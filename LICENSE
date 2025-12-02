@@ -1,0 +1,59 @@
+Server Side Public License
+VERSION 1, OCTOBER 16, 2018
+
+Copyright © 2025 Joey Troy
+
+Everyone is permitted to copy and distribute verbatim copies of this license document, but changing it is not allowed.
+
+TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+
+1. Definitions.
+
+   "This License" refers to version 1 of the Server Side Public License.
+
+   "Copyright" also means copyright-like laws that apply to other kinds of works.
+
+   "The Program" refers to any copyrightable work licensed under this License.
+
+   "You" and "your" means an individual or Legal Entity exercising permissions granted by this License.
+
+   "Server" means a computer program or process that accepts connections on a TCP/IP port.
+
+   "Derivative Work" means a work based upon the Program or portions of it.
+
+   "Larger Work" means a work that combines the Program or portions of it with code not governed by the terms of this License.
+
+   "Convey" means to make available, publish, or distribute.
+
+2. Grant of Copyright License. Subject to the terms and conditions of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to use, reproduce, prepare Derivative Works of, publicly display, publicly perform, sublicense, and distribute the Program and such Derivative Works in Source Code or other forms.
+
+3. Grant of Patent License. Subject to the terms and conditions of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer the Program, where such license applies only to those patent claims licensable by such Contributor that are necessarily infringed by their Contribution(s) alone or by combination of their Contribution(s) with the Program to which such Contribution(s) was submitted.
+
+4. Conditions.
+
+   If You Distribute the Program or any Derivative Works of the Program, You must:
+
+   (a) make the Program available via a network server at no charge, under the terms of this License, and make available complete corresponding machine-readable source code for the Program via the same network server at no charge, and allow any user who accesses the Program to copy, modify, and distribute the Program's source code under the terms of this License;
+
+   (b) make the Program available via a network server at no charge, under the terms of this License, and make available complete corresponding machine-readable source code for the Program via the same network server at no charge, and allow any user who accesses the Program to copy, modify, and distribute the Program's source code under the terms of this License, provided that You also meet all of these conditions:
+
+      (i) You must cause any files that You modify to carry prominent notices stating that You changed the files and the date of any change;
+
+      (ii) You must cause any Derivative Works that You distribute, in whole or in part, to carry prominent notices stating that the Derivative Work includes the Program and that the Derivative Work is licensed under this License;
+
+      (iii) You must make the Program available via a network server at no charge, under the terms of this License, and make available complete corresponding machine-readable source code for the Program via the same network server at no charge, and allow any user who accesses the Program to copy, modify, and distribute the Program's source code under the terms of this License.
+
+5. If the Program as you received it, or any part of it, contains a notice stating that it is governed by this License along with a term that is a further restriction, you may remove that term. If a license document contains a further restriction but permits relicensing or conveying under this License, you may add to a covered work material governed by the terms of that license document, provided that the further restriction does not survive such relicensing or conveying.
+
+6. You may not impose any further restrictions on the exercise of the rights granted or affirmed under this License. For example, you may not impose a license fee, royalty, or other charge for exercise of rights granted under this License, and you may not initiate litigation (including a cross-claim or counterclaim in a lawsuit) alleging that any patent claim is infringed by making, using, selling, offering for sale, or importing the Program or any portion of it.
+
+7. Disclaimer of Warranty.
+
+   THE PROGRAM IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+
+8. Limitation of Liability.
+
+   IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MODIFIES AND/OR CONVEYS THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM (INCLUDING BUT NOT LIMITED TO LOSS OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+END OF TERMS AND CONDITIONS
+

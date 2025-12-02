@@ -1,0 +1,28 @@
+# AlpacaHTTP Configuration
+
+# HTTP server settings
+http:
+  port: 6800
+
+# Discovery settings
+discovery:
+  enabled: true
+
+# Logging settings
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR
+
+# Server information
+server:
+  name: AlpacaHTTP
+  manufacturer: AlpacaHTTP
+  location: ""
+
+# Device enable/disable (optional)
+# devices:
+#   camera:
+#     0: true
+#     1: false
+#   mount:
+#     0: true
+
