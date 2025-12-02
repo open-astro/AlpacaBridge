@@ -10,15 +10,14 @@
 // with the SSPL v1 requirements.
 
 #include <alpacacore/device_capabilities.h>
+#include <alpacacore/device_registry.h>
 #include <alpacacore/util/logging.h>
 #include <vector>
 
 namespace alpacacore {
 
 std::vector<DeviceCapabilities> get_all_device_capabilities() {
-    // TODO: Implement device registry lookup
-    ALPACA_LOG_INFO("DeviceCapabilities", "get_all_device_capabilities called");
-    return {};
+    return management::DeviceRegistry::instance().get_all_device_capabilities();
 }
 
 } // namespace alpacacore

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2025-01-XX
 
+## [0.2.0] - 2025-01-XX
+
+### Added
+- **DeviceRegistry** (`include/alpacacore/device_registry.h`): Complete device management system
+  - Singleton pattern for global device registry
+  - Thread-safe device registration and lookup
+  - Support for registering devices by type and number
+  - Device capability enumeration for management API
+  - Integration with `get_all_device_capabilities()` function
+
+### Changed
+- Updated `device_capabilities.cpp` to use DeviceRegistry instead of placeholder implementation
+
 ### Added
 
 #### Project Infrastructure
@@ -62,7 +75,12 @@ All device types have pure virtual interfaces following ASCOM Alpaca specificati
   - API version support: GetApiVersions()
   - Device discovery: GetConfiguredDevices()
 - **DeviceCapabilities**: Structure for device metadata
-- Placeholder implementations for discovery service and device registry
+- **DeviceRegistry** (`device_registry.h`): Singleton device registry for managing all registered devices
+  - Thread-safe device registration and retrieval
+  - Support for querying devices by type and number
+  - Device capability enumeration
+  - Integration point for higher-level servers (e.g., AlpacaHTTP)
+- Placeholder implementations for discovery service
 
 #### Build System
 - Root CMakeLists.txt with proper C++20 configuration
