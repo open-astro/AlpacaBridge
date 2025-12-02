@@ -13,6 +13,16 @@ option(ALPACAHTTP_ENABLE_DISCOVERY "Enable Alpaca Discovery" ON)
 # Find dependencies
 find_package(nlohmann_json 3.2.0 REQUIRED)
 
+# Find AlpacaCore
+# Try to find AlpacaCore as a package first, then fall back to subdirectory
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/CMakeLists.txt")
+    # AlpacaCore is in the same workspace
+    add_subdirectory(../AlpacaCore ${CMAKE_BINARY_DIR}/AlpacaCore)
+else()
+    # AlpacaCore is installed system-wide
+    find_package(AlpacaCore REQUIRED)
+endif()
+
 if(ALPACAHTTP_USE_BOOST_BEAST)
     find_package(Boost REQUIRED COMPONENTS system)
     add_definitions(-DALPACAHTTP_USE_BOOST_BEAST)
@@ -46,6 +56,7 @@ add_library(alpacahttp STATIC ${ALPACAHTTP_SOURCES})
 target_link_libraries(alpacahttp
     PUBLIC
         nlohmann_json::nlohmann_json
+        AlpacaCore::alpacacore
 )
 
 if(ALPACAHTTP_USE_BOOST_BEAST)

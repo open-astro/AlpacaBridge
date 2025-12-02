@@ -22,6 +22,10 @@ Server::Server(const Config& config)
 {
 }
 
+void Server::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver) {
+    router_.set_management_driver(mgmt_driver);
+}
+
 Server::~Server() {
     stop();
 }

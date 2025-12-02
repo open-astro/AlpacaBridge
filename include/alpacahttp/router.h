@@ -10,15 +10,13 @@
 
 #include "request.h"
 #include "response.h"
+#include <alpacacore/device_registry.h>
+#include <alpacacore/alpaca_defs.h>
+#include <alpacacore/managementdriver.h>
 #include <string>
-#include <functional>
 #include <memory>
 
 namespace alpacahttp {
-
-// Forward declaration - AlpacaCore integration
-// TODO: Replace with actual AlpacaCore interface
-class DeviceManager;
 
 struct RouteMatch {
     std::string device_type;
@@ -33,17 +31,20 @@ public:
     Router();
     ~Router();
 
-    // Set device manager (from AlpacaCore)
-    void set_device_manager(std::shared_ptr<DeviceManager> device_manager);
+    // Set management driver (from AlpacaCore)
+    void set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver);
 
     // Route request and generate response
     Response route(const Request& request, std::uint32_t server_transaction_id);
 
 private:
-    std::shared_ptr<DeviceManager> device_manager_;
+    std::shared_ptr<alpacacore::ManagementDriver> management_driver_;
 
     // Parse route from path
     RouteMatch parse_route(const std::string& path);
+
+    // Convert device type string to enum
+    alpacacore::DeviceType string_to_device_type(const std::string& type_str) const;
 
     // Handle management endpoints
     Response handle_management(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id);
@@ -52,6 +53,15 @@ private:
 
     // Handle device endpoints
     Response handle_device(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id);
+    
+    // Dispatch device method calls
+    Response dispatch_device_method(
+        std::shared_ptr<alpacacore::AlpacaDriver> device,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
 };
 
 } // namespace alpacahttp

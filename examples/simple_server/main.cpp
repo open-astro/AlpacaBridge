@@ -10,6 +10,8 @@
 #include <alpacahttp/config.h>
 #include <alpacahttp/discovery.h>
 #include <alpacahttp/util/logging_adapter.h>
+#include <alpacacore/device_registry.h>
+#include <alpacacore/managementdriver.h>
 #include <iostream>
 #include <csignal>
 #include <atomic>
@@ -37,22 +39,39 @@ int main(int argc, char* argv[]) {
         config.load_default();
     }
 
-    // Initialize logging
-    // TODO: Connect to AlpacaCore logging system
-    init_logging(config, [](int level, const std::string& message) {
+    // Initialize logging - connect to AlpacaCore logging system
+    init_logging(config);
+    
+    // Optionally set a custom log sink
+    alpacacore::logging::set_log_sink([](alpacacore::logging::LogLevel level,
+                                         std::string_view component,
+                                         std::string_view message) {
         const char* level_str = "INFO";
         switch (level) {
-            case 0: level_str = "DEBUG"; break;
-            case 1: level_str = "INFO"; break;
-            case 2: level_str = "WARNING"; break;
-            case 3: level_str = "ERROR"; break;
+            case alpacacore::logging::LogLevel::Trace:
+            case alpacacore::logging::LogLevel::Debug: level_str = "DEBUG"; break;
+            case alpacacore::logging::LogLevel::Info: level_str = "INFO"; break;
+            case alpacacore::logging::LogLevel::Warn: level_str = "WARNING"; break;
+            case alpacacore::logging::LogLevel::Error:
+            case alpacacore::logging::LogLevel::Critical: level_str = "ERROR"; break;
         }
-        std::cout << "[" << level_str << "] " << message << std::endl;
+        std::cout << "[" << level_str << "] [" << component << "] " << message << std::endl;
     });
 
     log_info("Starting AlpacaHTTP server...");
     log_info("HTTP port: " + std::to_string(config.http_port()));
     log_info("Discovery enabled: " + std::string(config.discovery_enabled() ? "yes" : "no"));
+
+    // TODO: Register devices with AlpacaCore DeviceRegistry
+    // Example:
+    // auto& registry = alpacacore::management::DeviceRegistry::instance();
+    // auto camera = std::make_shared<YourCameraDriver>(...);
+    // registry.register_device(camera);
+    
+    // TODO: Create and set ManagementDriver
+    // Example:
+    // auto mgmt_driver = std::make_shared<YourManagementDriver>(config);
+    // server.set_management_driver(mgmt_driver);
 
     // Start discovery service
     std::unique_ptr<alpacahttp::Discovery> discovery;

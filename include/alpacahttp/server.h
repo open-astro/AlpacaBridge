@@ -10,6 +10,7 @@
 
 #include "config.h"
 #include "router.h"
+#include <alpacacore/managementdriver.h>
 #include <memory>
 #include <thread>
 #include <atomic>
@@ -21,6 +22,9 @@ class Server {
 public:
     explicit Server(const Config& config);
     ~Server();
+
+    // Set management driver (from AlpacaCore)
+    void set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver);
 
     // Start the server (blocking)
     void start();

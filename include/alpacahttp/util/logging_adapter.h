@@ -9,25 +9,23 @@
 #pragma once
 
 #include "../config.h"
+#include <alpacacore/util/logging.h>
 #include <string>
 #include <functional>
 
 namespace alpacahttp::util {
 
-// Log sink function type (matches AlpacaCore interface)
-using LogSink = std::function<void(int level, const std::string& message)>;
+// Initialize logging adapter - connects AlpacaHTTP to AlpacaCore logging
+void init_logging(const Config& config);
 
-// Initialize logging adapter
-void init_logging(const Config& config, LogSink sink);
-
-// Log functions
+// Log functions - these use AlpacaCore logging system
 void log_debug(const std::string& message);
 void log_info(const std::string& message);
 void log_warning(const std::string& message);
 void log_error(const std::string& message);
 
-// Convert LogLevel to integer
-int log_level_to_int(LogLevel level);
+// Convert AlpacaHTTP LogLevel to AlpacaCore LogLevel
+alpacacore::logging::LogLevel convert_log_level(LogLevel level);
 
 } // namespace alpacahttp::util
 
