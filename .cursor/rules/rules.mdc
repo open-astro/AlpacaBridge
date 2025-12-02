@@ -1,0 +1,339 @@
+---
+alwaysApply: true
+---
+# AlpacaCore – Cursor Rules
+
+These rules tell Cursor how to work inside the **AlpacaCore** repository.
+
+**AlpacaCore** is a **vendor-neutral C++ Alpaca core library** that:
+
+- Implements ASCOM Alpaca device models and behavior
+- Contains **no HTTP / REST / sockets**
+- Avoids platform-specific hacks
+- Exposes a clean API that higher-level servers (e.g. **AlpacaHTTP** inside **AlpacaOS**) use
+- Follow https://ascom-standards.org/api/ 
+
+The goal is to build a **flawlessly engineered**, **well-documented**, and **stable** core that the astro community can rely on for 10+ years.
+
+---
+
+## 1. Tech Stack & General Rules
+
+- **Language:** Modern C++ (**C++20** preferred).
+- **Build system:** **CMake**.
+- **Output:** Header + static/shared library (no executables except in `examples/`).
+- **OS targets:** Linux first, but keep it portable (macOS, Windows).  
+  No OS-specific code in `src/core` or `src/drivers`.
+
+**Dependencies:**
+
+- Prefer **standard library only** in:
+  - `src/core`
+  - `src/drivers`
+- Vendor SDKs live in `external/` and are used only in `src/vendors/**`.
+- Do **not** add large frameworks (Boost, Qt, etc.) unless:
+  - Absolutely necessary, and
+  - Justified in a comment in the diff and in `README.md`.
+
+**Coding style:**
+
+- Use RAII; avoid raw `new`/`delete` (use `std::unique_ptr`, `std::shared_ptr`, or stack objects).
+- Use **`#pragma once`** in headers.
+- Prefer `std::string_view` for read-only string parameters.
+- Use `enum class` instead of plain `enum`.
+- Use `std::chrono` for durations.
+- No `using namespace std;` in headers.
+- Keep functions small and focused.
+
+---
+
+## 2. License & Non-Commercial Intent
+
+**License:** **Server Side Public License v1 (SSPL v1)**
+
+All source files must contain:
+
+```cpp
+// AlpacaCore
+// Copyright (c) 2025 Joey Troy and contributors
+//
+// This file is part of AlpacaCore.
+//
+// AlpacaCore is licensed under the Server Side Public License, version 1 (SSPL v1).
+// https://www.mongodb.com/licensing/server-side-public-license
+//
+// If you use this library to provide a network-accessible service, you must comply
+// with the SSPL v1 requirements.
+```
+
+Cursor must **not** alter the license.
+
+---
+
+## 3. High-Level Architecture
+
+AlpacaCore is **protocol-level only**:
+
+- Implements Alpaca device behavior/state
+- No HTTP, REST, sockets, or JSON parsing
+- Higher layers translate HTTP/JSON into AlpacaCore calls
+
+---
+
+## 4. Directory Structure
+
+```
+AlpacaCore/
+├─ CMakeLists.txt
+├─ LICENSE
+├─ README.md
+├─ CHANGELOG.md
+├─ VERSION
+├─ CONTRIBUTING.md
+├─ cursor-rules.md
+│
+├─ external/                         # Vendor SDKs ONLY
+│   ├─ zwo/
+│   ├─ qhy/
+│   ├─ pegasus/
+│   └─ ioptron/
+│
+├─ include/
+│   └─ alpacacore/                   # Official AlpacaCore SDK
+│       ├─ alpaca_defs.h
+│       ├─ alpaca_errors.h
+│       ├─ alpaca_json.h
+│       ├─ alpacadriver.h
+│       ├─ managementdriver.h
+│       ├─ device_capabilities.h
+│       ├─ camera_driver.h
+│       ├─ telescope_driver.h
+│       ├─ filterwheel_driver.h
+│       ├─ focuser_driver.h
+│       ├─ rotator_driver.h
+│       ├─ dome_driver.h
+│       ├─ shutter_driver.h
+│       ├─ switch_driver.h
+│       ├─ util/
+│       │   ├─ logging.h
+│       │   ├─ threading.h
+│       │   ├─ error_handling.h
+│       │   └─ units.h
+│       └─ vendor/                  # Vendor wrappers API
+│           ├─ zwo/
+│           ├─ qhy/
+│           └─ ioptron/
+│
+├─ src/
+│   ├─ core/
+│   │   ├─ alpacadriver.cpp
+│   │   ├─ alpaca_defs.cpp
+│   │   ├─ alpaca_errors.cpp
+│   │   ├─ managementdriver.cpp
+│   │   ├─ util/
+│   │   │   ├─ logging.cpp
+│   │   │   ├─ threading.cpp
+│   │   │   ├─ error_handling.cpp
+│   │   │   └─ units.cpp
+│   │
+│   ├─ drivers/
+│   │   ├─ camera_driver.cpp
+│   │   ├─ telescope_driver.cpp
+│   │   ├─ filterwheel_driver.cpp
+│   │   ├─ focuser_driver.cpp
+│   │   ├─ rotator_driver.cpp
+│   │   ├─ dome_driver.cpp
+│   │   ├─ shutter_driver.cpp
+│   │   └─ switch_driver.cpp
+│   │
+│   ├─ vendors/
+│   │   ├─ zwo/
+│   │   │   ├─ zwo_camera_driver.cpp
+│   │   │   └─ CMakeLists.txt
+│   │   └─ qhy/
+│   │       ├─ qhy_camera_driver.cpp
+│   │       └─ CMakeLists.txt
+│   │
+│   └─ management/
+│       ├─ discovery_service.cpp
+│       └─ device_registry.cpp
+│
+├─ tests/
+│   ├─ CMakeLists.txt
+│   ├─ test_camera.cpp
+│   ├─ test_telescope.cpp
+│   ├─ test_management.cpp
+│   └─ test_units.cpp
+│
+└─ examples/
+    ├─ minimal_camera/
+    ├─ minimal_telescope/
+    └─ simulate_all_devices/
+```
+
+---
+
+## 5. Alpaca API Design Rules
+
+- Follow ASCOM Alpaca spec naming, behavior, and error codes.
+- Device types must have:
+  - **Pure virtual interface** in `include/alpacacore/`
+  - **Base implementation** in `src/drivers/`
+- Use synchronous C++ methods.
+- Provide DTO structs, e.g.:
+
+```cpp
+struct AlpacaResponseHeader {
+    int client_transaction_id{};
+    int server_transaction_id{};
+    int error_number{};
+    std::string error_message;
+};
+```
+
+- No hidden global state.
+
+---
+
+## 6. Logging Rules
+
+AlpacaCore uses a **minimal, dependency-free logging system**.
+
+Required API:
+
+```cpp
+namespace alpacacore::logging {
+
+enum class LogLevel { Trace, Debug, Info, Warn, Error, Critical };
+
+using LogSink = std::function<void(LogLevel,
+                                   std::string_view component,
+                                   std::string_view message)>;
+
+void set_log_sink(LogSink sink);
+LogSink get_log_sink();
+void log(LogLevel level,
+         std::string_view component,
+         std::string_view message);
+
+} // namespace alpacacore::logging
+```
+
+### Macros:
+
+```cpp
+#define ALPACA_LOG_INFO(component, message)     ::alpacacore::logging::log(::alpacacore::logging::LogLevel::Info, component, message)
+```
+
+Default sink: thread-safe stderr logger.  
+Higher layers override using `set_log_sink`.
+
+---
+
+## 7. SDK & Vendor Rules
+
+- Public SDK = `include/alpacacore/**` + built library.
+- Vendor SDKs live in:
+  ```
+  external/<vendor>/
+  src/vendors/<vendor>/
+  include/alpacacore/vendor/<vendor>/
+  ```
+- Core MUST NOT include vendor SDK headers.
+
+---
+
+## 8. Threading Rules
+
+- No global mutable state.
+- Device instances manage their own internal locking.
+- Higher layers manage concurrency.
+- Use primitives from `util/threading.h`.
+
+---
+
+## 9. Error Handling
+
+- Use a single exception type:
+  ```
+  class AlpacaException : public std::runtime_error {};
+  ```
+- No error-code return values.
+- AlpacaHTTP maps exceptions → Alpaca error numbers.
+
+---
+
+## 10. Units & Conventions
+
+- Exposure: **seconds**  
+- Angles: **degrees**  
+- RA: **hours**  
+- Dec: **degrees**  
+- Pixel size: **microns**  
+- Time: **UTC**, `std::chrono`  
+- Wavelengths: **nm**
+
+---
+
+## 11. Build Options (CMake)
+
+```
+ALPACACORE_BUILD_TESTS ON/OFF
+ALPACACORE_ENABLE_ZWO ON/OFF
+ALPACACORE_ENABLE_QHY ON/OFF
+ALPACACORE_ENABLE_IOPTRON ON/OFF
+```
+
+Vendor code must be behind build options.
+
+---
+
+## 12. Testing Rules
+
+- All non-trivial code must have unit tests in `tests/`.
+- Use Catch2 or doctest.
+- CI must build on:
+  - Linux (x86, ARM)
+  - macOS
+  - Windows
+- Use clang-tidy + warnings-as-errors.
+
+---
+
+## 13. Documentation Requirements
+
+AlpacaCore must provide:
+
+- `README.md`
+- `CHANGELOG.md`
+- `VERSION`
+- `CONTRIBUTING.md`
+- Full **Doxygen** API documentation
+- Developer Guide (threading, errors, device lifecycle)
+- Setup Guide (building, linking, examples)
+
+---
+
+## 14. Out of Scope
+
+Cursor must NOT add:
+
+- HTTP servers
+- JSON parsing
+- Socket code
+- GUI / CLI
+- Power management / GPIO
+- Branding or images
+
+These belong in AlpacaHTTP / AlpacaOS.
+
+---
+
+## 15. Cursor Behavior
+
+When generating or modifying code:
+
+- Explain what directory is being changed and why.
+- Follow the rules above precisely.
+- Add `TODO` comments for ambiguous vendor SDK behavior.
+- Maintain structural consistency.
