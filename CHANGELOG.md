@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Updated `device_capabilities.cpp` to use DeviceRegistry instead of placeholder implementation
+- Updated license URL in all source files from MongoDB reference to GitHub repository location
+  - Changed from `https://www.mongodb.com/licensing/server-side-public-license`
+  - Changed to `https://github.com/open-astro/AlpacaCore/blob/main/LICENSE`
+  - Updated 49 files (headers, sources, and tests)
 
 ### Added
 

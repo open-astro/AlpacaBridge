@@ -1,8 +1,193 @@
-Server Side Public License v1 (SSPL v1)
 
-Copyright (c) 2025 Joey Troy and contributors
+# Open-Astro Public License (OAPL) – Version 1 (2025)
+Copyright © 2025 Open-Astro Initiative  
+All rights reserved.
 
-This Source Code Form is subject to the terms of the Server Side Public License, v. 1.0.
-If a copy of the SSPL was not distributed with this file, You can obtain one at
-https://www.mongodb.com/licensing/server-side-public-license
+---
 
+## Preamble
+
+The Open-Astro Public License (OAPL) is a strong copyleft license designed to keep Open-Astro open, community-driven, and protected from closed-source commercialization.
+
+It ensures:
+- **Users** may freely run, modify, study, and share the software.
+- **Contributors**  retain credit and protection.
+- **Companies** must open-source their software if they use Open-Astro to provide a service, appliance, or commercial offering, including all software required to deliver that functionality (such as user interfaces, orchestration layers, automation tools, APIs, and management systems).
+
+This prevents closed ecosystems such as proprietary astrophotography platforms—from using the work without contributing back.
+
+---
+
+# Open-Astro Public License (OAPL) v1
+
+Everyone is permitted to copy and distribute verbatim copies of this license document, but changing it is not allowed.
+
+---
+
+# TERMS AND CONDITIONS
+
+## 0. Definitions
+
+“This License” refers to the **Open-Astro Public License (OAPL)**.
+
+“Copyright” also means copyright-like laws that apply to other kinds of works.
+
+“The Program” refers to any copyrightable work licensed under this License.  
+Each licensee is addressed as “you”. “Licensees” and “recipients” may be individuals or organizations.
+
+“To modify” means to adapt or copy the work in a way requiring copyright permission.  
+A “modified version” is the resulting work.
+
+A “covered work” means the unmodified Program or a work based on it.
+
+“To propagate” means to take any action that would make you liable for infringement except running the program.  
+Propagation includes distribution, copying, or making it publicly available.
+
+“To convey” means any propagation that enables others to receive copies.
+
+An interactive user interface shows “Appropriate Legal Notices” if it displays:  
+1. A copyright notice  
+2. A notice that the work provides no warranty  
+3. Instructions on how to view a copy of this License.
+
+---
+
+## 1. Source Code
+
+The “source code” is the preferred form of the work for making modifications.  
+“Object code” means non-source forms.
+
+“System Libraries” and “Corresponding Source” follow the same definitions used in the Server Side Public License (SSPL).
+
+---
+
+## 2. Basic Permissions
+
+All rights are granted for the duration of copyright and are irrevocable as long as conditions are met.
+
+You may run the unmodified Program without restrictions.
+
+You may make, run, or propagate covered works without conveying them.
+
+Conveying to others is permitted only under this License.
+
+Sublicensing is not allowed.
+
+---
+
+## 3. Protecting Users from Anti-Circumvention Law
+
+No covered work may be deemed part of a technological measure under anti-circumvention laws.
+
+When conveying a covered work, you waive the right to enforce such measures.
+
+---
+
+## 4. Conveying Verbatim Copies
+
+You may distribute unmodified source code if you:  
+- Keep copyright notices intact  
+- Include this License  
+- Include warranty disclaimers  
+- Provide a copy of this License
+
+You may charge any price for distribution.
+
+---
+
+## 5. Conveying Modified Source Versions
+
+You may distribute modified versions if all these conditions are met:
+
+a. The work must state you modified it and include the date.  
+b. The work must state it is released under this License.  
+c. You must license the entire work under this License.  
+d. If user interfaces exist, they must display Appropriate Legal Notices.
+
+---
+
+## 6. Conveying Non-Source Forms (Object Code)
+
+You must provide Corresponding Source along with object code, either physically or via network access, under the same terms as this License.
+
+If distributed in a consumer device, you must also provide Installation Information.
+
+---
+
+## 7. Additional Terms
+
+You may add additional terms such as attribution requirements, warranty disclaimers, or trademark limitations.
+
+---
+
+## 8. Termination
+
+Violation terminates your rights unless cured within the required timeframe.
+
+---
+
+## 9. Acceptance Not Required to Run the Software
+
+You do not need to accept the License to run the Program, but modifying or conveying it constitutes acceptance.
+
+---
+
+## 10. Automatic Licensing of Downstream Recipients
+
+Recipients automatically receive rights under this License.  
+You may not impose further restrictions.
+
+---
+
+## 11. Patents
+
+Contributors grant patent licenses as defined in the License.
+
+---
+
+## 12. No Surrender of Others’ Freedom
+
+You may not impose conflicting terms that restrict rights granted by this License.
+
+---
+
+## 13. Offering the Program as a Service
+
+If you make the Program (or a modified version) available to third parties **as a service**, you must provide the **Service Source Code** under this License.
+
+“Service Source Code” includes:  
+- The Program  
+- All modifications  
+- All software used to deliver the service (UI, APIs, automation, monitoring, hosting, storage, orchestration, etc.)
+
+This ensures users can run an equivalent service independently.
+
+---
+
+## 14. Revised Versions of this License
+
+New versions may be published by the Open-Astro Initiative.  
+You may choose any available version.
+
+---
+
+## 15. Disclaimer of Warranty
+
+THE PROGRAM IS PROVIDED “AS IS” WITHOUT WARRANTY.
+
+---
+
+## 16. Limitation of Liability
+
+IN NO EVENT WILL ANY COPYRIGHT HOLDER OR CONTRIBUTOR BE LIABLE FOR DAMAGES.
+
+---
+
+## 17. Interpretation
+
+If any part of this License cannot be enforced under local law, it should be enforced to the maximum extent possible.
+
+---
+
+# END OF TERMS AND CONDITIONS
+© 2025 Open-Astro Initiative
