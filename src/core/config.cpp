@@ -3,11 +3,12 @@
 //
 // This file is part of AlpacaHTTP.
 //
-// AlpacaHTTP is licensed under the Server Side Public License, version 1 (SSPL v1).
-// https://github.com/open-astro/AlpacaHTTP/blob/main/LICENSE
+// AlpacaHTTP is licensed under the Server Side Public License, Version 1 (SSPL v1).
+// See the LICENSE file in this repository or the official license at:
+// https://www.mongodb.com/legal/licensing/server-side-public-license
 //
-// If you use this library to provide a network-accessible service, you must comply
-// with the SSPL v1 requirements.
+// If you use this program to provide a network-accessible service, appliance,
+// or any commercial offering, you must comply with all SSPL v1 requirements.
 
 #include <alpacahttp/config.h>
 #include <fstream>
