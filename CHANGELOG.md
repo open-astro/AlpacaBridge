@@ -47,3 +47,12 @@ All notable changes to AlpacaHTTP will be documented in this file.
   - Actions: supportedactions, action, commandblind, commandbool, commandstring
 - Device-specific methods (e.g., camera startexposure) can be extended in router dispatch
 
+## [0.2.1] - 2025-12-04
+
+### Changed
+- **License Headers**: Updated all source files with new license header format
+  - Updated copyright to include "and contributors"
+  - Changed license URL to GitHub repository location
+  - Added SSPL v1 compliance notice to all headers
+  - Updated license reference from MongoDB URL to `https://github.com/open-astro/AlpacaHTTP/blob/main/LICENSE`
+

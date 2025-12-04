@@ -1,59 +1,193 @@
-Server Side Public License
-VERSION 1, OCTOBER 16, 2018
 
-Copyright © 2025 Joey Troy
+# Open-Astro Public License (OAPL) – Version 1 (2025)
+Copyright © 2025 Open-Astro Initiative  
+All rights reserved.
+
+---
+
+## Preamble
+
+The Open-Astro Public License (OAPL) is a strong copyleft license designed to keep Open-Astro open, community-driven, and protected from closed-source commercialization.
+
+It ensures:
+- **Users** may freely run, modify, study, and share the software.
+- **Contributors**  retain credit and protection.
+- **Companies** must open-source their software if they use Open-Astro to provide a service, appliance, or commercial offering, including all software required to deliver that functionality (such as user interfaces, orchestration layers, automation tools, APIs, and management systems).
+
+This prevents closed ecosystems such as proprietary astrophotography platforms—from using the work without contributing back.
+
+---
+
+# Open-Astro Public License (OAPL) v1
 
 Everyone is permitted to copy and distribute verbatim copies of this license document, but changing it is not allowed.
 
-TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+---
 
-1. Definitions.
+# TERMS AND CONDITIONS
 
-   "This License" refers to version 1 of the Server Side Public License.
+## 0. Definitions
 
-   "Copyright" also means copyright-like laws that apply to other kinds of works.
+“This License” refers to the **Open-Astro Public License (OAPL)**.
 
-   "The Program" refers to any copyrightable work licensed under this License.
+“Copyright” also means copyright-like laws that apply to other kinds of works.
 
-   "You" and "your" means an individual or Legal Entity exercising permissions granted by this License.
+“The Program” refers to any copyrightable work licensed under this License.  
+Each licensee is addressed as “you”. “Licensees” and “recipients” may be individuals or organizations.
 
-   "Server" means a computer program or process that accepts connections on a TCP/IP port.
+“To modify” means to adapt or copy the work in a way requiring copyright permission.  
+A “modified version” is the resulting work.
 
-   "Derivative Work" means a work based upon the Program or portions of it.
+A “covered work” means the unmodified Program or a work based on it.
 
-   "Larger Work" means a work that combines the Program or portions of it with code not governed by the terms of this License.
+“To propagate” means to take any action that would make you liable for infringement except running the program.  
+Propagation includes distribution, copying, or making it publicly available.
 
-   "Convey" means to make available, publish, or distribute.
+“To convey” means any propagation that enables others to receive copies.
 
-2. Grant of Copyright License. Subject to the terms and conditions of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to use, reproduce, prepare Derivative Works of, publicly display, publicly perform, sublicense, and distribute the Program and such Derivative Works in Source Code or other forms.
+An interactive user interface shows “Appropriate Legal Notices” if it displays:  
+1. A copyright notice  
+2. A notice that the work provides no warranty  
+3. Instructions on how to view a copy of this License.
 
-3. Grant of Patent License. Subject to the terms and conditions of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer the Program, where such license applies only to those patent claims licensable by such Contributor that are necessarily infringed by their Contribution(s) alone or by combination of their Contribution(s) with the Program to which such Contribution(s) was submitted.
+---
 
-4. Conditions.
+## 1. Source Code
 
-   If You Distribute the Program or any Derivative Works of the Program, You must:
+The “source code” is the preferred form of the work for making modifications.  
+“Object code” means non-source forms.
 
-   (a) make the Program available via a network server at no charge, under the terms of this License, and make available complete corresponding machine-readable source code for the Program via the same network server at no charge, and allow any user who accesses the Program to copy, modify, and distribute the Program's source code under the terms of this License;
+“System Libraries” and “Corresponding Source” follow the same definitions used in the Server Side Public License (SSPL).
 
-   (b) make the Program available via a network server at no charge, under the terms of this License, and make available complete corresponding machine-readable source code for the Program via the same network server at no charge, and allow any user who accesses the Program to copy, modify, and distribute the Program's source code under the terms of this License, provided that You also meet all of these conditions:
+---
 
-      (i) You must cause any files that You modify to carry prominent notices stating that You changed the files and the date of any change;
+## 2. Basic Permissions
 
-      (ii) You must cause any Derivative Works that You distribute, in whole or in part, to carry prominent notices stating that the Derivative Work includes the Program and that the Derivative Work is licensed under this License;
+All rights are granted for the duration of copyright and are irrevocable as long as conditions are met.
 
-      (iii) You must make the Program available via a network server at no charge, under the terms of this License, and make available complete corresponding machine-readable source code for the Program via the same network server at no charge, and allow any user who accesses the Program to copy, modify, and distribute the Program's source code under the terms of this License.
+You may run the unmodified Program without restrictions.
 
-5. If the Program as you received it, or any part of it, contains a notice stating that it is governed by this License along with a term that is a further restriction, you may remove that term. If a license document contains a further restriction but permits relicensing or conveying under this License, you may add to a covered work material governed by the terms of that license document, provided that the further restriction does not survive such relicensing or conveying.
+You may make, run, or propagate covered works without conveying them.
 
-6. You may not impose any further restrictions on the exercise of the rights granted or affirmed under this License. For example, you may not impose a license fee, royalty, or other charge for exercise of rights granted under this License, and you may not initiate litigation (including a cross-claim or counterclaim in a lawsuit) alleging that any patent claim is infringed by making, using, selling, offering for sale, or importing the Program or any portion of it.
+Conveying to others is permitted only under this License.
 
-7. Disclaimer of Warranty.
+Sublicensing is not allowed.
 
-   THE PROGRAM IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM IS WITH YOU. SHOULD THE PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
+---
 
-8. Limitation of Liability.
+## 3. Protecting Users from Anti-Circumvention Law
 
-   IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MODIFIES AND/OR CONVEYS THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE PROGRAM (INCLUDING BUT NOT LIMITED TO LOSS OF DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+No covered work may be deemed part of a technological measure under anti-circumvention laws.
 
-END OF TERMS AND CONDITIONS
+When conveying a covered work, you waive the right to enforce such measures.
 
+---
+
+## 4. Conveying Verbatim Copies
+
+You may distribute unmodified source code if you:  
+- Keep copyright notices intact  
+- Include this License  
+- Include warranty disclaimers  
+- Provide a copy of this License
+
+You may charge any price for distribution.
+
+---
+
+## 5. Conveying Modified Source Versions
+
+You may distribute modified versions if all these conditions are met:
+
+a. The work must state you modified it and include the date.  
+b. The work must state it is released under this License.  
+c. You must license the entire work under this License.  
+d. If user interfaces exist, they must display Appropriate Legal Notices.
+
+---
+
+## 6. Conveying Non-Source Forms (Object Code)
+
+You must provide Corresponding Source along with object code, either physically or via network access, under the same terms as this License.
+
+If distributed in a consumer device, you must also provide Installation Information.
+
+---
+
+## 7. Additional Terms
+
+You may add additional terms such as attribution requirements, warranty disclaimers, or trademark limitations.
+
+---
+
+## 8. Termination
+
+Violation terminates your rights unless cured within the required timeframe.
+
+---
+
+## 9. Acceptance Not Required to Run the Software
+
+You do not need to accept the License to run the Program, but modifying or conveying it constitutes acceptance.
+
+---
+
+## 10. Automatic Licensing of Downstream Recipients
+
+Recipients automatically receive rights under this License.  
+You may not impose further restrictions.
+
+---
+
+## 11. Patents
+
+Contributors grant patent licenses as defined in the License.
+
+---
+
+## 12. No Surrender of Others’ Freedom
+
+You may not impose conflicting terms that restrict rights granted by this License.
+
+---
+
+## 13. Offering the Program as a Service
+
+If you make the Program (or a modified version) available to third parties **as a service**, you must provide the **Service Source Code** under this License.
+
+“Service Source Code” includes:  
+- The Program  
+- All modifications  
+- All software used to deliver the service (UI, APIs, automation, monitoring, hosting, storage, orchestration, etc.)
+
+This ensures users can run an equivalent service independently.
+
+---
+
+## 14. Revised Versions of this License
+
+New versions may be published by the Open-Astro Initiative.  
+You may choose any available version.
+
+---
+
+## 15. Disclaimer of Warranty
+
+THE PROGRAM IS PROVIDED “AS IS” WITHOUT WARRANTY.
+
+---
+
+## 16. Limitation of Liability
+
+IN NO EVENT WILL ANY COPYRIGHT HOLDER OR CONTRIBUTOR BE LIABLE FOR DAMAGES.
+
+---
+
+## 17. Interpretation
+
+If any part of this License cannot be enforced under local law, it should be enforced to the maximum extent possible.
+
+---
+
+# END OF TERMS AND CONDITIONS
+© 2025 Open-Astro Initiative

@@ -44,25 +44,28 @@ AlpacaHTTP depends entirely on **AlpacaCore** for device behavior.
 
 ## 2. License
 
-Use **SSPL v1**, same as AlpacaCore.
+Use **SSPL v1**, same as AlpacaHTTP.
 
 Include this header at the top of all new `.h` and `.cpp` files:
 
 ```cpp
 // AlpacaHTTP
-// Copyright (c) 2025 Joey Troy
+// Copyright (c) 2025 Joey Troy and contributors
 //
 // This file is part of AlpacaHTTP.
 //
-// Licensed under the Server Side Public License, v1.
-// https://www.mongodb.com/licensing/server-side-public-license
+// AlpacaHTTP is licensed under the Server Side Public License, version 1 (SSPL v1).
+// https://github.com/open-astro/AlpacaHTTP/blob/main/LICENSE
+//
+// If you use this library to provide a network-accessible service, you must comply
+// with the SSPL v1 requirements.
 ```
 
 Cursor must never change this license or add another license.
 
 ---
 
-## 3. Responsibilities & Relationship With AlpacaCore
+## 3. Responsibilities & Relationship With AlpacaHTTP
 
 AlpacaHTTP handles:
 
