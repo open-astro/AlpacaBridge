@@ -13,9 +13,11 @@
 #include <alpacahttp/server.h>
 #include <alpacahttp/util/logging_adapter.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <cerrno>
 #include <cstring>
 #include <algorithm>
 
@@ -28,6 +30,10 @@ Server::Server(const Config& config)
 
 void Server::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver) {
     router_.set_management_driver(mgmt_driver);
+}
+
+void Server::set_shutdown_callback(std::function<void()> callback) {
+    router_.set_shutdown_callback(callback);
 }
 
 Server::~Server() {
@@ -57,10 +63,20 @@ void Server::stop() {
         return;
     }
 
+    util::log_info("Stopping HTTP server...");
     running_ = false;
+    
+    // Shutdown and close the server socket to interrupt accept() call
+    int fd = server_fd_.exchange(-1);
+    if (fd >= 0) {
+        shutdown(fd, SHUT_RDWR);  // Shutdown before close to ensure accept() wakes up
+        close(fd);
+    }
+    
     if (server_thread_.joinable()) {
         server_thread_.join();
     }
+    util::log_info("HTTP server stopped");
 }
 
 void Server::wait() {
@@ -72,10 +88,13 @@ void Server::wait() {
 void Server::run_server() {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
-        log_error("Failed to create socket");
+        util::log_error("Failed to create socket");
         running_ = false;
         return;
     }
+
+    // Store server_fd so we can close it from stop()
+    server_fd_.store(server_fd);
 
     // Set socket options
     int opt = 1;
@@ -89,43 +108,90 @@ void Server::run_server() {
     address.sin_port = htons(config_.http_port());
 
     if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
-        log_error("Failed to bind socket to port " + std::to_string(config_.http_port()));
+        util::log_error("Failed to bind socket to port " + std::to_string(config_.http_port()));
         close(server_fd);
+        server_fd_.store(-1);
         running_ = false;
         return;
     }
 
     // Listen
     if (listen(server_fd, 10) < 0) {
-        log_error("Failed to listen on socket");
+        util::log_error("Failed to listen on socket");
         close(server_fd);
+        server_fd_.store(-1);
         running_ = false;
         return;
     }
 
-    log_info("Server listening on port " + std::to_string(config_.http_port()));
+    util::log_info("Server listening on port " + std::to_string(config_.http_port()));
 
-    // Accept connections
+    // Accept connections using select() to allow checking running_ flag periodically
     while (running_) {
-        struct sockaddr_in client_address;
-        socklen_t client_len = sizeof(client_address);
+        // Use select() to wait for connections with a timeout, so we can check running_ periodically
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(server_fd, &read_fds);
         
-        int client_fd = accept(server_fd, (struct sockaddr*)&client_address, &client_len);
-        if (client_fd < 0) {
-            if (running_) {
-                log_error("Failed to accept connection");
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 500000;  // 500ms timeout
+        
+        int select_result = select(server_fd + 1, &read_fds, nullptr, nullptr, &timeout);
+        
+        if (select_result < 0) {
+            // Error in select
+            if (errno == EINTR) {
+                // Interrupted by signal - continue
+                continue;
+            } else if (errno == EBADF || errno == ENOTSOCK) {
+                // Socket was closed - exit
+                break;
+            } else {
+                if (running_) {
+                    util::log_error("Server select error: " + std::string(strerror(errno)));
+                }
+                break;
             }
+        } else if (select_result == 0) {
+            // Timeout - check running_ flag and continue
             continue;
         }
+        
+        // Connection available - accept it
+        if (FD_ISSET(server_fd, &read_fds)) {
+            struct sockaddr_in client_address;
+            socklen_t client_len = sizeof(client_address);
+            
+            int client_fd = accept(server_fd, (struct sockaddr*)&client_address, &client_len);
+            if (client_fd < 0) {
+                if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // Interrupted or would block - continue
+                    continue;
+                } else if (errno == EBADF || errno == ENOTSOCK) {
+                    // Socket was closed - exit
+                    break;
+                } else {
+                    if (running_) {
+                        util::log_error("Failed to accept connection: " + std::string(strerror(errno)));
+                    }
+                    continue;
+                }
+            }
 
-        // Handle connection (synchronous for now)
-        // TODO: Implement async/thread pool for concurrent requests
-        handle_connection(client_fd);
-        close(client_fd);
+            // Handle connection (synchronous for now)
+            // TODO: Implement async/thread pool for concurrent requests
+            handle_connection(client_fd);
+            close(client_fd);
+        }
     }
 
-    close(server_fd);
-    log_info("Server stopped");
+    // Clean up socket if not already closed
+    int fd = server_fd_.exchange(-1);
+    if (fd >= 0) {
+        close(fd);
+    }
+    util::log_info("Server stopped");
 }
 
 void Server::handle_connection(int socket_fd) {

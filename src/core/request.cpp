@@ -22,7 +22,7 @@ bool Request::parse(std::string_view raw_request) {
         return false;
     }
 
-    std::istringstream iss(std::string(raw_request));
+    std::istringstream iss{std::string(raw_request)};
     std::string line;
 
     // Parse request line
@@ -36,7 +36,7 @@ bool Request::parse(std::string_view raw_request) {
     }
 
     std::istringstream request_line(line);
-    std::string method_str, path_and_query;
+    std::string method_str, path_and_query, http_version_str;
 
     if (!(request_line >> method_str >> path_and_query)) {
         return false;
@@ -45,8 +45,8 @@ bool Request::parse(std::string_view raw_request) {
     method_ = parse_method(method_str);
 
     // Extract HTTP version if present
-    if (request_line >> http_version_) {
-        // HTTP version is already in string_view
+    if (request_line >> http_version_str) {
+        http_version_ = http_version_str;
     }
 
     // Split path and query string
@@ -100,6 +100,8 @@ bool Request::parse(std::string_view raw_request) {
 HttpMethod Request::parse_method(std::string_view method_str) {
     if (method_str == "GET") {
         return HttpMethod::GET;
+    } else if (method_str == "POST") {
+        return HttpMethod::POST;
     } else if (method_str == "PUT") {
         return HttpMethod::PUT;
     }

@@ -57,7 +57,7 @@ void Discovery::stop() {
 void Discovery::run_discovery() {
     socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (socket_fd_ < 0) {
-        log_error("Failed to create discovery socket");
+        util::log_error("Failed to create discovery socket");
         running_ = false;
         return;
     }
@@ -74,7 +74,7 @@ void Discovery::run_discovery() {
     addr.sin_port = htons(ALPACA_DISCOVERY_PORT);
 
     if (bind(socket_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        log_error("Failed to bind discovery socket");
+        util::log_error("Failed to bind discovery socket");
         close(socket_fd_);
         socket_fd_ = -1;
         running_ = false;
@@ -86,14 +86,14 @@ void Discovery::run_discovery() {
     mreq.imr_multiaddr.s_addr = inet_addr(ALPACA_DISCOVERY_MULTICAST_GROUP);
     mreq.imr_interface.s_addr = INADDR_ANY;
     if (setsockopt(socket_fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-        log_error("Failed to join multicast group");
+        util::log_error("Failed to join multicast group");
         close(socket_fd_);
         socket_fd_ = -1;
         running_ = false;
         return;
     }
 
-    log_info("Discovery service started on port " + std::to_string(ALPACA_DISCOVERY_PORT));
+    util::log_info("Discovery service started on port " + std::to_string(ALPACA_DISCOVERY_PORT));
 
     // Listen for probes
     char buffer[1024];
@@ -118,7 +118,7 @@ void Discovery::run_discovery() {
 
     close(socket_fd_);
     socket_fd_ = -1;
-    log_info("Discovery service stopped");
+    util::log_info("Discovery service stopped");
 }
 
 void Discovery::handle_probe(const std::string& probe_data, const std::string& sender_address, std::uint16_t sender_port) {

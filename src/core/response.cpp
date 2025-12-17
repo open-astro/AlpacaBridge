@@ -64,12 +64,13 @@ std::string Response::to_string() const {
     return oss.str();
 }
 
-std::string Response::get_header(const std::string& key) const {
+const std::string& Response::get_header(const std::string& key) const {
     auto it = headers_.find(key);
     if (it != headers_.end()) {
         return it->second;
     }
-    return "";
+    static const std::string empty_string;
+    return empty_string;
 }
 
 std::string Response::status_to_reason_phrase(std::uint16_t code) {

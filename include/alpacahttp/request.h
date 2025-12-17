@@ -21,6 +21,7 @@ namespace alpacahttp {
 
 enum class HttpMethod {
     GET,
+    POST,
     PUT,
     UNKNOWN
 };

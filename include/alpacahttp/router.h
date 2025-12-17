@@ -17,8 +17,10 @@
 #include <alpacacore/device_registry.h>
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/managementdriver.h>
+#include <alpacacore/telescope_driver.h>
 #include <string>
 #include <memory>
+#include <functional>
 
 namespace alpacahttp {
 
@@ -38,11 +40,15 @@ public:
     // Set management driver (from AlpacaCore)
     void set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver);
 
+    // Set shutdown callback (called when shutdown endpoint is requested)
+    void set_shutdown_callback(std::function<void()> callback);
+
     // Route request and generate response
     Response route(const Request& request, std::uint32_t server_transaction_id);
 
 private:
     std::shared_ptr<alpacacore::ManagementDriver> management_driver_;
+    std::function<void()> shutdown_callback_;
 
     // Parse route from path
     RouteMatch parse_route(const std::string& path);
@@ -52,8 +58,15 @@ private:
 
     // Handle management endpoints
     Response handle_management(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id);
+    Response handle_root(const Request& request, std::uint32_t server_tx_id);
     Response handle_description(const Request& request, std::uint32_t server_tx_id);
+    Response handle_api_versions(const Request& request, std::uint32_t server_tx_id);
     Response handle_configured_devices(const Request& request, std::uint32_t server_tx_id);
+    Response handle_configure_device(const Request& request, std::uint32_t server_tx_id);
+    Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
+    Response handle_shutdown(const Request& request, std::uint32_t server_tx_id);
+    Response handle_static_file(const Request& request);
+    Response handle_setup(const Request& request, std::uint32_t server_tx_id);
 
     // Handle device endpoints
     Response handle_device(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id);
@@ -61,6 +74,15 @@ private:
     // Dispatch device method calls
     Response dispatch_device_method(
         std::shared_ptr<alpacacore::AlpacaDriver> device,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+    
+    // Dispatch telescope-specific method calls
+    Response dispatch_telescope_method(
+        std::shared_ptr<alpacacore::TelescopeDriver> telescope,
         const std::string& method_name,
         const Request& request,
         std::uint32_t client_tx_id,

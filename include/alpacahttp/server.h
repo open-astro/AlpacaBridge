@@ -19,6 +19,7 @@
 #include <thread>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 
 namespace alpacahttp {
 
@@ -29,6 +30,9 @@ public:
 
     // Set management driver (from AlpacaCore)
     void set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver);
+
+    // Set shutdown callback (called when shutdown endpoint is requested)
+    void set_shutdown_callback(std::function<void()> callback);
 
     // Start the server (blocking)
     void start();
@@ -49,6 +53,7 @@ private:
     Config config_;
     Router router_;
     std::atomic<bool> running_{false};
+    std::atomic<int> server_fd_{-1};
     std::thread server_thread_;
 
     void run_server();

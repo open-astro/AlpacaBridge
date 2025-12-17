@@ -44,7 +44,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Initialize logging - connect to AlpacaCore logging system
-    init_logging(config);
+    alpacahttp::util::init_logging(config);
     
     // Optionally set a custom log sink
     alpacacore::logging::set_log_sink([](alpacacore::logging::LogLevel level,
@@ -62,9 +62,9 @@ int main(int argc, char* argv[]) {
         std::cout << "[" << level_str << "] [" << component << "] " << message << std::endl;
     });
 
-    log_info("Starting AlpacaHTTP server...");
-    log_info("HTTP port: " + std::to_string(config.http_port()));
-    log_info("Discovery enabled: " + std::string(config.discovery_enabled() ? "yes" : "no"));
+    alpacahttp::util::log_info("Starting AlpacaHTTP server...");
+    alpacahttp::util::log_info("HTTP port: " + std::to_string(config.http_port()));
+    alpacahttp::util::log_info("Discovery enabled: " + std::string(config.discovery_enabled() ? "yes" : "no"));
 
     // TODO: Register devices with AlpacaCore DeviceRegistry
     // Example:
@@ -82,11 +82,17 @@ int main(int argc, char* argv[]) {
     if (config.discovery_enabled()) {
         discovery = std::make_unique<alpacahttp::Discovery>(config);
         discovery->start();
-        log_info("Discovery service started");
+        alpacahttp::util::log_info("Discovery service started");
     }
 
     // Start HTTP server
     alpacahttp::Server server(config);
+    
+    // Set shutdown callback - when shutdown endpoint is called, set g_running to false
+    server.set_shutdown_callback([]() {
+        g_running = false;
+    });
+    
     server.start_async();
 
     // Wait for shutdown signal
@@ -94,15 +100,25 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    log_info("Shutting down...");
+    alpacahttp::util::log_info("Shutting down...");
 
-    // Stop services
-    server.stop();
+    // Stop services in reverse order of startup
     if (discovery) {
         discovery->stop();
     }
+    server.stop();
 
-    log_info("Server stopped");
-    return 0;
+    // Give threads a moment to fully exit
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    alpacahttp::util::log_info("Server stopped");
+    
+    // Flush any remaining log output
+    std::cout.flush();
+    std::cerr.flush();
+    
+    // Use exit() to ensure process terminates even if there are lingering threads
+    // This is safe since we've already stopped all services
+    exit(0);
 }
 

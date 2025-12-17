@@ -15,6 +15,8 @@
 #include <cassert>
 #include <iostream>
 
+using namespace alpacahttp;
+
 int main() {
     std::cout << "Testing JSON utilities...\n";
 

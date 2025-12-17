@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AlpacaHTTP - Device Management</title>
+    <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔭 AlpacaHTTP Server</h1>
+            <p class="subtitle">ASCOM Alpaca Device Management</p>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab active" onclick="showTab('devices')">Devices</button>
+            <button class="tab" onclick="showTab('configure')">Configure</button>
+            <button class="tab" onclick="showTab('server')">Server Info</button>
+        </nav>
+
+        <!-- Devices Tab -->
+        <div id="devices-tab" class="tab-content active">
+            <h2>Configured Devices</h2>
+            <div id="devices-list" class="devices-list">
+                <p class="loading">Loading devices...</p>
+            </div>
+            <button class="btn btn-primary" onclick="refreshDevices()">Refresh</button>
+        </div>
+
+        <!-- Configure Tab -->
+        <div id="configure-tab" class="tab-content">
+            <h2>Add Device</h2>
+            <form id="device-form" class="device-form">
+                <div class="form-group">
+                    <label for="device-type">Device Type:</label>
+                    <select id="device-type" name="deviceType" required>
+                        <option value="">Select device type...</option>
+                        <option value="telescope">Telescope</option>
+                        <option value="camera">Camera</option>
+                        <option value="filterwheel">Filter Wheel</option>
+                        <option value="focuser">Focuser</option>
+                        <option value="rotator">Rotator</option>
+                        <option value="dome">Dome</option>
+                        <option value="switch">Switch</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="device-number">Device Number:</label>
+                    <input type="number" id="device-number" name="deviceNumber" value="0" min="0" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="vendor">Vendor:</label>
+                    <select id="vendor" name="vendor" required>
+                        <option value="">Select vendor...</option>
+                        <option value="ioptron">iOptron</option>
+                    </select>
+                </div>
+
+                <!-- iOptron Telescope Configuration -->
+                <div id="ioptron-config" class="vendor-config" style="display: none;">
+                    <h3>iOptron Telescope Configuration</h3>
+                    
+                    <div class="form-group">
+                        <label for="connection-type">Connection Type:</label>
+                        <select id="connection-type" name="connectionType" required>
+                            <option value="serial">Serial/USB</option>
+                            <option value="network">Network/WiFi</option>
+                        </select>
+                    </div>
+
+                    <!-- Serial Connection -->
+                    <div id="serial-config" class="connection-config">
+                        <div class="form-group">
+                            <label for="port-path">Serial Port:</label>
+                            <input type="text" id="port-path" name="portPath" placeholder="/dev/ttyUSB0">
+                            <small>Linux: /dev/ttyUSB0, macOS: /dev/cu.usbserial-*, Windows: COM3</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="baud-rate">Baud Rate:</label>
+                            <input type="number" id="baud-rate" name="baudRate" value="115200" min="1200" max="115200">
+                        </div>
+                    </div>
+
+                    <!-- Network Connection -->
+                    <div id="network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="host">IP Address:</label>
+                            <input type="text" id="host" name="host" placeholder="192.168.1.100">
+                        </div>
+                        <div class="form-group">
+                            <label for="tcp-port">TCP Port:</label>
+                            <input type="number" id="tcp-port" name="tcpPort" value="4030" min="1" max="65535">
+                            <small>Default: 4030 (CEM60-EC), 8899 (HEM27)</small>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">Add Device</button>
+                    <button type="reset" class="btn btn-secondary">Reset</button>
+                </div>
+            </form>
+
+            <div id="form-message" class="message" style="display: none;"></div>
+        </div>
+
+        <!-- Server Info Tab -->
+        <div id="server-tab" class="tab-content">
+            <h2>Server Information</h2>
+            <div id="server-info" class="info-box">
+                <p class="loading">Loading server information...</p>
+            </div>
+            <div class="server-actions">
+                <button class="btn btn-primary" onclick="refreshServerInfo()">Refresh</button>
+                <button class="btn btn-danger" onclick="shutdownServer()">Shutdown Server</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/web/app.js?v=4"></script>
+</body>
+</html>
