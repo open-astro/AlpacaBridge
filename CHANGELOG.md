@@ -103,4 +103,51 @@ All device types have pure virtual interfaces following ASCOM Alpaca specificati
 - No HTTP/REST/JSON parsing - this is a protocol-level library only
 - All source files include proper SSPL v1 license headers
 - Follows ASCOM Alpaca API specification from https://ascom-standards.org/api/
+ 
+## [0.3.0] - 2025-12-16
+
+### Added
+- **iOptron Telescope Driver** (`include/alpacacore/vendor/ioptron/ioptron_telescope_driver.h`, `src/vendors/ioptron/ioptron_telescope_driver.cpp`)
+  - Concrete `TelescopeDriver` implementation for iOptron mounts
+  - Connection management via Alpaca `Connected` property
+  - Initial command support for position, motion, and status queries (work in progress)
+- **iOptron Protocol Wrapper** (`include/alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h`, `src/vendors/ioptron/ioptron_protocol_wrapper.cpp`)
+  - Clean C++ wrapper around iOptron RS‑232 command set over serial or TCP
+  - Platform‑specific transport handling (POSIX / Windows) hidden behind PIMPL
+  - Helpers for RA/Dec conversion, Alt/Az, site info, and mount status
+- **Vendor Documentation** (`external/README.md`, `external/ioptron/README.md`)
+  - Guidance for placing vendor SDKs / protocol docs under `external/`
+  - iOptron RS‑232 command reference linked for driver development
+- **Comprehensive Developer Documentation** (`docs/README.md`, `docs/building/*.md`, `docs/development/*.md`, `docs/getting-started/installation.md`)
+  - Central documentation index with organized structure
+  - Complete building guide with prerequisites, build options, and troubleshooting
+  - Driver development guide describing three‑layer architecture and AI‑assisted workflow
+  - Testing guide with comprehensive coverage
+  - Architecture documentation explaining design principles
+  - Installation guide for all platforms
+- **Telescope Driver Enhancement**
+  - Added `get_tracking_rates()` method to `TelescopeDriver` interface
+  - Returns collection of supported DriveRates (Sidereal, Lunar, Solar, King)
+  - Implemented in iOptron telescope driver
+
+### Changed
+- **README.md**
+  - Enhanced with AI-assisted development information and workflow
+  - Added comprehensive driver building guide section
+  - Improved documentation links and structure
+  - Added quick start building instructions
+- **Build System**
+  - Added `ALPACACORE_ENABLE_ALL_VENDORS` option to conveniently enable all implemented vendor drivers
+  - Updated root `CMakeLists.txt` to only add vendor subdirectories when implementations exist
+  - Added `alpacacore_ioptron` static library with proper include paths and platform linking
+  - Improved installation rules to optionally install vendor libraries when enabled
+  - Added CMake namespace alias `AlpacaCore::alpacacore` for consistent target naming
+  - Enhanced vendor library detection with proper target existence checks
+- **Testing Infrastructure**
+  - Updated Catch2 integration to use `Catch2::Catch2WithMain` and modern `catch_all.hpp` headers
+  - Switched to explicit inclusion of Catch2 CMake module from `Catch2_DIR`
+  - Updated test files for consistency
+- **Repository Hygiene**
+  - Extended `.gitignore` to ignore vendor SDK binaries and sources while keeping Markdown documentation under `external/`
+  - Added cursor rules directory to `.gitignore`
 

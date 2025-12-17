@@ -1,0 +1,751 @@
+---
+alwaysApply: true
+---
+# AlpacaCore Driver Build Guide
+
+This comprehensive guide walks you through building vendor-specific drivers for AlpacaCore, following ASCOM Alpaca standards and AlpacaCore architecture patterns.
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Architecture Principles](#architecture-principles)
+3. [SDK Organization](#sdk-organization)
+4. [Driver Structure](#driver-structure)
+5. [Step-by-Step Driver Implementation](#step-by-step-driver-implementation)
+6. [CMake Configuration](#cmake-configuration)
+7. [Testing Your Driver](#testing-your-driver)
+8. [Vendor-Specific Examples](#vendor-specific-examples)
+9. [Troubleshooting](#troubleshooting)
+
+---
+
+## Overview
+
+AlpacaCore drivers follow a **three-layer architecture**:
+
+1. **Pure Virtual Interface** (`include/alpacacore/<device>_driver.h`)
+   - Public API that all drivers implement
+   - Inherits from `AlpacaDriver` base class
+
+2. **SDK Wrapper Layer** (`include/alpacacore/vendor/<vendor>/`)
+   - Clean C++ interface wrapping messy vendor SDKs
+   - Isolates SDK dependencies from core code
+
+3. **Vendor Implementation** (`src/vendors/<vendor>/`)
+   - Concrete driver implementation
+   - Uses wrapper layer, never touches raw SDK directly
+
+---
+
+## Architecture Principles
+
+### Core Rules
+
+- ✅ **Vendor SDKs stay in `external/`** - never in core code
+- ✅ **Wrapper layer isolates SDK complexity** - clean API only
+- ✅ **Drivers use wrapper, not raw SDK** - maintainability
+- ✅ **Platform-specific code in CMake** - not in C++ source
+- ✅ **Standard library only in core** - no vendor dependencies leak
+
+### File Organization
+
+```
+external/                       # Raw SDK folders (untouched, not in Git)
+├─ ASICamera2_SDK/              # Vendor SDK folder (name varies by vendor)
+│   └─ SDK files...
+├─ qhy_sdk/                     # Another vendor SDK
+│   └─ SDK files...
+
+include/alpacacore/
+├─ <device>_driver.h            # Pure virtual interface
+└─ vendor/<vendor>/
+    └─ <vendor>_sdk_wrapper.h   # Clean wrapper API
+
+src/
+├─ drivers/
+│   └─ <device>_driver.cpp      # Base implementation (optional)
+└─ vendors/<vendor>/
+    ├─ <vendor>_sdk_wrapper.cpp # Wrapper implementation
+    ├─ <vendor>_<device>_driver.cpp  # Driver implementation
+    └─ CMakeLists.txt           # Build configuration
+```
+
+---
+
+## SDK Organization
+
+### Step 1: Place SDK in `external/`
+
+**Simply extract the vendor SDK folder directly into `external/`** - no subdirectories or reorganization needed:
+
+```bash
+# Example: ZWO SDK extracts as "ASICamera2_SDK"
+external/
+└─ ASICamera2_SDK/              # Vendor's folder name (use as-is)
+   ├─ include/
+   │   └─ ASICamera2.h
+   ├─ lib/
+   │   ├─ linux/x64/libASICamera2.a
+   │   ├─ macos/libASICamera2.dylib
+   │   └─ windows/x64/ASICamera2.lib
+   └─ examples/                 # Ignore these
+```
+
+**Important**: Use the SDK structure exactly as provided by the vendor. The folder name will vary (e.g., `ASICamera2_SDK/`, `qhy_sdk/`, `iOptron_SDK/`). Your CMake configuration will locate files within whatever folder name the vendor uses.
+
+### Step 2: Identify Required Files
+
+For each SDK, identify **only the files you need**:
+
+- ✅ **Header files** - Public API headers
+- ✅ **Library files** - Static/dynamic libraries for your platform
+- ❌ **Examples** - Not needed
+- ❌ **Tests** - Not needed
+- ❌ **Documentation** - Reference only (not compiled)
+- ❌ **Other platforms** - Only include your target platform
+
+### Step 3: Document SDK Structure in CMake
+
+In your driver's CMakeLists.txt, document the SDK folder name and which files are used. You'll need to search for the SDK folder since the name varies:
+
+```cmake
+# ZWO SDK Structure (example - actual folder name may vary):
+# - external/ASICamera2_SDK/include/ASICamera2.h (header)
+# - external/ASICamera2_SDK/lib/linux/x64/libASICamera2.a (Linux static lib)
+# - external/ASICamera2_SDK/lib/macos/libASICamera2.dylib (macOS dynamic lib)
+```
+
+---
+
+## Driver Structure
+
+### Layer 1: Pure Virtual Interface
+
+**Location**: `include/alpacacore/<device>_driver.h`
+
+This already exists! You don't need to modify it. Example:
+
+```cpp
+// include/alpacacore/camera_driver.h
+class CameraDriver : public AlpacaDriver {
+public:
+    virtual ~CameraDriver() = default;
+    virtual void start_exposure(double duration, bool light) = 0;
+    virtual ImageArray get_image_array() const = 0;
+    // ... more methods
+};
+```
+
+### Layer 2: SDK Wrapper
+
+**Location**: `include/alpacacore/vendor/<vendor>/<vendor>_sdk_wrapper.h`
+
+Create a clean C++ interface that wraps the messy SDK:
+
+```cpp
+// include/alpacacore/vendor/zwo/zwo_sdk_wrapper.h
+#pragma once
+
+#include <vector>
+#include <string>
+#include <memory>
+
+namespace alpacacore::vendor::zwo {
+
+// Clean types - no SDK types exposed
+struct ZWOCameraInfo {
+    int camera_id;
+    std::string name;
+    int max_width;
+    int max_height;
+    bool is_color;
+};
+
+class ZWOSDKWrapper {
+public:
+    static ZWOSDKWrapper& instance();
+    
+    // Clean API - hides SDK complexity
+    std::vector<ZWOCameraInfo> enumerate_cameras();
+    bool open_camera(int camera_id);
+    void close_camera();
+    bool start_exposure(int camera_id, double duration_seconds, bool light);
+    bool is_exposure_ready(int camera_id);
+    std::vector<uint8_t> get_image_data(int camera_id, int& width, int& height);
+    
+private:
+    // SDK-specific implementation details hidden
+    class Impl;
+    std::unique_ptr<Impl> pimpl_;
+};
+
+} // namespace alpacacore::vendor::zwo
+```
+
+**Implementation**: `src/vendors/<vendor>/<vendor>_sdk_wrapper.cpp`
+
+```cpp
+// src/vendors/zwo/zwo_sdk_wrapper.cpp
+#include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
+#include <ASICamera2.h>  // Only place SDK header is included!
+
+namespace alpacacore::vendor::zwo {
+
+class ZWOSDKWrapper::Impl {
+    // SDK-specific implementation
+};
+
+ZWOSDKWrapper& ZWOSDKWrapper::instance() {
+    static ZWOSDKWrapper wrapper;
+    return wrapper;
+}
+
+// Implement methods using SDK...
+std::vector<ZWOCameraInfo> ZWOSDKWrapper::enumerate_cameras() {
+    // Use ASICamera2 SDK here
+}
+
+} // namespace alpacacore::vendor::zwo
+```
+
+### Layer 3: Driver Implementation
+
+**Location**: `src/vendors/<vendor>/<vendor>_<device>_driver.cpp`
+
+Implement the pure virtual interface using the wrapper:
+
+```cpp
+// src/vendors/zwo/zwo_camera_driver.cpp
+#include <alpacacore/camera_driver.h>
+#include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
+#include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
+
+namespace alpacacore::vendor::zwo {
+
+class ZWOCameraDriver : public CameraDriver {
+public:
+    ZWOCameraDriver(int camera_id, int device_number);
+    ~ZWOCameraDriver() override;
+    
+    // Implement CameraDriver interface
+    void start_exposure(double duration, bool light) override {
+        auto& sdk = ZWOSDKWrapper::instance();
+        if (!sdk.start_exposure(camera_id_, duration, light)) {
+            throw AlpacaException("Failed to start exposure");
+        }
+    }
+    
+    ImageArray get_image_array() const override {
+        auto& sdk = ZWOSDKWrapper::instance();
+        int width, height;
+        auto data = sdk.get_image_data(camera_id_, width, height);
+        
+        ImageArray img;
+        img.data = std::move(data);
+        img.width = width;
+        img.height = height;
+        img.rank = 2; // Monochrome
+        return img;
+    }
+    
+    // Implement all other CameraDriver methods...
+    
+private:
+    int camera_id_;
+    // ... other state
+};
+
+} // namespace alpacacore::vendor::zwo
+```
+
+---
+
+## Step-by-Step Driver Implementation
+
+### Step 1: Create Wrapper Header
+
+```bash
+# Create wrapper header
+mkdir -p include/alpacacore/vendor/zwo
+touch include/alpacacore/vendor/zwo/zwo_sdk_wrapper.h
+```
+
+Write the wrapper interface (see Layer 2 example above).
+
+### Step 2: Implement Wrapper
+
+```bash
+# Create wrapper implementation
+touch src/vendors/zwo/zwo_sdk_wrapper.cpp
+```
+
+Implement using PIMPL pattern to hide SDK details.
+
+### Step 3: Implement Driver
+
+```bash
+# Create driver implementation
+touch src/vendors/zwo/zwo_camera_driver.cpp
+```
+
+Implement all pure virtual methods from `CameraDriver`.
+
+### Step 4: Create Factory Function
+
+```cpp
+// In zwo_camera_driver.cpp or separate header
+std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id) {
+    return std::make_unique<ZWOCameraDriver>(camera_id, device_number);
+}
+```
+
+### Step 5: Configure CMake
+
+See [CMake Configuration](#cmake-configuration) section below.
+
+---
+
+## CMake Configuration
+
+### Finding the SDK Folder
+
+Since vendor SDKs are placed directly in `external/` with varying folder names, you need to locate the SDK folder. You can either:
+
+1. **Search for a known file** (recommended):
+   ```cmake
+   # Find the SDK folder by searching for a known header file
+   file(GLOB_RECURSE ZWO_HEADER "${CMAKE_SOURCE_DIR}/external/*/ASICamera2.h")
+   if(NOT ZWO_HEADER)
+       message(FATAL_ERROR "ZWO SDK not found. Please extract SDK to external/")
+   endif()
+   get_filename_component(ZWO_SDK_DIR "${ZWO_HEADER}" DIRECTORY)
+   get_filename_component(ZWO_SDK_DIR "${ZWO_SDK_DIR}" DIRECTORY)  # Go up from include/
+   ```
+
+2. **Use a specific folder name** (if you know it):
+   ```cmake
+   # If you know the exact folder name
+   set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ASICamera2_SDK")
+   if(NOT EXISTS "${ZWO_SDK_DIR}/include/ASICamera2.h")
+       message(FATAL_ERROR "ZWO SDK not found at ${ZWO_SDK_DIR}")
+   endif()
+   ```
+
+### Vendor CMakeLists.txt Template
+
+```cmake
+# src/vendors/zwo/CMakeLists.txt
+
+if(ALPACACORE_ENABLE_ZWO)
+    # Find SDK folder by searching for header file
+    file(GLOB_RECURSE ZWO_HEADER "${CMAKE_SOURCE_DIR}/external/*/ASICamera2.h")
+    if(NOT ZWO_HEADER)
+        message(FATAL_ERROR "ZWO SDK not found. Please extract SDK to external/")
+    endif()
+    get_filename_component(ZWO_SDK_DIR "${ZWO_HEADER}" DIRECTORY)
+    get_filename_component(ZWO_SDK_DIR "${ZWO_SDK_DIR}" DIRECTORY)  # Go up from include/
+    
+    message(STATUS "Found ZWO SDK at: ${ZWO_SDK_DIR}")
+    
+    # Platform-specific library selection
+    if(APPLE)
+        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/macos")
+        set(ZWO_LIB_NAME "ASICamera2")
+        set(ZWO_LIB_TYPE SHARED)
+    elseif(UNIX)
+        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/linux/x64")
+        set(ZWO_LIB_NAME "ASICamera2")
+        set(ZWO_LIB_TYPE STATIC)
+    elseif(WIN32)
+        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/windows/x64")
+        set(ZWO_LIB_NAME "ASICamera2")
+        set(ZWO_LIB_TYPE STATIC)
+    endif()
+    
+    # Source files
+    set(ZWO_SOURCES
+        zwo_sdk_wrapper.cpp
+        zwo_camera_driver.cpp
+    )
+    
+    # Create vendor library
+    add_library(alpacacore_zwo STATIC ${ZWO_SOURCES})
+    
+    # Include directories
+    target_include_directories(alpacacore_zwo PRIVATE
+        ${ZWO_SDK_DIR}/include
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    
+    # Link SDK library
+    if(ZWO_LIB_TYPE STREQUAL "STATIC")
+        target_link_libraries(alpacacore_zwo PRIVATE
+            ${ZWO_LIB_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}${ZWO_LIB_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX}
+        )
+    else()
+        target_link_libraries(alpacacore_zwo PRIVATE
+            ${ZWO_LIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}${ZWO_LIB_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}
+        )
+    endif()
+    
+    # Link to main library
+    target_link_libraries(alpacacore_zwo PUBLIC alpacacore)
+    
+    # Platform-specific settings
+    if(APPLE)
+        # macOS-specific settings
+        set_target_properties(alpacacore_zwo PROPERTIES
+            LINK_FLAGS "-F${ZWO_LIB_DIR}"
+        )
+    elseif(UNIX)
+        # Linux-specific settings
+        target_link_directories(alpacacore_zwo PRIVATE ${ZWO_LIB_DIR})
+    endif()
+endif()
+```
+
+### Main CMakeLists.txt Integration
+
+After creating your vendor's `CMakeLists.txt`, you must integrate it into the main `CMakeLists.txt` file. This requires **4 updates** in specific locations:
+
+#### Step 1: Add Option Flag
+
+Add the vendor option flag in the "Build options" section (around line 9-14):
+
+```cmake
+# Build options
+option(ALPACACORE_BUILD_TESTS "Build unit tests" ON)
+option(ALPACACORE_ENABLE_ALL_VENDORS "Enable all vendor drivers" OFF)
+option(ALPACACORE_ENABLE_ZWO "Enable ZWO vendor support" OFF)
+option(ALPACACORE_ENABLE_QHY "Enable QHY vendor support" OFF)
+option(ALPACACORE_ENABLE_IOPTRON "Enable iOptron vendor support" OFF)
+option(ALPACACORE_ENABLE_NEWVENDOR "Enable NewVendor support" OFF)  # ← Add this
+```
+
+**Replace `NEWVENDOR` with your vendor name (uppercase).**
+
+#### Step 2: Add to ENABLE_ALL_VENDORS Block
+
+Update the `ALPACACORE_ENABLE_ALL_VENDORS` conditional block (around line 16-23):
+
+```cmake
+# If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
+# Note: Only enable vendors that are actually implemented (have source files)
+if(ALPACACORE_ENABLE_ALL_VENDORS)
+    # ZWO and QHY are not yet implemented, so don't enable them
+    # set(ALPACACORE_ENABLE_ZWO ON)
+    # set(ALPACACORE_ENABLE_QHY ON)
+    set(ALPACACORE_ENABLE_IOPTRON ON)
+    set(ALPACACORE_ENABLE_NEWVENDOR ON)  # ← Add this (only if implemented)
+endif()
+```
+
+**Important**: Only add vendors that are fully implemented. Comment out or remove vendors that aren't ready yet.
+
+#### Step 3: Add Conditional Subdirectory Inclusion
+
+Add the vendor subdirectory inclusion in the "Vendor support" section (around line 85-111):
+
+```cmake
+# Vendor support (conditional)
+# Only add subdirectories for vendors that are actually implemented
+if(ALPACACORE_ENABLE_ZWO)
+    # ZWO not yet implemented - skip for now
+    # add_subdirectory(src/vendors/zwo)
+    # if(TARGET alpacacore_zwo)
+    #     target_link_libraries(alpacacore PRIVATE alpacacore_zwo)
+    # endif()
+    message(WARNING "ZWO vendor support is not yet implemented")
+endif()
+
+if(ALPACACORE_ENABLE_QHY)
+    # QHY not yet implemented - skip for now
+    # add_subdirectory(src/vendors/qhy)
+    # if(TARGET alpacacore_qhy)
+    #     target_link_libraries(alpacacore PRIVATE alpacacore_qhy)
+    # endif()
+    message(WARNING "QHY vendor support is not yet implemented")
+endif()
+
+if(ALPACACORE_ENABLE_IOPTRON)
+    add_subdirectory(src/vendors/ioptron)
+    if(TARGET alpacacore_ioptron)
+        target_link_libraries(alpacacore PRIVATE alpacacore_ioptron)
+    endif()
+endif()
+
+# ← Add this block for your new vendor
+if(ALPACACORE_ENABLE_NEWVENDOR)
+    add_subdirectory(src/vendors/newvendor)
+    if(TARGET alpacacore_newvendor)
+        target_link_libraries(alpacacore PRIVATE alpacacore_newvendor)
+    endif()
+endif()
+```
+
+**Replace `newvendor` with your vendor name (lowercase) and `NEWVENDOR` with uppercase.**
+
+#### Step 4: Add Installation Rules
+
+Add installation rules in the "Installation" section (around line 130-156):
+
+```cmake
+# Install vendor libraries if they exist
+if(ALPACACORE_ENABLE_ZWO AND TARGET alpacacore_zwo)
+    install(TARGETS alpacacore_zwo
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_QHY AND TARGET alpacacore_qhy)
+    install(TARGETS alpacacore_qhy
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_IOPTRON AND TARGET alpacacore_ioptron)
+    install(TARGETS alpacacore_ioptron
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+# ← Add this block for your new vendor
+if(ALPACACORE_ENABLE_NEWVENDOR AND TARGET alpacacore_newvendor)
+    install(TARGETS alpacacore_newvendor
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+```
+
+#### Integration Checklist
+
+When adding a new vendor driver, ensure you've completed all 4 steps:
+
+- [ ] **Step 1**: Added `option(ALPACACORE_ENABLE_<VENDOR> ...)` in Build options section
+- [ ] **Step 2**: Added `set(ALPACACORE_ENABLE_<VENDOR> ON)` in ENABLE_ALL_VENDORS block (if implemented)
+- [ ] **Step 3**: Added `add_subdirectory()` and `target_link_libraries()` in Vendor support section
+- [ ] **Step 4**: Added `install(TARGETS ...)` in Installation section
+
+**Note**: AlpacaHTTP automatically gets all enabled vendors through its link to `alpacacore`, so no changes are needed in AlpacaHTTP's CMakeLists.txt. However, if your application code uses vendor-specific headers directly, you'll need `#ifdef ALPACACORE_ENABLE_<VENDOR>` guards (see `examples/simple_server/main.cpp` for examples).
+
+---
+
+## Testing Your Driver
+
+**📚 For comprehensive testing guidance, see [Driver Testing Guide](.cursor/rules/driver_test.mdc)**
+
+The testing guide covers:
+- Catch2 basics and test structure
+- Testing patterns for vendor drivers
+- Mocking and stubbing strategies
+- Error condition testing
+- Integration testing with hardware
+- CI/CD integration
+- Best practices and troubleshooting
+
+### Quick Start
+
+1. **Create test file** in `tests/`:
+   ```bash
+   touch tests/test_zwo_camera.cpp
+   ```
+
+2. **Add to `tests/CMakeLists.txt`**:
+   ```cmake
+   set(TEST_SOURCES
+       # ... existing tests ...
+       test_zwo_camera.cpp
+   )
+   ```
+
+3. **Write tests** following patterns in the [Driver Testing Guide](.cursor/rules/driver_test.mdc)
+
+4. **Build and run**:
+   ```bash
+   mkdir build
+   cd build
+   cmake .. -DALPACACORE_ENABLE_ZWO=ON -DALPACACORE_BUILD_TESTS=ON
+   cmake --build .
+   ctest
+   ```
+
+---
+
+## Vendor-Specific Examples
+
+### ZWO Camera Driver
+
+**SDK Location**: `external/ASICamera2_SDK/` (or similar - folder name varies)
+
+**Required Files** (within the SDK folder):
+- `include/ASICamera2.h`
+- `lib/<platform>/libASICamera2.*`
+
+**Wrapper API**:
+- `ZWOSDKWrapper::enumerate_cameras()`
+- `ZWOSDKWrapper::open_camera(int id)`
+- `ZWOSDKWrapper::start_exposure(...)`
+
+**CMake**: Use `file(GLOB_RECURSE ...)` to find `ASICamera2.h` and locate the SDK folder.
+
+### QHY Camera Driver
+
+**SDK Location**: `external/qhy_sdk/` (or similar - folder name varies)
+
+**Required Files** (within the SDK folder):
+- `include/qhyccd.h`
+- `lib/<platform>/libqhyccd.*`
+
+**Wrapper API**:
+- `QHYSDKWrapper::enumerate_cameras()`
+- `QHYSDKWrapper::open_camera(int id)`
+- `QHYSDKWrapper::start_exposure(...)`
+
+**CMake**: Use `file(GLOB_RECURSE ...)` to find `qhyccd.h` and locate the SDK folder.
+
+### iOptron Mount Driver
+
+**SDK Location**: `external/iOptron_SDK/` (or similar - folder name varies)
+
+**Required Files** (within the SDK folder):
+- `include/ioptron.h`
+- `lib/<platform>/libioptron.*`
+
+**Wrapper API**:
+- `iOptronSDKWrapper::enumerate_mounts()`
+- `iOptronSDKWrapper::connect(int id)`
+- `iOptronSDKWrapper::slew_to_coordinates(...)`
+
+**CMake**: Use `file(GLOB_RECURSE ...)` to find `ioptron.h` and locate the SDK folder.
+
+---
+
+## Troubleshooting
+
+### SDK Not Found
+
+**Error**: `FATAL_ERROR: ZWO SDK not found`
+
+**Solution**: 
+1. Verify SDK folder is in `external/` (extracted directly, not in a subdirectory)
+2. Check that the SDK folder contains the expected header file (e.g., `ASICamera2.h`)
+3. Verify the CMake `file(GLOB_RECURSE ...)` pattern matches your SDK's folder structure
+4. The SDK folder name doesn't matter - CMake searches for the header file
+
+### Linker Errors
+
+**Error**: `undefined reference to SDK functions`
+
+**Solution**:
+1. Verify library path in CMakeLists.txt
+2. Check platform-specific library naming
+3. Ensure library type (STATIC/SHARED) matches SDK
+
+### Include Path Issues
+
+**Error**: `fatal error: ASICamera2.h: No such file or directory`
+
+**Solution**:
+1. Check `target_include_directories` in CMakeLists.txt
+2. Verify SDK header location
+3. Use absolute paths in CMake for reliability
+
+### Platform-Specific Issues
+
+**macOS**: May need `-F` flag for framework paths
+**Linux**: May need `rpath` settings for shared libraries
+**Windows**: Check DLL search paths
+
+---
+
+## Best Practices Checklist
+
+### Code Quality
+- [ ] SDK wrapper uses PIMPL pattern
+- [ ] No SDK headers included outside wrapper implementation
+- [ ] All SDK errors converted to `AlpacaException`
+- [ ] Thread safety documented and handled
+- [ ] Platform-specific code only in CMake
+- [ ] Documentation comments for public API
+- [ ] License header in all source files
+- [ ] SDK version documented in comments
+
+### CMake Configuration
+- [ ] Vendor `CMakeLists.txt` created in `src/vendors/<vendor>/`
+- [ ] Vendor `CMakeLists.txt` documents which SDK files are used
+- [ ] Main `CMakeLists.txt` updated with option flag (Step 1)
+- [ ] Main `CMakeLists.txt` updated in ENABLE_ALL_VENDORS block (Step 2)
+- [ ] Main `CMakeLists.txt` updated with subdirectory inclusion (Step 3)
+- [ ] Main `CMakeLists.txt` updated with installation rules (Step 4)
+
+### Testing
+- [ ] Unit tests for driver functionality
+- [ ] Integration tests with hardware (if available)
+- [ ] Error condition testing
+- [ ] Tests added to `tests/CMakeLists.txt`
+
+---
+
+## Quick Reference
+
+### File Locations
+
+| Component | Location |
+|-----------|----------|
+| SDK Files | `external/<vendor_sdk_folder>/` (folder name varies by vendor) |
+| Wrapper Header | `include/alpacacore/vendor/<vendor>/<vendor>_sdk_wrapper.h` |
+| Wrapper Implementation | `src/vendors/<vendor>/<vendor>_sdk_wrapper.cpp` |
+| Driver Implementation | `src/vendors/<vendor>/<vendor>_<device>_driver.cpp` |
+| CMake Configuration | `src/vendors/<vendor>/CMakeLists.txt` |
+
+### Build Commands
+
+```bash
+# Build with vendor support
+cmake .. -DALPACACORE_ENABLE_ZWO=ON
+cmake --build .
+
+# Build with tests
+cmake .. -DALPACACORE_ENABLE_ZWO=ON -DALPACACORE_BUILD_TESTS=ON
+cmake --build .
+ctest
+```
+
+### Namespace Convention
+
+```cpp
+namespace alpacacore::vendor::zwo {
+    // ZWO-specific code
+}
+
+namespace alpacacore {
+    // Core AlpacaCore code (no vendor dependencies)
+}
+```
+
+---
+
+## Additional Resources
+
+- [ASCOM Alpaca API Specification](https://ascom-standards.org/api/)
+- [AlpacaCore Architecture Rules](.cursor/rules/rules.mdc)
+- [Driver Testing Guide](.cursor/rules/driver_test.mdc) - Comprehensive testing guide for vendor drivers
+- [External Directory README](../external/README.md) - Instructions for placing SDKs
+- [Contributing Guidelines](../CONTRIBUTING.md)
+
+---
+
+**Happy Driver Building!** 🚀

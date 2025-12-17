@@ -16,6 +16,7 @@
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
 #include <chrono>
+#include <vector>
 
 namespace alpacacore {
 
@@ -287,6 +288,14 @@ public:
      * @brief Set the telescope's tracking rate.
      */
     virtual void set_tracking_rate(double rate) = 0;
+
+    /**
+     * @brief Get the collection of supported tracking rates (DriveRates).
+     * 
+     * Returns a vector of integers representing supported DriveRates:
+     * 0 = driveSidereal, 1 = driveLunar, 2 = driveSolar, 3 = driveKing
+     */
+    virtual std::vector<int> get_tracking_rates() const = 0;
 
     /**
      * @brief Get the telescope's UTC date/time.

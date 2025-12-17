@@ -26,9 +26,10 @@ set(TEST_SOURCES
 # Create test executable
 if(TEST_FRAMEWORK STREQUAL "catch2")
     add_executable(alpacacore_tests ${TEST_SOURCES})
-    target_link_libraries(alpacacore_tests PRIVATE alpacacore Catch2::Catch2)
+    target_link_libraries(alpacacore_tests PRIVATE alpacacore Catch2::Catch2WithMain)
     include(CTest)
-    include(Catch)
+    # Include Catch2's test discovery module
+    include(${Catch2_DIR}/Catch.cmake)
     catch_discover_tests(alpacacore_tests)
 elseif(TEST_FRAMEWORK STREQUAL "doctest")
     add_executable(alpacacore_tests ${TEST_SOURCES})

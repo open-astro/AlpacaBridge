@@ -11,8 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#define CATCH_CONFIG_MAIN
-#include <catch2/catch.hpp>
+#include <catch2/catch_all.hpp>
 
 #include <alpacacore/util/units.h>
 #include <cmath>

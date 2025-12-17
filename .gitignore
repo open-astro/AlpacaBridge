@@ -37,3 +37,12 @@ Thumbs.db
 *.gcda
 *.gcno
 
+# Vendor SDKs - exclude all files except documentation
+# Exclude all files in vendor subdirectories
+external/*/*
+# But allow markdown documentation files
+!external/README.md
+!external/*.md
+!external/*/*.md
+!external/*/README.md
+!external/**/.gitkeep

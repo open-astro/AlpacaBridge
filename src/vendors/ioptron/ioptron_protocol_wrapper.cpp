@@ -1,0 +1,1048 @@
+// AlpacaCore
+// Copyright (c) 2025 Joey Troy and contributors
+//
+// This file is part of AlpacaCore.
+//
+// AlpacaCore is licensed under the Server Side Public License, Version 1 (SSPL v1).
+// See the LICENSE file in this repository or the official license at:
+// https://www.mongodb.com/legal/licensing/server-side-public-license
+//
+// If you use this program to provide a network-accessible service, appliance,
+// or any commercial offering, you must comply
+// with all SSPL v1 requirements.
+
+#include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
+#include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
+#include <alpacacore/util/units.h>
+#include <mutex>
+#include <chrono>
+#include <thread>
+#include <sstream>
+#include <iomanip>
+#include <cmath>
+#include <cstring>
+
+// Platform-specific includes
+#ifdef _WIN32
+    #include <windows.h>
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #pragma comment(lib, "ws2_32.lib")
+#else
+    #include <unistd.h>
+    #include <fcntl.h>
+    #include <termios.h>
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <netdb.h>
+    #include <errno.h>
+#endif
+
+namespace alpacacore::vendor::ioptron {
+
+// PIMPL implementation class
+class iOptronProtocolWrapper::Impl {
+public:
+    Impl() : connected_(false), connection_type_(ConnectionType::Serial) {
+#ifdef _WIN32
+        serial_handle_ = INVALID_HANDLE_VALUE;
+        socket_handle_ = INVALID_SOCKET;
+        WSADATA wsa_data;
+        WSAStartup(MAKEWORD(2, 2), &wsa_data);
+#else
+        serial_fd_ = -1;
+        socket_fd_ = -1;
+#endif
+    }
+    
+    ~Impl() {
+        disconnect();
+#ifdef _WIN32
+        WSACleanup();
+#endif
+    }
+    
+    bool connect(const ConnectionInfo& info) {
+        ALPACA_LOG_INFO("iOptron", "Impl::connect() called");
+        
+        // Validate connection info before proceeding
+        if (info.type == ConnectionType::Serial) {
+            if (info.port_path.empty()) {
+                ALPACA_LOG_ERROR("iOptron", "Serial connection requested but port_path is empty");
+                return false;
+            }
+            ALPACA_LOG_INFO("iOptron", "Serial connection - port: [" + info.port_path + "], baud: " + std::to_string(info.baud_rate));
+        } else {
+            if (info.host.empty()) {
+                ALPACA_LOG_ERROR("iOptron", "Network connection requested but host is empty");
+                return false;
+            }
+            ALPACA_LOG_INFO("iOptron", "Network connection - host: [" + info.host + "], port: " + std::to_string(info.tcp_port));
+        }
+        
+        std::lock_guard<std::mutex> lock(mutex_);
+        ALPACA_LOG_INFO("iOptron", "Got mutex lock");
+        
+        if (connected_) {
+            ALPACA_LOG_INFO("iOptron", "Already connected, disconnecting first");
+            disconnect();
+        }
+        
+        ALPACA_LOG_INFO("iOptron", "Connection type: " + std::string(info.type == ConnectionType::Serial ? "Serial" : "Network"));
+        connection_type_ = info.type;
+        connection_info_ = info;
+        
+        bool success = false;
+        if (info.type == ConnectionType::Serial) {
+            ALPACA_LOG_INFO("iOptron", "Connecting via serial, port: [" + info.port_path + "], baud: " + std::to_string(info.baud_rate));
+            // Make a copy of port_path to ensure it's valid
+            std::string port_path_copy = info.port_path;
+            ALPACA_LOG_INFO("iOptron", "Made copy of port_path, calling connect_serial()...");
+            success = connect_serial(port_path_copy, info.baud_rate);
+            ALPACA_LOG_INFO("iOptron", "connect_serial() returned: " + std::string(success ? "true" : "false"));
+        } else {
+            ALPACA_LOG_INFO("iOptron", "Connecting via network, host: [" + info.host + "], port: " + std::to_string(info.tcp_port));
+            // Make a copy of host to ensure it's valid
+            std::string host_copy = info.host;
+            ALPACA_LOG_INFO("iOptron", "Made copy of host, calling connect_network()...");
+            success = connect_network(host_copy, info.tcp_port);
+            ALPACA_LOG_INFO("iOptron", "connect_network() returned: " + std::string(success ? "true" : "false"));
+        }
+        
+        if (success) {
+            connected_ = true;
+            std::string conn_type = (info.type == ConnectionType::Serial ? "Serial" : "Network");
+            ALPACA_LOG_INFO("iOptron", "Connected to mount via " + conn_type);
+        } else {
+            ALPACA_LOG_ERROR("iOptron", "Failed to connect to mount");
+        }
+        
+        return success;
+    }
+    
+    void disconnect() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        if (!connected_) {
+            return;
+        }
+        
+        if (connection_type_ == ConnectionType::Serial) {
+            disconnect_serial();
+        } else {
+            disconnect_network();
+        }
+        
+        connected_ = false;
+        ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
+    }
+    
+    bool is_connected() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return connected_;
+    }
+    
+    std::string send_command(const std::string& command) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        if (!connected_) {
+            throw AlpacaException("Not connected to mount");
+        }
+        
+        // Format command with # terminator
+        std::string full_command = command;
+        if (full_command.back() != '#') {
+            full_command += "#";
+        }
+        
+        // Send command
+        if (!write_data(full_command)) {
+            throw AlpacaException("Failed to send command to mount");
+        }
+        
+        // Read response (commands return response ending with #)
+        std::string response = read_response();
+        
+        // Remove # terminator if present
+        if (!response.empty() && response.back() == '#') {
+            response.pop_back();
+        }
+        
+        return response;
+    }
+    
+    void send_command_blind(const std::string& command) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        if (!connected_) {
+            throw AlpacaException("Not connected to mount");
+        }
+        
+        std::string full_command = command;
+        if (full_command.back() != '#') {
+            full_command += "#";
+        }
+        
+        if (!write_data(full_command)) {
+            throw AlpacaException("Failed to send command to mount");
+        }
+    }
+
+private:
+    bool connect_serial(const std::string& port_path, int baud_rate) {
+        ALPACA_LOG_INFO("iOptron", "connect_serial() called with port: [" + port_path + "], baud: " + std::to_string(baud_rate));
+#ifdef _WIN32
+        ALPACA_LOG_INFO("iOptron", "Windows serial port path");
+        // Windows serial port
+        std::wstring wport_path(port_path.begin(), port_path.end());
+        serial_handle_ = CreateFileW(
+            wport_path.c_str(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            0,
+            nullptr
+        );
+        
+        if (serial_handle_ == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+        
+        DCB dcb = {0};
+        dcb.DCBlength = sizeof(DCB);
+        if (!GetCommState(serial_handle_, &dcb)) {
+            CloseHandle(serial_handle_);
+            serial_handle_ = INVALID_HANDLE_VALUE;
+            return false;
+        }
+        
+        dcb.BaudRate = baud_rate;
+        dcb.ByteSize = 8;
+        dcb.Parity = NOPARITY;
+        dcb.StopBits = ONESTOPBIT;
+        dcb.fDtrControl = DTR_CONTROL_ENABLE;
+        dcb.fRtsControl = RTS_CONTROL_ENABLE;
+        
+        if (!SetCommState(serial_handle_, &dcb)) {
+            CloseHandle(serial_handle_);
+            serial_handle_ = INVALID_HANDLE_VALUE;
+            return false;
+        }
+        
+        // Set timeouts
+        COMMTIMEOUTS timeouts = {0};
+        timeouts.ReadIntervalTimeout = 50;
+        timeouts.ReadTotalTimeoutConstant = 100;
+        timeouts.ReadTotalTimeoutMultiplier = 10;
+        timeouts.WriteTotalTimeoutConstant = 100;
+        timeouts.WriteTotalTimeoutMultiplier = 10;
+        SetCommTimeouts(serial_handle_, &timeouts);
+        
+        return true;
+#else
+        // Linux/macOS serial port
+        ALPACA_LOG_INFO("iOptron", "Opening serial port: [" + port_path + "]");
+        
+        // Validate port_path is not empty
+        if (port_path.empty()) {
+            ALPACA_LOG_ERROR("iOptron", "Port path is empty!");
+            return false;
+        }
+        
+        // Make sure we have a valid C string
+        const char* port_cstr = port_path.c_str();
+        if (port_cstr == nullptr) {
+            ALPACA_LOG_ERROR("iOptron", "Port path C string is null!");
+            return false;
+        }
+        
+        ALPACA_LOG_INFO("iOptron", "Got C string pointer: [" + std::string(port_cstr) + "], calling open()...");
+        
+        // Call open() with error handling
+        errno = 0;  // Clear errno before call
+        serial_fd_ = open(port_cstr, O_RDWR | O_NOCTTY | O_NONBLOCK);
+        int open_errno = errno;
+        ALPACA_LOG_INFO("iOptron", "open() returned: " + std::to_string(serial_fd_) + ", errno: " + std::to_string(open_errno));
+        if (serial_fd_ < 0) {
+            ALPACA_LOG_ERROR("iOptron", "Failed to open serial port, errno: " + std::to_string(errno));
+            return false;
+        }
+        
+        ALPACA_LOG_INFO("iOptron", "Getting terminal attributes...");
+        // Configure serial port
+        struct termios tty;
+        if (tcgetattr(serial_fd_, &tty) != 0) {
+            ALPACA_LOG_ERROR("iOptron", "tcgetattr failed, errno: " + std::to_string(errno));
+            close(serial_fd_);
+            serial_fd_ = -1;
+            return false;
+        }
+        ALPACA_LOG_INFO("iOptron", "Got terminal attributes");
+        
+        // Set baud rate
+        speed_t speed = B9600;
+        switch (baud_rate) {
+            case 9600: speed = B9600; break;
+            case 19200: speed = B19200; break;
+            case 38400: speed = B38400; break;
+            case 57600: speed = B57600; break;
+            case 115200: speed = B115200; break;
+            default: speed = B9600; break;
+        }
+        
+        cfsetospeed(&tty, speed);
+        cfsetispeed(&tty, speed);
+        
+        // 8N1 configuration
+        tty.c_cflag &= ~PARENB;  // No parity
+        tty.c_cflag &= ~CSTOPB;   // 1 stop bit
+        tty.c_cflag &= ~CSIZE;    // Clear size bits
+        tty.c_cflag |= CS8;       // 8 data bits
+        tty.c_cflag &= ~CRTSCTS;  // No hardware flow control
+        tty.c_cflag |= CREAD | CLOCAL;  // Enable receiver, ignore modem controls
+        
+        // Input flags
+        tty.c_iflag &= ~(IXON | IXOFF | IXANY);  // No software flow control
+        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
+        
+        // Output flags
+        tty.c_oflag &= ~OPOST;
+        
+        // Local flags
+        tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+        
+        // Set timeouts
+        tty.c_cc[VMIN] = 0;
+        tty.c_cc[VTIME] = 1;  // 0.1 second timeout
+        
+        ALPACA_LOG_INFO("iOptron", "Setting terminal attributes...");
+        if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
+            ALPACA_LOG_ERROR("iOptron", "tcsetattr failed, errno: " + std::to_string(errno));
+            close(serial_fd_);
+            serial_fd_ = -1;
+            return false;
+        }
+        ALPACA_LOG_INFO("iOptron", "Set terminal attributes");
+        
+        // Set to blocking mode
+        ALPACA_LOG_INFO("iOptron", "Setting to blocking mode...");
+        int flags = fcntl(serial_fd_, F_GETFL);
+        if (flags < 0) {
+            ALPACA_LOG_ERROR("iOptron", "fcntl F_GETFL failed, errno: " + std::to_string(errno));
+            close(serial_fd_);
+            serial_fd_ = -1;
+            return false;
+        }
+        if (fcntl(serial_fd_, F_SETFL, flags & ~O_NONBLOCK) != 0) {
+            ALPACA_LOG_ERROR("iOptron", "fcntl F_SETFL failed, errno: " + std::to_string(errno));
+            close(serial_fd_);
+            serial_fd_ = -1;
+            return false;
+        }
+        ALPACA_LOG_INFO("iOptron", "Serial port configured successfully");
+        
+        return true;
+#endif
+    }
+    
+    void disconnect_serial() {
+#ifdef _WIN32
+        if (serial_handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(serial_handle_);
+            serial_handle_ = INVALID_HANDLE_VALUE;
+        }
+#else
+        if (serial_fd_ >= 0) {
+            close(serial_fd_);
+            serial_fd_ = -1;
+        }
+#endif
+    }
+    
+    bool connect_network(const std::string& host, int port) {
+        ALPACA_LOG_INFO("iOptron", "connect_network() called with host: [" + host + "], port: " + std::to_string(port));
+#ifdef _WIN32
+        socket_handle_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (socket_handle_ == INVALID_SOCKET) {
+            return false;
+        }
+        
+        sockaddr_in addr{};
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        
+        // Resolve hostname
+        addrinfo hints{};
+        std::memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        addrinfo* result = nullptr;
+        
+        if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0) {
+            closesocket(socket_handle_);
+            socket_handle_ = INVALID_SOCKET;
+            return false;
+        }
+        
+        addr.sin_addr = ((sockaddr_in*)result->ai_addr)->sin_addr;
+        freeaddrinfo(result);
+        
+        if (connect(socket_handle_, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+            closesocket(socket_handle_);
+            socket_handle_ = INVALID_SOCKET;
+            return false;
+        }
+        
+        // Set socket to blocking mode
+        u_long mode = 0;
+        ioctlsocket(socket_handle_, FIONBIO, &mode);
+        
+        return true;
+#else
+        socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+        if (socket_fd_ < 0) {
+            return false;
+        }
+        
+        sockaddr_in addr{};
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        
+        // Resolve hostname
+        struct hostent* host_entry = gethostbyname(host.c_str());
+        if (host_entry == nullptr) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+            return false;
+        }
+        
+        addr.sin_addr = *((struct in_addr*)host_entry->h_addr);
+        
+        if (::connect(socket_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+            return false;
+        }
+        
+        return true;
+#endif
+    }
+    
+    void disconnect_network() {
+#ifdef _WIN32
+        if (socket_handle_ != INVALID_SOCKET) {
+            closesocket(socket_handle_);
+            socket_handle_ = INVALID_SOCKET;
+        }
+#else
+        if (socket_fd_ >= 0) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+        }
+#endif
+    }
+    
+    bool write_data(const std::string& data) {
+        if (connection_type_ == ConnectionType::Serial) {
+            return write_serial(data);
+        } else {
+            return write_network(data);
+        }
+    }
+    
+    bool write_serial(const std::string& data) {
+#ifdef _WIN32
+        DWORD bytes_written = 0;
+        return WriteFile(serial_handle_, data.c_str(), data.length(), &bytes_written, nullptr) &&
+               bytes_written == data.length();
+#else
+        ssize_t bytes_written = write(serial_fd_, data.c_str(), data.length());
+        return bytes_written == static_cast<ssize_t>(data.length());
+#endif
+    }
+    
+    bool write_network(const std::string& data) {
+#ifdef _WIN32
+        int bytes_sent = send(socket_handle_, data.c_str(), data.length(), 0);
+        return bytes_sent == static_cast<int>(data.length());
+#else
+        ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.length(), 0);
+        return bytes_sent == static_cast<ssize_t>(data.length());
+#endif
+    }
+    
+    std::string read_response() {
+        std::string response;
+        // Allow slower first responses from mount and make the timeout
+        // configurable via ConnectionInfo. Fall back to a sane minimum if
+        // the caller provided an invalid value.
+        int timeout_ms = connection_info_.response_timeout_ms;
+        if (timeout_ms <= 0) {
+            timeout_ms = 5000;
+        }
+        auto start = std::chrono::steady_clock::now();
+        
+        while (true) {
+            char ch;
+            bool got_char = false;
+            
+            if (connection_type_ == ConnectionType::Serial) {
+                got_char = read_serial_char(ch);
+            } else {
+                got_char = read_network_char(ch);
+            }
+            
+            if (got_char) {
+                response += ch;
+                if (ch == '#') {
+                    break;  // Command terminator found
+                }
+            }
+            
+            // Check timeout
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
+            if (elapsed.count() > timeout_ms) {
+                throw AlpacaException("Timeout waiting for mount response");
+            }
+            
+            // Small delay to avoid busy-waiting
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        
+        return response;
+    }
+    
+    bool read_serial_char(char& ch) {
+#ifdef _WIN32
+        DWORD bytes_read = 0;
+        if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
+            return true;
+        }
+        return false;
+#else
+        ssize_t bytes_read = read(serial_fd_, &ch, 1);
+        return bytes_read == 1;
+#endif
+    }
+    
+    bool read_network_char(char& ch) {
+#ifdef _WIN32
+        int bytes_received = recv(socket_handle_, &ch, 1, 0);
+        return bytes_received == 1;
+#else
+        ssize_t bytes_received = recv(socket_fd_, &ch, 1, 0);
+        return bytes_received == 1;
+#endif
+    }
+    
+public:
+    // Helper: Convert RA hours to iOptron format (0.01 arc-seconds)
+    int64_t ra_to_ioptron_format(double ra_hours) {
+        // RA in hours -> degrees -> arc-seconds -> 0.01 arc-seconds
+        double ra_degrees = units::hours_to_deg(ra_hours);
+        double ra_arcsec = ra_degrees * 3600.0;
+        return static_cast<int64_t>(std::round(ra_arcsec * 100.0));
+    }
+    
+    // Helper: Convert Dec degrees to iOptron format (0.01 arc-seconds)
+    int64_t dec_to_ioptron_format(double dec_degrees) {
+        double dec_arcsec = dec_degrees * 3600.0;
+        return static_cast<int64_t>(std::round(dec_arcsec * 100.0));
+    }
+    
+    // Helper: Convert iOptron format (0.01 arc-seconds) to RA hours
+    double ioptron_format_to_ra(int64_t value) {
+        double ra_arcsec = value / 100.0;
+        double ra_degrees = ra_arcsec / 3600.0;
+        return units::deg_to_hours(ra_degrees);
+    }
+    
+    // Helper: Convert iOptron format (0.01 arc-seconds) to Dec degrees
+    double ioptron_format_to_dec(int64_t value) {
+        double dec_arcsec = value / 100.0;
+        return dec_arcsec / 3600.0;
+    }
+    
+    // Helper: Parse signed integer from string
+    int64_t parse_signed_int(const std::string& str) {
+        if (str.empty()) return 0;
+        bool negative = (str[0] == '-');
+        size_t start = (str[0] == '-' || str[0] == '+') ? 1 : 0;
+        return (negative ? -1 : 1) * std::stoll(str.substr(start));
+    }
+    
+    // Helper: Format signed integer to string with sign
+    std::string format_signed_int(int64_t value, int width) {
+        std::ostringstream oss;
+        if (value >= 0) {
+            oss << "+";
+        } else {
+            oss << "-";
+            value = -value;
+        }
+        oss << std::setfill('0') << std::setw(width) << value;
+        return oss.str();
+    }
+
+private:
+    mutable std::mutex mutex_;
+    bool connected_;
+    ConnectionType connection_type_;
+    ConnectionInfo connection_info_;
+    
+#ifdef _WIN32
+    HANDLE serial_handle_;
+    SOCKET socket_handle_;
+#else
+    int serial_fd_;
+    int socket_fd_;
+#endif
+};
+
+// Singleton instance
+iOptronProtocolWrapper& iOptronProtocolWrapper::instance() {
+    static iOptronProtocolWrapper wrapper;
+    return wrapper;
+}
+
+// Public interface implementation
+// Constructor must initialize pimpl_
+iOptronProtocolWrapper::iOptronProtocolWrapper() 
+    : pimpl_(std::make_unique<Impl>()) {
+}
+
+iOptronProtocolWrapper::~iOptronProtocolWrapper() = default;
+
+bool iOptronProtocolWrapper::connect(const ConnectionInfo& info) {
+    return pimpl_->connect(info);
+}
+
+void iOptronProtocolWrapper::disconnect() {
+    pimpl_->disconnect();
+}
+
+bool iOptronProtocolWrapper::is_connected() const {
+    return pimpl_->is_connected();
+}
+
+std::string iOptronProtocolWrapper::send_command(const std::string& command) {
+    return pimpl_->send_command(command);
+}
+
+void iOptronProtocolWrapper::send_command_blind(const std::string& command) {
+    pimpl_->send_command_blind(command);
+}
+
+// Mount information queries
+MountInfo iOptronProtocolWrapper::get_mount_info() {
+    // Do not include the trailing '#' terminator here; send_command()
+    // will append it for us. Including it would result in sending '##'
+    // which some mounts reject, causing timeouts.
+    //
+    // Some mounts can be slow to respond directly after a fresh
+    // connection or power‑on. To be robust we retry the :MountInfo
+    // query a few times before giving up.
+    std::string response;
+    constexpr int max_attempts = 3;
+    
+    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+        try {
+            response = send_command(":MountInfo");
+            break;
+        } catch (const AlpacaException& e) {
+            // Only retry on timeout; rethrow any other error immediately.
+            std::string msg = e.what();
+            if (msg.find("Timeout waiting for mount response") == std::string::npos ||
+                attempt == max_attempts) {
+                throw;
+            }
+            
+            ALPACA_LOG_WARN("iOptron",
+                            "Timeout in :MountInfo attempt " + std::to_string(attempt) +
+                            " – retrying...");
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    }
+    
+    MountInfo info;
+    info.model_code = response;
+    
+    // Map model codes to names (from RS-232 spec)
+    if (response == "0026") info.model_name = "CEM26";
+    else if (response == "0027") info.model_name = "CEM26-EC";
+    else if (response == "0028") info.model_name = "GEM28";
+    else if (response == "0029") info.model_name = "GEM28-EC";
+    else if (response == "0040") info.model_name = "CEM40(G)";
+    else if (response == "0041") info.model_name = "CEM40(G)-EC";
+    else if (response == "0043") info.model_name = "GEM45(G)";
+    else if (response == "0044") info.model_name = "GEM45(G)-EC";
+    else if (response == "0070") info.model_name = "CEM70(G)";
+    else if (response == "0071") info.model_name = "CEM70(G)-EC";
+    else if (response == "0120") info.model_name = "CEM120";
+    else if (response == "0121") info.model_name = "CEM120-EC";
+    else if (response == "0122") info.model_name = "CEM120-EC2";
+    else info.model_name = "Unknown";
+    
+    info.has_encoder = (response.find("EC") != std::string::npos || 
+                        response == "0027" || response == "0029" || 
+                        response == "0041" || response == "0044" || 
+                        response == "0071" || response == "0121" || 
+                        response == "0122");
+    
+    return info;
+}
+
+Position iOptronProtocolWrapper::get_position() {
+    std::string response = send_command(":GEP");
+    
+    if (response.length() < 19) {
+        throw AlpacaException("Invalid position response from mount");
+    }
+    
+    // Parse :GEP# response: sTTTTTTTTTTTTTTTTTnn#
+    // Sign + 8 digits: Dec (0.01 arc-seconds)
+    // 9 digits: RA (0.01 arc-seconds)
+    // 2 digits: side of pier, pointing state
+    
+    std::string dec_str = response.substr(0, 9);  // Sign + 8 digits
+    std::string ra_str = response.substr(9, 9);   // 9 digits
+    
+    int64_t dec_value = pimpl_->parse_signed_int(dec_str);
+    int64_t ra_value = std::stoll(ra_str);
+    
+    Position pos;
+    pos.dec_degrees = pimpl_->ioptron_format_to_dec(dec_value);
+    pos.ra_hours = pimpl_->ioptron_format_to_ra(ra_value);
+    
+    return pos;
+}
+
+AltAz iOptronProtocolWrapper::get_alt_az() {
+    std::string response = send_command(":GAC");
+    
+    if (response.length() < 17) {
+        throw AlpacaException("Invalid Alt/Az response from mount");
+    }
+    
+    // Parse :GAC# response: sTTTTTTTTTTTTTTTTT#
+    // Sign + 8 digits: Alt (0.01 arc-seconds)
+    // 9 digits: Az (0.01 arc-seconds)
+    
+    std::string alt_str = response.substr(0, 9);  // Sign + 8 digits
+    std::string az_str = response.substr(9, 9);   // 9 digits
+    
+    int64_t alt_value = pimpl_->parse_signed_int(alt_str);
+    int64_t az_value = std::stoll(az_str);
+    
+    AltAz altaz;
+    altaz.altitude_degrees = pimpl_->ioptron_format_to_dec(alt_value);
+    altaz.azimuth_degrees = pimpl_->ioptron_format_to_dec(az_value);
+    
+    return altaz;
+}
+
+MountStatus iOptronProtocolWrapper::get_status() {
+    std::string response = send_command(":GLS");
+    
+    if (response.length() < 22) {
+        throw AlpacaException("Invalid status response from mount");
+    }
+    
+    // Parse :GLS# response: sTTTTTTTTTTTTTTTTnnnnnn#
+    // Various status digits at positions 16-21
+    
+    MountStatus status;
+    int system_status = response[16] - '0';
+    int tracking_rate_digit = response[19] - '0';
+    
+    status.system_status = system_status;
+    status.tracking_rate = tracking_rate_digit;
+    status.is_tracking = (system_status == 1 || system_status == 5);
+    status.is_slewing = (system_status == 2);
+    status.is_parked = (system_status == 6);
+    status.is_at_home = (system_status == 7);
+    
+    return status;
+}
+
+SiteInfo iOptronProtocolWrapper::get_site_info() {
+    std::string gls_response = send_command(":GLS");
+    std::string gut_response = send_command(":GUT");
+    
+    if (gls_response.length() < 22 || gut_response.length() < 17) {
+        throw AlpacaException("Invalid site info response from mount");
+    }
+    
+    SiteInfo site;
+    
+    // Parse longitude (first 8 digits after sign)
+    std::string lon_str = gls_response.substr(0, 9);
+    int64_t lon_value = pimpl_->parse_signed_int(lon_str);
+    site.longitude_degrees = pimpl_->ioptron_format_to_dec(lon_value);
+    
+    // Parse latitude (next 8 digits, but stored as lat + 90 degrees)
+    std::string lat_str = gls_response.substr(9, 8);
+    int64_t lat_offset = std::stoll(lat_str);
+    // Convert back: stored value = lat + 90 degrees
+    double lat_arcsec = (lat_offset / 100.0) - (90.0 * 3600.0);
+    site.latitude_degrees = lat_arcsec / 3600.0;
+    
+    // Hemisphere (22nd digit)
+    site.is_northern_hemisphere = (gls_response[21] == '1');
+    
+    // Timezone and DST from :GUT#
+    std::string tz_str = gut_response.substr(0, 4);  // Sign + 3 digits
+    site.timezone_offset_minutes = static_cast<int>(pimpl_->parse_signed_int(tz_str));
+    site.dst_observed = (gut_response[4] == '1');
+    
+    return site;
+}
+
+AltAz iOptronProtocolWrapper::get_park_position() {
+    std::string response = send_command(":GPC");
+    
+    if (response.length() < 17) {
+        throw AlpacaException("Invalid park position response from mount");
+    }
+    
+    // Parse :GPC# response: TTTTTTTTTTTTTTTTT#
+    // 8 digits: Alt (0.01 arc-seconds)
+    // 9 digits: Az (0.01 arc-seconds)
+    
+    std::string alt_str = response.substr(0, 8);
+    std::string az_str = response.substr(8, 9);
+    
+    int64_t alt_value = std::stoll(alt_str);
+    int64_t az_value = std::stoll(az_str);
+    
+    AltAz park;
+    park.altitude_degrees = pimpl_->ioptron_format_to_dec(alt_value);
+    park.azimuth_degrees = pimpl_->ioptron_format_to_dec(az_value);
+    
+    return park;
+}
+
+// Mount motion commands
+void iOptronProtocolWrapper::set_target_ra(double ra_hours) {
+    int64_t ra_value = pimpl_->ra_to_ioptron_format(ra_hours);
+    std::string cmd = ":SRA" + pimpl_->format_signed_int(ra_value, 9) + "#";
+    send_command(cmd);
+}
+
+void iOptronProtocolWrapper::set_target_dec(double dec_degrees) {
+    int64_t dec_value = pimpl_->dec_to_ioptron_format(dec_degrees);
+    std::string cmd = ":Sd" + pimpl_->format_signed_int(dec_value, 8) + "#";
+    send_command(cmd);
+}
+
+bool iOptronProtocolWrapper::slew_to_ra_dec() {
+    std::string response = send_command(":MS1");
+    return (response == "1");
+}
+
+bool iOptronProtocolWrapper::slew_to_ra_dec_cw_up() {
+    std::string response = send_command(":MS2");
+    return (response == "1");
+}
+
+void iOptronProtocolWrapper::stop_slewing() {
+    send_command(":Q");
+}
+
+void iOptronProtocolWrapper::start_tracking() {
+    send_command(":ST1");
+}
+
+void iOptronProtocolWrapper::stop_tracking() {
+    send_command(":ST0");
+}
+
+void iOptronProtocolWrapper::sync_to_coordinates() {
+    send_command(":CM");
+}
+
+// Parking commands
+bool iOptronProtocolWrapper::park() {
+    std::string response = send_command(":MP1");
+    return (response == "1");
+}
+
+void iOptronProtocolWrapper::unpark() {
+    send_command(":MP0");
+}
+
+void iOptronProtocolWrapper::set_park_position(double alt_degrees, double az_degrees) {
+    int64_t alt_value = pimpl_->dec_to_ioptron_format(alt_degrees);
+    int64_t az_value = pimpl_->dec_to_ioptron_format(az_degrees);
+    
+    std::string alt_cmd = ":SPH" + std::to_string(alt_value) + "#";
+    std::string az_cmd = ":SPA" + std::to_string(az_value) + "#";
+    
+    send_command(alt_cmd);
+    send_command(az_cmd);
+}
+
+// Home position commands
+void iOptronProtocolWrapper::go_to_home() {
+    send_command(":MH");
+}
+
+void iOptronProtocolWrapper::find_home() {
+    send_command(":MSH");
+}
+
+// Pulse guiding commands
+void iOptronProtocolWrapper::pulse_guide(int direction, int duration_ms) {
+    if (duration_ms < 0 || duration_ms > 99999) {
+        throw AlpacaException("Pulse guide duration must be 0-99999 ms");
+    }
+    
+    std::ostringstream cmd;
+    cmd << ":";
+    
+    // Direction: 0=North (Dec+), 1=South (Dec-), 2=East (RA+), 3=West (RA-)
+    if (direction == 0) cmd << "ZS";      // Dec+
+    else if (direction == 1) cmd << "ZC"; // Dec-
+    else if (direction == 2) cmd << "ZE"; // RA+
+    else if (direction == 3) cmd << "ZQ"; // RA-
+    else throw AlpacaException("Invalid pulse guide direction");
+    
+    cmd << std::setfill('0') << std::setw(5) << duration_ms << "#";
+    send_command_blind(cmd.str());
+}
+
+// Site settings
+void iOptronProtocolWrapper::set_longitude(double longitude_degrees) {
+    int64_t lon_value = pimpl_->dec_to_ioptron_format(longitude_degrees);
+    std::string cmd = ":SLO" + pimpl_->format_signed_int(lon_value, 8) + "#";
+    send_command(cmd);
+}
+
+void iOptronProtocolWrapper::set_latitude(double latitude_degrees) {
+    int64_t lat_value = pimpl_->dec_to_ioptron_format(latitude_degrees);
+    // Mount stores latitude + 90 degrees
+    int64_t stored_value = lat_value + static_cast<int64_t>(90.0 * 3600.0 * 100.0);
+    std::string cmd = ":SLA" + std::to_string(stored_value) + "#";
+    send_command(cmd);
+}
+
+void iOptronProtocolWrapper::set_hemisphere(bool is_northern) {
+    send_command(is_northern ? ":SHE1#" : ":SHE0#");
+}
+
+void iOptronProtocolWrapper::set_utc_time(std::chrono::system_clock::time_point utc_time) {
+    // Convert to milliseconds since J2000
+    // J2000 = 2000-01-01 12:00:00 UTC
+    auto j2000 = std::chrono::system_clock::time_point(
+        std::chrono::seconds(946728000));  // J2000 epoch
+    
+    auto duration = utc_time - j2000;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    
+    std::ostringstream cmd;
+    cmd << ":SUT" << std::setfill('0') << std::setw(13) << ms << "#";
+    send_command(cmd.str());
+}
+
+void iOptronProtocolWrapper::set_timezone_offset(int offset_minutes) {
+    if (offset_minutes < -720 || offset_minutes > 780) {
+        throw AlpacaException("Timezone offset must be -720 to +780 minutes");
+    }
+    
+    std::ostringstream cmd;
+    cmd << ":SG";
+    if (offset_minutes >= 0) {
+        cmd << "+";
+    } else {
+        cmd << "-";
+        offset_minutes = -offset_minutes;
+    }
+    cmd << std::setfill('0') << std::setw(3) << offset_minutes << "#";
+    send_command(cmd.str());
+}
+
+void iOptronProtocolWrapper::set_dst_observed(bool observed) {
+    send_command(observed ? ":SDS1#" : ":SDS0#");
+}
+
+// Tracking rate commands
+void iOptronProtocolWrapper::set_tracking_rate(int rate) {
+    if (rate < 0 || rate > 4) {
+        throw AlpacaException("Tracking rate must be 0-4");
+    }
+    std::ostringstream cmd;
+    cmd << ":RT" << rate << "#";
+    send_command(cmd.str());
+}
+
+double iOptronProtocolWrapper::get_custom_tracking_rate() {
+    std::string response = send_command(":GTR");
+    if (response.length() < 5) {
+        throw AlpacaException("Invalid custom tracking rate response");
+    }
+    
+    // Response is nnnnn# representing n.nnnn × sidereal
+    // e.g., "10000" = 1.0000, "12000" = 1.2000
+    int value = std::stoi(response);
+    return value / 10000.0;
+}
+
+void iOptronProtocolWrapper::set_custom_tracking_rate(double rate_multiplier) {
+    if (rate_multiplier < 0.1000 || rate_multiplier > 1.9000) {
+        throw AlpacaException("Custom tracking rate must be 0.1000 to 1.9000");
+    }
+    
+    // Format as nnnnn (e.g., 1.0000 = 10000)
+    int value = static_cast<int>(std::round(rate_multiplier * 10000.0));
+    std::ostringstream cmd;
+    cmd << ":RR" << std::setfill('0') << std::setw(5) << value << "#";
+    send_command(cmd.str());
+}
+
+// Guiding rate commands
+std::pair<double, double> iOptronProtocolWrapper::get_guide_rates() {
+    std::string response = send_command(":AG");
+    if (response.length() < 4) {
+        throw AlpacaException("Invalid guide rate response");
+    }
+    
+    // Response is nnnn#: first 2 digits = RA rate (0.nn), last 2 = Dec rate (0.nn)
+    std::string ra_str = response.substr(0, 2);
+    std::string dec_str = response.substr(2, 2);
+    
+    double ra_rate = std::stod("0." + ra_str);
+    double dec_rate = std::stod("0." + dec_str);
+    
+    // Suppress ABI change warning for std::pair return (C++14 vs C++17)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wpsabi"
+    return std::make_pair(ra_rate, dec_rate);
+    #pragma GCC diagnostic pop
+}
+
+void iOptronProtocolWrapper::set_guide_rates(double ra_rate, double dec_rate) {
+    if (ra_rate < 0.01 || ra_rate > 0.90) {
+        throw AlpacaException("RA guide rate must be 0.01 to 0.90");
+    }
+    if (dec_rate < 0.10 || dec_rate > 0.99) {
+        throw AlpacaException("Dec guide rate must be 0.10 to 0.99");
+    }
+    
+    // Format as nnnn: RA (0.nn) + Dec (0.nn)
+    int ra_value = static_cast<int>(std::round(ra_rate * 100.0));
+    int dec_value = static_cast<int>(std::round(dec_rate * 100.0));
+    
+    std::ostringstream cmd;
+    cmd << ":RG" << std::setfill('0') << std::setw(2) << ra_value
+        << std::setfill('0') << std::setw(2) << dec_value << "#";
+    send_command(cmd.str());
+}
+
+} // namespace alpacacore::vendor::ioptron
+

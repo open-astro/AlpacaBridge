@@ -11,7 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <catch2/catch.hpp>
+#include <catch2/catch_all.hpp>
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/alpaca_defs.h>

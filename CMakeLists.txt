@@ -8,9 +8,19 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(ALPACACORE_BUILD_TESTS "Build unit tests" ON)
+option(ALPACACORE_ENABLE_ALL_VENDORS "Enable all vendor drivers" OFF)
 option(ALPACACORE_ENABLE_ZWO "Enable ZWO vendor support" OFF)
 option(ALPACACORE_ENABLE_QHY "Enable QHY vendor support" OFF)
 option(ALPACACORE_ENABLE_IOPTRON "Enable iOptron vendor support" OFF)
+
+# If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
+# Note: Only enable vendors that are actually implemented (have source files)
+if(ALPACACORE_ENABLE_ALL_VENDORS)
+    # ZWO and QHY are not yet implemented, so don't enable them
+    # set(ALPACACORE_ENABLE_ZWO ON)
+    # set(ALPACACORE_ENABLE_QHY ON)
+    set(ALPACACORE_ENABLE_IOPTRON ON)
+endif()
 
 # Compiler warnings
 if(MSVC)
@@ -69,20 +79,35 @@ target_include_directories(alpacacore PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
+# Create namespace alias for consistent target naming
+add_library(AlpacaCore::alpacacore ALIAS alpacacore)
+
 # Vendor support (conditional)
+# Only add subdirectories for vendors that are actually implemented
+# Check if CMakeLists.txt exists and is not empty before adding
 if(ALPACACORE_ENABLE_ZWO)
-    add_subdirectory(src/vendors/zwo)
-    target_link_libraries(alpacacore PRIVATE alpacacore_zwo)
+    # ZWO not yet implemented - skip for now
+    # add_subdirectory(src/vendors/zwo)
+    # if(TARGET alpacacore_zwo)
+    #     target_link_libraries(alpacacore PRIVATE alpacacore_zwo)
+    # endif()
+    message(WARNING "ZWO vendor support is not yet implemented")
 endif()
 
 if(ALPACACORE_ENABLE_QHY)
-    add_subdirectory(src/vendors/qhy)
-    target_link_libraries(alpacacore PRIVATE alpacacore_qhy)
+    # QHY not yet implemented - skip for now
+    # add_subdirectory(src/vendors/qhy)
+    # if(TARGET alpacacore_qhy)
+    #     target_link_libraries(alpacacore PRIVATE alpacacore_qhy)
+    # endif()
+    message(WARNING "QHY vendor support is not yet implemented")
 endif()
 
 if(ALPACACORE_ENABLE_IOPTRON)
     add_subdirectory(src/vendors/ioptron)
-    target_link_libraries(alpacacore PRIVATE alpacacore_ioptron)
+    if(TARGET alpacacore_ioptron)
+        target_link_libraries(alpacacore PRIVATE alpacacore_ioptron)
+    endif()
 endif()
 
 # Tests
@@ -101,6 +126,34 @@ install(TARGETS alpacacore
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin
 )
+
+# Install vendor libraries if they exist
+if(ALPACACORE_ENABLE_ZWO AND TARGET alpacacore_zwo)
+    install(TARGETS alpacacore_zwo
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_QHY AND TARGET alpacacore_qhy)
+    install(TARGETS alpacacore_qhy
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_IOPTRON AND TARGET alpacacore_ioptron)
+    install(TARGETS alpacacore_ioptron
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
 
 install(DIRECTORY include/alpacacore
     DESTINATION include
