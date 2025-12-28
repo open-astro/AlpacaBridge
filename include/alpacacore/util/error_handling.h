@@ -15,6 +15,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <alpacacore/alpaca_errors.h>
 
 namespace alpacacore {
 
@@ -27,12 +28,20 @@ namespace alpacacore {
  */
 class AlpacaException : public std::runtime_error {
 public:
-    explicit AlpacaException(const std::string& message)
-        : std::runtime_error(message) {}
+    explicit AlpacaException(const std::string& message,
+                             int error_code = AlpacaError::DriverException)
+        : std::runtime_error(message)
+        , error_code_(error_code) {}
     
-    explicit AlpacaException(const char* message)
-        : std::runtime_error(message) {}
+    explicit AlpacaException(const char* message,
+                             int error_code = AlpacaError::DriverException)
+        : std::runtime_error(message)
+        , error_code_(error_code) {}
+    
+    int error_code() const noexcept { return error_code_; }
+
+private:
+    int error_code_;
 };
 
 } // namespace alpacacore
-
