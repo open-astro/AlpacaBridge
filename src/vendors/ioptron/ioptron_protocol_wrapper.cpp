@@ -22,6 +22,7 @@
 #include <iomanip>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 
 // Platform-specific includes
 #ifdef _WIN32
@@ -144,7 +145,7 @@ public:
         return connected_;
     }
     
-    std::string send_command(const std::string& command) {
+    std::string send_command(const std::string& command, bool require_hash_terminator) {
         std::lock_guard<std::mutex> lock(mutex_);
         
         if (!connected_) {
@@ -153,7 +154,7 @@ public:
         
         // Format command with # terminator
         std::string full_command = command;
-        if (full_command.back() != '#') {
+        if (full_command.empty() || full_command.back() != '#') {
             full_command += "#";
         }
         
@@ -162,13 +163,8 @@ public:
             throw AlpacaException("Failed to send command to mount");
         }
         
-        // Read response (commands return response ending with #)
-        std::string response = read_response();
-        
-        // Remove # terminator if present
-        if (!response.empty() && response.back() == '#') {
-            response.pop_back();
-        }
+        // Read response
+        std::string response = read_response(require_hash_terminator);
         
         return response;
     }
@@ -181,7 +177,7 @@ public:
         }
         
         std::string full_command = command;
-        if (full_command.back() != '#') {
+        if (full_command.empty() || full_command.back() != '#') {
             full_command += "#";
         }
         
@@ -476,7 +472,7 @@ private:
 #endif
     }
     
-    std::string read_response() {
+    std::string read_response(bool require_hash_terminator) {
         std::string response;
         // Allow slower first responses from mount and make the timeout
         // configurable via ConnectionInfo. Fall back to a sane minimum if
@@ -486,6 +482,9 @@ private:
             timeout_ms = 5000;
         }
         auto start = std::chrono::steady_clock::now();
+        
+        auto last_char_time = start;
+        const int idle_break_ms = 100;
         
         while (true) {
             char ch;
@@ -498,10 +497,13 @@ private:
             }
             
             if (got_char) {
-                response += ch;
+                last_char_time = std::chrono::steady_clock::now();
+                
                 if (ch == '#') {
                     break;  // Command terminator found
                 }
+                
+                response += ch;
             }
             
             // Check timeout
@@ -509,6 +511,13 @@ private:
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
             if (elapsed.count() > timeout_ms) {
                 throw AlpacaException("Timeout waiting for mount response");
+            }
+
+            if (!require_hash_terminator && !got_char && !response.empty()) {
+                auto idle_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_char_time);
+                if (idle_elapsed.count() > idle_break_ms) {
+                    break;
+                }
             }
             
             // Small delay to avoid busy-waiting
@@ -631,8 +640,8 @@ bool iOptronProtocolWrapper::is_connected() const {
     return pimpl_->is_connected();
 }
 
-std::string iOptronProtocolWrapper::send_command(const std::string& command) {
-    return pimpl_->send_command(command);
+std::string iOptronProtocolWrapper::send_command(const std::string& command, bool require_hash_terminator) {
+    return pimpl_->send_command(command, require_hash_terminator);
 }
 
 void iOptronProtocolWrapper::send_command_blind(const std::string& command) {
@@ -701,14 +710,15 @@ MountInfo iOptronProtocolWrapper::get_mount_info() {
 Position iOptronProtocolWrapper::get_position() {
     std::string response = send_command(":GEP");
     
-    if (response.length() < 19) {
+    if (response.length() < 20) {
         throw AlpacaException("Invalid position response from mount");
     }
     
     // Parse :GEP# response: sTTTTTTTTTTTTTTTTTnn#
     // Sign + 8 digits: Dec (0.01 arc-seconds)
     // 9 digits: RA (0.01 arc-seconds)
-    // 2 digits: side of pier, pointing state
+    // 18th digit: side of pier (0=pier east, 1=pier west, 2=indeterminate)
+    // 19th digit: pointing state (0=counterweight up, 1=normal)
     
     std::string dec_str = response.substr(0, 9);  // Sign + 8 digits
     std::string ra_str = response.substr(9, 9);   // 9 digits
@@ -719,6 +729,8 @@ Position iOptronProtocolWrapper::get_position() {
     Position pos;
     pos.dec_degrees = pimpl_->ioptron_format_to_dec(dec_value);
     pos.ra_hours = pimpl_->ioptron_format_to_ra(ra_value);
+    pos.side_of_pier = response[18] - '0';
+    pos.pointing_state = response[19] - '0';
     
     return pos;
 }
@@ -832,23 +844,24 @@ AltAz iOptronProtocolWrapper::get_park_position() {
 void iOptronProtocolWrapper::set_target_ra(double ra_hours) {
     int64_t ra_value = pimpl_->ra_to_ioptron_format(ra_hours);
     std::string cmd = ":SRA" + pimpl_->format_signed_int(ra_value, 9) + "#";
-    send_command(cmd);
+    send_command_blind(cmd);
 }
 
 void iOptronProtocolWrapper::set_target_dec(double dec_degrees) {
     int64_t dec_value = pimpl_->dec_to_ioptron_format(dec_degrees);
     std::string cmd = ":Sd" + pimpl_->format_signed_int(dec_value, 8) + "#";
-    send_command(cmd);
+    send_command_blind(cmd);
 }
 
 bool iOptronProtocolWrapper::slew_to_ra_dec() {
-    std::string response = send_command(":MS1");
-    return (response == "1");
+    // Some mounts do not respond immediately during slews.
+    send_command_blind(":MS1");
+    return true;
 }
 
 bool iOptronProtocolWrapper::slew_to_ra_dec_cw_up() {
-    std::string response = send_command(":MS2");
-    return (response == "1");
+    send_command_blind(":MS2");
+    return true;
 }
 
 void iOptronProtocolWrapper::stop_slewing() {
@@ -856,21 +869,23 @@ void iOptronProtocolWrapper::stop_slewing() {
 }
 
 void iOptronProtocolWrapper::start_tracking() {
-    send_command(":ST1");
+    send_command_blind(":ST1");
 }
 
 void iOptronProtocolWrapper::stop_tracking() {
-    send_command(":ST0");
+    send_command_blind(":ST0");
 }
 
 void iOptronProtocolWrapper::sync_to_coordinates() {
-    send_command(":CM");
+    send_command_blind(":CM");
 }
 
 // Parking commands
 bool iOptronProtocolWrapper::park() {
-    std::string response = send_command(":MP1");
-    return (response == "1");
+    // Some iOptron mounts go quiet while parking and never return a response.
+    // To match legacy AlpacaPi behavior, send the command without waiting.
+    send_command_blind(":MP1");
+    return true;
 }
 
 void iOptronProtocolWrapper::unpark() {
@@ -890,7 +905,8 @@ void iOptronProtocolWrapper::set_park_position(double alt_degrees, double az_deg
 
 // Home position commands
 void iOptronProtocolWrapper::go_to_home() {
-    send_command(":MH");
+    // Some mounts do not respond while slewing to home; fire-and-forget.
+    send_command_blind(":MH");
 }
 
 void iOptronProtocolWrapper::find_home() {
@@ -921,7 +937,7 @@ void iOptronProtocolWrapper::pulse_guide(int direction, int duration_ms) {
 void iOptronProtocolWrapper::set_longitude(double longitude_degrees) {
     int64_t lon_value = pimpl_->dec_to_ioptron_format(longitude_degrees);
     std::string cmd = ":SLO" + pimpl_->format_signed_int(lon_value, 8) + "#";
-    send_command(cmd);
+    send_command(cmd, false);
 }
 
 void iOptronProtocolWrapper::set_latitude(double latitude_degrees) {
@@ -929,11 +945,11 @@ void iOptronProtocolWrapper::set_latitude(double latitude_degrees) {
     // Mount stores latitude + 90 degrees
     int64_t stored_value = lat_value + static_cast<int64_t>(90.0 * 3600.0 * 100.0);
     std::string cmd = ":SLA" + std::to_string(stored_value) + "#";
-    send_command(cmd);
+    send_command(cmd, false);
 }
 
 void iOptronProtocolWrapper::set_hemisphere(bool is_northern) {
-    send_command(is_northern ? ":SHE1#" : ":SHE0#");
+    send_command(is_northern ? ":SHE1#" : ":SHE0#", false);
 }
 
 void iOptronProtocolWrapper::set_utc_time(std::chrono::system_clock::time_point utc_time) {
@@ -947,7 +963,73 @@ void iOptronProtocolWrapper::set_utc_time(std::chrono::system_clock::time_point 
     
     std::ostringstream cmd;
     cmd << ":SUT" << std::setfill('0') << std::setw(13) << ms << "#";
-    send_command(cmd.str());
+    // Some mounts acknowledge :SUT with a bare '1' instead of '1#'. Allow
+    // responses that omit the trailing '#'.
+    send_command(cmd.str(), false);
+}
+
+std::chrono::system_clock::time_point iOptronProtocolWrapper::get_utc_time() {
+    std::string response = send_command(":GUT");
+    if (response.length() < 18) {
+        throw AlpacaException("Invalid UTC time response from mount");
+    }
+    
+    // Response: sMMMnXXXXXXXXXXXXX
+    // Sign + 3 digits: timezone offset (ignored here)
+    // Next digit: DST flag
+    // Remaining digits: time in milliseconds since J2000
+    std::string tz_str = response.substr(0, 4);
+    int tz_offset_minutes = static_cast<int>(pimpl_->parse_signed_int(tz_str));
+    bool dst_observed = (response[4] == '1');
+    std::string time_digits = response.substr(5);
+    int64_t ms_since_j2000 = std::stoll(time_digits);
+    
+    auto j2000 = std::chrono::system_clock::time_point(
+        std::chrono::seconds(946728000));  // 2000-01-01 12:00:00 UTC
+    auto raw_time = j2000 + std::chrono::milliseconds(ms_since_j2000);
+    
+    // Some mounts return local time in the GUT payload. If so, adjust using the
+    // reported timezone/DST or the host's timezone when that brings us closer
+    // to system UTC.
+    int total_offset_minutes = tz_offset_minutes + (dst_observed ? 60 : 0);
+    auto adjusted_by_mount = raw_time - std::chrono::minutes(total_offset_minutes);
+
+    auto compute_host_offset_minutes = []() -> int {
+        std::time_t now = std::time(nullptr);
+        std::tm local_tm {};
+        std::tm utc_tm {};
+#if defined(_WIN32)
+        localtime_s(&local_tm, &now);
+        gmtime_s(&utc_tm, &now);
+#else
+        local_tm = *std::localtime(&now);
+        utc_tm = *std::gmtime(&now);
+#endif
+        std::time_t local_time = std::mktime(&local_tm);
+        std::time_t utc_as_local = std::mktime(&utc_tm);
+        double offset_seconds = std::difftime(local_time, utc_as_local);
+        return static_cast<int>(std::llround(offset_seconds / 60.0));
+    };
+
+    int host_offset_minutes = compute_host_offset_minutes();
+    auto adjusted_by_host = raw_time - std::chrono::minutes(host_offset_minutes);
+    
+    auto now = std::chrono::system_clock::now();
+    auto raw_diff = (raw_time > now) ? (raw_time - now) : (now - raw_time);
+    auto mount_diff = (adjusted_by_mount > now) ? (adjusted_by_mount - now) : (now - adjusted_by_mount);
+    auto host_diff = (adjusted_by_host > now) ? (adjusted_by_host - now) : (now - adjusted_by_host);
+
+    auto best_time = raw_time;
+    auto best_diff = raw_diff;
+    if (mount_diff + std::chrono::minutes(1) < best_diff) {
+        best_time = adjusted_by_mount;
+        best_diff = mount_diff;
+    }
+    if (host_diff + std::chrono::minutes(1) < best_diff) {
+        best_time = adjusted_by_host;
+        best_diff = host_diff;
+    }
+    return best_time;
 }
 
 void iOptronProtocolWrapper::set_timezone_offset(int offset_minutes) {
@@ -964,11 +1046,11 @@ void iOptronProtocolWrapper::set_timezone_offset(int offset_minutes) {
         offset_minutes = -offset_minutes;
     }
     cmd << std::setfill('0') << std::setw(3) << offset_minutes << "#";
-    send_command(cmd.str());
+    send_command(cmd.str(), false);
 }
 
 void iOptronProtocolWrapper::set_dst_observed(bool observed) {
-    send_command(observed ? ":SDS1#" : ":SDS0#");
+    send_command(observed ? ":SDS1#" : ":SDS0#", false);
 }
 
 // Tracking rate commands
@@ -1045,4 +1127,3 @@ void iOptronProtocolWrapper::set_guide_rates(double ra_rate, double dec_rate) {
 }
 
 } // namespace alpacacore::vendor::ioptron
-

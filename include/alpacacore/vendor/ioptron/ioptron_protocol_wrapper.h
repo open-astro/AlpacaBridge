@@ -71,6 +71,8 @@ struct MountInfo {
 struct Position {
     double ra_hours = 0.0;      // Right ascension in hours
     double dec_degrees = 0.0;   // Declination in degrees
+    int side_of_pier = -1;      // 0=pier east (OTA west), 1=pier west (OTA east), 2=indeterminate
+    int pointing_state = -1;    // 0=counterweight up, 1=normal
 };
 
 /**
@@ -342,6 +344,13 @@ public:
     void set_utc_time(std::chrono::system_clock::time_point utc_time);
     
     /**
+     * @brief Get UTC time from the mount.
+     *
+     * Sends :GUT# command.
+     */
+    std::chrono::system_clock::time_point get_utc_time();
+    
+    /**
      * @brief Set timezone offset.
      *
      * Sends :SGsMMM# command.
@@ -419,7 +428,7 @@ public:
      * @param command RS-232 command (without # terminator)
      * @return Response string (without # terminator)
      */
-    std::string send_command(const std::string& command);
+    std::string send_command(const std::string& command, bool require_hash_terminator = true);
     
     /**
      * @brief Send command without waiting for response.
@@ -440,4 +449,3 @@ private:
 };
 
 } // namespace alpacacore::vendor::ioptron
-
