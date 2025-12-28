@@ -119,11 +119,11 @@ public:
 
 ### Architecture Principles
 
-- ✅ **Vendor SDKs stay in `external/`** - never in core code
-- ✅ **Wrapper layer isolates SDK complexity** - clean API only
-- ✅ **Drivers use wrapper, not raw SDK** - maintainability
-- ✅ **Platform-specific code in CMake** - not in C++ source
-- ✅ **Standard library only in core** - no vendor dependencies leak
+- **Vendor SDKs stay in `external/`** - never in core code
+- **Wrapper layer isolates SDK complexity** - clean API only
+- **Drivers use wrapper, not raw SDK** - maintainability
+- **Platform-specific code in CMake** - not in C++ source
+- **Standard library only in core** - no vendor dependencies leak
 
 ## Step-by-Step Implementation
 
@@ -132,11 +132,11 @@ public:
 Extract the vendor SDK folder directly into `external/`:
 ```bash
 external/
-└─ ASICamera2_SDK/              # Vendor's folder name (use as-is)
-   ├─ include/
-   │   └─ ASICamera2.h
-   ├─ lib/
-   │   └─ ...
+`-- ASICamera2_SDK/             # Vendor's folder name (use as-is)
+   |-- include/
+   |   `-- ASICamera2.h
+   |-- lib/
+   |   `-- ...
 ```
 
 ### Step 2: Create Wrapper Header
@@ -234,40 +234,36 @@ See [Testing Guide](testing.md) for comprehensive testing instructions.
 
 ```
 external/                       # Raw SDK folders (untouched, not in Git)
-├─ ASICamera2_SDK/              # Vendor SDK folder
-│   └─ SDK files...
+|-- ASICamera2_SDK/             # Vendor SDK folder
+|   `-- SDK files...
 
 include/alpacacore/
-├─ <device>_driver.h            # Pure virtual interface
-└─ vendor/<vendor>/
-    └─ <vendor>_sdk_wrapper.h   # Clean wrapper API
+|-- <device>_driver.h           # Pure virtual interface
+`-- vendor/<vendor>/
+    `-- <vendor>_sdk_wrapper.h  # Clean wrapper API
 
 src/
-├─ drivers/
-│   └─ <device>_driver.cpp      # Base implementation (optional)
-└─ vendors/<vendor>/
-    ├─ <vendor>_sdk_wrapper.cpp # Wrapper implementation
-    ├─ <vendor>_<device>_driver.cpp  # Driver implementation
-    └─ CMakeLists.txt           # Build configuration
+|-- drivers/
+|   `-- <device>_driver.cpp     # Base implementation (optional)
+`-- vendors/<vendor>/
+    |-- <vendor>_sdk_wrapper.cpp      # Wrapper implementation
+    |-- <vendor>_<device>_driver.cpp  # Driver implementation
+    `-- CMakeLists.txt          # Build configuration
 ```
 
 ## AI-Assisted Development
 
 AlpacaCore is designed for AI-assisted development. When building a driver:
 
-1. **Reference the driver build guide** in Cursor:
-   - Type `@driver_build.mdc` in the chat to reference the comprehensive guide
-   - This guide contains all patterns, architecture rules, and step-by-step instructions
+1. **Share the Driver Development Guide** with your AI assistant
+   - It contains the architecture rules, patterns, and step-by-step instructions
 
-2. **Ask AI to help build your driver**:
-   - Example: "I've placed the [Vendor] SDK in external/. Help me build a [device type] driver following @driver_build.mdc"
-   - The AI will reference the guide and help you create the wrapper layer and driver implementation
+2. **Describe your SDK and target device**:
+   - Example: "I placed the [Vendor] SDK in external/. Help me build a [device type] driver following the Driver Development Guide."
 
-3. **The build guide covers**:
-   - Creating the SDK wrapper layer (clean C++ interface)
-   - Implementing the driver using the wrapper
-   - Configuring CMake for your vendor SDK
-   - Following AlpacaCore's three-layer architecture
+3. **Verify the generated code**:
+   - Confirm the wrapper layer isolates SDK headers
+   - Confirm the driver implements the full Alpaca interface
 
 ## Testing Your Driver
 
@@ -293,7 +289,7 @@ After implementing your driver:
    mkdir build
    cd build
    cmake .. -DALPACACORE_ENABLE_ZWO=ON -DALPACACORE_BUILD_TESTS=ON
-   cmake --build .
+   cmake --build . --parallel
    ctest
    ```
 
@@ -367,11 +363,11 @@ After implementing your driver:
 ```bash
 # Build with vendor support
 cmake .. -DALPACACORE_ENABLE_ZWO=ON
-cmake --build .
+cmake --build . --parallel
 
 # Build with tests
 cmake .. -DALPACACORE_ENABLE_ZWO=ON -DALPACACORE_BUILD_TESTS=ON
-cmake --build .
+cmake --build . --parallel
 ctest
 ```
 
@@ -389,5 +385,4 @@ namespace alpacacore {
 
 ---
 
-**Happy Driver Building!** 🚀
-
+**Happy driver building.**

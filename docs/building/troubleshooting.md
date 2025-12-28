@@ -108,11 +108,10 @@ If you're still experiencing problems:
    mkdir build
    cd build
    cmake ..
-   cmake --build .
+   cmake --build . --parallel
    ```
 5. Open an issue on GitHub with:
    - Your operating system and version
    - Compiler version
    - Full CMake output
    - Any relevant error messages
-

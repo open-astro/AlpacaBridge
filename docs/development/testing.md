@@ -22,7 +22,7 @@ Tests are built by default when `ALPACACORE_BUILD_TESTS` is enabled (default: ON
 mkdir build
 cd build
 cmake .. -DALPACACORE_BUILD_TESTS=ON
-cmake --build .
+cmake --build . --parallel
 ```
 
 To disable tests:
@@ -303,4 +303,3 @@ Tests can be integrated into CI/CD pipelines. See the [Architecture Guide](archi
 - [Catch2 Documentation](https://github.com/catchorg/Catch2)
 - [Driver Development Guide](driver-development.md) - For testing vendor drivers
 - [Architecture Guide](architecture.md) - For CI/CD integration examples
-
