@@ -12,6 +12,7 @@
 
 #include <alpacahttp/json_utils.h>
 #include <sstream>
+#include <type_traits>
 
 namespace alpacahttp {
 
@@ -24,7 +25,20 @@ nlohmann::json to_json(const AlpacaResponse& response) {
 
     if (response.value.has_value()) {
         std::visit([&j](const auto& val) {
-            j["Value"] = val;
+            // If value is a string that looks like JSON, parse it
+            if constexpr (std::is_same_v<std::decay_t<decltype(val)>, std::string>) {
+                // Try to parse as JSON - if it's valid JSON, use the parsed value
+                // Otherwise, use the string as-is
+                try {
+                    auto parsed = nlohmann::json::parse(val);
+                    j["Value"] = parsed;
+                } catch (const nlohmann::json::exception&) {
+                    // Not valid JSON, use as string
+                    j["Value"] = val;
+                }
+            } else {
+                j["Value"] = val;
+            }
         }, response.value.value());
     }
 
