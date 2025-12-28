@@ -18,9 +18,27 @@ find_package(nlohmann_json 3.2.0 REQUIRED)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/CMakeLists.txt")
     # AlpacaCore is in the same workspace
     add_subdirectory(../AlpacaCore ${CMAKE_BINARY_DIR}/AlpacaCore)
+    
+    # Propagate AlpacaCore vendor options as compile definitions for AlpacaHTTP
+    # This allows AlpacaHTTP code to use #ifdef checks for vendor support
+    # Check both explicit options and the ALL_VENDORS option
+    if(ALPACACORE_ENABLE_ALL_VENDORS OR ALPACACORE_ENABLE_IOPTRON)
+        add_definitions(-DALPACACORE_ENABLE_IOPTRON)
+    endif()
+    if(ALPACACORE_ENABLE_ALL_VENDORS OR ALPACACORE_ENABLE_ZWO)
+        add_definitions(-DALPACACORE_ENABLE_ZWO)
+    endif()
+    if(ALPACACORE_ENABLE_ALL_VENDORS OR ALPACACORE_ENABLE_QHY)
+        add_definitions(-DALPACACORE_ENABLE_QHY)
+    endif()
 else()
     # AlpacaCore is installed system-wide
     find_package(AlpacaCore REQUIRED)
+    # For installed packages, vendor support is determined by what was built
+    # Check if vendor libraries exist (this is a best-effort check)
+    if(TARGET alpacacore_ioptron)
+        add_definitions(-DALPACACORE_ENABLE_IOPTRON)
+    endif()
 endif()
 
 if(ALPACAHTTP_USE_BOOST_BEAST)
@@ -48,6 +66,27 @@ set(ALPACAHTTP_SOURCES
 if(ALPACAHTTP_ENABLE_DISCOVERY)
     list(APPEND ALPACAHTTP_SOURCES src/discovery/discovery.cpp)
     add_definitions(-DALPACAHTTP_ENABLE_DISCOVERY)
+endif()
+
+# Custom target to clean everything including CMake cache
+# Usage: cmake --build . --target alpacahttp-clean-all
+# Note: Named with project prefix to avoid conflicts with AlpacaCore subdirectory
+if(NOT TARGET alpacahttp-clean-all)
+    add_custom_target(alpacahttp-clean-all
+        COMMAND ${CMAKE_COMMAND} --build . --target clean
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/CMakeFiles
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/CMakeCache.txt
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/cmake_install.cmake
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/Makefile
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/CTestTestfile.cmake
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/DartConfiguration.tcl
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/Testing
+        COMMENT "Cleaning all AlpacaHTTP build files and CMake cache"
+    )
+    # Only create alias when building standalone (not as subdirectory)
+    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT TARGET clean-all)
+        add_custom_target(clean-all ALIAS alpacahttp-clean-all)
+    endif()
 endif()
 
 # Create library
