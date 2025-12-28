@@ -39,6 +39,5 @@ The AlpacaCore iOptron driver implements the RS-232 protocol as documented in th
 Build with iOptron support:
 ```bash
 cmake .. -DALPACACORE_ENABLE_IOPTRON=ON
-cmake --build .
+cmake --build . --parallel
 ```
-

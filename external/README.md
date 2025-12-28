@@ -13,10 +13,10 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
    ```bash
    mkdir build && cd build
    cmake .. -DALPACACORE_ENABLE_<VENDOR>=ON
-   cmake --build .
+   cmake --build . --parallel
    ```
 
-**📚 For comprehensive driver development guide, see [docs/development/driver-development.md](../docs/development/driver-development.md)**
+**For a comprehensive driver development guide, see [docs/development/driver-development.md](../docs/development/driver-development.md)**
 
 ## Important Notes
 
@@ -26,12 +26,12 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
 
 ## What's Tracked vs. Not Tracked
 
-### ✅ Tracked in Git
+### Tracked in Git
 - `README.md` files (this file and any vendor-specific READMEs)
 - Markdown documentation files (`.md`) in this directory and subdirectories
 - `.gitkeep` files (if used to preserve empty directories)
 
-### ❌ NOT Tracked in Git
+### Not tracked in Git
 - Vendor SDK binaries (`.dylib`, `.so`, `.dll`, `.a`, `.lib`)
 - SDK header files (`.h`, `.hpp`)
 - SDK source files (`.c`, `.cpp`)
@@ -62,7 +62,7 @@ For complete instructions on building vendor-specific drivers:
   - Testing your driver
   - Troubleshooting
 
-- **AI-Assisted Development**: In Cursor, reference `@driver_build.mdc` for comprehensive build patterns and examples
+- **AI-Assisted Development**: Point your AI assistant at the Driver Development Guide for patterns and examples
 
 ## License Compliance
 
@@ -77,4 +77,3 @@ For complete instructions on building vendor-specific drivers:
 - [Driver Development Guide](../docs/development/driver-development.md) - Complete guide to building drivers
 - [Architecture Guide](../docs/development/architecture.md) - AlpacaCore architecture overview
 - [Building Guide](../docs/building/building.md) - Build instructions
-

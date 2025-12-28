@@ -1,7 +1,7 @@
 ---
 alwaysApply: true
 ---
-# AlpacaCore – Cursor Rules
+# AlpacaCore - Cursor Rules
 
 These rules tell Cursor how to work inside the **AlpacaCore** repository.
 
@@ -11,7 +11,7 @@ These rules tell Cursor how to work inside the **AlpacaCore** repository.
 - Contains **no HTTP / REST / sockets**
 - Avoids platform-specific hacks
 - Exposes a clean API that higher-level servers (e.g. **AlpacaHTTP** inside **AlpacaOS**) use
-- Follow https://ascom-standards.org/api/ 
+- Follow the ASCOM Alpaca API specification: https://ascom-standards.org/api/
 
 The goal is to build a **flawlessly engineered**, **well-documented**, and **stable** core that the astro community can rely on for 10+ years.
 
@@ -47,7 +47,7 @@ The goal is to build a **flawlessly engineered**, **well-documented**, and **sta
 
 ---
 
-## 2. License & Non-Commercial Intent
+## 2. License (SSPL v1)
 
 **License:** **Server Side Public License v1 (SSPL v1)**
 
@@ -85,91 +85,83 @@ AlpacaCore is **protocol-level only**:
 
 ```
 AlpacaCore/
-├─ CMakeLists.txt
-├─ LICENSE
-├─ README.md
-├─ CHANGELOG.md
-├─ VERSION
-├─ CONTRIBUTING.md
-├─ cursor-rules.md
-│
-├─ external/                         # Vendor SDKs ONLY
-│   ├─ zwo/
-│   ├─ qhy/
-│   ├─ pegasus/
-│   └─ ioptron/
-│
-├─ include/
-│   └─ alpacacore/                   # Official AlpacaCore SDK
-│       ├─ alpaca_defs.h
-│       ├─ alpaca_errors.h
-│       ├─ alpaca_json.h
-│       ├─ alpacadriver.h
-│       ├─ managementdriver.h
-│       ├─ device_capabilities.h
-│       ├─ camera_driver.h
-│       ├─ telescope_driver.h
-│       ├─ filterwheel_driver.h
-│       ├─ focuser_driver.h
-│       ├─ rotator_driver.h
-│       ├─ dome_driver.h
-│       ├─ shutter_driver.h
-│       ├─ switch_driver.h
-│       ├─ util/
-│       │   ├─ logging.h
-│       │   ├─ threading.h
-│       │   ├─ error_handling.h
-│       │   └─ units.h
-│       └─ vendor/                  # Vendor wrappers API
-│           ├─ zwo/
-│           ├─ qhy/
-│           └─ ioptron/
-│
-├─ src/
-│   ├─ core/
-│   │   ├─ alpacadriver.cpp
-│   │   ├─ alpaca_defs.cpp
-│   │   ├─ alpaca_errors.cpp
-│   │   ├─ managementdriver.cpp
-│   │   ├─ util/
-│   │   │   ├─ logging.cpp
-│   │   │   ├─ threading.cpp
-│   │   │   ├─ error_handling.cpp
-│   │   │   └─ units.cpp
-│   │
-│   ├─ drivers/
-│   │   ├─ camera_driver.cpp
-│   │   ├─ telescope_driver.cpp
-│   │   ├─ filterwheel_driver.cpp
-│   │   ├─ focuser_driver.cpp
-│   │   ├─ rotator_driver.cpp
-│   │   ├─ dome_driver.cpp
-│   │   ├─ shutter_driver.cpp
-│   │   └─ switch_driver.cpp
-│   │
-│   ├─ vendors/
-│   │   ├─ zwo/
-│   │   │   ├─ zwo_camera_driver.cpp
-│   │   │   └─ CMakeLists.txt
-│   │   └─ qhy/
-│   │       ├─ qhy_camera_driver.cpp
-│   │       └─ CMakeLists.txt
-│   │
-│   └─ management/
-│       ├─ discovery_service.cpp
-│       └─ device_registry.cpp
-│
-├─ tests/
-│   ├─ CMakeLists.txt
-│   ├─ test_camera.cpp
-│   ├─ test_telescope.cpp
-│   ├─ test_management.cpp
-│   └─ test_units.cpp
-│
-└─ examples/
-    ├─ minimal_camera/
-    ├─ minimal_telescope/
-    └─ simulate_all_devices/
+|-- .cursor/
+|   `-- rules/
+|       `-- rules.mdc
+|-- CMakeLists.txt
+|-- LICENSE
+|-- README.md
+|-- CHANGELOG.md
+|-- VERSION
+|-- CONTRIBUTING.md
+|
+|-- external/                         # Vendor SDKs ONLY
+|   `-- <vendor>/
+|
+|-- include/
+|   `-- alpacacore/                   # Official AlpacaCore SDK
+|       |-- alpaca_defs.h
+|       |-- alpaca_errors.h
+|       |-- alpaca_json.h
+|       |-- alpacadriver.h
+|       |-- managementdriver.h
+|       |-- device_capabilities.h
+|       |-- camera_driver.h
+|       |-- telescope_driver.h
+|       |-- filterwheel_driver.h
+|       |-- focuser_driver.h
+|       |-- rotator_driver.h
+|       |-- dome_driver.h
+|       |-- shutter_driver.h
+|       |-- switch_driver.h
+|       |-- util/
+|       |   |-- logging.h
+|       |   |-- threading.h
+|       |   |-- error_handling.h
+|       |   `-- units.h
+|       `-- vendor/                  # Vendor wrappers API
+|           `-- <vendor>/
+|
+|-- src/
+|   |-- core/
+|   |   |-- alpacadriver.cpp
+|   |   |-- alpaca_defs.cpp
+|   |   |-- alpaca_errors.cpp
+|   |   |-- managementdriver.cpp
+|   |   `-- util/
+|   |       |-- logging.cpp
+|   |       |-- threading.cpp
+|   |       |-- error_handling.cpp
+|   |       `-- units.cpp
+|   |
+|   |-- drivers/
+|   |   |-- camera_driver.cpp
+|   |   |-- telescope_driver.cpp
+|   |   |-- filterwheel_driver.cpp
+|   |   |-- focuser_driver.cpp
+|   |   |-- rotator_driver.cpp
+|   |   |-- dome_driver.cpp
+|   |   |-- shutter_driver.cpp
+|   |   `-- switch_driver.cpp
+|   |
+|   |-- vendors/
+|   |   `-- <vendor>/
+|   |
+|   `-- management/
+|       |-- discovery_service.cpp
+|       `-- device_registry.cpp
+|
+|-- tests/
+|   |-- CMakeLists.txt
+|   |-- test_camera.cpp
+|   |-- test_telescope.cpp
+|   |-- test_management.cpp
+|   `-- test_units.cpp
+|
+`-- examples/
+    |-- minimal_camera/
+    |-- minimal_telescope/
+    `-- simulate_all_devices/
 ```
 
 ---
@@ -260,7 +252,7 @@ Higher layers override using `set_log_sink`.
   class AlpacaException : public std::runtime_error {};
   ```
 - No error-code return values.
-- AlpacaHTTP maps exceptions → Alpaca error numbers.
+- AlpacaHTTP maps exceptions to Alpaca error numbers.
 
 ---
 
@@ -280,6 +272,7 @@ Higher layers override using `set_log_sink`.
 
 ```
 ALPACACORE_BUILD_TESTS ON/OFF
+ALPACACORE_ENABLE_ALL_VENDORS ON/OFF
 ALPACACORE_ENABLE_ZWO ON/OFF
 ALPACACORE_ENABLE_QHY ON/OFF
 ALPACACORE_ENABLE_IOPTRON ON/OFF
@@ -309,7 +302,7 @@ AlpacaCore must provide:
 - `CHANGELOG.md`
 - `VERSION`
 - `CONTRIBUTING.md`
-- Full **Doxygen** API documentation
+- API documentation (Doxygen is planned)
 - Developer Guide (threading, errors, device lifecycle)
 - Setup Guide (building, linking, examples)
 
