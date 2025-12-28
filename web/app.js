@@ -1,8 +1,125 @@
 // AlpacaHTTP Web UI
 const API_BASE = '';
 const LOGGING_ENDPOINT = '/management/v1/loglevel';
-const DEBUG_LOG_LEVEL = 'DEBUG';
+const LOGS_ENDPOINT = '/management/v1/logs';
 const QUIET_LOG_LEVEL = 'WARNING';
+const LOG_LEVEL_ORDER = ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
+
+function normalizeLogLevel(level) {
+    return String(level || '').trim().toUpperCase();
+}
+
+function resolveLogLevel(level) {
+    const normalized = normalizeLogLevel(level);
+    return LOG_LEVEL_ORDER.includes(normalized) ? normalized : QUIET_LOG_LEVEL;
+}
+
+function getLogLevelIndex(level) {
+    return LOG_LEVEL_ORDER.indexOf(normalizeLogLevel(level));
+}
+
+function getLogLevelToggles() {
+    return Array.from(document.querySelectorAll('#log-level-toggles input[data-level]'));
+}
+
+function setLogControlsDisabled(disabled) {
+    getLogLevelToggles().forEach(toggle => {
+        toggle.disabled = disabled;
+    });
+}
+
+function ensureLogLevelToggles(supportedLevels) {
+    const container = document.getElementById('log-level-toggles');
+    if (!container) {
+        return;
+    }
+
+    const normalizedLevels = Array.isArray(supportedLevels)
+        ? supportedLevels.map(normalizeLogLevel)
+        : LOG_LEVEL_ORDER.slice();
+    const orderedLevels = LOG_LEVEL_ORDER.filter(level => normalizedLevels.includes(level));
+
+    container.innerHTML = '';
+    orderedLevels.forEach(level => {
+        const labelText = level === 'WARNING'
+            ? 'Warning'
+            : level.charAt(0) + level.slice(1).toLowerCase();
+        const label = document.createElement('label');
+        label.className = 'log-level-toggle';
+        label.innerHTML = `
+            <input type="checkbox" data-level="${level}">
+            <span>${labelText}</span>
+        `;
+        container.appendChild(label);
+    });
+
+    getLogLevelToggles().forEach(toggle => {
+        toggle.addEventListener('change', handleLogLevelToggleChange);
+    });
+}
+
+function applyLogLevelSelection(minLevel) {
+    const resolved = resolveLogLevel(minLevel);
+    const minIndex = getLogLevelIndex(resolved);
+    getLogLevelToggles().forEach(toggle => {
+        const idx = getLogLevelIndex(toggle.dataset.level);
+        toggle.checked = idx >= minIndex && idx !== -1;
+    });
+}
+
+function syncLogControls(level, supportedLevels) {
+    const resolved = resolveLogLevel(level);
+    ensureLogLevelToggles(supportedLevels);
+    applyLogLevelSelection(resolved);
+    return resolved;
+}
+
+async function requestLogLevelUpdate(desiredLevel) {
+    const statusEl = document.getElementById('log-level-status');
+    if (!statusEl) {
+        return;
+    }
+
+    const resolvedLevel = resolveLogLevel(desiredLevel);
+    setLogControlsDisabled(true);
+    statusEl.textContent = 'Updating log settings...';
+
+    try {
+        const response = await fetch(API_BASE + LOGGING_ENDPOINT, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ level: resolvedLevel })
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const text = await response.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (e) {
+            throw new Error('Invalid JSON response from server');
+        }
+
+        if (data.ErrorNumber !== 0) {
+            throw new Error(data.ErrorMessage || 'Unknown server error');
+        }
+
+        const payload = parseResponseValue(data.Value) || {};
+        const supportedLevels = payload.SupportedLevels || payload.supportedLevels || null;
+        const level = syncLogControls(payload.Level || payload.level || resolvedLevel, supportedLevels);
+        statusEl.textContent = `Current log level: ${level}`;
+    } catch (error) {
+        statusEl.textContent = `Failed to update log level: ${error.message}`;
+        await loadLogSettings();
+    } finally {
+        setLogControlsDisabled(false);
+    }
+}
 
 // Tab management
 function showTab(tabName) {
@@ -18,6 +135,8 @@ function showTab(tabName) {
     document.getElementById(tabName + '-tab').classList.add('active');
     event.target.classList.add('active');
 }
+
+let currentDevices = [];
 
 // Load devices
 async function loadDevices() {
@@ -86,7 +205,8 @@ async function loadDevices() {
             return;
         }
 
-        devicesList.innerHTML = devices.map(device => {
+        currentDevices = devices;
+        devicesList.innerHTML = devices.map((device, index) => {
             const config = device.Config || device.config || null;
             const vendor = (device.Vendor || (config && config.vendor) || '—').toString();
             const settingsHtml = renderDeviceSettings(config);
@@ -114,11 +234,16 @@ async function loadDevices() {
                 </div>
                 ${settingsHtml}
                 <div class="device-actions">
+                    <button class="btn btn-secondary btn-small btn-edit-device" data-device-index="${index}" type="button">Edit</button>
                     <button class="btn btn-danger btn-small" onclick="deleteDevice('${escapeHtml(device.DeviceType)}', ${device.DeviceNumber})">Delete</button>
                 </div>
             </div>
         `;
         }).join('');
+
+        document.querySelectorAll('.btn-edit-device').forEach(button => {
+            button.addEventListener('click', handleEditDeviceClick);
+        });
     } catch (error) {
         console.error('Error loading devices:', error);
         let errorMsg = 'Unknown error';
@@ -134,6 +259,93 @@ async function loadDevices() {
             }
         }
         devicesList.innerHTML = `<p class="error">Error loading devices: ${escapeHtml(errorMsg)}</p>`;
+    }
+}
+
+function handleEditDeviceClick(event) {
+    const button = event.currentTarget;
+    const index = Number.parseInt(button.dataset.deviceIndex, 10);
+    const device = currentDevices[index];
+    if (!device) {
+        return;
+    }
+    startEditDevice(device);
+}
+
+function normalizeDeviceType(value) {
+    if (!value) {
+        return '';
+    }
+    return value.toString().trim().toLowerCase();
+}
+
+function setEditMode(isEditing) {
+    const configureTitle = document.getElementById('configure-title');
+    const submitButton = document.querySelector('#device-form button[type="submit"]');
+    const form = document.getElementById('device-form');
+    if (configureTitle) {
+        configureTitle.textContent = isEditing ? 'Edit Device' : 'Add Device';
+    }
+    if (submitButton) {
+        submitButton.textContent = isEditing ? 'Update Device' : 'Add Device';
+    }
+    if (form) {
+        form.dataset.editing = isEditing ? 'true' : 'false';
+        if (!isEditing) {
+            delete form.dataset.originalDeviceType;
+            delete form.dataset.originalDeviceNumber;
+            delete form.dataset.originalVendor;
+        }
+    }
+}
+
+function setFormValue(elementId, value) {
+    const element = document.getElementById(elementId);
+    if (!element) {
+        return;
+    }
+    element.value = value !== undefined && value !== null ? value : '';
+}
+
+function startEditDevice(device) {
+    const config = device.Config || device.config || {};
+    const vendor = device.Vendor || config.vendor || '';
+    const deviceType = normalizeDeviceType(device.DeviceType || device.deviceType);
+
+    setEditMode(true);
+    setFormValue('device-type', deviceType);
+    setFormValue('device-number', device.DeviceNumber);
+    setFormValue('vendor', vendor);
+
+    document.getElementById('vendor').dispatchEvent(new Event('change'));
+
+    const connectionTypeEl = document.getElementById('connection-type');
+    if (connectionTypeEl) {
+        const connectionType = config.connectionType || 'serial';
+        setFormValue('connection-type', connectionType);
+        connectionTypeEl.dispatchEvent(new Event('change'));
+    }
+
+    setFormValue('port-path', config.portPath);
+    setFormValue('baud-rate', config.baudRate);
+    setFormValue('host', config.host);
+    setFormValue('tcp-port', config.tcpPort);
+
+    const messageDiv = document.getElementById('form-message');
+    if (messageDiv) {
+        messageDiv.style.display = 'none';
+    }
+
+    const form = document.getElementById('device-form');
+    if (form) {
+        form.dataset.originalDeviceType = deviceType;
+        form.dataset.originalDeviceNumber = String(device.DeviceNumber);
+        form.dataset.originalVendor = vendor;
+    }
+
+    const configureTabButton = document.querySelector('.tab[onclick*="configure"]');
+    if (configureTabButton) {
+        configureTabButton.click();
     }
 }
 
@@ -287,12 +499,11 @@ async function shutdownServer() {
 // Log level management
 async function loadLogSettings() {
     const statusEl = document.getElementById('log-level-status');
-    const toggleEl = document.getElementById('debug-log-toggle');
-    if (!statusEl || !toggleEl) {
+    if (!statusEl) {
         return;
     }
 
-    toggleEl.disabled = true;
+    setLogControlsDisabled(true);
     statusEl.textContent = 'Loading log settings...';
 
     try {
@@ -314,66 +525,72 @@ async function loadLogSettings() {
         }
 
         const payload = parseResponseValue(data.Value) || {};
-        const level = (payload.Level || payload.level || QUIET_LOG_LEVEL).toString().toUpperCase();
-        const debugEnabled = level === DEBUG_LOG_LEVEL || level === 'TRACE';
-
-        toggleEl.checked = debugEnabled;
+        const supportedLevels = payload.SupportedLevels || payload.supportedLevels || null;
+        const level = syncLogControls(payload.Level || payload.level || QUIET_LOG_LEVEL, supportedLevels);
         statusEl.textContent = `Current log level: ${level}`;
-        toggleEl.disabled = false;
     } catch (error) {
         statusEl.textContent = `Unable to load log settings: ${error.message}`;
     } finally {
-        toggleEl.disabled = false;
+        setLogControlsDisabled(false);
     }
 }
 
-async function handleDebugToggle(event) {
-    const toggleEl = event.target;
-    const statusEl = document.getElementById('log-level-status');
-    if (!statusEl) {
+async function handleLogLevelToggleChange(event) {
+    const selectedLevel = normalizeLogLevel(event.target.dataset.level);
+    const selectedIndex = getLogLevelIndex(selectedLevel);
+    if (selectedIndex === -1) {
         return;
     }
 
-    const desiredLevel = toggleEl.checked ? DEBUG_LOG_LEVEL : QUIET_LOG_LEVEL;
-    const previousState = !toggleEl.checked;
+    let minLevel = selectedLevel;
+    if (!event.target.checked) {
+        const toggles = getLogLevelToggles();
+        const higherLevel = LOG_LEVEL_ORDER
+            .slice(selectedIndex + 1)
+            .find(level => toggles.some(toggle => normalizeLogLevel(toggle.dataset.level) === level && toggle.checked));
+        minLevel = higherLevel || 'CRITICAL';
+    }
 
-    toggleEl.disabled = true;
-    statusEl.textContent = 'Updating log settings...';
+    applyLogLevelSelection(minLevel);
+    await requestLogLevelUpdate(minLevel);
+}
+
+async function downloadLogs() {
+    const statusEl = document.getElementById('log-level-status');
+    const previousStatus = statusEl ? statusEl.textContent : '';
+    if (statusEl) {
+        statusEl.textContent = 'Preparing log download...';
+    }
 
     try {
-        const response = await fetch(API_BASE + LOGGING_ENDPOINT, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ level: desiredLevel })
-        });
-
+        const response = await fetch(API_BASE + LOGS_ENDPOINT + '?format=plain&download=1');
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
 
-        const text = await response.text();
-        let data;
-        try {
-            data = JSON.parse(text);
-        } catch (e) {
-            throw new Error('Invalid JSON response from server');
-        }
+        const blob = await response.blob();
+        const now = new Date();
+        const timestamp = now.toISOString().replace(/[:.]/g, '-');
+        const filename = `alpacahttp-logs-${timestamp}.txt`;
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
 
-        if (data.ErrorNumber !== 0) {
-            throw new Error(data.ErrorMessage || 'Unknown server error');
+        if (statusEl) {
+            statusEl.textContent = previousStatus;
         }
-
-        const payload = parseResponseValue(data.Value) || {};
-        const level = (payload.Level || payload.level || desiredLevel).toString().toUpperCase();
-        toggleEl.checked = level === DEBUG_LOG_LEVEL || level === 'TRACE';
-        statusEl.textContent = `Current log level: ${level}`;
     } catch (error) {
-        statusEl.textContent = `Failed to update log level: ${error.message}`;
-        toggleEl.checked = previousState;
-    } finally {
-        toggleEl.disabled = false;
+        if (statusEl) {
+            statusEl.textContent = `Failed to download logs: ${error.message}`;
+            setTimeout(() => {
+                statusEl.textContent = previousStatus;
+            }, 4000);
+        }
     }
 }
 
@@ -415,43 +632,44 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.tcpPort = parseInt(formData.get('tcpPort')) || 4030;
         }
 
-        const apertureDiameter = parseFloat(formData.get('apertureDiameter'));
-        if (!Number.isNaN(apertureDiameter) && apertureDiameter > 0) {
-            deviceData.apertureDiameter = apertureDiameter;
-        }
-
-        const focalLength = parseFloat(formData.get('focalLength'));
-        if (!Number.isNaN(focalLength) && focalLength > 0) {
-            deviceData.focalLength = focalLength;
-        }
-
-        const siteLatitude = parseFloat(formData.get('siteLatitude'));
-        if (!Number.isNaN(siteLatitude)) {
-            deviceData.siteLatitude = siteLatitude;
-        }
-
-        const siteLongitude = parseFloat(formData.get('siteLongitude'));
-        if (!Number.isNaN(siteLongitude)) {
-            deviceData.siteLongitude = siteLongitude;
-        }
-
-        const siteElevation = parseFloat(formData.get('siteElevation'));
-        if (!Number.isNaN(siteElevation)) {
-            deviceData.siteElevation = siteElevation;
-        }
-
-        const syncTimeChoice = formData.get('syncTimeOnConnect');
-        if (syncTimeChoice === 'true') {
-            deviceData.syncTimeOnConnect = true;
-        } else if (syncTimeChoice === 'false') {
-            deviceData.syncTimeOnConnect = false;
-        }
     }
 
     const messageDiv = document.getElementById('form-message');
     messageDiv.style.display = 'none';
 
     try {
+        const isEditing = this.dataset.editing === 'true';
+        if (isEditing) {
+            const originalDeviceType = this.dataset.originalDeviceType || deviceData.deviceType;
+            const originalDeviceNumber = Number.parseInt(this.dataset.originalDeviceNumber, 10);
+            const originalVendor = this.dataset.originalVendor || deviceData.vendor;
+
+            if (!Number.isNaN(originalDeviceNumber)) {
+                const removeResponse = await fetch(API_BASE + '/management/v1/removedevice', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        deviceType: originalDeviceType,
+                        deviceNumber: originalDeviceNumber,
+                        vendor: originalVendor
+                    })
+                });
+
+                const removeResult = await removeResponse.json();
+                if (removeResult.ErrorNumber !== 0) {
+                    const message = removeResult.ErrorMessage || '';
+                    if (!message.toLowerCase().includes('device not found')) {
+                        messageDiv.style.display = 'block';
+                        messageDiv.className = 'message error';
+                        messageDiv.textContent = `Error updating device: ${message}`;
+                        return;
+                    }
+                }
+            }
+        }
+
         const response = await fetch(API_BASE + '/management/v1/configuredevice', {
             method: 'POST',
             headers: {
@@ -465,8 +683,9 @@ document.getElementById('device-form').addEventListener('submit', async function
         messageDiv.style.display = 'block';
         if (result.ErrorNumber === 0) {
             messageDiv.className = 'message success';
-            messageDiv.textContent = 'Device configured successfully!';
+            messageDiv.textContent = isEditing ? 'Device updated successfully!' : 'Device configured successfully!';
             this.reset();
+            setEditMode(false);
             setTimeout(() => {
                 loadDevices();
                 showTab('devices');
@@ -481,6 +700,10 @@ document.getElementById('device-form').addEventListener('submit', async function
         messageDiv.className = 'message error';
         messageDiv.textContent = `Error: ${error.message}`;
     }
+});
+
+document.getElementById('device-form').addEventListener('reset', function() {
+    setEditMode(false);
 });
 
 // Utility functions
@@ -503,29 +726,21 @@ function renderDeviceSettings(config) {
         return '';
     }
 
-    const labelMap = [
+    const labelMap = new Map([
         ['connectionType', 'Connection Type'],
         ['portPath', 'Serial Port'],
         ['baudRate', 'Baud Rate'],
         ['host', 'Host'],
         ['tcpPort', 'TCP Port'],
         ['responseTimeoutMs', 'Response Timeout (ms)'],
-        ['apertureDiameter', 'Aperture Diameter (m)'],
-        ['focalLength', 'Focal Length (m)'],
-        ['siteLatitude', 'Site Latitude (deg)'],
-        ['siteLongitude', 'Site Longitude (deg)'],
-        ['siteElevation', 'Site Elevation (m)'],
-        ['syncTimeOnConnect', 'Sync Time On Connect']
-    ];
+    ]);
 
     const rows = [];
     const addRow = (key, label) => {
         if (config[key] === undefined || config[key] === null || config[key] === '') {
             return;
         }
-        const value = (typeof config[key] === 'number')
-            ? config[key].toString()
-            : config[key];
+        const value = formatSettingValue(config[key]);
         rows.push(`
             <div class="setting-row">
                 <span class="setting-label">${escapeHtml(label)}</span>
@@ -534,7 +749,12 @@ function renderDeviceSettings(config) {
         `);
     };
 
-    labelMap.forEach(([key, label]) => addRow(key, label));
+    labelMap.forEach((label, key) => addRow(key, label));
+
+    Object.keys(config)
+        .filter(key => !labelMap.has(key))
+        .sort()
+        .forEach(key => addRow(key, humanizeSettingKey(key)));
 
     if (!rows.length) {
         return '';
@@ -550,6 +770,27 @@ function renderDeviceSettings(config) {
     `;
 }
 
+function formatSettingValue(value) {
+    if (typeof value === 'boolean') {
+        return value ? 'true' : 'false';
+    }
+    if (value && typeof value === 'object') {
+        try {
+            return JSON.stringify(value);
+        } catch (e) {
+            return String(value);
+        }
+    }
+    return value !== undefined && value !== null ? value.toString() : '';
+}
+
+function humanizeSettingKey(key) {
+    return key
+        .replace(/[_-]+/g, ' ')
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .replace(/^\w/, match => match.toUpperCase());
+}
+
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -561,9 +802,4 @@ document.addEventListener('DOMContentLoaded', function() {
     loadDevices();
     loadServerInfo();
     loadLogSettings();
-
-    const debugToggle = document.getElementById('debug-log-toggle');
-    if (debugToggle) {
-        debugToggle.addEventListener('change', handleDebugToggle);
-    }
 });

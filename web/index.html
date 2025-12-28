@@ -30,7 +30,7 @@
 
         <!-- Configure Tab -->
         <div id="configure-tab" class="tab-content">
-            <h2>Add Device</h2>
+            <h2 id="configure-title">Add Device</h2>
             <form id="device-form" class="device-form">
                 <div class="form-group">
                     <label for="device-type">Device Type:</label>
@@ -97,45 +97,6 @@
                         </div>
                     </div>
 
-                    <div class="form-group">
-                        <label for="aperture-diameter">Aperture Diameter (meters):</label>
-                        <input type="number" step="0.001" id="aperture-diameter" name="apertureDiameter" placeholder="0.200">
-                        <small>Leave blank if unknown</small>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="focal-length">Focal Length (meters):</label>
-                        <input type="number" step="0.01" id="focal-length" name="focalLength" placeholder="1.20">
-                        <small>Leave blank if unknown</small>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="site-latitude">Site Latitude (degrees):</label>
-                        <input type="number" step="0.0001" id="site-latitude" name="siteLatitude" placeholder="34.0000">
-                        <small>Positive north, negative south</small>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="site-longitude">Site Longitude (degrees):</label>
-                        <input type="number" step="0.0001" id="site-longitude" name="siteLongitude" placeholder="-118.0000">
-                        <small>Positive east, negative west</small>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="site-elevation">Site Elevation (meters):</label>
-                        <input type="number" step="1" id="site-elevation" name="siteElevation" placeholder="1500">
-                        <small>Used for metadata reporting</small>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="sync-time-on-connect">Sync Mount Time on Connect:</label>
-                        <select id="sync-time-on-connect" name="syncTimeOnConnect">
-                            <option value="">Leave unchanged</option>
-                            <option value="true">Yes - set mount time</option>
-                            <option value="false">No - keep mount time</option>
-                        </select>
-                        <small>If enabled, the server sets mount time to the host time on connect.</small>
-                    </div>
                 </div>
 
                 <div class="form-actions">
@@ -156,15 +117,21 @@
             <div class="log-control">
                 <div class="log-control-header">
                     <div>
-                        <h3>Debug Logging</h3>
-                        <p>Toggle verbose logging for the entire server (HTTP, routing, discovery, and device drivers).</p>
+                        <h3>Logging</h3>
+                        <p>Choose the minimum severity to include in server logs.</p>
                     </div>
-                    <label class="switch">
-                        <input type="checkbox" id="debug-log-toggle">
-                        <span class="slider round"></span>
-                    </label>
                 </div>
                 <p id="log-level-status" class="log-status">Detecting log level...</p>
+                <div class="log-levels">
+                    <div class="log-levels-header">
+                        <h4>Log Level Filters</h4>
+                        <p>Select the minimum severity to include. Higher severity levels are always included.</p>
+                    </div>
+                    <div id="log-level-toggles" class="log-levels-grid"></div>
+                    <div class="log-download">
+                        <button class="btn btn-secondary" type="button" onclick="downloadLogs()">Download Logs</button>
+                    </div>
+                </div>
             </div>
             <div class="server-actions">
                 <button class="btn btn-primary" onclick="refreshServerInfo()">Refresh</button>
@@ -173,6 +140,6 @@
         </div>
     </div>
 
-    <script src="/web/app.js?v=5"></script>
+    <script src="/web/app.js?v=7"></script>
 </body>
 </html>
