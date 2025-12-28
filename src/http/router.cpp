@@ -223,6 +223,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "loglevel";
         return match;
     }
+    if (path == "/management/v1/logs" || path == "/management/logs") {
+        match.is_management = true;
+        match.management_endpoint = "logs";
+        return match;
+    }
     if (path == "/management/v1/shutdown" || path == "/management/shutdown") {
         match.is_management = true;
         match.management_endpoint = "shutdown";
@@ -258,6 +263,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_remove_device(request, server_tx_id);
     } else if (match.management_endpoint == "loglevel") {
         return handle_log_level(request, server_tx_id);
+    } else if (match.management_endpoint == "logs") {
+        return handle_logs(request, server_tx_id);
     } else if (match.management_endpoint == "shutdown") {
         return handle_shutdown(request, server_tx_id);
     }
@@ -2188,6 +2195,53 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
         response.set_body(err);
         return response;
     }
+}
+
+Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        try {
+            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
+        } catch (...) {
+            // Invalid transaction ID
+        }
+    }
+
+    if (request.method() != HttpMethod::GET) {
+        response.set_content_type("application/json");
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::INVALID_OPERATION,
+            "Unsupported HTTP method for logs endpoint"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+
+    const std::string logs = util::get_log_history_text();
+    std::string format;
+    if (request.has_query_param("format")) {
+        format = request.get_query_param("format");
+        std::transform(format.begin(), format.end(), format.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    }
+
+    if (format == "plain" || format == "text") {
+        response.set_content_type("text/plain");
+        if (request.has_query_param("download")) {
+            response.set_header("Content-Disposition", "attachment; filename=\"alpacahttp-logs.txt\"");
+        }
+        response.set_body(logs);
+        return response;
+    }
+
+    response.set_content_type("application/json");
+    AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+    alpaca_response.value = logs;
+    response.set_body(alpaca_response);
+    return response;
 }
 Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx_id) {
     Response response;
