@@ -17,6 +17,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <chrono>
 #include <vector>
+#include <utility>
 
 namespace alpacacore {
 
@@ -63,6 +64,11 @@ public:
      * @brief Get the telescope's aperture diameter in meters.
      */
     virtual double get_aperture_diameter() const = 0;
+    
+    /**
+     * @brief Set the telescope's aperture diameter in meters.
+     */
+    virtual void set_aperture_diameter(double meters) = 0;
 
     /**
      * @brief Get the telescope's aperture area in square meters.
@@ -98,6 +104,11 @@ public:
      * @brief Get whether the telescope can pulse guide.
      */
     virtual bool get_can_pulse_guide() const = 0;
+
+    /**
+     * @brief Get whether a pulse guide command is currently active.
+     */
+    virtual bool get_is_pulse_guiding() const = 0;
 
     /**
      * @brief Get whether the telescope can set declination rate.
@@ -178,6 +189,11 @@ public:
      * @brief Get the telescope's focal length in meters.
      */
     virtual double get_focal_length() const = 0;
+    
+    /**
+     * @brief Set the telescope's focal length in meters.
+     */
+    virtual void set_focal_length(double meters) = 0;
 
     /**
      * @brief Get the telescope's guide rate.
@@ -218,6 +234,11 @@ public:
      * @brief Set the telescope's side of pier.
      */
     virtual void set_side_of_pier(int side) = 0;
+
+    /**
+     * @brief Get the destination side of pier for the current target.
+     */
+    virtual int get_destination_side_of_pier() const = 0;
 
     /**
      * @brief Get the telescope's sidereal time in hours.
@@ -366,7 +387,51 @@ public:
      * @brief Unpark the telescope.
      */
     virtual void unpark() = 0;
+
+    /**
+     * @brief Check if the telescope can move the specified axis.
+     *
+     * @param axis Axis number (0=Primary, 1=Secondary, 2=Tertiary)
+     * @return true if the axis can be moved, false otherwise
+     */
+    virtual bool get_can_move_axis(int axis) const = 0;
+
+    /**
+     * @brief Move the specified axis at the given rate.
+     *
+     * @param axis Axis number (0=Primary, 1=Secondary, 2=Tertiary)
+     * @param rate Rate in degrees per second (positive or negative)
+     */
+    virtual void move_axis(int axis, double rate) = 0;
+
+    /**
+     * @brief Get the allowed axis rate range.
+     *
+     * @param axis Axis number (0=Primary, 1=Secondary, 2=Tertiary)
+     * @return Pair of (min_rate, max_rate) in degrees per second.
+     */
+    virtual std::pair<double, double> get_axis_rate_range(int axis) const = 0;
+
+    /**
+     * @brief Abort any current slew operation.
+     */
+    virtual void abort_slew() = 0;
+
+    /**
+     * @brief Slew the telescope to the given Alt/Az coordinates asynchronously.
+     *
+     * @param altitude Altitude in degrees
+     * @param azimuth Azimuth in degrees
+     */
+    virtual void slew_to_alt_az_async(double altitude, double azimuth) = 0;
+
+    /**
+     * @brief Sync the telescope to the given Alt/Az coordinates.
+     *
+     * @param altitude Altitude in degrees
+     * @param azimuth Azimuth in degrees
+     */
+    virtual void sync_to_alt_az(double altitude, double azimuth) = 0;
 };
 
 } // namespace alpacacore
-
