@@ -26,6 +26,8 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <ctime>
 #include <cstdint>
 #include <vector>
 #include <chrono>
@@ -1070,10 +1072,11 @@ Response Router::dispatch_telescope_method(
                     axis = std::stoi(request.get_query_param("Axis"));
                 }
                 // AxisRates must return an array of rate objects, even if only one range
+                auto [min_rate, max_rate] = telescope->get_axis_rate_range(axis);
                 nlohmann::json rates_array = nlohmann::json::array();
                 nlohmann::json rate_obj;
-                rate_obj["Minimum"] = 0.0;
-                rate_obj["Maximum"] = 3.0;
+                rate_obj["Minimum"] = min_rate;
+                rate_obj["Maximum"] = max_rate;
                 rates_array.push_back(rate_obj);
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, rates_array.dump());
@@ -1161,8 +1164,9 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "trackingrate") {
+                int rate = static_cast<int>(std::lround(telescope->get_tracking_rate()));
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_tracking_rate());
+                    client_tx_id, server_tx_id, rate);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -1282,11 +1286,11 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
         }
-        else if (method_name == "utcdate") {
-            if (request.method() == HttpMethod::GET) {
-                auto utc = telescope->get_utc_date();
-                auto time_t = std::chrono::system_clock::to_time_t(utc);
-                std::ostringstream oss;
+            else if (method_name == "utcdate") {
+                if (request.method() == HttpMethod::GET) {
+                    auto utc = telescope->get_utc_date();
+                    auto time_t = std::chrono::system_clock::to_time_t(utc);
+                    std::ostringstream oss;
                 oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
                 auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     utc.time_since_epoch()) % 1000;
@@ -1295,10 +1299,10 @@ Response Router::dispatch_telescope_method(
                     client_tx_id, server_tx_id, oss.str());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (request.method() == HttpMethod::PUT) {
-                std::string date_str;
-                bool found = false;
+                }
+                else if (request.method() == HttpMethod::PUT) {
+                    std::string date_str;
+                    bool found = false;
                 
                 // Try query parameter first
                 if (request.has_query_param("UTCDate")) {
@@ -1346,7 +1350,15 @@ Response Router::dispatch_telescope_method(
                 if (ss.fail()) {
                     throw std::runtime_error("Invalid UTC date format: " + date_str);
                 }
-                auto time_point = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+#if defined(_WIN32)
+                auto utc_time = _mkgmtime(&tm);
+#else
+                auto utc_time = timegm(&tm);
+#endif
+                if (utc_time == static_cast<std::time_t>(-1)) {
+                    throw std::runtime_error("Failed to convert UTC date: " + date_str);
+                }
+                auto time_point = std::chrono::system_clock::from_time_t(utc_time);
                 telescope->set_utc_date(time_point);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
