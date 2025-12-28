@@ -16,6 +16,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <cerrno>
 #include <cstring>
 #include <sstream>
 
@@ -123,8 +124,14 @@ void Discovery::run_discovery() {
 
 void Discovery::handle_probe(const std::string& probe_data, const std::string& sender_address, std::uint16_t sender_port) {
     // Alpaca discovery protocol: respond to "alpacadiscovery1" probe
+    util::log_info("Discovery: Received probe from " + sender_address + ":" + std::to_string(sender_port));
+    
     if (probe_data.find("alpacadiscovery1") != std::string::npos) {
-        std::string response = build_response();
+        // Modern Alpaca spec: Send JSON format with AlpacaPort
+        // This is what NINA and other modern clients expect
+        std::ostringstream json_oss;
+        json_oss << "{\"AlpacaPort\":" << config_.http_port() << "}";
+        std::string json_response = json_oss.str();
         
         struct sockaddr_in target_addr;
         std::memset(&target_addr, 0, sizeof(target_addr));
@@ -132,10 +139,19 @@ void Discovery::handle_probe(const std::string& probe_data, const std::string& s
         target_addr.sin_addr.s_addr = inet_addr(sender_address.c_str());
         target_addr.sin_port = htons(sender_port);
 
-        sendto(
-            socket_fd_, response.c_str(), response.size(), 0,
+        ssize_t sent = sendto(
+            socket_fd_, json_response.c_str(), json_response.size(), 0,
             (struct sockaddr*)&target_addr, sizeof(target_addr)
         );
+        
+        if (sent > 0) {
+            util::log_info("Discovery: Sent JSON response to " + sender_address + ":" + std::to_string(sender_port) + 
+                          " (AlpacaPort=" + std::to_string(config_.http_port()) + ", " + std::to_string(sent) + " bytes)");
+        } else {
+            util::log_error("Discovery: Failed to send response to " + sender_address + ":" + std::to_string(sender_port) + " - " + std::string(strerror(errno)));
+        }
+    } else {
+        util::log_warning("Discovery: Received non-Alpaca probe from " + sender_address + ":" + std::to_string(sender_port));
     }
 }
 
