@@ -52,7 +52,7 @@ AlpacaCore makes it easy for anyone to build drivers for any vendor device using
    - Configure CMake for your vendor SDK
 3. **Test thoroughly** - Verify all functionality works as expected
 
-**📚 For complete driver development guide, see [Driver Development Guide](docs/development/driver-development.md)**
+**For complete driver development guide, see [Driver Development Guide](docs/development/driver-development.md)**
 
 The guide includes:
 - Three-layer architecture overview
@@ -63,7 +63,7 @@ The guide includes:
 
 **Anyone can build any driver they need** - simply place the vendor SDK in `external/` and work with AI to create the driver following the established patterns.
 
-## Supported Device Types per Alapaca v1 OAS 3.1
+## Supported Device Types (ASCOM Alpaca v1 OAS 3.1)
 
 - Camera
 - Telescope
@@ -85,7 +85,12 @@ For detailed build instructions, prerequisites, build options, and troubleshooti
 ```bash
 mkdir build && cd build
 cmake ..
-cmake --build .
+cmake --build . --parallel
+```
+
+To force a clean rebuild:
+```bash
+cmake --build . --clean-first --parallel
 ```
 
 See the [Documentation Index](docs/README.md) for all available guides.
@@ -112,4 +117,3 @@ AlpacaCore follows proper programming standards with AI-assisted development. Wh
 - Confirming compatibility with existing codebase
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines and development workflow.
-
