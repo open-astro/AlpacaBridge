@@ -88,6 +88,7 @@ public:
         , last_utc_set_{}
         , last_utc_set_monotonic_(std::chrono::steady_clock::now())
         , last_utc_valid_(false)
+        , utc_query_supported_(true)
         , clock_sync_cancel_(false)
         , pending_site_latitude_(site_latitude_deg)
         , pending_site_longitude_(site_longitude_deg)
@@ -182,6 +183,7 @@ public:
                 position_cache_valid_ = false;
                 status_cache_valid_ = false;
                 last_utc_valid_ = false;
+                utc_query_supported_ = true;
                 pulse_guiding_active_ = false;
                 schedule_clock_sync = true;
                 ALPACA_LOG_INFO("iOptron", "Connected to mount over " +
@@ -199,6 +201,7 @@ public:
             position_cache_valid_ = false;
             status_cache_valid_ = false;
             last_utc_valid_ = false;
+            utc_query_supported_ = true;
             disconnect_protocol = true;
         }
 
@@ -413,6 +416,15 @@ public:
         check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();
         if (tracking) {
+            refresh_status_cache_locked(true);
+            if (cached_status_.is_parked) {
+                ALPACA_LOG_INFO("iOptron", "Mount reports parked; sending unpark before tracking");
+                protocol.unpark();
+                cached_status_.is_parked = false;
+                status_cache_valid_ = false;
+            }
+        }
+        if (tracking) {
             protocol.start_tracking();
         } else {
             protocol.stop_tracking();
@@ -552,7 +564,9 @@ public:
         
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_latitude(latitude);
+        protocol.set_hemisphere(latitude >= 0.0);
         site_latitude_cached_ = latitude;
+        hemisphere_north_ = (latitude >= 0.0);
         site_info_valid_ = true;
         last_site_info_fetch_ = std::chrono::steady_clock::now();
     }
@@ -609,8 +623,11 @@ public:
     }
     
     std::pair<double, double> get_axis_rate_range(int axis) const override {
-        if (axis == 0 || axis == 1) {
-            return {0.0, 2.0};
+        if (axis == 0) {
+            return {0.0, 5.0};
+        }
+        if (axis == 1) {
+            return {0.0, 6.0};
         }
         return {0.0, 0.0};
     }
@@ -651,16 +668,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refresh_status_cache_locked();
-        auto& protocol = iOptronProtocolWrapper::instance();
-        
-        if (cached_status_.tracking_rate == 4) {
-            // Custom tracking rate
-            return protocol.get_custom_tracking_rate();
-        } else {
-            // Standard rates: 0=sidereal (1.0), 1=lunar, 2=solar, 3=King
-            // Return as multiplier of sidereal
-            return 1.0;  // Default to sidereal
-        }
+        // Alpaca TrackingRate uses DriveRates enum values (0-4).
+        return static_cast<double>(cached_status_.tracking_rate);
     }
     
     void set_tracking_rate(double rate) override {
@@ -685,15 +694,27 @@ public:
         check_connected();
         
         // Return supported tracking rates as DriveRates enum values:
-        // 0 = driveSidereal, 1 = driveLunar, 2 = driveSolar, 3 = driveKing
-        // iOptron mounts support all standard tracking rates
-        return {0, 1, 2, 3};
+        // 0 = driveSidereal, 1 = driveLunar, 2 = driveSolar, 3 = driveKing, 4 = driveCustom
+        return {0, 1, 2, 3, 4};
     }
     
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        
+
+        if (last_utc_valid_) {
+            return current_utc_time_locked();
+        }
+
+        if (!utc_query_supported_) {
+            if (!last_utc_valid_) {
+                last_utc_set_ = std::chrono::system_clock::now();
+                last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+                last_utc_valid_ = true;
+            }
+            return current_utc_time_locked();
+        }
+
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
             auto mount_time = protocol.get_utc_time();
@@ -720,6 +741,10 @@ public:
             return mount_time;
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("iOptron", "Failed to read UTC time from mount: " + std::string(e.what()));
+            utc_query_supported_ = false;
+            last_utc_set_ = std::chrono::system_clock::now();
+            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+            last_utc_valid_ = true;
             return current_utc_time_locked();
         }
     }
@@ -808,7 +833,11 @@ public:
         check_connected();
         refresh_status_cache_locked(true);
         if (cached_status_.is_parked) {
-            throw AlpacaException("Cannot slew while parked - unpark mount first");
+            auto& protocol = iOptronProtocolWrapper::instance();
+            ALPACA_LOG_INFO("iOptron", "Mount reports parked; sending unpark before slew");
+            protocol.unpark();
+            cached_status_.is_parked = false;
+            status_cache_valid_ = false;
         }
         
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -1191,6 +1220,7 @@ private:
     mutable std::chrono::system_clock::time_point last_utc_set_;
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
+    mutable bool utc_query_supported_;
     std::thread clock_sync_thread_;
     std::atomic<bool> clock_sync_cancel_;
     std::optional<double> pending_site_latitude_;

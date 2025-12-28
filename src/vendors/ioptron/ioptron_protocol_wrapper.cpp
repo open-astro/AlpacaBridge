@@ -762,15 +762,15 @@ AltAz iOptronProtocolWrapper::get_alt_az() {
 MountStatus iOptronProtocolWrapper::get_status() {
     std::string response = send_command(":GLS");
     
-    if (response.length() < 22) {
+    if (response.length() < 23) {
         throw AlpacaException("Invalid status response from mount");
     }
     
     // Parse :GLS# response: sTTTTTTTTTTTTTTTTnnnnnn#
-    // Various status digits at positions 16-21
+    // Various status digits at positions 17-22 (1-based, after the sign)
     
     MountStatus status;
-    int system_status = response[16] - '0';
+    int system_status = response[18] - '0';
     int tracking_rate_digit = response[19] - '0';
     
     status.system_status = system_status;
@@ -787,7 +787,7 @@ SiteInfo iOptronProtocolWrapper::get_site_info() {
     std::string gls_response = send_command(":GLS");
     std::string gut_response = send_command(":GUT");
     
-    if (gls_response.length() < 22 || gut_response.length() < 17) {
+    if (gls_response.length() < 23 || gut_response.length() < 17) {
         throw AlpacaException("Invalid site info response from mount");
     }
     
@@ -806,7 +806,7 @@ SiteInfo iOptronProtocolWrapper::get_site_info() {
     site.latitude_degrees = lat_arcsec / 3600.0;
     
     // Hemisphere (22nd digit)
-    site.is_northern_hemisphere = (gls_response[21] == '1');
+    site.is_northern_hemisphere = (gls_response[22] == '1');
     
     // Timezone and DST from :GUT#
     std::string tz_str = gut_response.substr(0, 4);  // Sign + 3 digits
@@ -843,13 +843,25 @@ AltAz iOptronProtocolWrapper::get_park_position() {
 // Mount motion commands
 void iOptronProtocolWrapper::set_target_ra(double ra_hours) {
     int64_t ra_value = pimpl_->ra_to_ioptron_format(ra_hours);
-    std::string cmd = ":SRA" + pimpl_->format_signed_int(ra_value, 9) + "#";
-    send_command_blind(cmd);
+    if (ra_value < 0) {
+        ra_value = 0;
+    } else if (ra_value > 129600000) {
+        ra_value = 129600000;
+    }
+    std::ostringstream cmd;
+    cmd << ":SRA" << std::setfill('0') << std::setw(9) << ra_value << "#";
+    send_command_blind(cmd.str());
 }
 
 void iOptronProtocolWrapper::set_target_dec(double dec_degrees) {
     int64_t dec_value = pimpl_->dec_to_ioptron_format(dec_degrees);
-    std::string cmd = ":Sd" + pimpl_->format_signed_int(dec_value, 8) + "#";
+    if (dec_value < -32400000) {
+        dec_value = -32400000;
+    } else if (dec_value > 32400000) {
+        dec_value = 32400000;
+    }
+    // iOptron expects ":Sds" + signed 8-digit dec (0.01 arc-seconds).
+    std::string cmd = ":Sds" + pimpl_->format_signed_int(dec_value, 8) + "#";
     send_command_blind(cmd);
 }
 
@@ -889,7 +901,8 @@ bool iOptronProtocolWrapper::park() {
 }
 
 void iOptronProtocolWrapper::unpark() {
-    send_command(":MP0");
+    // Some mounts do not respond to unpark, especially after power-cycle auto-unpark.
+    send_command_blind(":MP0");
 }
 
 void iOptronProtocolWrapper::set_park_position(double alt_degrees, double az_degrees) {
@@ -899,8 +912,9 @@ void iOptronProtocolWrapper::set_park_position(double alt_degrees, double az_deg
     std::string alt_cmd = ":SPH" + std::to_string(alt_value) + "#";
     std::string az_cmd = ":SPA" + std::to_string(az_value) + "#";
     
-    send_command(alt_cmd);
-    send_command(az_cmd);
+    // Some mounts do not respond to park-position set commands; fire-and-forget.
+    send_command_blind(alt_cmd);
+    send_command_blind(az_cmd);
 }
 
 // Home position commands
@@ -963,13 +977,14 @@ void iOptronProtocolWrapper::set_utc_time(std::chrono::system_clock::time_point 
     
     std::ostringstream cmd;
     cmd << ":SUT" << std::setfill('0') << std::setw(13) << ms << "#";
-    // Some mounts acknowledge :SUT with a bare '1' instead of '1#'. Allow
-    // responses that omit the trailing '#'.
-    send_command(cmd.str(), false);
+    // Some mounts do not respond to :SUT; fire-and-forget to avoid timeouts.
+    send_command_blind(cmd.str());
 }
 
 std::chrono::system_clock::time_point iOptronProtocolWrapper::get_utc_time() {
-    std::string response = send_command(":GUT");
+    // Some mounts reply to :GUT without a trailing '#', so allow responses
+    // that omit the terminator.
+    std::string response = send_command(":GUT", false);
     if (response.length() < 18) {
         throw AlpacaException("Invalid UTC time response from mount");
     }
@@ -1046,11 +1061,13 @@ void iOptronProtocolWrapper::set_timezone_offset(int offset_minutes) {
         offset_minutes = -offset_minutes;
     }
     cmd << std::setfill('0') << std::setw(3) << offset_minutes << "#";
-    send_command(cmd.str(), false);
+    // Some mounts do not respond to :SG; fire-and-forget to avoid timeouts.
+    send_command_blind(cmd.str());
 }
 
 void iOptronProtocolWrapper::set_dst_observed(bool observed) {
-    send_command(observed ? ":SDS1#" : ":SDS0#", false);
+    // Some mounts do not respond to :SDS; fire-and-forget to avoid timeouts.
+    send_command_blind(observed ? ":SDS1#" : ":SDS0#");
 }
 
 // Tracking rate commands
