@@ -64,6 +64,18 @@ void log(LogLevel level,
          std::string_view component,
          std::string_view message);
 
+/**
+ * @brief Set the minimum log level for output.
+ *
+ * Messages below this level are ignored before reaching the sink.
+ */
+void set_log_level(LogLevel level);
+
+/**
+ * @brief Get the current minimum log level.
+ */
+LogLevel get_log_level();
+
 } // namespace alpacacore::logging
 
 // Convenience macros
@@ -84,4 +96,3 @@ void log(LogLevel level,
 
 #define ALPACA_LOG_CRITICAL(component, message) \
     ::alpacacore::logging::log(::alpacacore::logging::LogLevel::Critical, component, message)
-

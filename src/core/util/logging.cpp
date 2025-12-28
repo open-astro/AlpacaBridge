@@ -23,6 +23,7 @@ namespace alpacacore::logging {
 namespace {
     std::mutex g_log_mutex;
     LogSink g_log_sink;
+    LogLevel g_min_log_level = LogLevel::Info;
     
     const char* level_to_string(LogLevel level) {
         switch (level) {
@@ -63,10 +64,23 @@ LogSink get_log_sink() {
     return g_log_sink;
 }
 
+void set_log_level(LogLevel level) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    g_min_log_level = level;
+}
+
+LogLevel get_log_level() {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    return g_min_log_level;
+}
+
 void log(LogLevel level,
          std::string_view component,
          std::string_view message) {
     std::lock_guard<std::mutex> lock(g_log_mutex);
+    if (level < g_min_log_level) {
+        return;
+    }
     if (g_log_sink) {
         g_log_sink(level, component, message);
     } else {
@@ -75,4 +89,3 @@ void log(LogLevel level,
 }
 
 } // namespace alpacacore::logging
-
