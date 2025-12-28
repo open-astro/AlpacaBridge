@@ -21,6 +21,8 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <vector>
+#include <nlohmann/json.hpp>
 
 namespace alpacahttp {
 
@@ -65,6 +67,7 @@ private:
     Response handle_configure_device(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
     Response handle_shutdown(const Request& request, std::uint32_t server_tx_id);
+    Response handle_log_level(const Request& request, std::uint32_t server_tx_id);
     Response handle_static_file(const Request& request);
     Response handle_setup(const Request& request, std::uint32_t server_tx_id);
 
@@ -79,6 +82,13 @@ private:
         std::uint32_t client_tx_id,
         std::uint32_t server_tx_id
     );
+
+    bool register_device_from_config(const nlohmann::json& config, std::string& error_message);
+    nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
+    void add_or_replace_persisted_device(const nlohmann::json& config);
+    void remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);
+    void save_persisted_devices() const;
+    void load_persisted_devices();
     
     // Dispatch telescope-specific method calls
     Response dispatch_telescope_method(
@@ -88,7 +98,9 @@ private:
         std::uint32_t client_tx_id,
         std::uint32_t server_tx_id
     );
+
+    std::vector<nlohmann::json> persisted_devices_;
+    bool persisted_devices_loaded_ = false;
 };
 
 } // namespace alpacahttp
-
