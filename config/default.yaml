@@ -3,6 +3,7 @@
 # HTTP server settings
 http:
   port: 6800
+  thread_pool_size: 32  # Number of concurrent request handlers (increase for more devices/clients)
 
 # Discovery settings
 discovery:
@@ -10,7 +11,7 @@ discovery:
 
 # Logging settings
 logging:
-  level: INFO  # DEBUG, INFO, WARNING, ERROR
+  level: WARNING  # DEBUG, INFO, WARNING, ERROR
 
 # Server information
 server:
@@ -25,4 +26,3 @@ server:
 #     1: false
 #   mount:
 #     0: true
-

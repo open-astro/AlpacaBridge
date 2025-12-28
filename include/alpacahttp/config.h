@@ -42,6 +42,7 @@ public:
     const std::string& server_name() const { return server_name_; }
     const std::string& manufacturer() const { return manufacturer_; }
     const std::string& location() const { return location_; }
+    std::size_t thread_pool_size() const { return thread_pool_size_; }
 
     // Device enable/disable
     bool is_device_enabled(const std::string& device_type, std::uint32_t device_number) const;
@@ -53,14 +54,16 @@ public:
     void set_server_name(const std::string& name) { server_name_ = name; }
     void set_manufacturer(const std::string& mfg) { manufacturer_ = mfg; }
     void set_location(const std::string& loc) { location_ = loc; }
+    void set_thread_pool_size(std::size_t size) { thread_pool_size_ = size; }
 
 private:
     std::uint16_t http_port_ = 6800;
     bool discovery_enabled_ = true;
-    LogLevel log_level_ = LogLevel::INFO;
+    LogLevel log_level_ = LogLevel::WARNING;
     std::string server_name_ = "AlpacaHTTP";
     std::string manufacturer_ = "AlpacaHTTP";
     std::string location_ = "";
+    std::size_t thread_pool_size_ = 32;  // Default: 32 concurrent requests (supports multiple devices + clients)
 
     // Device enable/disable map: "devicetype:number" -> enabled
     std::unordered_map<std::string, bool> device_enable_map_;
@@ -70,4 +73,3 @@ private:
 };
 
 } // namespace alpacahttp
-

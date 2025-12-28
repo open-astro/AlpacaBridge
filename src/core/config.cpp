@@ -87,6 +87,18 @@ void Config::apply_environment_overrides() {
     if (location_env) {
         location_ = location_env;
     }
+
+    const char* thread_pool_env = std::getenv("ALPACAHTTP_THREAD_POOL_SIZE");
+    if (thread_pool_env) {
+        try {
+            thread_pool_size_ = static_cast<std::size_t>(std::stoul(thread_pool_env));
+            // Clamp to reasonable range (1-256)
+            if (thread_pool_size_ < 1) thread_pool_size_ = 1;
+            if (thread_pool_size_ > 256) thread_pool_size_ = 256;
+        } catch (...) {
+            // Invalid value, use default
+        }
+    }
 }
 
 } // namespace alpacahttp
