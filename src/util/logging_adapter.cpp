@@ -28,10 +28,8 @@ alpacacore::logging::LogLevel convert_log_level(LogLevel level) {
 }
 
 void init_logging(const Config& config) {
-    // AlpacaHTTP uses AlpacaCore's logging system directly
-    // The default stderr sink is already set up in AlpacaCore
-    // If needed, we can set a custom sink here, but for now we use the default
-    (void)config; // Config may be used in the future for log level filtering
+    // Apply the configured log level before any components start logging
+    alpacacore::logging::set_log_level(convert_log_level(config.log_level()));
 }
 
 void log_debug(const std::string& message) {
@@ -51,4 +49,3 @@ void log_error(const std::string& message) {
 }
 
 } // namespace alpacahttp::util
-
