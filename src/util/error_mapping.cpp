@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
 #include <alpacahttp/util/error_mapping.h>
+#include <alpacacore/alpaca_errors.h>
 #include <stdexcept>
 #include <sstream>
 
@@ -45,9 +46,36 @@ std::string exception_to_error_message(const std::exception& e) {
 }
 
 std::int32_t map_error_code(int error_code) {
-    // Map system error codes to Alpaca error codes if needed
-    // For now, return as-is or map to DRIVER_ERROR
-    return ErrorCode::DRIVER_ERROR;
+    namespace AE = alpacacore::AlpacaError;
+    switch (error_code) {
+        case AE::InvalidValue:
+            return ErrorCode::INVALID_VALUE;
+        case AE::ValueNotSet:
+            return ErrorCode::VALUE_NOT_SET;
+        case AE::NotConnected:
+            return ErrorCode::NOT_CONNECTED;
+        case AE::NotImplemented:
+        case AE::MethodNotImplemented:
+        case AE::PropertyNotImplemented:
+            return ErrorCode::NOT_IMPLEMENTED;
+        case AE::ActionNotImplemented:
+            return ErrorCode::ACTION_NOT_IMPLEMENTED;
+        case AE::InvalidOperation:
+        case AE::InvalidOperationException:
+        case AE::InvalidOperationException2:
+        case AE::Parked:
+        case AE::InvalidWhileSlewing:
+        case AE::NotSupported:
+        case AE::NotAtHome:
+        case AE::Slaved:
+            return ErrorCode::INVALID_OPERATION;
+        case AE::InvalidWhileParked:
+            return ErrorCode::INVALID_WHILE_PARKED;
+        case AE::InvalidWhileSlaved:
+            return ErrorCode::INVALID_WHILE_SLAVED;
+        default:
+            return ErrorCode::DRIVER_ERROR;
+    }
 }
 
 std::string map_error_message(std::int32_t alpaca_error_code) {
@@ -82,4 +110,3 @@ std::string map_error_message(std::int32_t alpaca_error_code) {
 }
 
 } // namespace alpacahttp::util
-
