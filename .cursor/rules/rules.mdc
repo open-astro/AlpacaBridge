@@ -1,7 +1,7 @@
 ---
 alwaysApply: true
 ---
-# AlpacaHTTP – Cursor Rules
+# AlpacaHTTP - Cursor Rules
 
 These rules tell Cursor how to work inside the **AlpacaHTTP** repository.
 
@@ -23,7 +23,7 @@ AlpacaHTTP depends entirely on **AlpacaCore** for device behavior.
 - **HTTP Server:** Prefer **Boost.Beast**; alternative: `cpp-httplib`
 - **JSON library:** Use **nlohmann/json**
 - **OS Targets:** Linux first, then macOS and Windows
-- Focus on Alpaca Management https://ascom-standards.org/api/?urls.primaryName=ASCOM+Alpaca+Management+API
+- Follow the ASCOM Alpaca Management API: https://ascom-standards.org/api/?urls.primaryName=ASCOM+Alpaca+Management+API
 
 **Dependencies:**
 
@@ -66,7 +66,7 @@ Cursor must never change this license or add another license.
 
 ---
 
-## 3. Responsibilities & Relationship With AlpacaHTTP
+## 3. Responsibilities & Relationship With AlpacaCore
 
 AlpacaHTTP handles:
 
@@ -89,7 +89,7 @@ AlpacaHTTP **must NOT**:
 Device calls always go through:
 
 ```
-AlpacaHTTP → AlpacaCore::DeviceDriver → Vendor SDK (only inside AlpacaCore)
+AlpacaHTTP -> AlpacaCore::DeviceDriver -> Vendor SDK (only inside AlpacaCore)
 ```
 
 ---
@@ -98,62 +98,64 @@ AlpacaHTTP → AlpacaCore::DeviceDriver → Vendor SDK (only inside AlpacaCore)
 
 ```
 AlpacaHTTP/
-├─ CMakeLists.txt
-├─ LICENSE
-├─ README.md
-├─ CHANGELOG.md
-├─ VERSION
-├─ CONTRIBUTING.md
-├─ cursor-rules.md
-│
-├─ config/
-│   ├─ default.yaml
-│   └─ schema/
-│
-├─ include/
-│   └─ alpacahttp/
-│       ├─ server.h
-│       ├─ router.h
-│       ├─ request.h
-│       ├─ response.h
-│       ├─ discovery.h
-│       ├─ config.h
-│       ├─ json_utils.h
-│       └─ util/
-│           ├─ threading.h
-│           ├─ logging_adapter.h
-│           └─ error_mapping.h
-│
-├─ src/
-│   ├─ http/
-│   │   ├─ server.cpp
-│   │   ├─ session.cpp
-│   │   └─ router.cpp
-│   │
-│   ├─ core/
-│   │   ├─ request.cpp
-│   │   ├─ response.cpp
-│   │   ├─ json_utils.cpp
-│   │   └─ config.cpp
-│   │
-│   ├─ discovery/
-│   │   └─ discovery.cpp
-│   │
-│   └─ util/
-│       ├─ threading.cpp
-│       ├─ logging_adapter.cpp
-│       └─ error_mapping.cpp
-│
-├─ tests/
-│   ├─ test_routing.cpp
-│   ├─ test_json.cpp
-│   ├─ test_discovery.cpp
-│   └─ test_config.cpp
-│
-└─ examples/
-    ├─ simple_server/
-    │   └─ main.cpp
-    └─ curl_examples/
+|-- .cursor/
+|   `-- rules/
+|       `-- rules.mdc
+|-- CMakeLists.txt
+|-- LICENSE
+|-- README.md
+|-- CHANGELOG.md
+|-- VERSION
+|-- CONTRIBUTING.md
+|
+|-- config/
+|   |-- default.yaml
+|   `-- schema/
+|
+|-- include/
+|   `-- alpacahttp/
+|       |-- server.h
+|       |-- router.h
+|       |-- request.h
+|       |-- response.h
+|       |-- discovery.h
+|       |-- config.h
+|       |-- json_utils.h
+|       `-- util/
+|           |-- threading.h
+|           |-- logging_adapter.h
+|           `-- error_mapping.h
+|
+|-- src/
+|   |-- http/
+|   |   |-- server.cpp
+|   |   |-- session.cpp
+|   |   `-- router.cpp
+|   |
+|   |-- core/
+|   |   |-- request.cpp
+|   |   |-- response.cpp
+|   |   |-- json_utils.cpp
+|   |   `-- config.cpp
+|   |
+|   |-- discovery/
+|   |   `-- discovery.cpp
+|   |
+|   `-- util/
+|       |-- threading.cpp
+|       |-- logging_adapter.cpp
+|       `-- error_mapping.cpp
+|
+|-- tests/
+|   |-- test_routing.cpp
+|   |-- test_json.cpp
+|   |-- test_discovery.cpp
+|   `-- test_config.cpp
+|
+`-- examples/
+    |-- simple_server/
+    |   `-- main.cpp
+    `-- curl_examples/
 ```
 
 ---
@@ -282,7 +284,7 @@ util/logging_adapter.cpp
 ## 11. Error Handling Rules
 
 - Wrap all AlpacaCore calls in try/catch blocks.
-- Convert exceptions → Alpaca error response using:
+- Convert exceptions to Alpaca error response using:
 
 ```
 util/error_mapping.h

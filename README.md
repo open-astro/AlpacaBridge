@@ -27,7 +27,12 @@ AlpacaHTTP provides:
 mkdir build
 cd build
 cmake ..
-make
+cmake --build . --parallel
+```
+
+To force a clean rebuild:
+```bash
+cmake --build . --clean-first --parallel
 ```
 
 ### Build Options
@@ -77,4 +82,3 @@ int main() {
 ## License
 
 Server Side Public License v1
-

@@ -10,7 +10,7 @@ Thank you for your interest in contributing to AlpacaHTTP!
    ```bash
    mkdir build && cd build
    cmake ..
-   make
+   cmake --build . --parallel
    ```
 
 ## Code Style
@@ -43,4 +43,3 @@ ctest
 ## License
 
 By contributing, you agree that your contributions will be licensed under the Server Side Public License v1.
-
