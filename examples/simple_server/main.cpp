@@ -47,9 +47,9 @@ int main(int argc, char* argv[]) {
     alpacahttp::util::init_logging(config);
     
     // Optionally set a custom log sink
-    alpacacore::logging::set_log_sink([](alpacacore::logging::LogLevel level,
-                                         std::string_view component,
-                                         std::string_view message) {
+    alpacahttp::util::set_external_log_sink([](alpacacore::logging::LogLevel level,
+                                               std::string_view component,
+                                               std::string_view message) {
         const char* level_str = "INFO";
         switch (level) {
             case alpacacore::logging::LogLevel::Trace:
@@ -121,4 +121,3 @@ int main(int argc, char* argv[]) {
     // This is safe since we've already stopped all services
     exit(0);
 }
-

@@ -28,8 +28,13 @@ void log_info(const std::string& message);
 void log_warning(const std::string& message);
 void log_error(const std::string& message);
 
+// Retrieve recent log history as plain text.
+std::string get_log_history_text();
+
+// Optional external sink (e.g., stdout logger) layered on top of history capture.
+void set_external_log_sink(alpacacore::logging::LogSink sink);
+
 // Convert AlpacaHTTP LogLevel to AlpacaCore LogLevel
 alpacacore::logging::LogLevel convert_log_level(LogLevel level);
 
 } // namespace alpacahttp::util
-
