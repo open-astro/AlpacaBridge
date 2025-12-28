@@ -220,7 +220,9 @@ if(ALPACACORE_ENABLE_ZWO)
     )
     
     # Link to main library
-    target_link_libraries(alpacacore_zwo PUBLIC alpacacore)
+    # Use PRIVATE to avoid circular dependency warnings
+    # The vendor library uses alpacacore headers but doesn't expose them to consumers
+    target_link_libraries(alpacacore_zwo PRIVATE alpacacore)
 endif()
 ```
 

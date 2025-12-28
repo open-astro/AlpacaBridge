@@ -15,12 +15,14 @@ if(ALPACACORE_ENABLE_IOPTRON)
     add_library(alpacacore_ioptron STATIC ${IOPTRON_SOURCES})
     
     # Include directories
+    # The vendor library only needs headers from alpacacore, not the library itself
+    # The linking is one-way: alpacacore -> alpacacore_ioptron (in main CMakeLists.txt)
     target_include_directories(alpacacore_ioptron PRIVATE
         ${CMAKE_SOURCE_DIR}/include
     )
     
-    # Link to main library
-    target_link_libraries(alpacacore_ioptron PUBLIC alpacacore)
+    # Do NOT link to alpacacore here - that creates a circular dependency
+    # The vendor library only uses headers, and alpacacore will link to this library
     
     # Platform-specific settings
     if(WIN32)

@@ -110,6 +110,27 @@ if(ALPACACORE_ENABLE_IOPTRON)
     endif()
 endif()
 
+# Custom target to clean everything including CMake cache
+# Usage: cmake --build . --target alpacacore-clean-all
+# Note: Named with project prefix to avoid conflicts when used as subdirectory
+if(NOT TARGET alpacacore-clean-all)
+    add_custom_target(alpacacore-clean-all
+        COMMAND ${CMAKE_COMMAND} --build . --target clean
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/CMakeFiles
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/CMakeCache.txt
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/cmake_install.cmake
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/Makefile
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/CTestTestfile.cmake
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/DartConfiguration.tcl
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/Testing
+        COMMENT "Cleaning all AlpacaCore build files and CMake cache"
+    )
+    # Only create alias when building standalone (not as subdirectory)
+    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT TARGET clean-all)
+        add_custom_target(clean-all ALIAS alpacacore-clean-all)
+    endif()
+endif()
+
 # Tests
 if(ALPACACORE_BUILD_TESTS)
     enable_testing()
