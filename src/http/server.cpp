@@ -20,12 +20,16 @@
 #include <cerrno>
 #include <cstring>
 #include <algorithm>
+#include <queue>
+#include <atomic>
+#include <utility>
 
 namespace alpacahttp {
 
 Server::Server(const Config& config)
     : config_(config)
 {
+    router_.set_shutdown_callback([this]() { handle_shutdown_request(); });
 }
 
 void Server::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver) {
@@ -33,7 +37,8 @@ void Server::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver>
 }
 
 void Server::set_shutdown_callback(std::function<void()> callback) {
-    router_.set_shutdown_callback(callback);
+    std::lock_guard<std::mutex> lock(shutdown_mutex_);
+    shutdown_callback_ = std::move(callback);
 }
 
 Server::~Server() {
@@ -45,6 +50,7 @@ void Server::start() {
         return;
     }
 
+    shutdown_requested_ = false;
     running_ = true;
     run_server();
 }
@@ -54,6 +60,7 @@ void Server::start_async() {
         return;
     }
 
+    shutdown_requested_ = false;
     running_ = true;
     server_thread_ = std::thread(&Server::run_server, this);
 }
@@ -65,6 +72,21 @@ void Server::stop() {
 
     util::log_info("Stopping HTTP server...");
     running_ = false;
+    
+    // Shutdown worker threads
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        shutdown_workers_ = true;
+    }
+    queue_condition_.notify_all();
+    
+    // Wait for all worker threads to finish
+    for (auto& thread : worker_threads_) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+    worker_threads_.clear();
     
     // Shutdown and close the server socket to interrupt accept() call
     int fd = server_fd_.exchange(-1);
@@ -125,6 +147,14 @@ void Server::run_server() {
     }
 
     util::log_info("Server listening on port " + std::to_string(config_.http_port()));
+    
+    // Start worker thread pool for handling concurrent requests
+    std::size_t pool_size = config_.thread_pool_size();
+    worker_threads_.reserve(pool_size);
+    for (size_t i = 0; i < pool_size; ++i) {
+        worker_threads_.emplace_back(&Server::worker_thread, this);
+    }
+    util::log_info("Started " + std::to_string(pool_size) + " worker threads for concurrent request handling");
 
     // Accept connections using select() to allow checking running_ flag periodically
     while (running_) {
@@ -179,10 +209,12 @@ void Server::run_server() {
                 }
             }
 
-            // Handle connection (synchronous for now)
-            // TODO: Implement async/thread pool for concurrent requests
-            handle_connection(client_fd);
-            close(client_fd);
+            // Dispatch connection to worker thread pool for concurrent handling
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                connection_queue_.push(client_fd);
+            }
+            queue_condition_.notify_one();
         }
     }
 
@@ -213,8 +245,8 @@ void Server::handle_connection(int socket_fd) {
         return;
     }
 
-    // Generate transaction ID
-    static std::uint32_t transaction_counter = 0;
+    // Generate transaction ID (thread-safe)
+    static std::atomic<std::uint32_t> transaction_counter{0};
     std::uint32_t server_tx_id = ++transaction_counter;
 
     // Route request
@@ -225,5 +257,62 @@ void Server::handle_connection(int socket_fd) {
     write(socket_fd, response_str.c_str(), response_str.size());
 }
 
-} // namespace alpacahttp
+void Server::worker_thread() {
+    while (true) {
+        int client_fd = -1;
+        
+        // Wait for a connection to handle
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            queue_condition_.wait(lock, [this] {
+                return !connection_queue_.empty() || shutdown_workers_;
+            });
+            
+            if (shutdown_workers_ && connection_queue_.empty()) {
+                // Shutdown requested and no more work
+                break;
+            }
+            
+            if (!connection_queue_.empty()) {
+                client_fd = connection_queue_.front();
+                connection_queue_.pop();
+            }
+        }
+        
+        if (client_fd >= 0) {
+            // Handle the connection
+            handle_connection(client_fd);
+            close(client_fd);
+        }
+    }
+}
 
+void Server::handle_shutdown_request() {
+    bool expected = false;
+    if (!shutdown_requested_.compare_exchange_strong(expected, true)) {
+        util::log_info("Shutdown request already in progress, ignoring duplicate request");
+        return;
+    }
+
+    util::log_info("Shutdown requested via management endpoint");
+
+    std::function<void()> callback_copy;
+    {
+        std::lock_guard<std::mutex> lock(shutdown_mutex_);
+        callback_copy = shutdown_callback_;
+    }
+
+    if (callback_copy) {
+        try {
+            callback_copy();
+        } catch (const std::exception& e) {
+            util::log_error("Shutdown callback threw exception: " + std::string(e.what()));
+        } catch (...) {
+            util::log_error("Shutdown callback threw unknown exception");
+        }
+    }
+
+    stop();
+}
+
+} // namespace alpacahttp

@@ -20,6 +20,10 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <vector>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 
 namespace alpacahttp {
 
@@ -55,10 +59,22 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<int> server_fd_{-1};
     std::thread server_thread_;
+    
+    // Thread pool for handling concurrent requests
+    std::vector<std::thread> worker_threads_;
+    std::queue<int> connection_queue_;
+    std::mutex queue_mutex_;
+    std::condition_variable queue_condition_;
+    bool shutdown_workers_{false};
 
     void run_server();
     void handle_connection(int socket_fd);
+    void worker_thread();
+    void handle_shutdown_request();
+
+    std::function<void()> shutdown_callback_;
+    std::mutex shutdown_mutex_;
+    std::atomic<bool> shutdown_requested_{false};
 };
 
 } // namespace alpacahttp
-
