@@ -21,14 +21,14 @@ namespace alpacahttp::util {
 // Alpaca error codes
 namespace ErrorCode {
     constexpr std::int32_t SUCCESS = 0;
-    constexpr std::int32_t INVALID_VALUE = 0x400;  // 1024
-    constexpr std::int32_t VALUE_NOT_SET = 0x401;  // 1025
+    constexpr std::int32_t NOT_IMPLEMENTED = 0x400;  // 1024
+    constexpr std::int32_t INVALID_VALUE = 0x401;  // 1025
+    constexpr std::int32_t VALUE_NOT_SET = 0x402;  // 1026
     constexpr std::int32_t NOT_CONNECTED = 0x407;  // 1031
-    constexpr std::int32_t NOT_IMPLEMENTED = 0x43C; // 1084
-    constexpr std::int32_t INVALID_WHILE_PARKED = 0x44C; // 1100
-    constexpr std::int32_t INVALID_WHILE_SLAVED = 0x44D; // 1101
-    constexpr std::int32_t INVALID_OPERATION = 0x44E; // 1102
-    constexpr std::int32_t ACTION_NOT_IMPLEMENTED = 0x44F; // 1103
+    constexpr std::int32_t INVALID_WHILE_PARKED = 0x408; // 1032
+    constexpr std::int32_t INVALID_WHILE_SLAVED = 0x409; // 1033
+    constexpr std::int32_t INVALID_OPERATION = 0x40B; // 1035
+    constexpr std::int32_t ACTION_NOT_IMPLEMENTED = 0x40C; // 1036
     constexpr std::int32_t DRIVER_ERROR = 0x500; // 1280
     constexpr std::int32_t DRIVER_NOT_READY = 0x501; // 1281
     constexpr std::int32_t NOT_SAFE = 0x502; // 1282
@@ -43,4 +43,3 @@ std::int32_t map_error_code(int error_code);
 std::string map_error_message(std::int32_t alpaca_error_code);
 
 } // namespace alpacahttp::util
-

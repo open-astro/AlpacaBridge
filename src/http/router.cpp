@@ -28,6 +28,7 @@
 #include <cctype>
 #include <cmath>
 #include <ctime>
+#include <cstdlib>
 #include <cstdint>
 #include <vector>
 #include <chrono>
@@ -37,6 +38,7 @@
 #include <thread>
 #include <optional>
 #include <array>
+#include <variant>
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
@@ -90,10 +92,75 @@ std::optional<LogLevel> parse_log_level_string(const std::string& input) {
     return std::nullopt;
 }
 
+std::string to_lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::string url_decode(const std::string& value) {
+    std::string result;
+    result.reserve(value.size());
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '%' && i + 2 < value.size()) {
+            std::string hex = value.substr(i + 1, 2);
+            char decoded = static_cast<char>(std::strtol(hex.c_str(), nullptr, 16));
+            result.push_back(decoded);
+            i += 2;
+        } else if (value[i] == '+') {
+            result.push_back(' ');
+        } else {
+            result.push_back(value[i]);
+        }
+    }
+    return result;
+}
+
+const nlohmann::json* find_json_value_ci(const nlohmann::json& json_obj, const std::string& key) {
+    if (!json_obj.is_object()) {
+        return nullptr;
+    }
+    std::string target = to_lower_copy(key);
+    for (auto it = json_obj.begin(); it != json_obj.end(); ++it) {
+        if (to_lower_copy(it.key()) == target) {
+            return &it.value();
+        }
+    }
+    return nullptr;
+}
+
+std::optional<std::string> get_form_value_ci(std::string_view body, const std::string& key) {
+    if (body.empty()) {
+        return std::nullopt;
+    }
+    std::string target = to_lower_copy(key);
+    std::istringstream iss{std::string(body)};
+    std::string pair;
+    while (std::getline(iss, pair, '&')) {
+        auto eq_pos = pair.find('=');
+        if (eq_pos != std::string::npos) {
+            std::string form_key = url_decode(pair.substr(0, eq_pos));
+            std::string value = url_decode(pair.substr(eq_pos + 1));
+            if (to_lower_copy(form_key) == target) {
+                return value;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 nlohmann::json make_log_level_payload() {
     nlohmann::json payload;
     payload["Level"] = log_level_to_string(alpacacore::logging::get_log_level());
     payload["SupportedLevels"] = {"TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"};
+    return payload;
+}
+
+nlohmann::json make_log_history_payload() {
+    nlohmann::json payload;
+    const auto limit = alpacahttp::util::get_log_history_limit();
+    payload["Limit"] = limit;
+    payload["Unlimited"] = (limit == 0);
     return payload;
 }
 
@@ -228,6 +295,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "logs";
         return match;
     }
+    if (path == "/management/v1/loghistory" || path == "/management/loghistory") {
+        match.is_management = true;
+        match.management_endpoint = "loghistory";
+        return match;
+    }
     if (path == "/management/v1/shutdown" || path == "/management/shutdown") {
         match.is_management = true;
         match.management_endpoint = "shutdown";
@@ -265,6 +337,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_log_level(request, server_tx_id);
     } else if (match.management_endpoint == "logs") {
         return handle_logs(request, server_tx_id);
+    } else if (match.management_endpoint == "loghistory") {
+        return handle_log_history(request, server_tx_id);
     } else if (match.management_endpoint == "shutdown") {
         return handle_shutdown(request, server_tx_id);
     }
@@ -553,33 +627,25 @@ Response Router::dispatch_device_method(
                 // Try parsing as JSON first
                 auto json_opt = parse_json(request.body());
                 if (json_opt) {
-                    if (json_opt->contains("Connected")) {
-                        connected = json_opt->at("Connected").get<bool>();
+                    if (const auto* val = find_json_value_ci(*json_opt, "Connected")) {
+                        connected = val->get<bool>();
                         found = true;
-                    } else if (json_opt->contains("Value")) {
-                        connected = json_opt->at("Value").get<bool>();
+                    } else if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                        connected = val->get<bool>();
                         found = true;
                     }
                 }
                 
                 // If JSON parsing failed or didn't contain Connected/Value, try form-encoded
-                if (!found && !request.body().empty()) {
-                    // Parse form-encoded body (format: Connected=true&ClientID=1&ClientTransactionID=1)
-                    std::istringstream iss(request.body());
-                    std::string pair;
-                    while (std::getline(iss, pair, '&')) {
-                        auto eq_pos = pair.find('=');
-                        if (eq_pos != std::string::npos) {
-                            std::string key = pair.substr(0, eq_pos);
-                            std::string value = pair.substr(eq_pos + 1);
-                            
-                            if (key == "Connected" || key == "Value") {
-                                std::transform(value.begin(), value.end(), value.begin(), ::tolower);
-                                connected = (value == "true" || value == "1");
-                                found = true;
-                                break;
-                            }
-                        }
+                if (!found) {
+                    if (auto value = get_form_value_ci(request.body(), "Connected")) {
+                        std::string lowered = to_lower_copy(*value);
+                        connected = (lowered == "true" || lowered == "1");
+                        found = true;
+                    } else if (auto value = get_form_value_ci(request.body(), "Value")) {
+                        std::string lowered = to_lower_copy(*value);
+                        connected = (lowered == "true" || lowered == "1");
+                        found = true;
                     }
                 }
                 
@@ -595,8 +661,12 @@ Response Router::dispatch_device_method(
         }
         else if (method_name == "supportedactions") {
             if (request.method() == HttpMethod::GET) {
+                nlohmann::json actions = nlohmann::json::array();
+                for (const auto& action : device->get_supported_actions()) {
+                    actions.push_back(action);
+                }
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, device->get_supported_actions());
+                    client_tx_id, server_tx_id, actions.dump());
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -604,21 +674,30 @@ Response Router::dispatch_device_method(
         else if (method_name == "action") {
             if (request.method() == HttpMethod::PUT) {
                 auto json_opt = parse_json(request.body());
-                if (!json_opt) {
-                    throw std::runtime_error("Invalid JSON in request body");
-                }
-                
                 std::string action_name;
                 std::string action_parameters = "{}";
                 
-                if (json_opt->contains("Action")) {
-                    action_name = json_opt->at("Action").get<std::string>();
-                } else {
-                    throw std::runtime_error("Missing 'Action' in request");
+                if (json_opt) {
+                    if (const auto* val = find_json_value_ci(*json_opt, "Action")) {
+                        action_name = val->get<std::string>();
+                    }
+                    if (const auto* val = find_json_value_ci(*json_opt, "Parameters")) {
+                        action_parameters = val->dump();
+                    }
                 }
                 
-                if (json_opt->contains("Parameters")) {
-                    action_parameters = json_opt->at("Parameters").dump();
+                if (action_name.empty()) {
+                    if (auto value = get_form_value_ci(request.body(), "Action")) {
+                        action_name = *value;
+                    }
+                }
+
+                if (auto value = get_form_value_ci(request.body(), "Parameters")) {
+                    action_parameters = *value;
+                }
+
+                if (action_name.empty()) {
+                    throw std::runtime_error("Missing 'Action' in request");
                 }
                 
                 std::string result = device->action(action_name, action_parameters);
@@ -630,22 +709,31 @@ Response Router::dispatch_device_method(
         }
         else if (method_name == "commandblind") {
             if (request.method() == HttpMethod::PUT) {
-                auto json_opt = parse_json(request.body());
-                if (!json_opt) {
-                    throw std::runtime_error("Invalid JSON in request body");
-                }
-                
                 std::string command;
                 bool raw = false;
                 
-                if (json_opt->contains("Command")) {
-                    command = json_opt->at("Command").get<std::string>();
-                } else {
-                    throw std::runtime_error("Missing 'Command' in request");
+                auto json_opt = parse_json(request.body());
+                if (json_opt) {
+                    if (const auto* val = find_json_value_ci(*json_opt, "Command")) {
+                        command = val->get<std::string>();
+                    }
+                    if (const auto* val = find_json_value_ci(*json_opt, "Raw")) {
+                        raw = val->get<bool>();
+                    }
                 }
                 
-                if (json_opt->contains("Raw")) {
-                    raw = json_opt->at("Raw").get<bool>();
+                if (command.empty()) {
+                    if (auto value = get_form_value_ci(request.body(), "Command")) {
+                        command = *value;
+                    }
+                }
+                if (auto value = get_form_value_ci(request.body(), "Raw")) {
+                    std::string lowered = to_lower_copy(*value);
+                    raw = (lowered == "true" || lowered == "1");
+                }
+
+                if (command.empty()) {
+                    throw std::runtime_error("Missing 'Command' in request");
                 }
                 
                 device->command_blind(command, raw);
@@ -656,22 +744,31 @@ Response Router::dispatch_device_method(
         }
         else if (method_name == "commandbool") {
             if (request.method() == HttpMethod::PUT) {
-                auto json_opt = parse_json(request.body());
-                if (!json_opt) {
-                    throw std::runtime_error("Invalid JSON in request body");
-                }
-                
                 std::string command;
                 bool raw = false;
                 
-                if (json_opt->contains("Command")) {
-                    command = json_opt->at("Command").get<std::string>();
-                } else {
-                    throw std::runtime_error("Missing 'Command' in request");
+                auto json_opt = parse_json(request.body());
+                if (json_opt) {
+                    if (const auto* val = find_json_value_ci(*json_opt, "Command")) {
+                        command = val->get<std::string>();
+                    }
+                    if (const auto* val = find_json_value_ci(*json_opt, "Raw")) {
+                        raw = val->get<bool>();
+                    }
                 }
                 
-                if (json_opt->contains("Raw")) {
-                    raw = json_opt->at("Raw").get<bool>();
+                if (command.empty()) {
+                    if (auto value = get_form_value_ci(request.body(), "Command")) {
+                        command = *value;
+                    }
+                }
+                if (auto value = get_form_value_ci(request.body(), "Raw")) {
+                    std::string lowered = to_lower_copy(*value);
+                    raw = (lowered == "true" || lowered == "1");
+                }
+
+                if (command.empty()) {
+                    throw std::runtime_error("Missing 'Command' in request");
                 }
                 
                 bool result = device->command_bool(command, raw);
@@ -683,27 +780,75 @@ Response Router::dispatch_device_method(
         }
         else if (method_name == "commandstring") {
             if (request.method() == HttpMethod::PUT) {
-                auto json_opt = parse_json(request.body());
-                if (!json_opt) {
-                    throw std::runtime_error("Invalid JSON in request body");
-                }
-                
                 std::string command;
                 bool raw = false;
                 
-                if (json_opt->contains("Command")) {
-                    command = json_opt->at("Command").get<std::string>();
-                } else {
-                    throw std::runtime_error("Missing 'Command' in request");
+                auto json_opt = parse_json(request.body());
+                if (json_opt) {
+                    if (const auto* val = find_json_value_ci(*json_opt, "Command")) {
+                        command = val->get<std::string>();
+                    }
+                    if (const auto* val = find_json_value_ci(*json_opt, "Raw")) {
+                        raw = val->get<bool>();
+                    }
                 }
                 
-                if (json_opt->contains("Raw")) {
-                    raw = json_opt->at("Raw").get<bool>();
+                if (command.empty()) {
+                    if (auto value = get_form_value_ci(request.body(), "Command")) {
+                        command = *value;
+                    }
+                }
+                if (auto value = get_form_value_ci(request.body(), "Raw")) {
+                    std::string lowered = to_lower_copy(*value);
+                    raw = (lowered == "true" || lowered == "1");
+                }
+
+                if (command.empty()) {
+                    throw std::runtime_error("Missing 'Command' in request");
                 }
                 
                 std::string result = device->command_string(command, raw);
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, result);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+        else if (method_name == "connect") {
+            if (request.method() == HttpMethod::PUT) {
+                device->connect();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+        else if (method_name == "disconnect") {
+            if (request.method() == HttpMethod::PUT) {
+                device->disconnect();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+        else if (method_name == "connecting") {
+            if (request.method() == HttpMethod::GET) {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, device->get_connecting());
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+        else if (method_name == "devicestate") {
+            if (request.method() == HttpMethod::GET) {
+                nlohmann::json values = nlohmann::json::array();
+                for (const auto& entry : device->get_device_state()) {
+                    nlohmann::json obj;
+                    obj["Name"] = entry.name;
+                    std::visit([&obj](const auto& val) { obj["Value"] = val; }, entry.value);
+                    values.push_back(obj);
+                }
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, values.dump());
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -717,6 +862,66 @@ Response Router::dispatch_device_method(
             auto telescope = std::dynamic_pointer_cast<alpacacore::TelescopeDriver>(device);
             if (telescope) {
                 return dispatch_telescope_method(telescope, method_name, request, client_tx_id, server_tx_id);
+            }
+        }
+        if (device_type == alpacacore::DeviceType::Camera) {
+            auto camera = std::dynamic_pointer_cast<alpacacore::CameraDriver>(device);
+            if (camera) {
+                return dispatch_camera_method(camera, method_name, request, client_tx_id, server_tx_id);
+            }
+        }
+        if (device_type == alpacacore::DeviceType::Switch) {
+            auto sw = std::dynamic_pointer_cast<alpacacore::SwitchDriver>(device);
+            if (sw) {
+                return dispatch_switch_method(sw, method_name, request, client_tx_id, server_tx_id);
+            }
+        }
+        if (device_type == alpacacore::DeviceType::FilterWheel) {
+            auto filterwheel = std::dynamic_pointer_cast<alpacacore::FilterWheelDriver>(device);
+            if (filterwheel) {
+                return dispatch_filterwheel_method(filterwheel, method_name, request, client_tx_id, server_tx_id);
+            }
+        }
+        if (device_type == alpacacore::DeviceType::Focuser) {
+            auto focuser = std::dynamic_pointer_cast<alpacacore::FocuserDriver>(device);
+            if (focuser) {
+                return dispatch_focuser_method(focuser, method_name, request, client_tx_id, server_tx_id);
+            }
+        }
+        if (device_type == alpacacore::DeviceType::Rotator) {
+            auto rotator = std::dynamic_pointer_cast<alpacacore::RotatorDriver>(device);
+            if (rotator) {
+                return dispatch_rotator_method(rotator, method_name, request, client_tx_id, server_tx_id);
+            }
+        }
+        if (device_type == alpacacore::DeviceType::Dome) {
+            auto dome = std::dynamic_pointer_cast<alpacacore::DomeDriver>(device);
+            if (dome) {
+                return dispatch_dome_method(dome, method_name, request, client_tx_id, server_tx_id);
+            }
+        }
+        if (device_type == alpacacore::DeviceType::Shutter) {
+            auto shutter = std::dynamic_pointer_cast<alpacacore::ShutterDriver>(device);
+            if (shutter) {
+                return dispatch_shutter_method(shutter, method_name, request, client_tx_id, server_tx_id);
+            }
+        }
+        if (device_type == alpacacore::DeviceType::CoverCalibrator) {
+            auto covercalibrator = std::dynamic_pointer_cast<alpacacore::CoverCalibratorDriver>(device);
+            if (covercalibrator) {
+                return dispatch_covercalibrator_method(covercalibrator, method_name, request, client_tx_id, server_tx_id);
+            }
+        }
+        if (device_type == alpacacore::DeviceType::ObservingConditions) {
+            auto observingconditions = std::dynamic_pointer_cast<alpacacore::ObservingConditionsDriver>(device);
+            if (observingconditions) {
+                return dispatch_observingconditions_method(observingconditions, method_name, request, client_tx_id, server_tx_id);
+            }
+        }
+        if (device_type == alpacacore::DeviceType::SafetyMonitor) {
+            auto safetymonitor = std::dynamic_pointer_cast<alpacacore::SafetyMonitorDriver>(device);
+            if (safetymonitor) {
+                return dispatch_safetymonitor_method(safetymonitor, method_name, request, client_tx_id, server_tx_id);
             }
         }
         
@@ -761,58 +966,10 @@ Response Router::dispatch_telescope_method(
     Response response;
     
     try {
-        // Helper function to URL decode a string
-        auto url_decode = [](const std::string& str) -> std::string {
-            std::string result;
-            result.reserve(str.size());
-            for (size_t i = 0; i < str.size(); ++i) {
-                if (str[i] == '%' && i + 2 < str.size()) {
-                    int value;
-                    std::istringstream iss(str.substr(i + 1, 2));
-                    if (iss >> std::hex >> value) {
-                        result += static_cast<char>(value);
-                        i += 2;
-                    } else {
-                        result += str[i];
-                    }
-                } else if (str[i] == '+') {
-                    result += ' ';
-                } else {
-                    result += str[i];
-                }
-            }
-            return result;
-        };
-        
-        // Helper function to compare strings case-insensitively
-        auto case_insensitive_compare = [](const std::string& a, const std::string& b) -> bool {
-            if (a.size() != b.size()) return false;
-            for (size_t i = 0; i < a.size(); ++i) {
-                if (std::tolower(static_cast<unsigned char>(a[i])) != 
-                    std::tolower(static_cast<unsigned char>(b[i]))) {
-                    return false;
-                }
-            }
-            return true;
-        };
-        
         // Helper function to parse form-encoded parameter from body (case-insensitive)
         auto parse_form_param = [&](const std::string& param_name) -> std::string {
-            if (request.body().empty()) {
-                return "";
-            }
-            std::istringstream iss(request.body());
-            std::string pair;
-            while (std::getline(iss, pair, '&')) {
-                auto eq_pos = pair.find('=');
-                if (eq_pos != std::string::npos) {
-                    std::string key = pair.substr(0, eq_pos);
-                    std::string value = pair.substr(eq_pos + 1);
-                    // Case-insensitive comparison for form parameters
-                    if (case_insensitive_compare(key, param_name)) {
-                        return url_decode(value);
-                    }
-                }
+            if (auto value = get_form_value_ci(request.body(), param_name)) {
+                return *value;
             }
             return "";
         };
@@ -830,11 +987,13 @@ Response Router::dispatch_telescope_method(
             // Try JSON body
             if (!request.body().empty()) {
                 auto json_opt = parse_json(request.body());
-                if (json_opt && json_opt->contains(param_name)) {
-                    try {
-                        return json_opt->at(param_name).get<double>();
-                    } catch (const std::exception&) {
-                        throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                if (json_opt) {
+                    if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                        try {
+                            return val->get<double>();
+                        } catch (const std::exception&) {
+                            throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                        }
                     }
                 }
             }
@@ -863,11 +1022,13 @@ Response Router::dispatch_telescope_method(
             // Try JSON body
             if (!request.body().empty()) {
                 auto json_opt = parse_json(request.body());
-                if (json_opt && json_opt->contains(param_name)) {
-                    try {
-                        return json_opt->at(param_name).get<int>();
-                    } catch (const std::exception&) {
-                        throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                if (json_opt) {
+                    if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                        try {
+                            return val->get<int>();
+                        } catch (const std::exception&) {
+                            throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                        }
                     }
                 }
             }
@@ -894,26 +1055,23 @@ Response Router::dispatch_telescope_method(
             
             // Try JSON body
             auto json_opt = parse_json(request.body());
-            if (json_opt && json_opt->contains(param_name)) {
-                return json_opt->at(param_name).get<bool>();
+            if (json_opt) {
+                if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                    return val->get<bool>();
+                }
+                if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                    return val->get<bool>();
+                }
             }
             
             // Try form-encoded body (e.g., "Tracking=true" or "Tracking=1")
-            if (!request.body().empty()) {
-                std::istringstream iss(request.body());
-                std::string pair;
-                while (std::getline(iss, pair, '&')) {
-                    auto eq_pos = pair.find('=');
-                    if (eq_pos != std::string::npos) {
-                        std::string key = pair.substr(0, eq_pos);
-                        std::string value = pair.substr(eq_pos + 1);
-                        
-                        if (key == param_name || key == "Value") {
-                            std::transform(value.begin(), value.end(), value.begin(), ::tolower);
-                            return (value == "true" || value == "1");
-                        }
-                    }
-                }
+            if (auto value = get_form_value_ci(request.body(), param_name)) {
+                std::string lowered = to_lower_copy(*value);
+                return (lowered == "true" || lowered == "1");
+            }
+            if (auto value = get_form_value_ci(request.body(), "Value")) {
+                std::string lowered = to_lower_copy(*value);
+                return (lowered == "true" || lowered == "1");
             }
             
             throw std::runtime_error("Missing parameter: " + param_name);
@@ -925,8 +1083,19 @@ Response Router::dispatch_telescope_method(
                 return request.get_query_param(param_name);
             }
             auto json_opt = parse_json(request.body());
-            if (json_opt && json_opt->contains(param_name)) {
-                return json_opt->at(param_name).get<std::string>();
+            if (json_opt) {
+                if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                    return val->get<std::string>();
+                }
+                if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                    return val->get<std::string>();
+                }
+            }
+            if (auto value = get_form_value_ci(request.body(), param_name)) {
+                return *value;
+            }
+            if (auto value = get_form_value_ci(request.body(), "Value")) {
+                return *value;
             }
             throw std::runtime_error("Missing parameter: " + param_name);
         };
@@ -1013,19 +1182,19 @@ Response Router::dispatch_telescope_method(
             }
             else if (method_name == "canslewaltaz") {
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, false);
+                    client_tx_id, server_tx_id, telescope->get_can_slew_alt_az());
                 response.set_body(alpaca_response);
                 return response;
             }
             else if (method_name == "canslewaltazasync") {
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, false);
+                    client_tx_id, server_tx_id, telescope->get_can_slew_alt_az_async());
                 response.set_body(alpaca_response);
                 return response;
             }
             else if (method_name == "cansyncaltaz") {
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, false);
+                    client_tx_id, server_tx_id, telescope->get_can_sync_alt_az());
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -1038,25 +1207,25 @@ Response Router::dispatch_telescope_method(
             }
             else if (method_name == "equatorialsystem") {
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, 0);
+                    client_tx_id, server_tx_id, static_cast<int>(telescope->get_equatorial_system()));
                 response.set_body(alpaca_response);
                 return response;
             }
             else if (method_name == "doesrefraction") {
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, false);
+                    client_tx_id, server_tx_id, telescope->get_does_refraction());
                 response.set_body(alpaca_response);
                 return response;
             }
             else if (method_name == "ispulseguiding") {
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, false);
+                    client_tx_id, server_tx_id, telescope->get_is_pulse_guiding());
                 response.set_body(alpaca_response);
                 return response;
             }
             else if (method_name == "slewsettletime") {
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, 0.0);
+                    client_tx_id, server_tx_id, telescope->get_slew_settle_time());
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -1104,7 +1273,7 @@ Response Router::dispatch_telescope_method(
             else if (method_name == "destinationsideofpier") {
                 double ra = parse_double("RightAscension");
                 double dec = parse_double("Declination");
-                int side = telescope->get_side_of_pier();
+                int side = telescope->get_destination_side_of_pier(ra, dec);
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, side);
                 response.set_body(alpaca_response);
@@ -1171,7 +1340,7 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "trackingrate") {
-                int rate = static_cast<int>(std::lround(telescope->get_tracking_rate()));
+                int rate = telescope->get_tracking_rate();
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, rate);
                 response.set_body(alpaca_response);
@@ -1268,12 +1437,13 @@ Response Router::dispatch_telescope_method(
         if (method_name == "doesrefraction") {
             if (request.method() == HttpMethod::GET) {
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, false);
+                    client_tx_id, server_tx_id, telescope->get_does_refraction());
                 response.set_body(alpaca_response);
                 return response;
             }
             else if (request.method() == HttpMethod::PUT) {
                 bool value = parse_bool("DoesRefraction");
+                telescope->set_does_refraction(value);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -1282,22 +1452,23 @@ Response Router::dispatch_telescope_method(
         else if (method_name == "slewsettletime") {
             if (request.method() == HttpMethod::GET) {
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, 0.0);
+                    client_tx_id, server_tx_id, telescope->get_slew_settle_time());
                 response.set_body(alpaca_response);
                 return response;
             }
             else if (request.method() == HttpMethod::PUT) {
-                double value = parse_double("SlewSettleTime");
+                int value = parse_int("SlewSettleTime");
+                telescope->set_slew_settle_time(value);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
             }
         }
-            else if (method_name == "utcdate") {
-                if (request.method() == HttpMethod::GET) {
-                    auto utc = telescope->get_utc_date();
-                    auto time_t = std::chrono::system_clock::to_time_t(utc);
-                    std::ostringstream oss;
+        else if (method_name == "utcdate") {
+            if (request.method() == HttpMethod::GET) {
+                auto utc = telescope->get_utc_date();
+                auto time_t = std::chrono::system_clock::to_time_t(utc);
+                std::ostringstream oss;
                 oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
                 auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     utc.time_since_epoch()) % 1000;
@@ -1306,53 +1477,53 @@ Response Router::dispatch_telescope_method(
                     client_tx_id, server_tx_id, oss.str());
                 response.set_body(alpaca_response);
                 return response;
-                }
-                else if (request.method() == HttpMethod::PUT) {
-                    std::string date_str;
-                    bool found = false;
-                
-                // Try query parameter first
+            }
+            else if (request.method() == HttpMethod::PUT) {
+                std::string date_str;
                 if (request.has_query_param("UTCDate")) {
                     date_str = request.get_query_param("UTCDate");
-                    found = true;
-                } else if (!request.body().empty()) {
-                    // Try JSON first
-                    auto json_opt = parse_json(request.body());
-                    if (json_opt) {
-                        if (json_opt->contains("UTCDate")) {
-                            date_str = json_opt->at("UTCDate").get<std::string>();
-                            found = true;
-                        } else if (json_opt->contains("Value")) {
-                            date_str = json_opt->at("Value").get<std::string>();
-                            found = true;
-                        }
-                    }
-                    
-                    // If JSON parsing failed or didn't contain UTCDate/Value, try form-encoded
-                    if (!found) {
-                        std::istringstream iss(request.body());
-                        std::string pair;
-                        while (std::getline(iss, pair, '&')) {
-                            auto eq_pos = pair.find('=');
-                            if (eq_pos != std::string::npos) {
-                                std::string key = pair.substr(0, eq_pos);
-                                std::string value = pair.substr(eq_pos + 1);
-                                
-                                if (key == "UTCDate" || key == "Value") {
-                                    date_str = url_decode(value);
-                                    found = true;
-                                    break;
-                                }
-                            }
-                        }
+                } else if (auto json_opt = parse_json(request.body())) {
+                    if (const auto* val = find_json_value_ci(*json_opt, "UTCDate")) {
+                        date_str = val->get<std::string>();
+                    } else if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                        date_str = val->get<std::string>();
                     }
                 }
-                
-                if (!found) {
+                if (date_str.empty()) {
+                    if (auto value = get_form_value_ci(request.body(), "UTCDate")) {
+                        date_str = *value;
+                    } else if (auto value = get_form_value_ci(request.body(), "Value")) {
+                        date_str = *value;
+                    }
+                }
+                if (date_str.empty()) {
                     throw std::runtime_error("Missing parameter: UTCDate or Value");
                 }
+                std::string cleaned = date_str;
+                if (!cleaned.empty() && (cleaned.back() == 'Z' || cleaned.back() == 'z')) {
+                    cleaned.pop_back();
+                }
+                std::string base = cleaned;
+                int millis = 0;
+                auto dot_pos = cleaned.find('.');
+                if (dot_pos != std::string::npos) {
+                    base = cleaned.substr(0, dot_pos);
+                    std::string frac = cleaned.substr(dot_pos + 1);
+                    if (frac.size() > 3) {
+                        frac = frac.substr(0, 3);
+                    }
+                    while (frac.size() < 3) {
+                        frac.push_back('0');
+                    }
+                    try {
+                        millis = std::stoi(frac);
+                    } catch (const std::exception&) {
+                        throw std::runtime_error("Invalid UTC date format: " + date_str);
+                    }
+                }
+
                 std::tm tm = {};
-                std::istringstream ss(date_str);
+                std::istringstream ss(base);
                 ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
                 if (ss.fail()) {
                     throw std::runtime_error("Invalid UTC date format: " + date_str);
@@ -1365,7 +1536,8 @@ Response Router::dispatch_telescope_method(
                 if (utc_time == static_cast<std::time_t>(-1)) {
                     throw std::runtime_error("Failed to convert UTC date: " + date_str);
                 }
-                auto time_point = std::chrono::system_clock::from_time_t(utc_time);
+                auto time_point = std::chrono::system_clock::from_time_t(utc_time) +
+                    std::chrono::milliseconds(millis);
                 telescope->set_utc_date(time_point);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
@@ -1425,7 +1597,7 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (request.method() == HttpMethod::PUT) {
-                double value = parse_double("TrackingRate");
+                int value = parse_int("TrackingRate");
                 telescope->set_tracking_rate(value);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
@@ -1588,6 +1760,14 @@ Response Router::dispatch_telescope_method(
                 response.set_body(alpaca_response);
                 return response;
             }
+            else if (method_name == "slewtoaltaz") {
+                double altitude = parse_double("Altitude");
+                double azimuth = parse_double("Azimuth");
+                telescope->slew_to_alt_az(altitude, azimuth);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
             else if (method_name == "synctoaltaz") {
                 double altitude = parse_double("Altitude");
                 double azimuth = parse_double("Azimuth");
@@ -1637,7 +1817,7 @@ Response Router::dispatch_telescope_method(
                 double dec = parse_double("Declination");
                 telescope->set_target_right_ascension(ra);
                 telescope->set_target_declination(dec);
-                telescope->slew_to_coordinates();
+                telescope->slew_to_coordinates(ra, dec);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -1652,7 +1832,7 @@ Response Router::dispatch_telescope_method(
                 util::log_info("slewtocoordinatesasync parsed: RA=" + std::to_string(ra) + ", Dec=" + std::to_string(dec));
                 telescope->set_target_right_ascension(ra);
                 telescope->set_target_declination(dec);
-                telescope->slew_to_coordinates_async();
+                telescope->slew_to_coordinates_async(ra, dec);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -1701,6 +1881,1813 @@ Response Router::dispatch_telescope_method(
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in telescope method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::exception_to_error_code(e),
+            util::exception_to_error_message(e)
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::dispatch_camera_method(
+    std::shared_ptr<alpacacore::CameraDriver> camera,
+    const std::string& method_name,
+    const Request& request,
+    std::uint32_t client_tx_id,
+    std::uint32_t server_tx_id) {
+    
+    Response response;
+    auto parse_double = [&](const std::string& param_name) -> double {
+        if (request.has_query_param(param_name)) {
+            return std::stod(request.get_query_param(param_name));
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<double>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<double>();
+            }
+        }
+        if (auto value = get_form_value_ci(request.body(), param_name)) {
+            return std::stod(*value);
+        }
+        if (auto value = get_form_value_ci(request.body(), "Value")) {
+            return std::stod(*value);
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto parse_int = [&](const std::string& param_name) -> int {
+        if (request.has_query_param(param_name)) {
+            return std::stoi(request.get_query_param(param_name));
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<int>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<int>();
+            }
+        }
+        if (auto value = get_form_value_ci(request.body(), param_name)) {
+            return std::stoi(*value);
+        }
+        if (auto value = get_form_value_ci(request.body(), "Value")) {
+            return std::stoi(*value);
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto parse_bool = [&](const std::string& param_name) -> bool {
+        if (request.has_query_param(param_name)) {
+            std::string value = to_lower_copy(request.get_query_param(param_name));
+            return (value == "true" || value == "1");
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<bool>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<bool>();
+            }
+        }
+        if (auto value = get_form_value_ci(request.body(), param_name)) {
+            std::string lowered = to_lower_copy(*value);
+            return (lowered == "true" || lowered == "1");
+        }
+        if (auto value = get_form_value_ci(request.body(), "Value")) {
+            std::string lowered = to_lower_copy(*value);
+            return (lowered == "true" || lowered == "1");
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto parse_string = [&](const std::string& param_name) -> std::string {
+        if (request.has_query_param(param_name)) {
+            return request.get_query_param(param_name);
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<std::string>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<std::string>();
+            }
+        }
+        if (auto value = get_form_value_ci(request.body(), param_name)) {
+            return *value;
+        }
+        if (auto value = get_form_value_ci(request.body(), "Value")) {
+            return *value;
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto format_utc = [](std::chrono::system_clock::time_point time_point) -> std::string {
+        auto time_t = std::chrono::system_clock::to_time_t(time_point);
+        std::ostringstream oss;
+        oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            time_point.time_since_epoch()) % 1000;
+        oss << "." << std::setfill('0') << std::setw(3) << ms.count() << "Z";
+        return oss.str();
+    };
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            if (method_name == "bayeroffsetx") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_bayer_offset_x());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "bayeroffsety") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_bayer_offset_y());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "binx") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_bin_x());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "biny") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_bin_y());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "camerastate") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, static_cast<int>(camera->get_camera_state()));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cameraxsize") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_camera_x_size());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cameraysize") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_camera_y_size());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canabortexposure") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_can_abort_exposure());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canasymmetricbin") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_can_asymmetric_bin());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canfastreadout") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_can_fast_readout());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cangetcoolerpower") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_can_get_cooler_power());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canpulseguide") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_can_pulse_guide());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cansetccdtemperature") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_can_set_ccd_temperature());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canstopexposure") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_can_stop_exposure());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "ccdtemperature") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_ccd_temperature());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cooleron") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_cooler_on());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "coolerpower") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_cooler_power());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "electronsperadu") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_electrons_per_adu());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "exposuremax") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_exposure_max());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "exposuremin") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_exposure_min());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "exposureresolution") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_exposure_resolution());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "fastreadout") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_fast_readout());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "fullwellcapacity") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_full_well_capacity());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "gain") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_gain());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "gainmax") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_gain_max());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "gainmin") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_gain_min());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "gains") {
+                nlohmann::json gains = nlohmann::json::array();
+                for (const auto& gain : camera->get_gains()) {
+                    gains.push_back(gain);
+                }
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, gains.dump());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "hasshutter") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_has_shutter());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "heatsinktemperature") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_heat_sink_temperature());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "imagearray") {
+                auto image = camera->get_image_array();
+                nlohmann::json array = nlohmann::json::array();
+                if (image.rank == 2 && image.width > 0 && image.height > 0) {
+                    std::size_t idx = 0;
+                    for (int y = 0; y < image.height; ++y) {
+                        nlohmann::json row = nlohmann::json::array();
+                        for (int x = 0; x < image.width; ++x) {
+                            int value = 0;
+                            if (idx < image.data.size()) {
+                                value = image.data[idx];
+                            }
+                            row.push_back(value);
+                            ++idx;
+                        }
+                        array.push_back(row);
+                    }
+                } else if (image.rank == 3 && image.width > 0 && image.height > 0) {
+                    std::size_t idx = 0;
+                    for (int y = 0; y < image.height; ++y) {
+                        nlohmann::json row = nlohmann::json::array();
+                        for (int x = 0; x < image.width; ++x) {
+                            nlohmann::json pixel = nlohmann::json::array();
+                            for (int c = 0; c < 3; ++c) {
+                                int value = 0;
+                                if (idx < image.data.size()) {
+                                    value = image.data[idx];
+                                }
+                                pixel.push_back(value);
+                                ++idx;
+                            }
+                            row.push_back(pixel);
+                        }
+                        array.push_back(row);
+                    }
+                }
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, array.dump());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "imagearrayvariant") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_image_array_variant());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "imageready") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_image_ready());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "ispulseguiding") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_is_pulse_guiding());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "lastexposureduration") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_last_exposure_duration());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "lastexposurestarttime") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, format_utc(camera->get_last_exposure_start_time()));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "maxadu") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_max_adu());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "maxbinx") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_max_bin_x());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "maxbiny") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_max_bin_y());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "numx") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_num_x());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "numy") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_num_y());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "offset") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_offset());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "offsetmax") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_offset_max());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "offsetmin") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_offset_min());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "offsets") {
+                nlohmann::json offsets = nlohmann::json::array();
+                for (const auto& offset : camera->get_offsets()) {
+                    offsets.push_back(offset);
+                }
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, offsets.dump());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "percentcompleted") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_percent_completed());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "pixelsizex") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_pixel_size_x());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "pixelsizey") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_pixel_size_y());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "readoutmode") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_readout_mode());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "readoutmodes") {
+                nlohmann::json modes = nlohmann::json::array();
+                for (const auto& mode : camera->get_readout_modes()) {
+                    modes.push_back(mode);
+                }
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, modes.dump());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "sensorname") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_sensor_name());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "sensortype") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, static_cast<int>(camera->get_sensor_type()));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "setccdtemperature") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_set_ccd_temperature());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "startx") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_start_x());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "starty") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_start_y());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "subexposureduration") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_sub_exposure_duration());
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        if (request.method() == HttpMethod::PUT) {
+            if (method_name == "binx") {
+                int value = parse_int("BinX");
+                camera->set_bin_x(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "biny") {
+                int value = parse_int("BinY");
+                camera->set_bin_y(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "fastreadout") {
+                bool value = parse_bool("FastReadout");
+                camera->set_fast_readout(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "gain") {
+                int value = parse_int("Gain");
+                camera->set_gain(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cooleron") {
+                bool value = parse_bool("CoolerOn");
+                camera->set_cooler_on(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "setccdtemperature") {
+                double value = parse_double("SetCCDTemperature");
+                camera->set_set_ccd_temperature(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "numx") {
+                int value = parse_int("NumX");
+                camera->set_num_x(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "numy") {
+                int value = parse_int("NumY");
+                camera->set_num_y(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "offset") {
+                int value = parse_int("Offset");
+                camera->set_offset(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "readoutmode") {
+                int value = parse_int("ReadoutMode");
+                camera->set_readout_mode(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "startx") {
+                int value = parse_int("StartX");
+                camera->set_start_x(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "starty") {
+                int value = parse_int("StartY");
+                camera->set_start_y(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "subexposureduration") {
+                double value = parse_double("SubExposureDuration");
+                camera->set_sub_exposure_duration(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "startexposure") {
+                double duration = parse_double("Duration");
+                bool light = parse_bool("Light");
+                camera->start_exposure(duration, light);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "pulseguide") {
+                int direction = parse_int("Direction");
+                int duration = parse_int("Duration");
+                camera->pulse_guide(direction, duration);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "stopexposure") {
+                camera->stop_exposure();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "abortexposure") {
+                camera->abort_exposure();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::NOT_IMPLEMENTED,
+            "Method '" + method_name + "' not yet implemented for Camera"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const alpacacore::AlpacaException& e) {
+        util::log_error("AlpacaException in camera method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::map_error_code(e.error_code()),
+            std::string(e.what())
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        util::log_error("Exception in camera method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::exception_to_error_code(e),
+            util::exception_to_error_message(e)
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::dispatch_switch_method(
+    std::shared_ptr<alpacacore::SwitchDriver> sw,
+    const std::string& method_name,
+    const Request& request,
+    std::uint32_t client_tx_id,
+    std::uint32_t server_tx_id) {
+    
+    Response response;
+
+    auto parse_double = [&](const std::string& param_name) -> double {
+        if (request.has_query_param(param_name)) {
+            return std::stod(request.get_query_param(param_name));
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<double>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<double>();
+            }
+        }
+        if (auto value = get_form_value_ci(request.body(), param_name)) {
+            return std::stod(*value);
+        }
+        if (auto value = get_form_value_ci(request.body(), "Value")) {
+            return std::stod(*value);
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto parse_int = [&](const std::string& param_name) -> int {
+        if (request.has_query_param(param_name)) {
+            return std::stoi(request.get_query_param(param_name));
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<int>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<int>();
+            }
+        }
+        if (auto value = get_form_value_ci(request.body(), param_name)) {
+            return std::stoi(*value);
+        }
+        if (auto value = get_form_value_ci(request.body(), "Value")) {
+            return std::stoi(*value);
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto parse_bool = [&](const std::string& param_name) -> bool {
+        if (request.has_query_param(param_name)) {
+            std::string value = to_lower_copy(request.get_query_param(param_name));
+            return (value == "true" || value == "1");
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<bool>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<bool>();
+            }
+        }
+        if (auto value = get_form_value_ci(request.body(), param_name)) {
+            std::string lowered = to_lower_copy(*value);
+            return (lowered == "true" || lowered == "1");
+        }
+        if (auto value = get_form_value_ci(request.body(), "Value")) {
+            std::string lowered = to_lower_copy(*value);
+            return (lowered == "true" || lowered == "1");
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto parse_string = [&](const std::string& param_name) -> std::string {
+        if (request.has_query_param(param_name)) {
+            return request.get_query_param(param_name);
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<std::string>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<std::string>();
+            }
+        }
+        if (auto value = get_form_value_ci(request.body(), param_name)) {
+            return *value;
+        }
+        if (auto value = get_form_value_ci(request.body(), "Value")) {
+            return *value;
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            if (method_name == "maxswitch") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_max_switch());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canasync") {
+                int id = parse_int("Id");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_can_async(id));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canwrite") {
+                int id = parse_int("Id");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_can_write(id));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "getswitch") {
+                int id = parse_int("Id");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_switch(id));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "getswitchvalue") {
+                int id = parse_int("Id");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_switch_value(id));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "getswitchname") {
+                int id = parse_int("Id");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_switch_name(id));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "getswitchdescription") {
+                int id = parse_int("Id");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_switch_description(id));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "minswitchvalue") {
+                int id = parse_int("Id");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_min_switch_value(id));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "maxswitchvalue") {
+                int id = parse_int("Id");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_max_switch_value(id));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "statechangecomplete") {
+                int id = parse_int("Id");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_state_change_complete(id));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "switchstep") {
+                int id = parse_int("Id");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, sw->get_switch_step(id));
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        if (request.method() == HttpMethod::PUT) {
+            if (method_name == "setswitch") {
+                int id = parse_int("Id");
+                bool state = parse_bool("State");
+                sw->set_switch(id, state);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "setasync") {
+                int id = parse_int("Id");
+                bool state = parse_bool("State");
+                sw->set_async(id, state);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "setswitchvalue") {
+                int id = parse_int("Id");
+                double value = parse_double("Value");
+                sw->set_switch_value(id, value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "setasyncvalue") {
+                int id = parse_int("Id");
+                double value = parse_double("Value");
+                sw->set_async_value(id, value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "setswitchname") {
+                int id = parse_int("Id");
+                std::string name = parse_string("Name");
+                sw->set_switch_name(id, name);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::NOT_IMPLEMENTED,
+            "Method '" + method_name + "' not yet implemented for Switch"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const alpacacore::AlpacaException& e) {
+        util::log_error("AlpacaException in switch method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::map_error_code(e.error_code()),
+            std::string(e.what())
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        util::log_error("Exception in switch method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::exception_to_error_code(e),
+            util::exception_to_error_message(e)
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::dispatch_filterwheel_method(
+    std::shared_ptr<alpacacore::FilterWheelDriver> filterwheel,
+    const std::string& method_name,
+    const Request& request,
+    std::uint32_t client_tx_id,
+    std::uint32_t server_tx_id) {
+    
+    Response response;
+
+    auto parse_int = [&](const std::string& param_name) -> int {
+        if (request.has_query_param(param_name)) {
+            return std::stoi(request.get_query_param(param_name));
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<int>();
+            }
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            if (method_name == "position") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, filterwheel->get_position());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "names") {
+                nlohmann::json names = nlohmann::json::array();
+                for (const auto& name : filterwheel->get_names()) {
+                    names.push_back(name);
+                }
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, names.dump());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "focusoffsets") {
+                nlohmann::json offsets = nlohmann::json::array();
+                for (int offset : filterwheel->get_focus_offsets()) {
+                    offsets.push_back(offset);
+                }
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, offsets.dump());
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        if (request.method() == HttpMethod::PUT) {
+            if (method_name == "position") {
+                int value = parse_int("Position");
+                filterwheel->set_position(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "names") {
+                auto json_opt = parse_json(request.body());
+                const auto* names_val = json_opt ? find_json_value_ci(*json_opt, "Names") : nullptr;
+                if (!names_val) {
+                    throw std::runtime_error("Missing parameter: Names");
+                }
+                std::vector<std::string> names = names_val->get<std::vector<std::string>>();
+                filterwheel->set_names(names);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "focusoffsets") {
+                auto json_opt = parse_json(request.body());
+                const auto* offsets_val = json_opt ? find_json_value_ci(*json_opt, "FocusOffsets") : nullptr;
+                if (!offsets_val) {
+                    throw std::runtime_error("Missing parameter: FocusOffsets");
+                }
+                std::vector<int> offsets = offsets_val->get<std::vector<int>>();
+                filterwheel->set_focus_offsets(offsets);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::NOT_IMPLEMENTED,
+            "Method '" + method_name + "' not yet implemented for FilterWheel"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const alpacacore::AlpacaException& e) {
+        util::log_error("AlpacaException in filter wheel method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::map_error_code(e.error_code()),
+            std::string(e.what())
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        util::log_error("Exception in filter wheel method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::exception_to_error_code(e),
+            util::exception_to_error_message(e)
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::dispatch_focuser_method(
+    std::shared_ptr<alpacacore::FocuserDriver> focuser,
+    const std::string& method_name,
+    const Request& request,
+    std::uint32_t client_tx_id,
+    std::uint32_t server_tx_id) {
+    
+    Response response;
+
+    auto parse_int = [&](const std::string& param_name) -> int {
+        if (request.has_query_param(param_name)) {
+            return std::stoi(request.get_query_param(param_name));
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt && json_opt->contains(param_name)) {
+            return json_opt->at(param_name).get<int>();
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto parse_bool = [&](const std::string& param_name) -> bool {
+        if (request.has_query_param(param_name)) {
+            std::string value = request.get_query_param(param_name);
+            std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+            return (value == "true" || value == "1");
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<bool>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<bool>();
+            }
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            if (method_name == "absolute") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, focuser->get_absolute());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "ismoving") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, focuser->get_is_moving());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "maxincrement") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, focuser->get_max_increment());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "maxstep") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, focuser->get_max_step());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "position") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, focuser->get_position());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "stepsize") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, focuser->get_step_size());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "tempcompavailable") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, focuser->get_temp_comp_available());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "tempcomp") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, focuser->get_temp_comp());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "temperature") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, focuser->get_temperature());
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        if (request.method() == HttpMethod::PUT) {
+            if (method_name == "tempcomp") {
+                bool value = parse_bool("TempComp");
+                focuser->set_temp_comp(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "move") {
+                int position = parse_int("Position");
+                focuser->move(position);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "halt") {
+                focuser->halt();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::NOT_IMPLEMENTED,
+            "Method '" + method_name + "' not yet implemented for Focuser"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const alpacacore::AlpacaException& e) {
+        util::log_error("AlpacaException in focuser method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::map_error_code(e.error_code()),
+            std::string(e.what())
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        util::log_error("Exception in focuser method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::exception_to_error_code(e),
+            util::exception_to_error_message(e)
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::dispatch_rotator_method(
+    std::shared_ptr<alpacacore::RotatorDriver> rotator,
+    const std::string& method_name,
+    const Request& request,
+    std::uint32_t client_tx_id,
+    std::uint32_t server_tx_id) {
+    
+    Response response;
+
+    auto parse_double = [&](const std::string& param_name) -> double {
+        if (request.has_query_param(param_name)) {
+            return std::stod(request.get_query_param(param_name));
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt && json_opt->contains(param_name)) {
+            return json_opt->at(param_name).get<double>();
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto parse_bool = [&](const std::string& param_name) -> bool {
+        if (request.has_query_param(param_name)) {
+            std::string value = request.get_query_param(param_name);
+            std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+            return (value == "true" || value == "1");
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<bool>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<bool>();
+            }
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            if (method_name == "canreverse") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, rotator->get_can_reverse());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "reverse") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, rotator->get_reverse());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "ismoving") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, rotator->get_is_moving());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "mechanicalposition") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, rotator->get_mechanical_position());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "position") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, rotator->get_position());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "stepsize") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, rotator->get_step_size());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "targetposition") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, rotator->get_target_position());
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        if (request.method() == HttpMethod::PUT) {
+            if (method_name == "reverse") {
+                bool value = parse_bool("Reverse");
+                rotator->set_reverse(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "move") {
+                double position = parse_double("Position");
+                rotator->move(position);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "moveabsolute") {
+                double position = parse_double("Position");
+                rotator->move_absolute(position);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "movemechanical") {
+                double position = parse_double("Position");
+                rotator->move_mechanical(position);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "halt") {
+                rotator->halt();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "sync") {
+                double position = parse_double("Position");
+                rotator->sync(position);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "targetposition") {
+                double position = parse_double("TargetPosition");
+                rotator->set_target_position(position);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::NOT_IMPLEMENTED,
+            "Method '" + method_name + "' not yet implemented for Rotator"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const alpacacore::AlpacaException& e) {
+        util::log_error("AlpacaException in rotator method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::map_error_code(e.error_code()),
+            std::string(e.what())
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        util::log_error("Exception in rotator method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::exception_to_error_code(e),
+            util::exception_to_error_message(e)
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::dispatch_dome_method(
+    std::shared_ptr<alpacacore::DomeDriver> dome,
+    const std::string& method_name,
+    const Request& request,
+    std::uint32_t client_tx_id,
+    std::uint32_t server_tx_id) {
+    
+    Response response;
+
+    auto parse_double = [&](const std::string& param_name) -> double {
+        if (request.has_query_param(param_name)) {
+            return std::stod(request.get_query_param(param_name));
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<double>();
+            }
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto parse_bool = [&](const std::string& param_name) -> bool {
+        if (request.has_query_param(param_name)) {
+            std::string value = request.get_query_param(param_name);
+            std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+            return (value == "true" || value == "1");
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<bool>();
+            }
+            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                return val->get<bool>();
+            }
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            if (method_name == "altitude") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_altitude());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "athome") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_at_home());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "atpark") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_at_park());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "azimuth") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_azimuth());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canfindhome") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_can_find_home());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canpark") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_can_park());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cansetaltitude") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_can_set_altitude());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cansetazimuth") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_can_set_azimuth());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cansetpark") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_can_set_park());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cansetshutter") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_can_set_shutter());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canslew") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_can_slew());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cansyncazimuth") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_can_sync_azimuth());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "canslave") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_can_slave());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "slaved") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_slaved());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "slewing") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_slewing());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "shutterstatus") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, dome->get_shutter_status());
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        if (request.method() == HttpMethod::PUT) {
+            if (method_name == "slaved") {
+                bool value = parse_bool("Slaved");
+                dome->set_slaved(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "abortslew") {
+                dome->abort_slew();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "closeshutter") {
+                dome->close_shutter();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "findhome") {
+                dome->find_home();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "openshutter") {
+                dome->open_shutter();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "park") {
+                dome->park();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "setpark") {
+                dome->set_park();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "slewtoazimuth") {
+                double azimuth = parse_double("Azimuth");
+                dome->slew_to_azimuth(azimuth);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "slewtoaltitude") {
+                double altitude = parse_double("Altitude");
+                dome->slew_to_altitude(altitude);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "synctoazimuth") {
+                double azimuth = parse_double("Azimuth");
+                dome->sync_to_azimuth(azimuth);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::NOT_IMPLEMENTED,
+            "Method '" + method_name + "' not yet implemented for Dome"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const alpacacore::AlpacaException& e) {
+        util::log_error("AlpacaException in dome method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::map_error_code(e.error_code()),
+            std::string(e.what())
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        util::log_error("Exception in dome method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::exception_to_error_code(e),
+            util::exception_to_error_message(e)
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::dispatch_shutter_method(
+    std::shared_ptr<alpacacore::ShutterDriver> shutter,
+    const std::string& method_name,
+    const Request& request,
+    std::uint32_t client_tx_id,
+    std::uint32_t server_tx_id) {
+    
+    Response response;
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            if (method_name == "shutterstate") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, static_cast<int>(shutter->get_shutter_state()));
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        if (request.method() == HttpMethod::PUT) {
+            if (method_name == "open") {
+                shutter->open();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "close") {
+                shutter->close();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::NOT_IMPLEMENTED,
+            "Method '" + method_name + "' not yet implemented for Shutter"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const alpacacore::AlpacaException& e) {
+        util::log_error("AlpacaException in shutter method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::map_error_code(e.error_code()),
+            std::string(e.what())
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        util::log_error("Exception in shutter method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::exception_to_error_code(e),
+            util::exception_to_error_message(e)
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::dispatch_covercalibrator_method(
+    std::shared_ptr<alpacacore::CoverCalibratorDriver> covercalibrator,
+    const std::string& method_name,
+    const Request& request,
+    std::uint32_t client_tx_id,
+    std::uint32_t server_tx_id) {
+    
+    Response response;
+
+    auto parse_int = [&](const std::string& param_name) -> int {
+        if (request.has_query_param(param_name)) {
+            return std::stoi(request.get_query_param(param_name));
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt && json_opt->contains(param_name)) {
+            return json_opt->at(param_name).get<int>();
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            if (method_name == "brightness") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, covercalibrator->get_brightness());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "calibratorchanging") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, covercalibrator->get_calibrator_changing());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "calibratorstate") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, static_cast<int>(covercalibrator->get_calibrator_state()));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "covermoving") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, covercalibrator->get_cover_moving());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "coverstate") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, static_cast<int>(covercalibrator->get_cover_state()));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "maxbrightness") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, covercalibrator->get_max_brightness());
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        if (request.method() == HttpMethod::PUT) {
+            if (method_name == "calibratoron") {
+                int brightness = parse_int("Brightness");
+                covercalibrator->calibrator_on(brightness);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "calibratoroff") {
+                covercalibrator->calibrator_off();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "opencover") {
+                covercalibrator->open_cover();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "closecover") {
+                covercalibrator->close_cover();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "haltcover") {
+                covercalibrator->halt_cover();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::NOT_IMPLEMENTED,
+            "Method '" + method_name + "' not yet implemented for CoverCalibrator"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const alpacacore::AlpacaException& e) {
+        util::log_error("AlpacaException in cover calibrator method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::map_error_code(e.error_code()),
+            std::string(e.what())
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        util::log_error("Exception in cover calibrator method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::exception_to_error_code(e),
+            util::exception_to_error_message(e)
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::dispatch_observingconditions_method(
+    std::shared_ptr<alpacacore::ObservingConditionsDriver> observingconditions,
+    const std::string& method_name,
+    const Request& request,
+    std::uint32_t client_tx_id,
+    std::uint32_t server_tx_id) {
+    
+    Response response;
+
+    auto parse_double = [&](const std::string& param_name) -> double {
+        if (request.has_query_param(param_name)) {
+            return std::stod(request.get_query_param(param_name));
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<double>();
+            }
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    auto parse_string = [&](const std::string& param_name) -> std::string {
+        if (request.has_query_param(param_name)) {
+            return request.get_query_param(param_name);
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                return val->get<std::string>();
+            }
+        }
+        throw std::runtime_error("Missing parameter: " + param_name);
+    };
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            if (method_name == "averageperiod") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_average_period());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cloudcover") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_cloud_cover());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "dewpoint") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_dew_point());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "humidity") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_humidity());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "pressure") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_pressure());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "rainrate") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_rain_rate());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "skybrightness") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_sky_brightness());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "skyquality") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_sky_quality());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "skytemperature") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_sky_temperature());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "seeing") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_seeing());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "starfwhm") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_star_fwhm());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "temperature") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_temperature());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "winddirection") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_wind_direction());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "windgust") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_wind_gust());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "windspeed") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_wind_speed());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "timesincelastupdate") {
+                std::string property_name = parse_string("PropertyName");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_time_since_last_update(property_name));
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "sensordescription") {
+                std::string property_name = parse_string("PropertyName");
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, observingconditions->get_sensor_description(property_name));
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        if (request.method() == HttpMethod::PUT) {
+            if (method_name == "averageperiod") {
+                double value = parse_double("AveragePeriod");
+                observingconditions->set_average_period(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "refresh") {
+                observingconditions->refresh();
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::NOT_IMPLEMENTED,
+            "Method '" + method_name + "' not yet implemented for ObservingConditions"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const alpacacore::AlpacaException& e) {
+        util::log_error("AlpacaException in observing conditions method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::map_error_code(e.error_code()),
+            std::string(e.what())
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        util::log_error("Exception in observing conditions method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::exception_to_error_code(e),
+            util::exception_to_error_message(e)
+        );
+        response.set_body(alpaca_response);
+        return response;
+    }
+}
+
+Response Router::dispatch_safetymonitor_method(
+    std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
+    const std::string& method_name,
+    const Request& request,
+    std::uint32_t client_tx_id,
+    std::uint32_t server_tx_id) {
+    
+    Response response;
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            if (method_name == "issafe") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, safetymonitor->get_is_safe());
+                response.set_body(alpaca_response);
+                return response;
+            }
+        }
+
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::NOT_IMPLEMENTED,
+            "Method '" + method_name + "' not yet implemented for SafetyMonitor"
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const alpacacore::AlpacaException& e) {
+        util::log_error("AlpacaException in safety monitor method '" + method_name + "': " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::map_error_code(e.error_code()),
+            std::string(e.what())
+        );
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        util::log_error("Exception in safety monitor method '" + method_name + "': " + std::string(e.what()));
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
             util::exception_to_error_code(e),
@@ -2242,6 +4229,131 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
     alpaca_response.value = logs;
     response.set_body(alpaca_response);
     return response;
+}
+
+Response Router::handle_log_history(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        try {
+            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
+        } catch (...) {
+            // ignore invalid id
+        }
+    }
+
+    auto send_payload = [&](std::uint32_t ctx_id) {
+        AlpacaResponse alpaca_response(ctx_id, server_tx_id);
+        alpaca_response.value = make_log_history_payload().dump();
+        response.set_body(alpaca_response);
+        return response;
+    };
+
+    try {
+        if (request.method() == HttpMethod::GET) {
+            return send_payload(client_tx_id);
+        }
+
+        if (request.method() == HttpMethod::POST || request.method() == HttpMethod::PUT) {
+            if (request.body().empty()) {
+                AlpacaResponse err = make_error_response(
+                    client_tx_id, server_tx_id,
+                    util::ErrorCode::VALUE_NOT_SET,
+                    "Missing request body"
+                );
+                response.set_body(err);
+                return response;
+            }
+
+            auto json_opt = parse_json(request.body());
+            if (!json_opt) {
+                AlpacaResponse err = make_error_response(
+                    client_tx_id, server_tx_id,
+                    util::ErrorCode::INVALID_VALUE,
+                    "Invalid JSON payload"
+                );
+                response.set_body(err);
+                return response;
+            }
+
+            const auto& body = *json_opt;
+            auto body_client_tx = extract_client_transaction_id(body);
+            if (body_client_tx != 0) {
+                client_tx_id = body_client_tx;
+            }
+
+            bool has_limit = false;
+            std::size_t limit = util::get_log_history_limit();
+
+            if (body.contains("Unlimited") || body.contains("unlimited")) {
+                bool unlimited = false;
+                if (body.contains("Unlimited")) {
+                    unlimited = body["Unlimited"].get<bool>();
+                } else {
+                    unlimited = body["unlimited"].get<bool>();
+                }
+                limit = unlimited ? 0 : limit;
+                has_limit = true;
+            }
+
+            if (body.contains("Limit") || body.contains("limit")) {
+                const auto& value = body.contains("Limit") ? body["Limit"] : body["limit"];
+                if (value.is_string()) {
+                    std::string text = value.get<std::string>();
+                    std::transform(text.begin(), text.end(), text.begin(),
+                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (text == "unlimited" || text == "none") {
+                        limit = 0;
+                    } else {
+                        limit = static_cast<std::size_t>(std::stoull(text));
+                    }
+                } else if (value.is_number_unsigned()) {
+                    limit = value.get<std::size_t>();
+                } else if (value.is_number_integer()) {
+                    auto signed_limit = value.get<long long>();
+                    if (signed_limit < 0) {
+                        throw std::invalid_argument("Log history limit must be >= 0");
+                    }
+                    limit = static_cast<std::size_t>(signed_limit);
+                } else {
+                    throw std::invalid_argument("Log history limit must be a number or string");
+                }
+                has_limit = true;
+            }
+
+            if (!has_limit) {
+                AlpacaResponse err = make_error_response(
+                    client_tx_id, server_tx_id,
+                    util::ErrorCode::VALUE_NOT_SET,
+                    "Request must include 'limit' or 'unlimited'"
+                );
+                response.set_body(err);
+                return response;
+            }
+
+            util::set_log_history_limit(limit);
+            util::log_info("Log history limit set to " + std::to_string(limit));
+            return send_payload(client_tx_id);
+        }
+
+        AlpacaResponse err = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::INVALID_OPERATION,
+            "Unsupported HTTP method for log history endpoint"
+        );
+        response.set_body(err);
+        return response;
+    } catch (const std::exception& e) {
+        AlpacaResponse err = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::DRIVER_ERROR,
+            "Failed to update log history limit: " + std::string(e.what())
+        );
+        response.set_body(err);
+        return response;
+    }
 }
 Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx_id) {
     Response response;

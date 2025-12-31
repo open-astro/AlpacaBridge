@@ -43,6 +43,7 @@ public:
     const std::string& manufacturer() const { return manufacturer_; }
     const std::string& location() const { return location_; }
     std::size_t thread_pool_size() const { return thread_pool_size_; }
+    std::size_t log_history_limit() const { return log_history_limit_; }
 
     // Device enable/disable
     bool is_device_enabled(const std::string& device_type, std::uint32_t device_number) const;
@@ -54,7 +55,12 @@ public:
     void set_server_name(const std::string& name) { server_name_ = name; }
     void set_manufacturer(const std::string& mfg) { manufacturer_ = mfg; }
     void set_location(const std::string& loc) { location_ = loc; }
-    void set_thread_pool_size(std::size_t size) { thread_pool_size_ = size; }
+    void set_thread_pool_size(std::size_t size) {
+        if (size < 1) size = 1;
+        if (size > 256) size = 256;
+        thread_pool_size_ = size;
+    }
+    void set_log_history_limit(std::size_t limit) { log_history_limit_ = limit; }
 
 private:
     std::uint16_t http_port_ = 6800;
@@ -64,6 +70,7 @@ private:
     std::string manufacturer_ = "AlpacaHTTP";
     std::string location_ = "";
     std::size_t thread_pool_size_ = 32;  // Default: 32 concurrent requests (supports multiple devices + clients)
+    std::size_t log_history_limit_ = 2000;  // 0 = unlimited
 
     // Device enable/disable map: "devicetype:number" -> enabled
     std::unordered_map<std::string, bool> device_enable_map_;

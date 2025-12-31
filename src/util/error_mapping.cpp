@@ -12,12 +12,17 @@
 
 #include <alpacahttp/util/error_mapping.h>
 #include <alpacacore/alpaca_errors.h>
+#include <alpacacore/util/error_handling.h>
 #include <stdexcept>
 #include <sstream>
 
 namespace alpacahttp::util {
 
 std::int32_t exception_to_error_code(const std::exception& e) {
+    if (const auto* alpaca_ex = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
+        return map_error_code(alpaca_ex->error_code());
+    }
+
     // Try to map common exception types to Alpaca error codes
     const std::string& what = e.what();
     
@@ -30,6 +35,18 @@ std::int32_t exception_to_error_code(const std::exception& e) {
     if (what.find("not implemented") != std::string::npos ||
         what.find("NotImplemented") != std::string::npos) {
         return ErrorCode::NOT_IMPLEMENTED;
+    }
+
+    if (what.find("not supported") != std::string::npos ||
+        what.find("NotSupported") != std::string::npos) {
+        return ErrorCode::NOT_IMPLEMENTED;
+    }
+
+    if (what.find("value not set") != std::string::npos ||
+        what.find("ValueNotSet") != std::string::npos ||
+        what.find("not been set") != std::string::npos ||
+        what.find("not set") != std::string::npos) {
+        return ErrorCode::VALUE_NOT_SET;
     }
     
     if (what.find("invalid value") != std::string::npos ||
@@ -55,8 +72,6 @@ std::int32_t map_error_code(int error_code) {
         case AE::NotConnected:
             return ErrorCode::NOT_CONNECTED;
         case AE::NotImplemented:
-        case AE::MethodNotImplemented:
-        case AE::PropertyNotImplemented:
             return ErrorCode::NOT_IMPLEMENTED;
         case AE::ActionNotImplemented:
             return ErrorCode::ACTION_NOT_IMPLEMENTED;

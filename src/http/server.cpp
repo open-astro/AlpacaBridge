@@ -51,6 +51,13 @@ void Server::start() {
     }
 
     shutdown_requested_ = false;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        shutdown_workers_ = false;
+        while (!connection_queue_.empty()) {
+            connection_queue_.pop();
+        }
+    }
     running_ = true;
     run_server();
 }
@@ -61,6 +68,13 @@ void Server::start_async() {
     }
 
     shutdown_requested_ = false;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        shutdown_workers_ = false;
+        while (!connection_queue_.empty()) {
+            connection_queue_.pop();
+        }
+    }
     running_ = true;
     server_thread_ = std::thread(&Server::run_server, this);
 }
@@ -81,10 +95,16 @@ void Server::stop() {
     queue_condition_.notify_all();
     
     // Wait for all worker threads to finish
+    const auto current_id = std::this_thread::get_id();
     for (auto& thread : worker_threads_) {
-        if (thread.joinable()) {
-            thread.join();
+        if (!thread.joinable()) {
+            continue;
         }
+        if (thread.get_id() == current_id) {
+            thread.detach();
+            continue;
+        }
+        thread.join();
     }
     worker_threads_.clear();
     
@@ -96,7 +116,11 @@ void Server::stop() {
     }
     
     if (server_thread_.joinable()) {
-        server_thread_.join();
+        if (server_thread_.get_id() == current_id) {
+            server_thread_.detach();
+        } else {
+            server_thread_.join();
+        }
     }
     util::log_info("HTTP server stopped");
 }

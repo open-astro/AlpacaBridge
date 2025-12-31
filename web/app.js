@@ -2,8 +2,10 @@
 const API_BASE = '';
 const LOGGING_ENDPOINT = '/management/v1/loglevel';
 const LOGS_ENDPOINT = '/management/v1/logs';
+const LOG_HISTORY_ENDPOINT = '/management/v1/loghistory';
 const QUIET_LOG_LEVEL = 'WARNING';
 const LOG_LEVEL_ORDER = ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
+let lastLogHistoryLimit = 2000;
 
 function normalizeLogLevel(level) {
     return String(level || '').trim().toUpperCase();
@@ -26,6 +28,13 @@ function setLogControlsDisabled(disabled) {
     getLogLevelToggles().forEach(toggle => {
         toggle.disabled = disabled;
     });
+}
+
+function setLogHistoryControlsDisabled(disabled) {
+    const toggle = document.getElementById('log-history-toggle');
+    if (toggle) {
+        toggle.disabled = disabled;
+    }
 }
 
 function ensureLogLevelToggles(supportedLevels) {
@@ -118,6 +127,60 @@ async function requestLogLevelUpdate(desiredLevel) {
         await loadLogSettings();
     } finally {
         setLogControlsDisabled(false);
+    }
+}
+
+async function requestLogHistoryUpdate(limit) {
+    const statusEl = document.getElementById('log-history-status');
+    if (!statusEl) {
+        return;
+    }
+
+    setLogHistoryControlsDisabled(true);
+    statusEl.textContent = 'Updating log history...';
+
+    try {
+        const response = await fetch(API_BASE + LOG_HISTORY_ENDPOINT, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({limit})
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const text = await response.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (e) {
+            throw new Error('Invalid JSON response from server');
+        }
+
+        if (data.ErrorNumber !== 0) {
+            throw new Error(data.ErrorMessage || 'Unknown server error');
+        }
+
+        const payload = parseResponseValue(data.Value) || {};
+        const nextLimit = Number(payload.Limit);
+        const unlimited = payload.Unlimited === true || nextLimit === 0;
+        if (!unlimited && Number.isFinite(nextLimit) && nextLimit > 0) {
+            lastLogHistoryLimit = nextLimit;
+        }
+
+        const toggle = document.getElementById('log-history-toggle');
+        if (toggle) {
+            toggle.checked = unlimited;
+        }
+        statusEl.textContent = unlimited
+            ? 'Log history: unlimited (stored until restart)'
+            : `Log history: last ${lastLogHistoryLimit} lines`;
+    } catch (error) {
+        statusEl.textContent = `Failed to update log history: ${error.message}`;
+        await loadLogHistorySettings();
+    } finally {
+        setLogHistoryControlsDisabled(false);
     }
 }
 
@@ -462,6 +525,7 @@ async function loadServerInfo() {
 function refreshServerInfo() {
     loadServerInfo();
     loadLogSettings();
+    loadLogHistorySettings();
 }
 
 // Shutdown server
@@ -533,6 +597,61 @@ async function loadLogSettings() {
     } finally {
         setLogControlsDisabled(false);
     }
+}
+
+async function loadLogHistorySettings() {
+    const statusEl = document.getElementById('log-history-status');
+    if (!statusEl) {
+        return;
+    }
+
+    setLogHistoryControlsDisabled(true);
+    statusEl.textContent = 'Loading log history settings...';
+
+    try {
+        const response = await fetch(API_BASE + LOG_HISTORY_ENDPOINT);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const text = await response.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (e) {
+            throw new Error('Invalid JSON response from server');
+        }
+
+        if (data.ErrorNumber !== 0) {
+            throw new Error(data.ErrorMessage || 'Unknown server error');
+        }
+
+        const payload = parseResponseValue(data.Value) || {};
+        const limit = Number(payload.Limit);
+        const unlimited = payload.Unlimited === true || limit === 0;
+        if (!unlimited && Number.isFinite(limit) && limit > 0) {
+            lastLogHistoryLimit = limit;
+        }
+
+        const toggle = document.getElementById('log-history-toggle');
+        if (toggle) {
+            toggle.checked = unlimited;
+        }
+
+        statusEl.textContent = unlimited
+            ? 'Log history: unlimited (stored until restart)'
+            : `Log history: last ${lastLogHistoryLimit} lines`;
+    } catch (error) {
+        statusEl.textContent = `Unable to load log history settings: ${error.message}`;
+    } finally {
+        setLogHistoryControlsDisabled(false);
+    }
+}
+
+async function handleLogHistoryToggleChange(event) {
+    const isUnlimited = event.target.checked;
+    const nextLimit = isUnlimited ? 0 : (lastLogHistoryLimit || 2000);
+    await requestLogHistoryUpdate(nextLimit);
 }
 
 async function handleLogLevelToggleChange(event) {
@@ -802,4 +921,10 @@ document.addEventListener('DOMContentLoaded', function() {
     loadDevices();
     loadServerInfo();
     loadLogSettings();
+    loadLogHistorySettings();
+
+    const logHistoryToggle = document.getElementById('log-history-toggle');
+    if (logHistoryToggle) {
+        logHistoryToggle.addEventListener('change', handleLogHistoryToggleChange);
+    }
 });

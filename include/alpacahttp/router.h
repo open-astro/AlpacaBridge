@@ -18,6 +18,16 @@
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/managementdriver.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/camera_driver.h>
+#include <alpacacore/switch_driver.h>
+#include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/focuser_driver.h>
+#include <alpacacore/rotator_driver.h>
+#include <alpacacore/dome_driver.h>
+#include <alpacacore/shutter_driver.h>
+#include <alpacacore/covercalibrator_driver.h>
+#include <alpacacore/observingconditions_driver.h>
+#include <alpacacore/safetymonitor_driver.h>
 #include <string>
 #include <memory>
 #include <functional>
@@ -69,6 +79,7 @@ private:
     Response handle_shutdown(const Request& request, std::uint32_t server_tx_id);
     Response handle_log_level(const Request& request, std::uint32_t server_tx_id);
     Response handle_logs(const Request& request, std::uint32_t server_tx_id);
+    Response handle_log_history(const Request& request, std::uint32_t server_tx_id);
     Response handle_static_file(const Request& request);
     Response handle_setup(const Request& request, std::uint32_t server_tx_id);
 
@@ -94,6 +105,86 @@ private:
     // Dispatch telescope-specific method calls
     Response dispatch_telescope_method(
         std::shared_ptr<alpacacore::TelescopeDriver> telescope,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+
+    Response dispatch_camera_method(
+        std::shared_ptr<alpacacore::CameraDriver> camera,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+
+    Response dispatch_switch_method(
+        std::shared_ptr<alpacacore::SwitchDriver> sw,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+
+    Response dispatch_filterwheel_method(
+        std::shared_ptr<alpacacore::FilterWheelDriver> filterwheel,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+
+    Response dispatch_focuser_method(
+        std::shared_ptr<alpacacore::FocuserDriver> focuser,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+
+    Response dispatch_rotator_method(
+        std::shared_ptr<alpacacore::RotatorDriver> rotator,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+
+    Response dispatch_dome_method(
+        std::shared_ptr<alpacacore::DomeDriver> dome,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+
+    Response dispatch_shutter_method(
+        std::shared_ptr<alpacacore::ShutterDriver> shutter,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+
+    Response dispatch_covercalibrator_method(
+        std::shared_ptr<alpacacore::CoverCalibratorDriver> covercalibrator,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+
+    Response dispatch_observingconditions_method(
+        std::shared_ptr<alpacacore::ObservingConditionsDriver> observingconditions,
+        const std::string& method_name,
+        const Request& request,
+        std::uint32_t client_tx_id,
+        std::uint32_t server_tx_id
+    );
+
+    Response dispatch_safetymonitor_method(
+        std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
         const std::string& method_name,
         const Request& request,
         std::uint32_t client_tx_id,

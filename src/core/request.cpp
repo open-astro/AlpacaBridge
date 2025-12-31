@@ -14,6 +14,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 
 namespace alpacahttp {
 
@@ -113,26 +114,46 @@ void Request::parse_query_string() {
         return;
     }
 
+    auto url_decode = [](const std::string& value) -> std::string {
+        std::string result;
+        result.reserve(value.size());
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            if (value[i] == '%' && i + 2 < value.size()) {
+                std::string hex = value.substr(i + 1, 2);
+                char decoded = static_cast<char>(std::strtol(hex.c_str(), nullptr, 16));
+                result.push_back(decoded);
+                i += 2;
+            } else if (value[i] == '+') {
+                result.push_back(' ');
+            } else {
+                result.push_back(value[i]);
+            }
+        }
+        return result;
+    };
+
     std::istringstream iss(query_string_);
     std::string pair;
 
     while (std::getline(iss, pair, '&')) {
         auto eq_pos = pair.find('=');
         if (eq_pos != std::string::npos) {
-            std::string key = pair.substr(0, eq_pos);
-            std::string value = pair.substr(eq_pos + 1);
-
-            // URL decode (basic implementation)
-            // TODO: Implement proper URL decoding
+            std::string key = url_decode(pair.substr(0, eq_pos));
+            std::string value = url_decode(pair.substr(eq_pos + 1));
+            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
             query_params_[key] = value;
         } else {
-            query_params_[pair] = "";
+            std::string key = url_decode(pair);
+            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+            query_params_[key] = "";
         }
     }
 }
 
 std::string Request::get_query_param(const std::string& key) const {
-    auto it = query_params_.find(key);
+    std::string lower_key = key;
+    std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
+    auto it = query_params_.find(lower_key);
     if (it != query_params_.end()) {
         return it->second;
     }
@@ -140,7 +161,9 @@ std::string Request::get_query_param(const std::string& key) const {
 }
 
 bool Request::has_query_param(const std::string& key) const {
-    return query_params_.find(key) != query_params_.end();
+    std::string lower_key = key;
+    std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
+    return query_params_.find(lower_key) != query_params_.end();
 }
 
 std::string Request::get_header(const std::string& key) const {
@@ -160,4 +183,3 @@ bool Request::has_header(const std::string& key) const {
 }
 
 } // namespace alpacahttp
-

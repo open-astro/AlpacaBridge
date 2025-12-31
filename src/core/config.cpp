@@ -99,7 +99,21 @@ void Config::apply_environment_overrides() {
             // Invalid value, use default
         }
     }
+
+    const char* log_history_env = std::getenv("ALPACAHTTP_LOG_HISTORY_LIMIT");
+    if (log_history_env) {
+        std::string limit_str = log_history_env;
+        std::transform(limit_str.begin(), limit_str.end(), limit_str.begin(), ::tolower);
+        if (limit_str == "unlimited" || limit_str == "none") {
+            log_history_limit_ = 0;
+        } else {
+            try {
+                log_history_limit_ = static_cast<std::size_t>(std::stoull(limit_str));
+            } catch (...) {
+                // Invalid value, use default
+            }
+        }
+    }
 }
 
 } // namespace alpacahttp
-

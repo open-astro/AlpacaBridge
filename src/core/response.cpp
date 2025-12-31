@@ -54,8 +54,15 @@ std::string Response::to_string() const {
     std::ostringstream oss;
     oss << "HTTP/1.1 " << status_code_ << " " << reason_phrase_ << "\r\n";
 
+    bool has_connection = false;
     for (const auto& [key, value] : headers_) {
+        if (key == "Connection") {
+            has_connection = true;
+        }
         oss << key << ": " << value << "\r\n";
+    }
+    if (!has_connection) {
+        oss << "Connection: close\r\n";
     }
 
     oss << "\r\n";
@@ -86,4 +93,3 @@ std::string Response::status_to_reason_phrase(std::uint16_t code) {
 }
 
 } // namespace alpacahttp
-

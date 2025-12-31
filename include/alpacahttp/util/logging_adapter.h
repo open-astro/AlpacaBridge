@@ -30,6 +30,8 @@ void log_error(const std::string& message);
 
 // Retrieve recent log history as plain text.
 std::string get_log_history_text();
+void set_log_history_limit(std::size_t limit);
+std::size_t get_log_history_limit();
 
 // Optional external sink (e.g., stdout logger) layered on top of history capture.
 void set_external_log_sink(alpacacore::logging::LogSink sink);

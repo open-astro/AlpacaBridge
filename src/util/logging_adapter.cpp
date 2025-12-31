@@ -60,11 +60,13 @@ namespace {
         return stream.str();
     }
 
-    void append_log_history(std::string line) {
+void append_log_history(std::string line) {
         std::lock_guard<std::mutex> lock(g_history_mutex);
         g_log_history.push_back(std::move(line));
-        while (g_log_history.size() > g_log_history_limit) {
-            g_log_history.pop_front();
+        if (g_log_history_limit > 0) {
+            while (g_log_history.size() > g_log_history_limit) {
+                g_log_history.pop_front();
+            }
         }
     }
 
@@ -98,6 +100,7 @@ void init_logging(const Config& config) {
     // Apply the configured log level before any components start logging
     alpacacore::logging::set_log_level(convert_log_level(config.log_level()));
     alpacacore::logging::set_log_sink(log_sink);
+    set_log_history_limit(config.log_history_limit());
 }
 
 void log_debug(const std::string& message) {
@@ -136,6 +139,21 @@ std::string get_log_history_text() {
 void set_external_log_sink(alpacacore::logging::LogSink sink) {
     std::lock_guard<std::mutex> lock(g_sink_mutex);
     g_external_sink = std::move(sink);
+}
+
+void set_log_history_limit(std::size_t limit) {
+    std::lock_guard<std::mutex> lock(g_history_mutex);
+    g_log_history_limit = limit;
+    if (g_log_history_limit > 0) {
+        while (g_log_history.size() > g_log_history_limit) {
+            g_log_history.pop_front();
+        }
+    }
+}
+
+std::size_t get_log_history_limit() {
+    std::lock_guard<std::mutex> lock(g_history_mutex);
+    return g_log_history_limit;
 }
 
 } // namespace alpacahttp::util

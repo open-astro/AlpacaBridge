@@ -3,7 +3,7 @@
 # HTTP server settings
 http:
   port: 6800
-  thread_pool_size: 32  # Number of concurrent request handlers (increase for more devices/clients)
+  thread_pool_size: 32  # Number of concurrent request handlers (increase for more devices/clients). Env: ALPACAHTTP_THREAD_POOL_SIZE (1-256)
 
 # Discovery settings
 discovery:
@@ -12,6 +12,7 @@ discovery:
 # Logging settings
 logging:
   level: WARNING  # DEBUG, INFO, WARNING, ERROR
+  history_limit: 2000  # 0 = unlimited, Env: ALPACAHTTP_LOG_HISTORY_LIMIT
 
 # Server information
 server:

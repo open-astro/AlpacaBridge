@@ -123,14 +123,23 @@
                 </div>
                 <p id="log-level-status" class="log-status">Detecting log level...</p>
                 <div class="log-levels">
-                    <div class="log-levels-header">
-                        <h4>Log Level Filters</h4>
-                        <p>Select the minimum severity to include. Higher severity levels are always included.</p>
-                    </div>
                     <div id="log-level-toggles" class="log-levels-grid"></div>
                     <div class="log-download">
                         <button class="btn btn-secondary" type="button" onclick="downloadLogs()">Download Logs</button>
                     </div>
+                </div>
+                <div class="log-history">
+                    <div class="log-history-row">
+                        <div>
+                            <h4>Log history retention</h4>
+                            <p>Keep all log lines in memory until restart.</p>
+                        </div>
+                        <label class="switch">
+                            <input id="log-history-toggle" type="checkbox">
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+                    <p id="log-history-status" class="log-status">Detecting log history limit...</p>
                 </div>
             </div>
             <div class="server-actions">
@@ -140,6 +149,6 @@
         </div>
     </div>
 
-    <script src="/web/app.js?v=7"></script>
+    <script src="/web/app.js?v=8"></script>
 </body>
 </html>
