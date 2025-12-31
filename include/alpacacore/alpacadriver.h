@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <memory>
+#include <vector>
 
 namespace alpacacore {
 
@@ -86,9 +87,29 @@ public:
     virtual void set_connected(bool connected) = 0;
 
     /**
+     * @brief Start an asynchronous connect to the device.
+     */
+    virtual void connect() { set_connected(true); }
+
+    /**
+     * @brief Start an asynchronous disconnect from the device.
+     */
+    virtual void disconnect() { set_connected(false); }
+
+    /**
+     * @brief Get whether the device is currently connecting or disconnecting.
+     */
+    virtual bool get_connecting() const { return false; }
+
+    /**
+     * @brief Get the device state snapshot.
+     */
+    virtual std::vector<DeviceState> get_device_state() const { return {}; }
+
+    /**
      * @brief Get the supported actions.
      */
-    virtual std::string get_supported_actions() const = 0;
+    virtual std::vector<std::string> get_supported_actions() const = 0;
 
     /**
      * @brief Invoke an action.
@@ -134,4 +155,3 @@ public:
 };
 
 } // namespace alpacacore
-

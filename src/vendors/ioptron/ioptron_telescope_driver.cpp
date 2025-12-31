@@ -99,6 +99,7 @@ public:
     }
     
     ~iOptronTelescopeDriver() override {
+        stop_connection_thread();
         if (connected_) {
             set_connected(false);
         }
@@ -148,7 +149,19 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
     }
-    
+
+    void connect() override {
+        start_connection_task(true);
+    }
+
+    void disconnect() override {
+        start_connection_task(false);
+    }
+
+    bool get_connecting() const override {
+        return connecting_.load();
+    }
+
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lock(mutex_);
 
@@ -218,8 +231,37 @@ public:
         }
     }
     
-    std::string get_supported_actions() const override {
-        return "";  // No custom actions
+    std::vector<std::string> get_supported_actions() const override {
+        return {};  // No custom actions
+    }
+
+    std::vector<DeviceState> get_device_state() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<DeviceState> state;
+        state.push_back({"Connected", connected_});
+        state.push_back({"Connecting", connecting_.load()});
+
+        if (!connected_) {
+            return state;
+        }
+
+        refresh_status_cache_locked();
+        refresh_position_cache_locked();
+        refresh_altaz_cache_locked();
+
+        state.push_back({"AtHome", cached_status_.is_at_home});
+        state.push_back({"AtPark", cached_status_.is_parked});
+        state.push_back({"Slewing", cached_status_.is_slewing});
+        state.push_back({"Tracking", cached_status_.is_tracking});
+        state.push_back({"TrackingRate", static_cast<std::int32_t>(cached_status_.tracking_rate)});
+        state.push_back({"PulseGuiding", get_is_pulse_guiding()});
+        state.push_back({"SideOfPier", static_cast<std::int32_t>(cached_side_of_pier_)});
+        state.push_back({"RightAscension", cached_ra_hours_});
+        state.push_back({"Declination", cached_dec_degrees_});
+        state.push_back({"Altitude", cached_alt_degrees_});
+        state.push_back({"Azimuth", cached_az_degrees_});
+
+        return state;
     }
     
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
@@ -369,6 +411,18 @@ public:
     bool get_can_set_tracking() const override {
         return true;  // iOptron supports start/stop tracking
     }
+
+    bool get_can_slew_alt_az() const override {
+        return false;
+    }
+
+    bool get_can_slew_alt_az_async() const override {
+        return false;
+    }
+
+    bool get_can_sync_alt_az() const override {
+        return false;
+    }
     
     bool get_can_slew() const override {
         return true;  // All iOptron mounts support slewing
@@ -401,12 +455,19 @@ public:
     
     void set_declination_rate(double rate) override {
         (void)rate;  // Unused - not supported
-        throw AlpacaException("Setting declination rate not supported by iOptron mount");
+        throw AlpacaException(
+            "Declination rate is not implemented by this mount",
+            AlpacaError::PropertyNotImplemented
+        );
     }
     
     bool get_tracking() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        auto now = std::chrono::steady_clock::now();
+        if (tracking_override_until_ > now && status_cache_valid_) {
+            return cached_status_.is_tracking;
+        }
         refresh_status_cache_locked();
         return cached_status_.is_tracking;
     }
@@ -429,7 +490,10 @@ public:
         } else {
             protocol.stop_tracking();
         }
-        status_cache_valid_ = false;
+        cached_status_.is_tracking = tracking;
+        status_cache_valid_ = true;
+        last_status_update_ = std::chrono::steady_clock::now();
+        tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
     }
     
     double get_focal_length() const override {
@@ -473,13 +537,6 @@ public:
         protocol.set_guide_rates(rate.ra, rate.dec);
     }
     
-    bool get_is_slewing() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        refresh_status_cache_locked();
-        return cached_status_.is_slewing;
-    }
-    
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
@@ -489,6 +546,9 @@ public:
     }
     
     double get_right_ascension_rate() const override {
+        if (!get_can_set_right_ascension_rate()) {
+            return 0.0;
+        }
         // iOptron doesn't support getting RA rate directly
         // Calculate from tracking rate
         std::lock_guard<std::mutex> lock(mutex_);
@@ -512,7 +572,10 @@ public:
     
     void set_right_ascension_rate(double rate) override {
         (void)rate;  // Unused - not supported
-        throw AlpacaException("Setting right ascension rate not supported by iOptron mount");
+        throw AlpacaException(
+            "Right ascension rate is not implemented by this mount",
+            AlpacaError::PropertyNotImplemented
+        );
     }
     
     int get_side_of_pier() const override {
@@ -523,8 +586,36 @@ public:
         return cached_side_of_pier_;
     }
     
-    int get_destination_side_of_pier() const override {
+    int get_destination_side_of_pier(double ra, double dec) const override {
+        (void)ra;
+        (void)dec;
         return get_side_of_pier();
+    }
+
+    EquatorialSystem get_equatorial_system() const override {
+        return EquatorialSystem::Topocentric;
+    }
+
+    bool get_does_refraction() const override {
+        return does_refraction_;
+    }
+
+    void set_does_refraction(bool does_refraction) override {
+        does_refraction_ = does_refraction;
+    }
+
+    int get_slew_settle_time() const override {
+        return slew_settle_time_seconds_;
+    }
+
+    void set_slew_settle_time(int seconds) override {
+        if (seconds < 0) {
+            throw AlpacaException(
+                "Slew settle time must be >= 0 seconds",
+                AlpacaError::InvalidValue
+            );
+        }
+        slew_settle_time_seconds_ = seconds;
     }
     
     void set_side_of_pier(int side) override {
@@ -547,7 +638,14 @@ public:
     
     void set_site_elevation(double elevation) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (elevation < -300.0 || elevation > 10000.0) {
+            throw AlpacaException(
+                "Site elevation must be between -300 and 10000 meters",
+                AlpacaError::InvalidValue
+            );
+        }
         site_elevation_m_ = elevation;
+        site_info_valid_ = false;
     }
     
     double get_site_latitude() const override {
@@ -561,14 +659,18 @@ public:
     void set_site_latitude(double latitude) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        
+        if (latitude < -90.0 || latitude > 90.0) {
+            throw AlpacaException(
+                "Site latitude must be between -90 and 90 degrees",
+                AlpacaError::InvalidValue
+            );
+        }
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_latitude(latitude);
         protocol.set_hemisphere(latitude >= 0.0);
         site_latitude_cached_ = latitude;
         hemisphere_north_ = (latitude >= 0.0);
-        site_info_valid_ = true;
-        last_site_info_fetch_ = std::chrono::steady_clock::now();
+        site_info_valid_ = false;
     }
     
     double get_site_longitude() const override {
@@ -582,12 +684,16 @@ public:
     void set_site_longitude(double longitude) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        
+        if (longitude < -180.0 || longitude > 180.0) {
+            throw AlpacaException(
+                "Site longitude must be between -180 and 180 degrees",
+                AlpacaError::InvalidValue
+            );
+        }
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_longitude(longitude);
         site_longitude_cached_ = longitude;
-        site_info_valid_ = true;
-        last_site_info_fetch_ = std::chrono::steady_clock::now();
+        site_info_valid_ = false;
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -633,58 +739,78 @@ public:
     }
 
     bool get_slewing() const override {
-        return get_is_slewing();
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        refresh_status_cache_locked();
+        if (cached_status_.is_slewing) {
+            return true;
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (slew_override_until_ > now) {
+            return true;
+        }
+        return false;
     }
     
     double get_target_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!target_set_) {
+            throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
+        }
         return target_dec_degrees_;
     }
     
     void set_target_declination(double dec) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        validate_dec(dec, "TargetDeclination");
         
         target_dec_degrees_ = dec;
+        target_set_ = true;
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_target_dec(dec);
     }
     
     double get_target_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!target_set_) {
+            throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
+        }
         return target_ra_hours_;
     }
     
     void set_target_right_ascension(double ra) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        validate_ra(ra, "TargetRightAscension");
         
         target_ra_hours_ = ra;
+        target_set_ = true;
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_target_ra(ra);
     }
     
-    double get_tracking_rate() const override {
+    int get_tracking_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refresh_status_cache_locked();
         // Alpaca TrackingRate uses DriveRates enum values (0-4).
-        return static_cast<double>(cached_status_.tracking_rate);
+        return static_cast<int>(cached_status_.tracking_rate);
     }
     
-    void set_tracking_rate(double rate) override {
+    void set_tracking_rate(int rate) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         
         auto& protocol = iOptronProtocolWrapper::instance();
-        
-        // If rate is close to 1.0, use sidereal
-        if (std::abs(rate - 1.0) < 0.001) {
-            protocol.set_tracking_rate(0);  // Sidereal
-        } else {
-            // Use custom tracking rate
-            protocol.set_tracking_rate(4);  // Custom
-            protocol.set_custom_tracking_rate(rate);
+
+        if (rate < 0 || rate > 4) {
+            throw AlpacaException("Invalid tracking rate");
+        }
+
+        protocol.set_tracking_rate(rate);
+        if (rate == 4) {
+            protocol.set_custom_tracking_rate(custom_tracking_rate_);
         }
         status_cache_valid_ = false;
     }
@@ -800,8 +926,20 @@ public:
     void abort_slew() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        refresh_status_cache_locked();
+        if (!cached_status_.is_slewing) {
+            return;
+        }
         auto& protocol = iOptronProtocolWrapper::instance();
-        protocol.stop_slewing();
+        try {
+            protocol.stop_slewing();
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("iOptron", std::string("AbortSlew failed, assuming not slewing: ") + e.what());
+        }
+        cached_status_.is_slewing = false;
+        status_cache_valid_ = true;
+        last_status_update_ = std::chrono::steady_clock::now();
+        slew_override_until_ = last_status_update_;
     }
     
     void pulse_guide(int direction, int duration) override {
@@ -809,7 +947,14 @@ public:
         check_connected();
         
         auto& protocol = iOptronProtocolWrapper::instance();
-        protocol.pulse_guide(direction, duration);
+        if ((direction == 0 || direction == 1) && !dec_guide_calibration_attempted_) {
+            calibrate_dec_guide_locked(duration);
+        }
+        int calibrated_direction = direction;
+        if (dec_guide_calibrated_ && dec_guide_inverted_ && (direction == 0 || direction == 1)) {
+            calibrated_direction = (direction == 0) ? 1 : 0;
+        }
+        protocol.pulse_guide(calibrated_direction, duration);
         pulse_guiding_active_ = (duration > 0);
         if (pulse_guiding_active_) {
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
@@ -828,9 +973,10 @@ public:
         position_cache_valid_ = false;
     }
     
-    void slew_to_coordinates() override {
+    void slew_to_coordinates(double ra, double dec) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        validate_ra_dec(ra, dec, "SlewToCoordinates");
         refresh_status_cache_locked(true);
         if (cached_status_.is_parked) {
             auto& protocol = iOptronProtocolWrapper::instance();
@@ -840,7 +986,13 @@ public:
             status_cache_valid_ = false;
         }
         
+        target_ra_hours_ = ra;
+        target_dec_degrees_ = dec;
+        target_set_ = true;
+
         auto& protocol = iOptronProtocolWrapper::instance();
+        protocol.set_target_ra(ra);
+        protocol.set_target_dec(dec);
         bool accepted = protocol.slew_to_ra_dec();
         if (!accepted) {
             accepted = protocol.slew_to_ra_dec_cw_up();
@@ -848,27 +1000,39 @@ public:
         if (!accepted) {
             throw AlpacaException("Slew rejected by mount - target may violate altitude limits");
         }
+        slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
     }
     
-    void slew_to_coordinates_async() override {
+    void slew_to_coordinates_async(double ra, double dec) override {
         // iOptron slewing is already async
-        slew_to_coordinates();
+        slew_to_coordinates(ra, dec);
     }
     
     void slew_to_target() override {
-        slew_to_coordinates();
+        if (!target_set_) {
+            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        }
+        slew_to_coordinates(target_ra_hours_, target_dec_degrees_);
     }
     
     void slew_to_target_async() override {
-        slew_to_coordinates_async();
+        if (!target_set_) {
+            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        }
+        slew_to_coordinates_async(target_ra_hours_, target_dec_degrees_);
     }
     
     void sync_to_coordinates(double ra, double dec) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        validate_ra_dec(ra, dec, "SyncToCoordinates");
         
+        target_ra_hours_ = ra;
+        target_dec_degrees_ = dec;
+        target_set_ = true;
+
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_target_ra(ra);
         protocol.set_target_dec(dec);
@@ -880,6 +1044,9 @@ public:
     void sync_to_target() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        if (!target_set_) {
+            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        }
         
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.sync_to_coordinates();
@@ -888,6 +1055,12 @@ public:
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
+        (void)altitude;
+        (void)azimuth;
+        throw AlpacaException("Alt/Az slews not supported by iOptron driver");
+    }
+
+    void slew_to_alt_az(double altitude, double azimuth) override {
         (void)altitude;
         (void)azimuth;
         throw AlpacaException("Alt/Az slews not supported by iOptron driver");
@@ -1042,6 +1215,60 @@ private:
         return false;
     }
 
+    void calibrate_dec_guide_locked(int duration_ms) {
+        dec_guide_calibration_attempted_ = true;
+        refresh_status_cache_locked(true);
+        if (cached_status_.is_slewing || cached_status_.is_parked) {
+            ALPACA_LOG_WARN("iOptron", "Skipping Dec guide calibration while slewing or parked");
+            return;
+        }
+
+        auto& protocol = iOptronProtocolWrapper::instance();
+        try {
+            const auto start = protocol.get_position();
+            const int sample_duration = std::clamp(duration_ms, 500, 2000);
+            protocol.pulse_guide(0, sample_duration);
+            std::this_thread::sleep_for(std::chrono::milliseconds(sample_duration + 700));
+            Position end = protocol.get_position();
+            for (int i = 0; i < 2; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                end = protocol.get_position();
+            }
+
+            const double delta = end.dec_degrees - start.dec_degrees;
+            const double min_delta = 0.0005;  // ~1.8 arcsec
+            if (std::abs(delta) < min_delta) {
+                ALPACA_LOG_WARN("iOptron", "Dec guide calibration inconclusive; using default mapping (delta=" +
+                                              std::to_string(delta) + " deg)");
+                return;
+            }
+
+            dec_guide_inverted_ = (delta < 0.0);
+            dec_guide_calibrated_ = true;
+            ALPACA_LOG_INFO("iOptron", std::string("Dec guide calibration: ") +
+                                           (dec_guide_inverted_ ? "inverted" : "normal"));
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("iOptron", std::string("Dec guide calibration failed: ") + e.what());
+        }
+    }
+
+    static void validate_ra(double ra_hours, const char* label) {
+        if (!std::isfinite(ra_hours) || ra_hours < 0.0 || ra_hours >= 24.0) {
+            throw AlpacaException(std::string(label) + " must be in [0, 24) hours", AlpacaError::InvalidValue);
+        }
+    }
+
+    static void validate_dec(double dec_degrees, const char* label) {
+        if (!std::isfinite(dec_degrees) || dec_degrees < -90.0 || dec_degrees > 90.0) {
+            throw AlpacaException(std::string(label) + " must be in [-90, 90] degrees", AlpacaError::InvalidValue);
+        }
+    }
+
+    static void validate_ra_dec(double ra_hours, double dec_degrees, const char* label) {
+        validate_ra(ra_hours, label);
+        validate_dec(dec_degrees, label);
+    }
+
     void sync_site_settings_with_mount_locked() {
         if (pending_site_latitude_.has_value()) {
             double latitude = pending_site_latitude_.value();
@@ -1146,6 +1373,33 @@ private:
         clock_sync_cancel_.store(false);
     }
 
+    void start_connection_task(bool connect) {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        if (connection_thread_.joinable()) {
+            connection_thread_.join();
+        }
+        if (connect == get_connected()) {
+            return;
+        }
+        connecting_.store(true);
+        connection_thread_ = std::thread([this, connect]() {
+            try {
+                set_connected(connect);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_ERROR("iOptron", std::string("Async connection task failed: ") + e.what());
+            }
+            connecting_.store(false);
+        });
+    }
+
+    void stop_connection_thread() {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        if (connection_thread_.joinable()) {
+            connection_thread_.join();
+        }
+        connecting_.store(false);
+    }
+
     std::chrono::system_clock::time_point current_utc_time_locked() const {
         if (!last_utc_valid_) {
             return std::chrono::system_clock::now();
@@ -1187,6 +1441,10 @@ private:
     double aperture_diameter_m_ = 0.0;
     double aperture_area_m2_ = 0.0;
     double focal_length_m_ = 0.0;
+    int slew_settle_time_seconds_ = 0;
+    double custom_tracking_rate_ = 1.0;
+    bool does_refraction_ = false;
+    bool target_set_ = false;
     mutable bool pulse_guiding_active_ = false;
     mutable std::chrono::steady_clock::time_point pulse_guiding_end_{};
     
@@ -1212,6 +1470,10 @@ private:
     mutable std::chrono::steady_clock::time_point last_altaz_update_;
     mutable GuideRate cached_guide_rate_{};
     mutable bool guide_rate_valid_;
+
+    mutable bool dec_guide_calibration_attempted_ = false;
+    mutable bool dec_guide_calibrated_ = false;
+    mutable bool dec_guide_inverted_ = false;
     
     mutable MountStatus cached_status_{};
     mutable bool status_cache_valid_;
@@ -1221,8 +1483,13 @@ private:
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
     mutable bool utc_query_supported_;
+    mutable std::chrono::steady_clock::time_point tracking_override_until_{};
+    mutable std::chrono::steady_clock::time_point slew_override_until_{};
     std::thread clock_sync_thread_;
     std::atomic<bool> clock_sync_cancel_;
+    std::atomic<bool> connecting_{false};
+    std::thread connection_thread_;
+    mutable std::mutex connection_mutex_;
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;

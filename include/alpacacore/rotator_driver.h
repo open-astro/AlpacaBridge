@@ -36,6 +36,16 @@ public:
     virtual bool get_can_reverse() const = 0;
 
     /**
+     * @brief Get whether the rotator direction is reversed.
+     */
+    virtual bool get_reverse() const = 0;
+
+    /**
+     * @brief Set whether the rotator direction is reversed.
+     */
+    virtual void set_reverse(bool reverse) = 0;
+
+    /**
      * @brief Get whether the rotator is moving.
      */
     virtual bool get_is_moving() const = 0;
@@ -102,4 +112,3 @@ public:
 };
 
 } // namespace alpacacore
-

@@ -66,6 +66,11 @@ public:
     virtual bool get_can_set_shutter() const = 0;
 
     /**
+     * @brief Get whether the dome can slave.
+     */
+    virtual bool get_can_slave() const = 0;
+
+    /**
      * @brief Get whether the dome can slew.
      */
     virtual bool get_can_slew() const = 0;
@@ -101,14 +106,14 @@ public:
     virtual int get_shutter_status() const = 0;
 
     /**
-     * @brief Get the slew target azimuth in degrees.
+     * @brief Get whether the dome is slaved to the telescope.
      */
-    virtual double get_slew_azimuth() const = 0;
+    virtual bool get_slaved() const = 0;
 
     /**
-     * @brief Set the slew target azimuth in degrees.
+     * @brief Set whether the dome is slaved to the telescope.
      */
-    virtual void set_slew_azimuth(double azimuth) = 0;
+    virtual void set_slaved(bool slaved) = 0;
 
     // Dome-specific methods
 
@@ -148,10 +153,14 @@ public:
     virtual void slew_to_azimuth(double azimuth) = 0;
 
     /**
+     * @brief Slew to altitude.
+     */
+    virtual void slew_to_altitude(double altitude) = 0;
+
+    /**
      * @brief Sync to azimuth.
      */
     virtual void sync_to_azimuth(double azimuth) = 0;
 };
 
 } // namespace alpacacore
-

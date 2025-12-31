@@ -45,11 +45,41 @@ public:
     virtual bool get_can_write(int id) const = 0;
 
     /**
+     * @brief Get whether a switch can operate asynchronously.
+     *
+     * @param id Switch ID (0-based)
+     */
+    virtual bool get_can_async(int id) const = 0;
+
+    /**
+     * @brief Get the switch state (boolean).
+     *
+     * @param id Switch ID (0-based)
+     */
+    virtual bool get_switch(int id) const = 0;
+
+    /**
+     * @brief Set the switch state (boolean).
+     *
+     * @param id Switch ID (0-based)
+     * @param state Switch state
+     */
+    virtual void set_switch(int id, bool state) = 0;
+
+    /**
+     * @brief Set the switch state asynchronously (boolean).
+     *
+     * @param id Switch ID (0-based)
+     * @param state Switch state
+     */
+    virtual void set_async(int id, bool state) = 0;
+
+    /**
      * @brief Get the switch value.
      *
      * @param id Switch ID (0-based)
      */
-    virtual bool get_switch_value(int id) const = 0;
+    virtual double get_switch_value(int id) const = 0;
 
     /**
      * @brief Set the switch value.
@@ -57,7 +87,22 @@ public:
      * @param id Switch ID (0-based)
      * @param value Switch value
      */
-    virtual void set_switch_value(int id, bool value) = 0;
+    virtual void set_switch_value(int id, double value) = 0;
+
+    /**
+     * @brief Set the switch value asynchronously.
+     *
+     * @param id Switch ID (0-based)
+     * @param value Switch value
+     */
+    virtual void set_async_value(int id, double value) = 0;
+
+    /**
+     * @brief Check whether an asynchronous state change is complete.
+     *
+     * @param id Switch ID (0-based)
+     */
+    virtual bool get_state_change_complete(int id) const = 0;
 
     /**
      * @brief Get the switch name.
@@ -104,4 +149,3 @@ public:
 };
 
 } // namespace alpacacore
-

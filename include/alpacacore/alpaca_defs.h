@@ -15,6 +15,8 @@
 
 #include <string>
 #include <cstdint>
+#include <vector>
+#include <variant>
 
 namespace alpacacore {
 
@@ -58,9 +60,21 @@ enum class ConnectionState {
 };
 
 /**
+ * @brief Device state value for DeviceState responses.
+ */
+using DeviceStateValue = std::variant<bool, std::int32_t, double, std::string>;
+
+/**
+ * @brief Device state entry for DeviceState responses.
+ */
+struct DeviceState {
+    std::string name;
+    DeviceStateValue value;
+};
+
+/**
  * @brief Get device type name as string.
  */
 const char* device_type_to_string(DeviceType type);
 
 } // namespace alpacacore
-

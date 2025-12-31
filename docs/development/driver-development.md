@@ -125,6 +125,17 @@ public:
 - **Platform-specific code in CMake** - not in C++ source
 - **Standard library only in core** - no vendor dependencies leak
 
+### Gold-Standard Driver Behavior (Required)
+
+To deliver 1:1 Alpaca behavior across vendors, every driver should follow the same runtime semantics:
+
+- **Async connect/disconnect**: Implement `connect()` and `disconnect()` as asynchronous operations that return immediately and perform work in a background task.
+- **Connecting state**: Implement `get_connecting()` to report true while connect/disconnect is in progress.
+- **Device state snapshot**: Implement `get_device_state()` and return a populated list of Name/Value pairs that represent key device telemetry (e.g., Connected, Tracking, Slewing, Position, Temperatures).
+- **Connected property**: Keep `set_connected()` synchronous to support legacy clients; `connect()`/`disconnect()` provide the async workflow.
+
+Use the iOptron telescope driver as the reference implementation for these behaviors.
+
 ## Step-by-Step Implementation
 
 ### Step 1: Place SDK in `external/`
@@ -354,6 +365,7 @@ After implementing your driver:
 - [external/README.md](../../external/README.md) - SDK placement guide
 - [Testing Guide](testing.md) - Comprehensive testing guide
 - [Architecture Guide](architecture.md) - Architecture overview
+- [ASCOM ConformU](https://github.com/ASCOMInitiative/ConformU/releases) - Official Alpaca conformance tool for validating driver behavior
 - [ASCOM Alpaca API Specification](https://ascom-standards.org/api/)
 
 ## Quick Reference

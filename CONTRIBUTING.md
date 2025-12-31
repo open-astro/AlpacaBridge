@@ -29,9 +29,16 @@ All contributions must be licensed under the Server Side Public License v1 (SSPL
 
 All non-trivial code must have unit tests. Use Catch2 or doctest for testing.
 
+## Conformance Logs
+
+All contributions that affect Alpaca behavior must include a link to ConformU logs in the pull request description. Submissions without ConformU logs will not be accepted.
+
+Download ConformU: https://github.com/ASCOMInitiative/ConformU/releases
+
+Also include AlpacaHTTP server logs captured during the ConformU run (DEBUG or TRACE preferred) so we can correlate failures with request handling.
+
 ## Documentation
 
 - Add Doxygen comments for public APIs
 - Update CHANGELOG.md for user-facing changes
 - Update README.md if adding new features or build options
-

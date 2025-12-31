@@ -152,6 +152,8 @@ public:
             throw AlpacaException("Not connected to mount");
         }
         
+        const auto start = std::chrono::steady_clock::now();
+
         // Format command with # terminator
         std::string full_command = command;
         if (full_command.empty() || full_command.back() != '#') {
@@ -165,6 +167,11 @@ public:
         
         // Read response
         std::string response = read_response(require_hash_terminator);
+
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start);
+        ALPACA_LOG_TRACE("iOptron", "CMD " + full_command + " RESP " + response +
+                                       " (" + std::to_string(elapsed.count()) + " ms)");
         
         return response;
     }
@@ -181,6 +188,8 @@ public:
             full_command += "#";
         }
         
+        ALPACA_LOG_TRACE("iOptron", "CMD " + full_command + " (blind)");
+
         if (!write_data(full_command)) {
             throw AlpacaException("Failed to send command to mount");
         }
@@ -709,6 +718,14 @@ MountInfo iOptronProtocolWrapper::get_mount_info() {
 
 Position iOptronProtocolWrapper::get_position() {
     std::string response = send_command(":GEP");
+
+    // Some mounts may leave a pending "0"/"1" response in the buffer (e.g. after :MS1).
+    // If we see a leading status digit before the sign, strip it to realign parsing.
+    if (response.size() >= 21 &&
+        (response[0] == '0' || response[0] == '1') &&
+        (response[1] == '+' || response[1] == '-')) {
+        response = response.substr(1);
+    }
     
     if (response.length() < 20) {
         throw AlpacaException("Invalid position response from mount");
@@ -850,7 +867,7 @@ void iOptronProtocolWrapper::set_target_ra(double ra_hours) {
     }
     std::ostringstream cmd;
     cmd << ":SRA" << std::setfill('0') << std::setw(9) << ra_value << "#";
-    send_command_blind(cmd.str());
+    send_command(cmd.str(), false);
 }
 
 void iOptronProtocolWrapper::set_target_dec(double dec_degrees) {
@@ -862,17 +879,29 @@ void iOptronProtocolWrapper::set_target_dec(double dec_degrees) {
     }
     // iOptron expects ":Sds" + signed 8-digit dec (0.01 arc-seconds).
     std::string cmd = ":Sds" + pimpl_->format_signed_int(dec_value, 8) + "#";
-    send_command_blind(cmd);
+    send_command(cmd, false);
 }
 
 bool iOptronProtocolWrapper::slew_to_ra_dec() {
-    // Some mounts do not respond immediately during slews.
-    send_command_blind(":MS1");
+    // :MS1 returns "1" (accepted) or "0" (rejected). Read the response to keep the stream aligned.
+    std::string response = send_command(":MS1", false);
+    if (response == "0") {
+        return false;
+    }
+    if (!response.empty() && response != "1") {
+        ALPACA_LOG_WARN("iOptron", "Unexpected :MS1 response: " + response);
+    }
     return true;
 }
 
 bool iOptronProtocolWrapper::slew_to_ra_dec_cw_up() {
-    send_command_blind(":MS2");
+    std::string response = send_command(":MS2", false);
+    if (response == "0") {
+        return false;
+    }
+    if (!response.empty() && response != "1") {
+        ALPACA_LOG_WARN("iOptron", "Unexpected :MS2 response: " + response);
+    }
     return true;
 }
 
@@ -881,28 +910,37 @@ void iOptronProtocolWrapper::stop_slewing() {
 }
 
 void iOptronProtocolWrapper::start_tracking() {
-    send_command_blind(":ST1");
+    send_command(":ST1", false);
 }
 
 void iOptronProtocolWrapper::stop_tracking() {
-    send_command_blind(":ST0");
+    send_command(":ST0", false);
 }
 
 void iOptronProtocolWrapper::sync_to_coordinates() {
-    send_command_blind(":CM");
+    send_command(":CM", false);
 }
 
 // Parking commands
 bool iOptronProtocolWrapper::park() {
     // Some iOptron mounts go quiet while parking and never return a response.
-    // To match legacy AlpacaPi behavior, send the command without waiting.
-    send_command_blind(":MP1");
+    // Try to read an optional response to keep the protocol stream aligned.
+    try {
+        send_command(":MP1", false);
+    } catch (const std::exception& e) {
+        ALPACA_LOG_WARN("iOptron", std::string("Park command response not received: ") + e.what());
+    }
     return true;
 }
 
 void iOptronProtocolWrapper::unpark() {
     // Some mounts do not respond to unpark, especially after power-cycle auto-unpark.
-    send_command_blind(":MP0");
+    // Try to read an optional response to keep the protocol stream aligned.
+    try {
+        send_command(":MP0", false);
+    } catch (const std::exception& e) {
+        ALPACA_LOG_WARN("iOptron", std::string("Unpark command response not received: ") + e.what());
+    }
 }
 
 void iOptronProtocolWrapper::set_park_position(double alt_degrees, double az_degrees) {
@@ -912,9 +950,8 @@ void iOptronProtocolWrapper::set_park_position(double alt_degrees, double az_deg
     std::string alt_cmd = ":SPH" + std::to_string(alt_value) + "#";
     std::string az_cmd = ":SPA" + std::to_string(az_value) + "#";
     
-    // Some mounts do not respond to park-position set commands; fire-and-forget.
-    send_command_blind(alt_cmd);
-    send_command_blind(az_cmd);
+    send_command(alt_cmd, false);
+    send_command(az_cmd, false);
 }
 
 // Home position commands
@@ -937,9 +974,9 @@ void iOptronProtocolWrapper::pulse_guide(int direction, int duration_ms) {
     cmd << ":";
     
     // Direction: 0=North (Dec+), 1=South (Dec-), 2=East (RA+), 3=West (RA-)
-    if (direction == 0) cmd << "ZS";      // Dec+
+    if (direction == 0) cmd << "ZE";      // Dec+
     else if (direction == 1) cmd << "ZC"; // Dec-
-    else if (direction == 2) cmd << "ZE"; // RA+
+    else if (direction == 2) cmd << "ZS"; // RA+
     else if (direction == 3) cmd << "ZQ"; // RA-
     else throw AlpacaException("Invalid pulse guide direction");
     
@@ -956,9 +993,7 @@ void iOptronProtocolWrapper::set_longitude(double longitude_degrees) {
 
 void iOptronProtocolWrapper::set_latitude(double latitude_degrees) {
     int64_t lat_value = pimpl_->dec_to_ioptron_format(latitude_degrees);
-    // Mount stores latitude + 90 degrees
-    int64_t stored_value = lat_value + static_cast<int64_t>(90.0 * 3600.0 * 100.0);
-    std::string cmd = ":SLA" + std::to_string(stored_value) + "#";
+    std::string cmd = ":SLA" + pimpl_->format_signed_int(lat_value, 8) + "#";
     send_command(cmd, false);
 }
 
@@ -977,8 +1012,12 @@ void iOptronProtocolWrapper::set_utc_time(std::chrono::system_clock::time_point 
     
     std::ostringstream cmd;
     cmd << ":SUT" << std::setfill('0') << std::setw(13) << ms << "#";
-    // Some mounts do not respond to :SUT; fire-and-forget to avoid timeouts.
-    send_command_blind(cmd.str());
+    // Some mounts do not respond to :SUT; allow timeouts without failing.
+    try {
+        send_command(cmd.str(), false);
+    } catch (const std::exception& e) {
+        ALPACA_LOG_WARN("iOptron", std::string("UTC set response not received: ") + e.what());
+    }
 }
 
 std::chrono::system_clock::time_point iOptronProtocolWrapper::get_utc_time() {

@@ -26,7 +26,8 @@ enum class CoverState {
     Closed,
     Moving,
     Open,
-    Unknown
+    Unknown,
+    Error
 };
 
 /**
@@ -54,11 +55,6 @@ public:
     // CoverCalibrator-specific properties
 
     /**
-     * @brief Get whether the cover is present.
-     */
-    virtual bool get_calibrator_available() const = 0;
-
-    /**
      * @brief Get the calibrator brightness.
      */
     virtual int get_brightness() const = 0;
@@ -74,19 +70,24 @@ public:
     virtual CalibratorState get_calibrator_state() const = 0;
 
     /**
+     * @brief Get whether the calibrator is changing state.
+     */
+    virtual bool get_calibrator_changing() const = 0;
+
+    /**
      * @brief Get the maximum brightness.
      */
     virtual int get_max_brightness() const = 0;
 
     /**
-     * @brief Get whether the cover is present.
-     */
-    virtual bool get_cover_state_available() const = 0;
-
-    /**
      * @brief Get the cover state.
      */
     virtual CoverState get_cover_state() const = 0;
+
+    /**
+     * @brief Get whether the cover is moving.
+     */
+    virtual bool get_cover_moving() const = 0;
 
     // CoverCalibrator-specific methods
 
@@ -117,4 +118,3 @@ public:
 };
 
 } // namespace alpacacore
-

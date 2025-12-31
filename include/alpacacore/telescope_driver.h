@@ -31,6 +31,16 @@ enum class AlignmentMode {
 };
 
 /**
+ * @brief Equatorial coordinate system.
+ */
+enum class EquatorialSystem {
+    Topocentric = 0,
+    J2000 = 1,
+    J2050 = 2,
+    B1950 = 3
+};
+
+/**
  * @brief Telescope guide rate.
  */
 struct GuideRate {
@@ -141,6 +151,21 @@ public:
     virtual bool get_can_set_tracking() const = 0;
 
     /**
+     * @brief Get whether the telescope can slew to Alt/Az coordinates.
+     */
+    virtual bool get_can_slew_alt_az() const = 0;
+
+    /**
+     * @brief Get whether the telescope can slew to Alt/Az coordinates asynchronously.
+     */
+    virtual bool get_can_slew_alt_az_async() const = 0;
+
+    /**
+     * @brief Get whether the telescope can sync to Alt/Az coordinates.
+     */
+    virtual bool get_can_sync_alt_az() const = 0;
+
+    /**
      * @brief Get whether the telescope can slew.
      */
     virtual bool get_can_slew() const = 0;
@@ -206,11 +231,6 @@ public:
     virtual void set_guide_rate(const GuideRate& rate) = 0;
 
     /**
-     * @brief Get whether the telescope is slewing.
-     */
-    virtual bool get_is_slewing() const = 0;
-
-    /**
      * @brief Get the telescope's right ascension in hours.
      */
     virtual double get_right_ascension() const = 0;
@@ -236,9 +256,34 @@ public:
     virtual void set_side_of_pier(int side) = 0;
 
     /**
-     * @brief Get the destination side of pier for the current target.
+     * @brief Get the destination side of pier for the specified target coordinates.
      */
-    virtual int get_destination_side_of_pier() const = 0;
+    virtual int get_destination_side_of_pier(double ra, double dec) const = 0;
+
+    /**
+     * @brief Get the equatorial coordinate system.
+     */
+    virtual EquatorialSystem get_equatorial_system() const = 0;
+
+    /**
+     * @brief Get whether atmospheric refraction is applied.
+     */
+    virtual bool get_does_refraction() const = 0;
+
+    /**
+     * @brief Set whether atmospheric refraction is applied.
+     */
+    virtual void set_does_refraction(bool does_refraction) = 0;
+
+    /**
+     * @brief Get the slew settle time in seconds.
+     */
+    virtual int get_slew_settle_time() const = 0;
+
+    /**
+     * @brief Set the slew settle time in seconds.
+     */
+    virtual void set_slew_settle_time(int seconds) = 0;
 
     /**
      * @brief Get the telescope's sidereal time in hours.
@@ -303,12 +348,12 @@ public:
     /**
      * @brief Get the telescope's tracking rate.
      */
-    virtual double get_tracking_rate() const = 0;
+    virtual int get_tracking_rate() const = 0;
 
     /**
      * @brief Set the telescope's tracking rate.
      */
-    virtual void set_tracking_rate(double rate) = 0;
+    virtual void set_tracking_rate(int rate) = 0;
 
     /**
      * @brief Get the collection of supported tracking rates (DriveRates).
@@ -356,12 +401,12 @@ public:
     /**
      * @brief Slew the telescope to the target coordinates.
      */
-    virtual void slew_to_coordinates() = 0;
+    virtual void slew_to_coordinates(double ra, double dec) = 0;
 
     /**
      * @brief Slew the telescope to the target coordinates asynchronously.
      */
-    virtual void slew_to_coordinates_async() = 0;
+    virtual void slew_to_coordinates_async(double ra, double dec) = 0;
 
     /**
      * @brief Slew the telescope to the target.
@@ -416,6 +461,14 @@ public:
      * @brief Abort any current slew operation.
      */
     virtual void abort_slew() = 0;
+
+    /**
+     * @brief Slew the telescope to the given Alt/Az coordinates.
+     *
+     * @param altitude Altitude in degrees
+     * @param azimuth Azimuth in degrees
+     */
+    virtual void slew_to_alt_az(double altitude, double azimuth) = 0;
 
     /**
      * @brief Slew the telescope to the given Alt/Az coordinates asynchronously.
