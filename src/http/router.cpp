@@ -512,9 +512,8 @@ bool is_valid_method(alpacacore::DeviceType type, const std::string& method_name
 }
 
 void apply_error_status(alpacahttp::Response& response, std::int32_t error_code) {
-    if (error_code == alpacahttp::util::ErrorCode::INVALID_VALUE) {
-        response.set_status(400, "Bad Request");
-    }
+    (void)response;
+    (void)error_code;
 }
 
 const nlohmann::json* find_json_value(const nlohmann::json& json_obj, const std::string& key) {
@@ -1671,13 +1670,15 @@ Response Router::dispatch_telescope_method(
                 if (request.has_query_param("Axis")) {
                     axis = parse_int_value(request.get_query_param("Axis"), "Axis");
                 }
-                // AxisRates must return an array of rate objects, even if only one range
-                auto [min_rate, max_rate] = telescope->get_axis_rate_range(axis);
+                // AxisRates must return an array of rate objects, even if only one range.
+                auto ranges = telescope->get_axis_rate_ranges(axis);
                 nlohmann::json rates_array = nlohmann::json::array();
-                nlohmann::json rate_obj;
-                rate_obj["Minimum"] = min_rate;
-                rate_obj["Maximum"] = max_rate;
-                rates_array.push_back(rate_obj);
+                for (const auto& range : ranges) {
+                    nlohmann::json rate_obj;
+                    rate_obj["Minimum"] = range.first;
+                    rate_obj["Maximum"] = range.second;
+                    rates_array.push_back(rate_obj);
+                }
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, rates_array.dump());
                 response.set_body(alpaca_response);

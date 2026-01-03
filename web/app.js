@@ -370,6 +370,24 @@ function setFormValue(elementId, value) {
     element.value = value !== undefined && value !== null ? value : '';
 }
 
+function updateApertureAreaFromDiameter() {
+    const diameterEl = document.getElementById('aperture-diameter');
+    const areaEl = document.getElementById('aperture-area');
+    if (!diameterEl || !areaEl) {
+        return;
+    }
+
+    const diameter = Number.parseFloat(diameterEl.value);
+    if (!Number.isFinite(diameter) || diameter <= 0) {
+        areaEl.value = '';
+        return;
+    }
+
+    const radius = diameter / 2;
+    const area = Math.PI * radius * radius;
+    areaEl.value = area.toFixed(6);
+}
+
 function startEditDevice(device) {
     const config = device.Config || device.config || {};
     const vendor = device.Vendor || config.vendor || '';
@@ -393,6 +411,9 @@ function startEditDevice(device) {
     setFormValue('baud-rate', config.baudRate);
     setFormValue('host', config.host);
     setFormValue('tcp-port', config.tcpPort);
+    setFormValue('aperture-diameter', config.apertureDiameter);
+    setFormValue('focal-length', config.focalLength);
+    updateApertureAreaFromDiameter();
 
     const messageDiv = document.getElementById('form-message');
     if (messageDiv) {
@@ -419,6 +440,12 @@ function refreshDevices() {
 
 // Delete device
 async function deleteDevice(deviceType, deviceNumber) {
+    const normalizedType = normalizeDeviceType(deviceType);
+    if (!normalizedType) {
+        alert('Error deleting device: Invalid device type');
+        return;
+    }
+
     if (!confirm(`Are you sure you want to delete ${deviceType} device #${deviceNumber}?`)) {
         return;
     }
@@ -430,7 +457,7 @@ async function deleteDevice(deviceType, deviceNumber) {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                deviceType: deviceType,
+                deviceType: normalizedType,
                 deviceNumber: deviceNumber
             })
         });
@@ -730,6 +757,24 @@ document.getElementById('connection-type').addEventListener('change', function()
     document.getElementById('network-config').style.display = type === 'network' ? 'block' : 'none';
 });
 
+const apertureDiameterInput = document.getElementById('aperture-diameter');
+if (apertureDiameterInput) {
+    apertureDiameterInput.addEventListener('input', updateApertureAreaFromDiameter);
+}
+
+function readOptionalNumber(formData, name) {
+    const rawValue = formData.get(name);
+    if (rawValue === null || rawValue === undefined) {
+        return null;
+    }
+    const trimmed = rawValue.toString().trim();
+    if (trimmed === '') {
+        return null;
+    }
+    const value = Number.parseFloat(trimmed);
+    return Number.isFinite(value) ? value : null;
+}
+
 document.getElementById('device-form').addEventListener('submit', async function(e) {
     e.preventDefault();
     
@@ -751,6 +796,15 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.tcpPort = parseInt(formData.get('tcpPort')) || 4030;
         }
 
+        const apertureDiameter = readOptionalNumber(formData, 'apertureDiameter');
+        if (apertureDiameter !== null) {
+            deviceData.apertureDiameter = apertureDiameter;
+        }
+
+        const focalLength = readOptionalNumber(formData, 'focalLength');
+        if (focalLength !== null) {
+            deviceData.focalLength = focalLength;
+        }
     }
 
     const messageDiv = document.getElementById('form-message');
@@ -851,6 +905,8 @@ function renderDeviceSettings(config) {
         ['baudRate', 'Baud Rate'],
         ['host', 'Host'],
         ['tcpPort', 'TCP Port'],
+        ['apertureDiameter', 'Aperture Diameter (m)'],
+        ['focalLength', 'Focal Length (m)'],
         ['responseTimeoutMs', 'Response Timeout (ms)'],
     ]);
 
@@ -867,8 +923,27 @@ function renderDeviceSettings(config) {
             </div>
         `);
     };
+    const addRowValue = (label, value) => {
+        if (value === undefined || value === null || value === '') {
+            return;
+        }
+        const formatted = formatSettingValue(value);
+        rows.push(`
+            <div class="setting-row">
+                <span class="setting-label">${escapeHtml(label)}</span>
+                <span class="setting-value">${escapeHtml(formatted)}</span>
+            </div>
+        `);
+    };
 
     labelMap.forEach((label, key) => addRow(key, label));
+
+    const apertureDiameter = Number(config.apertureDiameter);
+    if (Number.isFinite(apertureDiameter) && apertureDiameter > 0) {
+        const radius = apertureDiameter / 2;
+        const area = Math.PI * radius * radius;
+        addRowValue('Aperture Area (m^2)', area.toFixed(6));
+    }
 
     Object.keys(config)
         .filter(key => !labelMap.has(key))
