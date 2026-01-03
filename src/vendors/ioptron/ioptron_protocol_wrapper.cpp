@@ -145,7 +145,7 @@ public:
         return connected_;
     }
     
-    std::string send_command(const std::string& command, bool require_hash_terminator) {
+    std::string send_command(const std::string& command, bool require_hash_terminator, int timeout_ms_override) {
         std::lock_guard<std::mutex> lock(mutex_);
         
         if (!connected_) {
@@ -166,7 +166,14 @@ public:
         }
         
         // Read response
-        std::string response = read_response(require_hash_terminator);
+        int timeout_ms = timeout_ms_override;
+        if (timeout_ms <= 0) {
+            timeout_ms = connection_info_.response_timeout_ms;
+        }
+        if (timeout_ms <= 0) {
+            timeout_ms = 5000;
+        }
+        std::string response = read_response(require_hash_terminator, timeout_ms);
 
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start);
@@ -481,15 +488,8 @@ private:
 #endif
     }
     
-    std::string read_response(bool require_hash_terminator) {
+    std::string read_response(bool require_hash_terminator, int timeout_ms) {
         std::string response;
-        // Allow slower first responses from mount and make the timeout
-        // configurable via ConnectionInfo. Fall back to a sane minimum if
-        // the caller provided an invalid value.
-        int timeout_ms = connection_info_.response_timeout_ms;
-        if (timeout_ms <= 0) {
-            timeout_ms = 5000;
-        }
         auto start = std::chrono::steady_clock::now();
         
         auto last_char_time = start;
@@ -649,8 +649,10 @@ bool iOptronProtocolWrapper::is_connected() const {
     return pimpl_->is_connected();
 }
 
-std::string iOptronProtocolWrapper::send_command(const std::string& command, bool require_hash_terminator) {
-    return pimpl_->send_command(command, require_hash_terminator);
+std::string iOptronProtocolWrapper::send_command(const std::string& command,
+                                                 bool require_hash_terminator,
+                                                 int timeout_ms_override) {
+    return pimpl_->send_command(command, require_hash_terminator, timeout_ms_override);
 }
 
 void iOptronProtocolWrapper::send_command_blind(const std::string& command) {
@@ -754,6 +756,12 @@ Position iOptronProtocolWrapper::get_position() {
 
 AltAz iOptronProtocolWrapper::get_alt_az() {
     std::string response = send_command(":GAC");
+
+    if (response.size() >= 19 &&
+        (response[0] == '0' || response[0] == '1') &&
+        (response[1] == '+' || response[1] == '-')) {
+        response = response.substr(1);
+    }
     
     if (response.length() < 17) {
         throw AlpacaException("Invalid Alt/Az response from mount");
@@ -778,6 +786,12 @@ AltAz iOptronProtocolWrapper::get_alt_az() {
 
 MountStatus iOptronProtocolWrapper::get_status() {
     std::string response = send_command(":GLS");
+
+    if (response.size() >= 24 &&
+        (response[0] == '0' || response[0] == '1') &&
+        (response[1] == '+' || response[1] == '-')) {
+        response = response.substr(1);
+    }
     
     if (response.length() < 23) {
         throw AlpacaException("Invalid status response from mount");
@@ -803,6 +817,17 @@ MountStatus iOptronProtocolWrapper::get_status() {
 SiteInfo iOptronProtocolWrapper::get_site_info() {
     std::string gls_response = send_command(":GLS");
     std::string gut_response = send_command(":GUT");
+
+    if (gls_response.size() >= 2 &&
+        (gls_response[0] == '0' || gls_response[0] == '1') &&
+        (gls_response[1] == '+' || gls_response[1] == '-')) {
+        gls_response = gls_response.substr(1);
+    }
+    if (gut_response.size() >= 2 &&
+        (gut_response[0] == '0' || gut_response[0] == '1') &&
+        (gut_response[1] == '+' || gut_response[1] == '-')) {
+        gut_response = gut_response.substr(1);
+    }
     
     if (gls_response.length() < 23 || gut_response.length() < 17) {
         throw AlpacaException("Invalid site info response from mount");
@@ -857,6 +882,56 @@ AltAz iOptronProtocolWrapper::get_park_position() {
     return park;
 }
 
+int iOptronProtocolWrapper::get_altitude_limit_degrees() {
+    std::string response = send_command(":GAL");
+    if (response.empty()) {
+        throw AlpacaException("Invalid altitude limit response from mount");
+    }
+    int64_t limit = pimpl_->parse_signed_int(response);
+    return static_cast<int>(limit);
+}
+
+void iOptronProtocolWrapper::set_altitude_limit_degrees(int limit_degrees) {
+    if (limit_degrees < -89) {
+        limit_degrees = -89;
+    } else if (limit_degrees > 89) {
+        limit_degrees = 89;
+    }
+    std::string cmd = ":SAL" + pimpl_->format_signed_int(limit_degrees, 2) + "#";
+    std::string response = send_command(cmd, false);
+    if (!response.empty() && response != "1") {
+        ALPACA_LOG_WARN("iOptron", "Unexpected :SAL response: " + response);
+    }
+}
+
+MeridianTreatment iOptronProtocolWrapper::get_meridian_treatment() {
+    std::string response = send_command(":GMT");
+    if (response.size() < 3) {
+        throw AlpacaException("Invalid meridian treatment response from mount");
+    }
+    MeridianTreatment treatment;
+    treatment.behavior = response[0] - '0';
+    treatment.degrees_past = std::stoi(response.substr(1, 2));
+    return treatment;
+}
+
+void iOptronProtocolWrapper::set_meridian_treatment(int behavior, int degrees_past) {
+    if (behavior != 0 && behavior != 1) {
+        behavior = 0;
+    }
+    if (degrees_past < 0) {
+        degrees_past = 0;
+    } else if (degrees_past > 90) {
+        degrees_past = 90;
+    }
+    std::ostringstream cmd;
+    cmd << ":SMT" << behavior << std::setfill('0') << std::setw(2) << degrees_past << "#";
+    std::string response = send_command(cmd.str(), false);
+    if (!response.empty() && response != "1") {
+        ALPACA_LOG_WARN("iOptron", "Unexpected :SMT response: " + response);
+    }
+}
+
 // Mount motion commands
 void iOptronProtocolWrapper::set_target_ra(double ra_hours) {
     int64_t ra_value = pimpl_->ra_to_ioptron_format(ra_hours);
@@ -877,8 +952,8 @@ void iOptronProtocolWrapper::set_target_dec(double dec_degrees) {
     } else if (dec_value > 32400000) {
         dec_value = 32400000;
     }
-    // iOptron expects ":Sds" + signed 8-digit dec (0.01 arc-seconds).
-    std::string cmd = ":Sds" + pimpl_->format_signed_int(dec_value, 8) + "#";
+    // iOptron expects ":Sd" + signed 8-digit dec (0.01 arc-seconds).
+    std::string cmd = ":Sd" + pimpl_->format_signed_int(dec_value, 8) + "#";
     send_command(cmd, false);
 }
 
@@ -906,15 +981,15 @@ bool iOptronProtocolWrapper::slew_to_ra_dec_cw_up() {
 }
 
 void iOptronProtocolWrapper::stop_slewing() {
-    send_command(":Q");
+    send_command_blind(":Q#");
 }
 
 void iOptronProtocolWrapper::start_tracking() {
-    send_command(":ST1", false);
+    send_command_blind(":ST1#");
 }
 
 void iOptronProtocolWrapper::stop_tracking() {
-    send_command(":ST0", false);
+    send_command_blind(":ST0#");
 }
 
 void iOptronProtocolWrapper::sync_to_coordinates() {
@@ -924,23 +999,13 @@ void iOptronProtocolWrapper::sync_to_coordinates() {
 // Parking commands
 bool iOptronProtocolWrapper::park() {
     // Some iOptron mounts go quiet while parking and never return a response.
-    // Try to read an optional response to keep the protocol stream aligned.
-    try {
-        send_command(":MP1", false);
-    } catch (const std::exception& e) {
-        ALPACA_LOG_WARN("iOptron", std::string("Park command response not received: ") + e.what());
-    }
+    send_command_blind(":MP1#");
     return true;
 }
 
 void iOptronProtocolWrapper::unpark() {
     // Some mounts do not respond to unpark, especially after power-cycle auto-unpark.
-    // Try to read an optional response to keep the protocol stream aligned.
-    try {
-        send_command(":MP0", false);
-    } catch (const std::exception& e) {
-        ALPACA_LOG_WARN("iOptron", std::string("Unpark command response not received: ") + e.what());
-    }
+    send_command_blind(":MP0#");
 }
 
 void iOptronProtocolWrapper::set_park_position(double alt_degrees, double az_degrees) {
@@ -956,8 +1021,8 @@ void iOptronProtocolWrapper::set_park_position(double alt_degrees, double az_deg
 
 // Home position commands
 void iOptronProtocolWrapper::go_to_home() {
-    // Some mounts do not respond while slewing to home; fire-and-forget.
-    send_command_blind(":MH");
+    // Some mounts do not respond while slewing to home.
+    send_command_blind(":MH#");
 }
 
 void iOptronProtocolWrapper::find_home() {
@@ -1012,12 +1077,8 @@ void iOptronProtocolWrapper::set_utc_time(std::chrono::system_clock::time_point 
     
     std::ostringstream cmd;
     cmd << ":SUT" << std::setfill('0') << std::setw(13) << ms << "#";
-    // Some mounts do not respond to :SUT; allow timeouts without failing.
-    try {
-        send_command(cmd.str(), false);
-    } catch (const std::exception& e) {
-        ALPACA_LOG_WARN("iOptron", std::string("UTC set response not received: ") + e.what());
-    }
+    // Some mounts do not respond to :SUT.
+    send_command_blind(cmd.str());
 }
 
 std::chrono::system_clock::time_point iOptronProtocolWrapper::get_utc_time() {
@@ -1116,7 +1177,8 @@ void iOptronProtocolWrapper::set_tracking_rate(int rate) {
     }
     std::ostringstream cmd;
     cmd << ":RT" << rate << "#";
-    send_command(cmd.str());
+    // Some mounts do not respond to :RT; fire-and-forget to avoid timeouts.
+    send_command_blind(cmd.str());
 }
 
 double iOptronProtocolWrapper::get_custom_tracking_rate() {
@@ -1140,7 +1202,8 @@ void iOptronProtocolWrapper::set_custom_tracking_rate(double rate_multiplier) {
     int value = static_cast<int>(std::round(rate_multiplier * 10000.0));
     std::ostringstream cmd;
     cmd << ":RR" << std::setfill('0') << std::setw(5) << value << "#";
-    send_command(cmd.str());
+    // Some mounts do not respond to :RR; fire-and-forget to avoid timeouts.
+    send_command_blind(cmd.str());
 }
 
 // Guiding rate commands
@@ -1179,7 +1242,8 @@ void iOptronProtocolWrapper::set_guide_rates(double ra_rate, double dec_rate) {
     std::ostringstream cmd;
     cmd << ":RG" << std::setfill('0') << std::setw(2) << ra_value
         << std::setfill('0') << std::setw(2) << dec_value << "#";
-    send_command(cmd.str());
+    // Some mounts do not respond to :RG; fire-and-forget to avoid timeouts.
+    send_command_blind(cmd.str());
 }
 
 } // namespace alpacacore::vendor::ioptron
