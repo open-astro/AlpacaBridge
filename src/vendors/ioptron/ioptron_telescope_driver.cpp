@@ -964,6 +964,19 @@ public:
         }
         refresh_status_cache_locked();
         if (cached_status_.is_slewing) {
+            if (slew_in_progress_ && target_set_) {
+                if (slew_target_reached_locked()) {
+                    ALPACA_LOG_INFO("iOptron", "Slew complete by position tolerance (status still slewing)");
+                    update_slew_ra_bias_locked();
+                    cached_status_.is_slewing = false;
+                    status_cache_valid_ = true;
+                    last_status_update_ = now;
+                    slew_in_progress_ = false;
+                    restore_altitude_limit_locked("Slewing");
+                    restore_meridian_treatment_locked("Slewing");
+                    return false;
+                }
+            }
             return true;
         }
         if (slew_override_until_ > now) {
@@ -1390,6 +1403,7 @@ private:
     static constexpr std::chrono::milliseconds kPulseGuideCompletionDelay{1000};
     static constexpr std::chrono::milliseconds kPulseGuideHoldGrace{200};
     static constexpr std::chrono::milliseconds kPulseGuideCorrectionGrace{5000};
+    static constexpr double kSlewCompletionToleranceArcsec = 60.0;
     static constexpr double kSiderealSeconds = 86164.0905;
     static constexpr double kSiderealRateDegPerSec = 360.0 / kSiderealSeconds;
     static constexpr double kDefaultGuideRateFraction = 0.5;
@@ -2038,6 +2052,21 @@ private:
             ALPACA_LOG_WARN("iOptron", std::string("Slew RA bias update failed: ") + e.what());
         }
         slew_in_progress_ = false;
+    }
+
+    bool slew_target_reached_locked() const {
+        try {
+            refresh_position_cache_locked(true);
+        } catch (const std::exception&) {
+            return false;
+        }
+        const double ra_delta_hours =
+            std::abs(shortest_ra_delta_hours(slew_target_ra_hours_, cached_ra_hours_));
+        const double dec_delta_degrees = std::abs(slew_target_dec_degrees_ - cached_dec_degrees_);
+        const double ra_arcsec = ra_delta_hours * 15.0 * 3600.0;
+        const double dec_arcsec = dec_delta_degrees * 3600.0;
+        return ra_arcsec <= kSlewCompletionToleranceArcsec &&
+               dec_arcsec <= kSlewCompletionToleranceArcsec;
     }
 
     static void validate_ra(double ra_hours, const char* label) {
