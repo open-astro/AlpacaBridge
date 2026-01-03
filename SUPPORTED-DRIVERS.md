@@ -8,7 +8,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Vendor | Models | Connection | Status |
 |--------|--------|------------|--------|
-| **iOptron** | CEM, GEM, HEM, HAE, HAZ series, SkyHunter | USB/Serial, Ethernet | [ConformU Certified 01022026](conformu/iOptron/) |
+| **iOptron** | CEM, GEM, HEM, HAE, HAZ series, SkyHunter | USB/Serial, Ethernet | [ConformU Validation 20260103](conformu/iOptron/) |
 
 ## Notes
 

@@ -523,11 +523,11 @@ public:
     }
 
     bool get_can_slew_alt_az() const override {
-        return false;
+        return true;
     }
 
     bool get_can_slew_alt_az_async() const override {
-        return false;
+        return true;
     }
 
     bool get_can_sync_alt_az() const override {
@@ -727,7 +727,7 @@ public:
         check_connected();
         
         refresh_position_cache_locked();
-        return cached_side_of_pier_;
+        return normalize_side_of_pier_value(cached_side_of_pier_);
     }
     
     int get_destination_side_of_pier(double ra, double dec) const override {
@@ -738,7 +738,7 @@ public:
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
             if (!site_info_valid_) {
-                return cached_side_of_pier_;
+                return normalize_side_of_pier_value(cached_side_of_pier_);
             }
         }
 
@@ -876,14 +876,19 @@ public:
             throw AlpacaException("Axis must be 0 or 1", AlpacaError::InvalidValue);
         }
 
-        auto [min_rate, max_rate] = get_axis_rate_range(axis);
         double abs_rate = std::abs(rate);
-        if (abs_rate > max_rate || (abs_rate != 0.0 && abs_rate < min_rate)) {
+        if (!is_axis_rate_supported(abs_rate)) {
             throw AlpacaException("Axis rate out of range", AlpacaError::InvalidValue);
         }
 
         const bool was_any_axis_active = axis_move_active_primary_ || axis_move_active_secondary_;
         auto& protocol = iOptronProtocolWrapper::instance();
+        if (abs_rate > 0.0) {
+            const int arrow_speed = arrow_speed_level_for_rate(abs_rate);
+            std::ostringstream cmd;
+            cmd << ":SR" << arrow_speed << "#";
+            protocol.send_command_blind(cmd.str());
+        }
         if (axis == 0) {
             if (rate > 0.0) {
                 protocol.send_command_blind(":mw#"); // RA+ (west)
@@ -943,13 +948,24 @@ public:
     }
     
     std::pair<double, double> get_axis_rate_range(int axis) const override {
-        if (axis == 0) {
-            return {0.0, 5.0};
-        }
-        if (axis == 1) {
-            return {0.0, 6.0};
+        if (axis == 0 || axis == 1) {
+            const auto& rates = axis_rate_steps_deg_per_sec();
+            return {rates.front(), rates.back()};
         }
         return {0.0, 0.0};
+    }
+
+    std::vector<std::pair<double, double>> get_axis_rate_ranges(int axis) const override {
+        if (axis != 0 && axis != 1) {
+            return {{0.0, 0.0}};
+        }
+        const auto& rates = axis_rate_steps_deg_per_sec();
+        std::vector<std::pair<double, double>> ranges;
+        ranges.reserve(rates.size());
+        for (double rate : rates) {
+            ranges.push_back({rate, rate});
+        }
+        return ranges;
     }
 
     bool get_slewing() const override {
@@ -1346,21 +1362,63 @@ public:
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
-        (void)altitude;
-        (void)azimuth;
-        throw AlpacaException(
-            "Alt/Az slews not supported by iOptron driver",
-            AlpacaError::MethodNotImplemented
-        );
+        double ra_hours = 0.0;
+        double dec_degrees = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
+            if (!site_info_valid_) {
+                ensure_site_info_cached_locked();
+                if (!site_info_valid_) {
+                    throw AlpacaException("Site information unavailable for Alt/Az slew",
+                                          AlpacaError::ValueNotSet);
+                }
+            }
+            auto converted = alt_az_to_ra_dec(
+                altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
+            ra_hours = converted.first;
+            dec_degrees = converted.second;
+            prepare_slew_state_locked(ra_hours, dec_degrees, "SlewToAltAzAsync");
+        }
+
+        try {
+            std::thread([this, ra_hours, dec_degrees]() {
+                std::lock_guard<std::mutex> lock(mutex_);
+                try {
+                    dispatch_slew_command_locked(ra_hours, dec_degrees, true, "SlewToAltAzAsync");
+                } catch (const std::exception& e) {
+                    slew_in_progress_ = false;
+                    ALPACA_LOG_WARN("iOptron", std::string("Async AltAz slew failed: ") + e.what());
+                }
+            }).detach();
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            slew_in_progress_ = false;
+            throw AlpacaException(std::string("Failed to start async Alt/Az slew: ") + e.what(),
+                                  AlpacaError::DriverException);
+        }
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {
-        (void)altitude;
-        (void)azimuth;
-        throw AlpacaException(
-            "Alt/Az slews not supported by iOptron driver",
-            AlpacaError::MethodNotImplemented
-        );
+        double ra_hours = 0.0;
+        double dec_degrees = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            validate_alt_az(altitude, azimuth, "SlewToAltAz");
+            ensure_site_info_cached_locked();
+            if (!site_info_valid_) {
+                throw AlpacaException("Site information unavailable for Alt/Az slew",
+                                      AlpacaError::ValueNotSet);
+            }
+            auto converted = alt_az_to_ra_dec(
+                altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
+            ra_hours = converted.first;
+            dec_degrees = converted.second;
+            start_slew_to_coordinates_locked(ra_hours, dec_degrees, false);
+        }
+        wait_for_slew_completion("SlewToAltAz");
     }
     
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -1575,10 +1633,10 @@ private:
         }
     }
 
-    void start_slew_to_coordinates_locked(double ra, double dec, bool allow_soft_fail) {
+    void prepare_slew_state_locked(double ra, double dec, const char* label) {
         check_connected();
-        validate_ra_dec(ra, dec, "SlewToCoordinates");
-        ensure_not_parked_locked("SlewToCoordinates");
+        validate_ra_dec(ra, dec, label);
+        ensure_not_parked_locked(label);
 
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
@@ -1586,7 +1644,9 @@ private:
         slew_in_progress_ = true;
         slew_target_ra_hours_ = ra;
         slew_target_dec_degrees_ = dec;
+    }
 
+    void dispatch_slew_command_locked(double ra, double dec, bool allow_soft_fail, const char* label) {
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_target_ra(strip_sync_offset_ra(ra));
         protocol.set_target_dec(strip_sync_offset_dec(dec));
@@ -1608,10 +1668,10 @@ private:
                 accepted = protocol.slew_to_ra_dec_cw_up();
             }
             if (!accepted && altitude_override_applied) {
-                restore_altitude_limit_locked("SlewToCoordinates");
+                restore_altitude_limit_locked(label);
             }
             if (!accepted && meridian_override_applied) {
-                restore_meridian_treatment_locked("SlewToCoordinates");
+                restore_meridian_treatment_locked(label);
             }
         }
         if (!accepted) {
@@ -1625,6 +1685,11 @@ private:
         slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
+    }
+
+    void start_slew_to_coordinates_locked(double ra, double dec, bool allow_soft_fail) {
+        prepare_slew_state_locked(ra, dec, "SlewToCoordinates");
+        dispatch_slew_command_locked(ra, dec, allow_soft_fail, "SlewToCoordinates");
     }
 
     void wait_for_slew_completion(const char* label) {
@@ -2044,10 +2109,15 @@ private:
             if (delta_arcsec >= kMinBiasArcsec && delta_arcsec <= kMaxBiasArcsec) {
                 slew_ra_bias_hours_ = normalize_ra_offset_hours(slew_ra_bias_hours_ + delta);
                 slew_ra_bias_valid_ = true;
+                adjusted_ra = normalize_ra_hours(adjusted_ra + delta);
                 ALPACA_LOG_INFO("iOptron", "Applied RA slew bias: " +
                                              std::to_string(slew_ra_bias_hours_ * 3600.0 * 15.0) +
                                              " arcsec");
             }
+            cached_ra_hours_ = adjusted_ra;
+            cached_dec_degrees_ = apply_sync_offset_dec(raw_pos.dec_degrees);
+            position_cache_valid_ = true;
+            last_position_update_ = std::chrono::steady_clock::now();
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("iOptron", std::string("Slew RA bias update failed: ") + e.what());
         }
@@ -2084,6 +2154,17 @@ private:
     static void validate_ra_dec(double ra_hours, double dec_degrees, const char* label) {
         validate_ra(ra_hours, label);
         validate_dec(dec_degrees, label);
+    }
+
+    static void validate_alt_az(double altitude_degrees, double azimuth_degrees, const char* label) {
+        if (!std::isfinite(altitude_degrees) || altitude_degrees < -90.0 || altitude_degrees > 90.0) {
+            throw AlpacaException(std::string(label) + " altitude must be in [-90, 90] degrees",
+                                  AlpacaError::InvalidValue);
+        }
+        if (!std::isfinite(azimuth_degrees) || azimuth_degrees < 0.0 || azimuth_degrees >= 360.0) {
+            throw AlpacaException(std::string(label) + " azimuth must be in [0, 360) degrees",
+                                  AlpacaError::InvalidValue);
+        }
     }
 
     void sync_site_settings_with_mount_locked() {
@@ -2244,6 +2325,91 @@ private:
             lst += 360.0;
         }
         return lst / 15.0;
+    }
+
+    static std::pair<double, double> alt_az_to_ra_dec(double altitude_degrees,
+                                                      double azimuth_degrees,
+                                                      double latitude_degrees,
+                                                      double longitude_degrees,
+                                                      std::chrono::system_clock::time_point utc_time) {
+        const double deg_to_rad = M_PI / 180.0;
+        const double rad_to_deg = 180.0 / M_PI;
+        const double alt_rad = altitude_degrees * deg_to_rad;
+        const double az_rad = azimuth_degrees * deg_to_rad;
+        const double lat_rad = latitude_degrees * deg_to_rad;
+
+        const double sin_alt = std::sin(alt_rad);
+        const double cos_alt = std::cos(alt_rad);
+        const double sin_lat = std::sin(lat_rad);
+        const double cos_lat = std::cos(lat_rad);
+
+        double sin_dec = sin_alt * sin_lat + cos_alt * cos_lat * std::cos(az_rad);
+        sin_dec = std::clamp(sin_dec, -1.0, 1.0);
+        const double dec_rad = std::asin(sin_dec);
+        const double cos_dec = std::cos(dec_rad);
+
+        double ha_rad = 0.0;
+        if (std::abs(cos_lat) > 1e-12 && std::abs(cos_dec) > 1e-12) {
+            const double sin_h = -std::sin(az_rad) * cos_alt / cos_dec;
+            const double cos_h = (sin_alt - sin_lat * sin_dec) / (cos_lat * cos_dec);
+            ha_rad = std::atan2(sin_h, cos_h);
+        }
+
+        const double ha_hours = ha_rad * 12.0 / M_PI;
+        const double lst_hours = compute_local_sidereal_time_hours(utc_time, longitude_degrees);
+        const double ra_hours = normalize_ra_hours(lst_hours - ha_hours);
+        const double dec_degrees = dec_rad * rad_to_deg;
+        return {ra_hours, dec_degrees};
+    }
+
+    static int normalize_side_of_pier_value(int side) {
+        return (side == 0 || side == 1 || side == 2) ? side : 2;
+    }
+
+    static const std::vector<double>& axis_rate_steps_deg_per_sec() {
+        static const std::vector<double> rates = [] {
+            const double sidereal_deg_per_sec = 15.0 / 3600.0;
+            std::vector<double> values = {
+                sidereal_deg_per_sec * 1.0,
+                sidereal_deg_per_sec * 2.0,
+                sidereal_deg_per_sec * 8.0,
+                sidereal_deg_per_sec * 16.0,
+                sidereal_deg_per_sec * 64.0,
+                sidereal_deg_per_sec * 128.0,
+                sidereal_deg_per_sec * 256.0,
+                sidereal_deg_per_sec * 512.0,
+                6.0
+            };
+            return values;
+        }();
+        return rates;
+    }
+
+    static bool is_axis_rate_supported(double abs_rate) {
+        if (abs_rate == 0.0) {
+            return true;
+        }
+        const auto& rates = axis_rate_steps_deg_per_sec();
+        for (double rate : rates) {
+            if (std::abs(abs_rate - rate) <= 1e-6) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static int arrow_speed_level_for_rate(double abs_rate) {
+        const auto& rates = axis_rate_steps_deg_per_sec();
+        double best_delta = std::numeric_limits<double>::max();
+        int best_index = 0;
+        for (size_t i = 0; i < rates.size(); ++i) {
+            const double delta = std::abs(abs_rate - rates[i]);
+            if (delta < best_delta) {
+                best_delta = delta;
+                best_index = static_cast<int>(i);
+            }
+        }
+        return std::clamp(best_index + 1, 1, 9);
     }
 
     bool should_flip_dec_for_pier_locked() const {

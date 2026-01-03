@@ -34,10 +34,11 @@ enum class AlignmentMode {
  * @brief Equatorial coordinate system.
  */
 enum class EquatorialSystem {
-    Topocentric = 0,
-    J2000 = 1,
-    J2050 = 2,
-    B1950 = 3
+    Other = 0,
+    Topocentric = 1,
+    J2000 = 2,
+    J2050 = 3,
+    B1950 = 4
 };
 
 /**
@@ -456,6 +457,17 @@ public:
      * @return Pair of (min_rate, max_rate) in degrees per second.
      */
     virtual std::pair<double, double> get_axis_rate_range(int axis) const = 0;
+    /**
+     * @brief Get the allowed axis rate ranges.
+     *
+     * Use multiple ranges to represent discrete speeds.
+     *
+     * @param axis Axis number (0=Primary, 1=Secondary, 2=Tertiary)
+     * @return Vector of (min_rate, max_rate) ranges in degrees per second.
+     */
+    virtual std::vector<std::pair<double, double>> get_axis_rate_ranges(int axis) const {
+        return {get_axis_rate_range(axis)};
+    }
 
     /**
      * @brief Abort any current slew operation.
