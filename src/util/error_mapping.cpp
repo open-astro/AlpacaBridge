@@ -15,6 +15,8 @@
 #include <alpacacore/util/error_handling.h>
 #include <stdexcept>
 #include <sstream>
+#include <algorithm>
+#include <cctype>
 
 namespace alpacahttp::util {
 
@@ -25,32 +27,36 @@ std::int32_t exception_to_error_code(const std::exception& e) {
 
     // Try to map common exception types to Alpaca error codes
     const std::string& what = e.what();
+    std::string what_lower = what;
+    std::transform(what_lower.begin(), what_lower.end(), what_lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     
     // Check for common error patterns
-    if (what.find("not connected") != std::string::npos ||
-        what.find("NotConnected") != std::string::npos) {
+    if (what_lower.find("not connected") != std::string::npos) {
         return ErrorCode::NOT_CONNECTED;
     }
     
-    if (what.find("not implemented") != std::string::npos ||
-        what.find("NotImplemented") != std::string::npos) {
+    if (what_lower.find("not implemented") != std::string::npos) {
         return ErrorCode::NOT_IMPLEMENTED;
     }
 
-    if (what.find("not supported") != std::string::npos ||
-        what.find("NotSupported") != std::string::npos) {
+    if (what_lower.find("not supported") != std::string::npos) {
         return ErrorCode::NOT_IMPLEMENTED;
     }
 
-    if (what.find("value not set") != std::string::npos ||
-        what.find("ValueNotSet") != std::string::npos ||
-        what.find("not been set") != std::string::npos ||
-        what.find("not set") != std::string::npos) {
+    if (what_lower.find("value not set") != std::string::npos ||
+        what_lower.find("not been set") != std::string::npos ||
+        what_lower.find("not set") != std::string::npos) {
         return ErrorCode::VALUE_NOT_SET;
     }
     
-    if (what.find("invalid value") != std::string::npos ||
-        what.find("InvalidValue") != std::string::npos) {
+    if (what_lower.find("invalid value") != std::string::npos ||
+        what_lower.find("invalid form value") != std::string::npos ||
+        what_lower.find("invalid json value") != std::string::npos ||
+        what_lower.find("missing parameter") != std::string::npos ||
+        what_lower.find("missing '") != std::string::npos ||
+        what_lower.find("missing \"") != std::string::npos ||
+        what_lower.find("invalid utc date format") != std::string::npos) {
         return ErrorCode::INVALID_VALUE;
     }
     

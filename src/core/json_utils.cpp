@@ -13,6 +13,7 @@
 #include <alpacahttp/json_utils.h>
 #include <sstream>
 #include <type_traits>
+#include <limits>
 
 namespace alpacahttp {
 
@@ -85,8 +86,30 @@ std::optional<nlohmann::json> parse_json(std::string_view json_str) {
 }
 
 std::uint32_t extract_client_transaction_id(const nlohmann::json& j) {
+    const nlohmann::json* candidate = nullptr;
     if (j.contains("ClientTransactionID")) {
-        return j["ClientTransactionID"].get<std::uint32_t>();
+        candidate = &j["ClientTransactionID"];
+    }
+
+    if (candidate) {
+        try {
+            if (candidate->is_number_integer()) {
+                auto value = candidate->get<std::int64_t>();
+                if (value < 0 || value > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())) {
+                    return 0;
+                }
+                return static_cast<std::uint32_t>(value);
+            }
+            if (candidate->is_number_unsigned()) {
+                auto value = candidate->get<std::uint64_t>();
+                if (value > std::numeric_limits<std::uint32_t>::max()) {
+                    return 0;
+                }
+                return static_cast<std::uint32_t>(value);
+            }
+        } catch (const nlohmann::json::exception&) {
+            return 0;
+        }
     }
     return 0;
 }
@@ -104,4 +127,3 @@ AlpacaResponse make_error_response(
 }
 
 } // namespace alpacahttp
-

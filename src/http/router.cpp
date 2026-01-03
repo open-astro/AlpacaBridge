@@ -39,6 +39,8 @@
 #include <optional>
 #include <array>
 #include <variant>
+#include <unordered_set>
+#include <limits>
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
@@ -116,24 +118,420 @@ std::string url_decode(const std::string& value) {
     return result;
 }
 
-const nlohmann::json* find_json_value_ci(const nlohmann::json& json_obj, const std::string& key) {
+bool is_lowercase_ascii(const std::string& value) {
+    for (unsigned char c : value) {
+        if (c >= 'A' && c <= 'Z') {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::uint32_t parse_client_transaction_id(const std::string& value) {
+    if (value.empty()) {
+        return 0;
+    }
+    try {
+        std::size_t pos = 0;
+        long long parsed = std::stoll(value, &pos);
+        if (pos != value.size()) {
+            return 0;
+        }
+        if (parsed < 0 || parsed > static_cast<long long>(std::numeric_limits<std::uint32_t>::max())) {
+            return 0;
+        }
+        return static_cast<std::uint32_t>(parsed);
+    } catch (...) {
+        return 0;
+    }
+}
+
+double parse_double_value(const std::string& raw, const std::string& param_name) {
+    try {
+        std::size_t pos = 0;
+        double value = std::stod(raw, &pos);
+        if (pos != raw.size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+        return value;
+    } catch (const std::exception&) {
+        throw std::runtime_error("Invalid value for parameter: " + param_name);
+    }
+}
+
+int parse_int_value(const std::string& raw, const std::string& param_name) {
+    try {
+        std::size_t pos = 0;
+        long long value = std::stoll(raw, &pos);
+        if (pos != raw.size()) {
+            throw std::invalid_argument("trailing characters");
+        }
+        if (value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max()) {
+            throw std::out_of_range("int range");
+        }
+        return static_cast<int>(value);
+    } catch (const std::exception&) {
+        throw std::runtime_error("Invalid value for parameter: " + param_name);
+    }
+}
+
+bool parse_bool_value(const std::string& raw, const std::string& param_name) {
+    std::string lowered = to_lower_copy(raw);
+    if (lowered == "true" || lowered == "1") {
+        return true;
+    }
+    if (lowered == "false" || lowered == "0") {
+        return false;
+    }
+    throw std::runtime_error("Invalid value for parameter: " + param_name);
+}
+
+const std::unordered_set<std::string> kCommonMethods = {
+    "action",
+    "commandblind",
+    "commandbool",
+    "commandstring",
+    "connect",
+    "connected",
+    "connecting",
+    "description",
+    "devicestate",
+    "disconnect",
+    "driverinfo",
+    "driverversion",
+    "interfaceversion",
+    "name",
+    "supportedactions",
+};
+
+const std::unordered_set<std::string> kTelescopeMethods = {
+    "abortslew",
+    "alignmentmode",
+    "altitude",
+    "aperturearea",
+    "aperturediameter",
+    "athome",
+    "atpark",
+    "axisrates",
+    "azimuth",
+    "canfindhome",
+    "canmoveaxis",
+    "canpark",
+    "canpulseguide",
+    "cansetdeclinationrate",
+    "cansetguiderates",
+    "cansetpark",
+    "cansetpierside",
+    "cansetrightascensionrate",
+    "cansettracking",
+    "canslew",
+    "canslewaltaz",
+    "canslewaltazasync",
+    "canslewasync",
+    "cansync",
+    "cansyncaltaz",
+    "canunpark",
+    "declination",
+    "declinationrate",
+    "destinationsideofpier",
+    "doesrefraction",
+    "equatorialsystem",
+    "findhome",
+    "focallength",
+    "guideratedeclination",
+    "guideraterightascension",
+    "ispulseguiding",
+    "moveaxis",
+    "park",
+    "pulseguide",
+    "rightascension",
+    "rightascensionrate",
+    "setpark",
+    "sideofpier",
+    "siderealtime",
+    "siteelevation",
+    "sitelatitude",
+    "sitelongitude",
+    "slewing",
+    "slewsettletime",
+    "slewtoaltaz",
+    "slewtoaltazasync",
+    "slewtocoordinates",
+    "slewtocoordinatesasync",
+    "slewtotarget",
+    "slewtotargetasync",
+    "synctoaltaz",
+    "synctocoordinates",
+    "synctotarget",
+    "targetdeclination",
+    "targetrightascension",
+    "tracking",
+    "trackingrate",
+    "trackingrates",
+    "unpark",
+    "utcdate",
+};
+
+const std::unordered_set<std::string> kCameraMethods = {
+    "abortexposure",
+    "bayeroffsetx",
+    "bayeroffsety",
+    "binx",
+    "biny",
+    "camerastate",
+    "cameraxsize",
+    "cameraysize",
+    "canabortexposure",
+    "canasymmetricbin",
+    "canfastreadout",
+    "cangetcoolerpower",
+    "canpulseguide",
+    "cansetccdtemperature",
+    "canstopexposure",
+    "ccdtemperature",
+    "cooleron",
+    "coolerpower",
+    "electronsperadu",
+    "exposuremax",
+    "exposuremin",
+    "exposureresolution",
+    "fastreadout",
+    "fullwellcapacity",
+    "gain",
+    "gainmax",
+    "gainmin",
+    "gains",
+    "hasshutter",
+    "heatsinktemperature",
+    "imagearray",
+    "imagearrayvariant",
+    "imageready",
+    "ispulseguiding",
+    "lastexposureduration",
+    "lastexposurestarttime",
+    "maxadu",
+    "maxbinx",
+    "maxbiny",
+    "numx",
+    "numy",
+    "offset",
+    "offsetmax",
+    "offsetmin",
+    "offsets",
+    "percentcompleted",
+    "pixelsizex",
+    "pixelsizey",
+    "pulseguide",
+    "readoutmode",
+    "readoutmodes",
+    "sensorname",
+    "sensortype",
+    "setccdtemperature",
+    "startexposure",
+    "startx",
+    "starty",
+    "stopexposure",
+    "subexposureduration",
+};
+
+const std::unordered_set<std::string> kFilterWheelMethods = {
+    "focusoffsets",
+    "names",
+    "position",
+};
+
+const std::unordered_set<std::string> kFocuserMethods = {
+    "absolute",
+    "halt",
+    "ismoving",
+    "maxincrement",
+    "maxstep",
+    "move",
+    "position",
+    "stepsize",
+    "tempcomp",
+    "tempcompavailable",
+    "temperature",
+};
+
+const std::unordered_set<std::string> kRotatorMethods = {
+    "canreverse",
+    "halt",
+    "ismoving",
+    "mechanicalposition",
+    "move",
+    "moveabsolute",
+    "movemechanical",
+    "position",
+    "reverse",
+    "stepsize",
+    "sync",
+    "targetposition",
+};
+
+const std::unordered_set<std::string> kDomeMethods = {
+    "abortslew",
+    "altitude",
+    "athome",
+    "atpark",
+    "azimuth",
+    "canfindhome",
+    "canpark",
+    "cansetaltitude",
+    "cansetazimuth",
+    "cansetpark",
+    "cansetshutter",
+    "canslave",
+    "canslew",
+    "cansyncazimuth",
+    "closeshutter",
+    "findhome",
+    "openshutter",
+    "park",
+    "setpark",
+    "shutterstatus",
+    "slaved",
+    "slewing",
+    "slewtoaltitude",
+    "slewtoazimuth",
+    "synctoazimuth",
+};
+
+const std::unordered_set<std::string> kShutterMethods = {
+    "close",
+    "open",
+    "shutterstate",
+};
+
+const std::unordered_set<std::string> kSwitchMethods = {
+    "canasync",
+    "canwrite",
+    "getswitch",
+    "getswitchdescription",
+    "getswitchname",
+    "getswitchvalue",
+    "maxswitch",
+    "maxswitchvalue",
+    "minswitchvalue",
+    "setasync",
+    "setasyncvalue",
+    "setswitch",
+    "setswitchname",
+    "setswitchvalue",
+    "statechangecomplete",
+    "switchstep",
+};
+
+const std::unordered_set<std::string> kCoverCalibratorMethods = {
+    "brightness",
+    "calibratorchanging",
+    "calibratoroff",
+    "calibratoron",
+    "calibratorstate",
+    "closecover",
+    "covermoving",
+    "coverstate",
+    "haltcover",
+    "maxbrightness",
+    "opencover",
+};
+
+const std::unordered_set<std::string> kObservingConditionsMethods = {
+    "averageperiod",
+    "cloudcover",
+    "dewpoint",
+    "humidity",
+    "pressure",
+    "rainrate",
+    "refresh",
+    "seeing",
+    "sensordescription",
+    "skybrightness",
+    "skyquality",
+    "skytemperature",
+    "starfwhm",
+    "temperature",
+    "timesincelastupdate",
+    "winddirection",
+    "windgust",
+    "windspeed",
+};
+
+const std::unordered_set<std::string> kSafetyMonitorMethods = {
+    "issafe",
+};
+
+bool is_known_device_type_name(const std::string& type_name) {
+    static const std::unordered_set<std::string> kDeviceTypes = {
+        "camera",
+        "telescope",
+        "mount",
+        "filterwheel",
+        "focuser",
+        "rotator",
+        "dome",
+        "shutter",
+        "switch",
+        "covercalibrator",
+        "observingconditions",
+        "safetymonitor",
+    };
+    return kDeviceTypes.count(type_name) > 0;
+}
+
+bool is_valid_method(alpacacore::DeviceType type, const std::string& method_name) {
+    if (kCommonMethods.count(method_name) > 0) {
+        return true;
+    }
+    switch (type) {
+        case alpacacore::DeviceType::Camera:
+            return kCameraMethods.count(method_name) > 0;
+        case alpacacore::DeviceType::Telescope:
+            return kTelescopeMethods.count(method_name) > 0;
+        case alpacacore::DeviceType::FilterWheel:
+            return kFilterWheelMethods.count(method_name) > 0;
+        case alpacacore::DeviceType::Focuser:
+            return kFocuserMethods.count(method_name) > 0;
+        case alpacacore::DeviceType::Rotator:
+            return kRotatorMethods.count(method_name) > 0;
+        case alpacacore::DeviceType::Dome:
+            return kDomeMethods.count(method_name) > 0;
+        case alpacacore::DeviceType::Shutter:
+            return kShutterMethods.count(method_name) > 0;
+        case alpacacore::DeviceType::Switch:
+            return kSwitchMethods.count(method_name) > 0;
+        case alpacacore::DeviceType::CoverCalibrator:
+            return kCoverCalibratorMethods.count(method_name) > 0;
+        case alpacacore::DeviceType::ObservingConditions:
+            return kObservingConditionsMethods.count(method_name) > 0;
+        case alpacacore::DeviceType::SafetyMonitor:
+            return kSafetyMonitorMethods.count(method_name) > 0;
+        default:
+            return false;
+    }
+}
+
+void apply_error_status(alpacahttp::Response& response, std::int32_t error_code) {
+    if (error_code == alpacahttp::util::ErrorCode::INVALID_VALUE) {
+        response.set_status(400, "Bad Request");
+    }
+}
+
+const nlohmann::json* find_json_value(const nlohmann::json& json_obj, const std::string& key) {
     if (!json_obj.is_object()) {
         return nullptr;
     }
-    std::string target = to_lower_copy(key);
-    for (auto it = json_obj.begin(); it != json_obj.end(); ++it) {
-        if (to_lower_copy(it.key()) == target) {
-            return &it.value();
-        }
+    auto it = json_obj.find(key);
+    if (it != json_obj.end()) {
+        return &it.value();
     }
     return nullptr;
 }
 
-std::optional<std::string> get_form_value_ci(std::string_view body, const std::string& key) {
+std::optional<std::string> get_form_value(std::string_view body, const std::string& key) {
     if (body.empty()) {
         return std::nullopt;
     }
-    std::string target = to_lower_copy(key);
     std::istringstream iss{std::string(body)};
     std::string pair;
     while (std::getline(iss, pair, '&')) {
@@ -141,7 +539,7 @@ std::optional<std::string> get_form_value_ci(std::string_view body, const std::s
         if (eq_pos != std::string::npos) {
             std::string form_key = url_decode(pair.substr(0, eq_pos));
             std::string value = url_decode(pair.substr(eq_pos + 1));
-            if (to_lower_copy(form_key) == target) {
+            if (form_key == key) {
                 return value;
             }
         }
@@ -217,11 +615,7 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
             response.set_status(404, "Not Found");
             std::uint32_t client_tx_id = 0;
             if (request.has_query_param("ClientTransactionID")) {
-                try {
-                    client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-                } catch (...) {
-                    // Invalid transaction ID
-                }
+                client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
             }
             AlpacaResponse alpaca_response = make_error_response(
                 client_tx_id, server_transaction_id,
@@ -358,11 +752,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
     
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
-        try {
-            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-        } catch (...) {
-            // Invalid transaction ID
-        }
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
     try {
@@ -407,11 +797,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
     
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
-        try {
-            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-        } catch (...) {
-            // Invalid transaction ID
-        }
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
     try {
@@ -479,44 +865,48 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         if (json_opt) {
             client_tx_id = extract_client_transaction_id(*json_opt);
         } else {
-            // Try form-encoded (format: Connected=true&ClientID=1&ClientTransactionID=1)
-            std::istringstream iss(request.body());
-            std::string pair;
-            while (std::getline(iss, pair, '&')) {
-                auto eq_pos = pair.find('=');
-                if (eq_pos != std::string::npos) {
-                    std::string key = pair.substr(0, eq_pos);
-                    std::string value = pair.substr(eq_pos + 1);
-                    if (key == "ClientTransactionID") {
-                        try {
-                            client_tx_id = static_cast<std::uint32_t>(std::stoul(value));
-                        } catch (...) {
-                            // Invalid transaction ID
-                        }
-                        break;
-                    }
-                }
+            if (auto value = get_form_value(request.body(), "ClientTransactionID")) {
+                client_tx_id = parse_client_transaction_id(*value);
             }
         }
     } else if (request.method() == HttpMethod::GET) {
         if (request.has_query_param("ClientTransactionID")) {
-            try {
-                client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-            } catch (...) {
-                // Invalid transaction ID
-            }
+            client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
         }
+    }
+
+    if (!is_lowercase_ascii(match.device_type) || !is_known_device_type_name(match.device_type)) {
+        response.set_status(404, "Not Found");
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::INVALID_VALUE,
+            "Unknown device type: " + match.device_type
+        );
+        response.set_body(alpaca_response);
+        return response;
     }
 
     try {
         // Convert device type string to enum
         alpacacore::DeviceType device_type = string_to_device_type(match.device_type);
+
+        if (!is_lowercase_ascii(match.method_name) || !is_valid_method(device_type, match.method_name)) {
+            response.set_status(404, "Not Found");
+            AlpacaResponse alpaca_response = make_error_response(
+                client_tx_id, server_tx_id,
+                util::ErrorCode::INVALID_VALUE,
+                "Unknown method: " + match.method_name
+            );
+            response.set_body(alpaca_response);
+            return response;
+        }
         
         // Get device from registry
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         auto device = registry.get_device(device_type, static_cast<int>(match.device_number));
         
         if (!device) {
+            response.set_status(404, "Not Found");
             AlpacaResponse alpaca_response = make_error_response(
                 client_tx_id, server_tx_id,
                 util::ErrorCode::INVALID_VALUE,
@@ -531,11 +921,13 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         
     } catch (const std::exception& e) {
         util::log_error("Device error: " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
     }
 
@@ -543,21 +935,17 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
 }
 
 alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str) const {
-    std::string lower_type = type_str;
-    std::transform(lower_type.begin(), lower_type.end(), lower_type.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-
-    if (lower_type == "camera") return alpacacore::DeviceType::Camera;
-    if (lower_type == "telescope" || lower_type == "mount") return alpacacore::DeviceType::Telescope;
-    if (lower_type == "filterwheel") return alpacacore::DeviceType::FilterWheel;
-    if (lower_type == "focuser") return alpacacore::DeviceType::Focuser;
-    if (lower_type == "rotator") return alpacacore::DeviceType::Rotator;
-    if (lower_type == "dome") return alpacacore::DeviceType::Dome;
-    if (lower_type == "shutter") return alpacacore::DeviceType::Shutter;
-    if (lower_type == "switch") return alpacacore::DeviceType::Switch;
-    if (lower_type == "covercalibrator") return alpacacore::DeviceType::CoverCalibrator;
-    if (lower_type == "observingconditions") return alpacacore::DeviceType::ObservingConditions;
-    if (lower_type == "safetymonitor") return alpacacore::DeviceType::SafetyMonitor;
+    if (type_str == "camera") return alpacacore::DeviceType::Camera;
+    if (type_str == "telescope" || type_str == "mount") return alpacacore::DeviceType::Telescope;
+    if (type_str == "filterwheel") return alpacacore::DeviceType::FilterWheel;
+    if (type_str == "focuser") return alpacacore::DeviceType::Focuser;
+    if (type_str == "rotator") return alpacacore::DeviceType::Rotator;
+    if (type_str == "dome") return alpacacore::DeviceType::Dome;
+    if (type_str == "shutter") return alpacacore::DeviceType::Shutter;
+    if (type_str == "switch") return alpacacore::DeviceType::Switch;
+    if (type_str == "covercalibrator") return alpacacore::DeviceType::CoverCalibrator;
+    if (type_str == "observingconditions") return alpacacore::DeviceType::ObservingConditions;
+    if (type_str == "safetymonitor") return alpacacore::DeviceType::SafetyMonitor;
 
     throw std::runtime_error("Unknown device type: " + type_str);
 }
@@ -627,30 +1015,40 @@ Response Router::dispatch_device_method(
                 // Try parsing as JSON first
                 auto json_opt = parse_json(request.body());
                 if (json_opt) {
-                    if (const auto* val = find_json_value_ci(*json_opt, "Connected")) {
-                        connected = val->get<bool>();
+                    if (const auto* val = find_json_value(*json_opt, "Connected")) {
+                        if (val->is_boolean()) {
+                            connected = val->get<bool>();
+                        } else if (val->is_string()) {
+                            connected = parse_bool_value(val->get<std::string>(), "Connected");
+                        } else {
+                            throw std::runtime_error("Invalid JSON value for parameter: Connected");
+                        }
                         found = true;
-                    } else if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                        connected = val->get<bool>();
+                    } else if (const auto* val = find_json_value(*json_opt, "Value")) {
+                        if (val->is_boolean()) {
+                            connected = val->get<bool>();
+                        } else if (val->is_string()) {
+                            connected = parse_bool_value(val->get<std::string>(), "Connected");
+                        } else {
+                            throw std::runtime_error("Invalid JSON value for parameter: Connected");
+                        }
                         found = true;
                     }
                 }
                 
                 // If JSON parsing failed or didn't contain Connected/Value, try form-encoded
                 if (!found) {
-                    if (auto value = get_form_value_ci(request.body(), "Connected")) {
-                        std::string lowered = to_lower_copy(*value);
-                        connected = (lowered == "true" || lowered == "1");
+                    if (auto value = get_form_value(request.body(), "Connected")) {
+                        connected = parse_bool_value(*value, "Connected");
                         found = true;
-                    } else if (auto value = get_form_value_ci(request.body(), "Value")) {
-                        std::string lowered = to_lower_copy(*value);
-                        connected = (lowered == "true" || lowered == "1");
+                    } else if (auto value = get_form_value(request.body(), "Value")) {
+                        connected = parse_bool_value(*value, "Connected");
                         found = true;
                     }
                 }
                 
                 if (!found) {
-                    throw std::runtime_error("Missing 'Connected' or 'Value' in request");
+                    throw std::runtime_error("Missing parameter: Connected");
                 }
                 
                 device->set_connected(connected);
@@ -678,26 +1076,29 @@ Response Router::dispatch_device_method(
                 std::string action_parameters = "{}";
                 
                 if (json_opt) {
-                    if (const auto* val = find_json_value_ci(*json_opt, "Action")) {
+                    if (const auto* val = find_json_value(*json_opt, "Action")) {
+                        if (!val->is_string()) {
+                            throw std::runtime_error("Invalid JSON value for parameter: Action");
+                        }
                         action_name = val->get<std::string>();
                     }
-                    if (const auto* val = find_json_value_ci(*json_opt, "Parameters")) {
+                    if (const auto* val = find_json_value(*json_opt, "Parameters")) {
                         action_parameters = val->dump();
                     }
                 }
                 
                 if (action_name.empty()) {
-                    if (auto value = get_form_value_ci(request.body(), "Action")) {
+                    if (auto value = get_form_value(request.body(), "Action")) {
                         action_name = *value;
                     }
                 }
 
-                if (auto value = get_form_value_ci(request.body(), "Parameters")) {
+                if (auto value = get_form_value(request.body(), "Parameters")) {
                     action_parameters = *value;
                 }
 
                 if (action_name.empty()) {
-                    throw std::runtime_error("Missing 'Action' in request");
+                    throw std::runtime_error("Missing parameter: Action");
                 }
                 
                 std::string result = device->action(action_name, action_parameters);
@@ -714,26 +1115,34 @@ Response Router::dispatch_device_method(
                 
                 auto json_opt = parse_json(request.body());
                 if (json_opt) {
-                    if (const auto* val = find_json_value_ci(*json_opt, "Command")) {
+                    if (const auto* val = find_json_value(*json_opt, "Command")) {
+                        if (!val->is_string()) {
+                            throw std::runtime_error("Invalid JSON value for parameter: Command");
+                        }
                         command = val->get<std::string>();
                     }
-                    if (const auto* val = find_json_value_ci(*json_opt, "Raw")) {
-                        raw = val->get<bool>();
+                    if (const auto* val = find_json_value(*json_opt, "Raw")) {
+                        if (val->is_boolean()) {
+                            raw = val->get<bool>();
+                        } else if (val->is_string()) {
+                            raw = parse_bool_value(val->get<std::string>(), "Raw");
+                        } else {
+                            throw std::runtime_error("Invalid JSON value for parameter: Raw");
+                        }
                     }
                 }
                 
                 if (command.empty()) {
-                    if (auto value = get_form_value_ci(request.body(), "Command")) {
+                    if (auto value = get_form_value(request.body(), "Command")) {
                         command = *value;
                     }
                 }
-                if (auto value = get_form_value_ci(request.body(), "Raw")) {
-                    std::string lowered = to_lower_copy(*value);
-                    raw = (lowered == "true" || lowered == "1");
+                if (auto value = get_form_value(request.body(), "Raw")) {
+                    raw = parse_bool_value(*value, "Raw");
                 }
 
                 if (command.empty()) {
-                    throw std::runtime_error("Missing 'Command' in request");
+                    throw std::runtime_error("Missing parameter: Command");
                 }
                 
                 device->command_blind(command, raw);
@@ -749,26 +1158,34 @@ Response Router::dispatch_device_method(
                 
                 auto json_opt = parse_json(request.body());
                 if (json_opt) {
-                    if (const auto* val = find_json_value_ci(*json_opt, "Command")) {
+                    if (const auto* val = find_json_value(*json_opt, "Command")) {
+                        if (!val->is_string()) {
+                            throw std::runtime_error("Invalid JSON value for parameter: Command");
+                        }
                         command = val->get<std::string>();
                     }
-                    if (const auto* val = find_json_value_ci(*json_opt, "Raw")) {
-                        raw = val->get<bool>();
+                    if (const auto* val = find_json_value(*json_opt, "Raw")) {
+                        if (val->is_boolean()) {
+                            raw = val->get<bool>();
+                        } else if (val->is_string()) {
+                            raw = parse_bool_value(val->get<std::string>(), "Raw");
+                        } else {
+                            throw std::runtime_error("Invalid JSON value for parameter: Raw");
+                        }
                     }
                 }
                 
                 if (command.empty()) {
-                    if (auto value = get_form_value_ci(request.body(), "Command")) {
+                    if (auto value = get_form_value(request.body(), "Command")) {
                         command = *value;
                     }
                 }
-                if (auto value = get_form_value_ci(request.body(), "Raw")) {
-                    std::string lowered = to_lower_copy(*value);
-                    raw = (lowered == "true" || lowered == "1");
+                if (auto value = get_form_value(request.body(), "Raw")) {
+                    raw = parse_bool_value(*value, "Raw");
                 }
 
                 if (command.empty()) {
-                    throw std::runtime_error("Missing 'Command' in request");
+                    throw std::runtime_error("Missing parameter: Command");
                 }
                 
                 bool result = device->command_bool(command, raw);
@@ -785,26 +1202,34 @@ Response Router::dispatch_device_method(
                 
                 auto json_opt = parse_json(request.body());
                 if (json_opt) {
-                    if (const auto* val = find_json_value_ci(*json_opt, "Command")) {
+                    if (const auto* val = find_json_value(*json_opt, "Command")) {
+                        if (!val->is_string()) {
+                            throw std::runtime_error("Invalid JSON value for parameter: Command");
+                        }
                         command = val->get<std::string>();
                     }
-                    if (const auto* val = find_json_value_ci(*json_opt, "Raw")) {
-                        raw = val->get<bool>();
+                    if (const auto* val = find_json_value(*json_opt, "Raw")) {
+                        if (val->is_boolean()) {
+                            raw = val->get<bool>();
+                        } else if (val->is_string()) {
+                            raw = parse_bool_value(val->get<std::string>(), "Raw");
+                        } else {
+                            throw std::runtime_error("Invalid JSON value for parameter: Raw");
+                        }
                     }
                 }
                 
                 if (command.empty()) {
-                    if (auto value = get_form_value_ci(request.body(), "Command")) {
+                    if (auto value = get_form_value(request.body(), "Command")) {
                         command = *value;
                     }
                 }
-                if (auto value = get_form_value_ci(request.body(), "Raw")) {
-                    std::string lowered = to_lower_copy(*value);
-                    raw = (lowered == "true" || lowered == "1");
+                if (auto value = get_form_value(request.body(), "Raw")) {
+                    raw = parse_bool_value(*value, "Raw");
                 }
 
                 if (command.empty()) {
-                    throw std::runtime_error("Missing 'Command' in request");
+                    throw std::runtime_error("Missing parameter: Command");
                 }
                 
                 std::string result = device->command_string(command, raw);
@@ -937,20 +1362,24 @@ Response Router::dispatch_device_method(
         
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in device method: " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in device method: " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -966,45 +1395,30 @@ Response Router::dispatch_telescope_method(
     Response response;
     
     try {
-        // Helper function to parse form-encoded parameter from body (case-insensitive)
-        auto parse_form_param = [&](const std::string& param_name) -> std::string {
-            if (auto value = get_form_value_ci(request.body(), param_name)) {
-                return *value;
-            }
-            return "";
-        };
-        
         // Helper function to parse double from query param, JSON body, or form-encoded body
         auto parse_double = [&](const std::string& param_name) -> double {
             // Try query parameter first
             if (request.has_query_param(param_name)) {
-                try {
-                    return std::stod(request.get_query_param(param_name));
-                } catch (const std::exception&) {
-                    throw std::runtime_error("Invalid value for parameter: " + param_name);
-                }
+                return parse_double_value(request.get_query_param(param_name), param_name);
             }
             // Try JSON body
             if (!request.body().empty()) {
                 auto json_opt = parse_json(request.body());
                 if (json_opt) {
-                    if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                        try {
+                    if (const auto* val = find_json_value(*json_opt, param_name)) {
+                        if (val->is_number()) {
                             return val->get<double>();
-                        } catch (const std::exception&) {
-                            throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
                         }
+                        if (val->is_string()) {
+                            return parse_double_value(val->get<std::string>(), param_name);
+                        }
+                        throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
                     }
                 }
             }
             // Try form-encoded
-            std::string form_value = parse_form_param(param_name);
-            if (!form_value.empty()) {
-                try {
-                    return std::stod(form_value);
-                } catch (const std::exception&) {
-                    throw std::runtime_error("Invalid form value for parameter: " + param_name);
-                }
+            if (auto value = get_form_value(request.body(), param_name)) {
+                return parse_double_value(*value, param_name);
             }
             throw std::runtime_error("Missing parameter: " + param_name);
         };
@@ -1013,33 +1427,29 @@ Response Router::dispatch_telescope_method(
         auto parse_int = [&](const std::string& param_name) -> int {
             // Try query parameter first
             if (request.has_query_param(param_name)) {
-                try {
-                    return std::stoi(request.get_query_param(param_name));
-                } catch (const std::exception&) {
-                    throw std::runtime_error("Invalid value for parameter: " + param_name);
-                }
+                return parse_int_value(request.get_query_param(param_name), param_name);
             }
             // Try JSON body
             if (!request.body().empty()) {
                 auto json_opt = parse_json(request.body());
                 if (json_opt) {
-                    if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                        try {
+                    if (const auto* val = find_json_value(*json_opt, param_name)) {
+                        if (val->is_number_integer()) {
                             return val->get<int>();
-                        } catch (const std::exception&) {
-                            throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
                         }
+                        if (val->is_number()) {
+                            return static_cast<int>(val->get<double>());
+                        }
+                        if (val->is_string()) {
+                            return parse_int_value(val->get<std::string>(), param_name);
+                        }
+                        throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
                     }
                 }
             }
             // Try form-encoded
-            std::string form_value = parse_form_param(param_name);
-            if (!form_value.empty()) {
-                try {
-                    return std::stoi(form_value);
-                } catch (const std::exception&) {
-                    throw std::runtime_error("Invalid form value for parameter: " + param_name);
-                }
+            if (auto value = get_form_value(request.body(), param_name)) {
+                return parse_int_value(*value, param_name);
             }
             throw std::runtime_error("Missing parameter: " + param_name);
         };
@@ -1048,30 +1458,38 @@ Response Router::dispatch_telescope_method(
         auto parse_bool = [&](const std::string& param_name) -> bool {
             // Try query parameter first
             if (request.has_query_param(param_name)) {
-                std::string val = request.get_query_param(param_name);
-                std::transform(val.begin(), val.end(), val.begin(), ::tolower);
-                return (val == "true" || val == "1");
+                return parse_bool_value(request.get_query_param(param_name), param_name);
             }
             
             // Try JSON body
             auto json_opt = parse_json(request.body());
             if (json_opt) {
-                if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                    return val->get<bool>();
+                if (const auto* val = find_json_value(*json_opt, param_name)) {
+                    if (val->is_boolean()) {
+                        return val->get<bool>();
+                    }
+                    if (val->is_string()) {
+                        return parse_bool_value(val->get<std::string>(), param_name);
+                    }
+                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
                 }
-                if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                    return val->get<bool>();
+                if (const auto* val = find_json_value(*json_opt, "Value")) {
+                    if (val->is_boolean()) {
+                        return val->get<bool>();
+                    }
+                    if (val->is_string()) {
+                        return parse_bool_value(val->get<std::string>(), param_name);
+                    }
+                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
                 }
             }
             
             // Try form-encoded body (e.g., "Tracking=true" or "Tracking=1")
-            if (auto value = get_form_value_ci(request.body(), param_name)) {
-                std::string lowered = to_lower_copy(*value);
-                return (lowered == "true" || lowered == "1");
+            if (auto value = get_form_value(request.body(), param_name)) {
+                return parse_bool_value(*value, param_name);
             }
-            if (auto value = get_form_value_ci(request.body(), "Value")) {
-                std::string lowered = to_lower_copy(*value);
-                return (lowered == "true" || lowered == "1");
+            if (auto value = get_form_value(request.body(), "Value")) {
+                return parse_bool_value(*value, param_name);
             }
             
             throw std::runtime_error("Missing parameter: " + param_name);
@@ -1084,17 +1502,23 @@ Response Router::dispatch_telescope_method(
             }
             auto json_opt = parse_json(request.body());
             if (json_opt) {
-                if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+                if (const auto* val = find_json_value(*json_opt, param_name)) {
+                    if (!val->is_string()) {
+                        throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                    }
                     return val->get<std::string>();
                 }
-                if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                if (const auto* val = find_json_value(*json_opt, "Value")) {
+                    if (!val->is_string()) {
+                        throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                    }
                     return val->get<std::string>();
                 }
             }
-            if (auto value = get_form_value_ci(request.body(), param_name)) {
+            if (auto value = get_form_value(request.body(), param_name)) {
                 return *value;
             }
-            if (auto value = get_form_value_ci(request.body(), "Value")) {
+            if (auto value = get_form_value(request.body(), "Value")) {
                 return *value;
             }
             throw std::runtime_error("Missing parameter: " + param_name);
@@ -1245,7 +1669,7 @@ Response Router::dispatch_telescope_method(
             else if (method_name == "axisrates") {
                 int axis = 0;
                 if (request.has_query_param("Axis")) {
-                    axis = std::stoi(request.get_query_param("Axis"));
+                    axis = parse_int_value(request.get_query_param("Axis"), "Axis");
                 }
                 // AxisRates must return an array of rate objects, even if only one range
                 auto [min_rate, max_rate] = telescope->get_axis_rate_range(axis);
@@ -1262,7 +1686,7 @@ Response Router::dispatch_telescope_method(
             else if (method_name == "canmoveaxis") {
                 int axis = 0;
                 if (request.has_query_param("Axis")) {
-                    axis = std::stoi(request.get_query_param("Axis"));
+                    axis = parse_int_value(request.get_query_param("Axis"), "Axis");
                 }
                 bool can_move = telescope->get_can_move_axis(axis);
                 AlpacaResponse alpaca_response = make_success_response(
@@ -1483,16 +1907,16 @@ Response Router::dispatch_telescope_method(
                 if (request.has_query_param("UTCDate")) {
                     date_str = request.get_query_param("UTCDate");
                 } else if (auto json_opt = parse_json(request.body())) {
-                    if (const auto* val = find_json_value_ci(*json_opt, "UTCDate")) {
+                    if (const auto* val = find_json_value(*json_opt, "UTCDate")) {
                         date_str = val->get<std::string>();
-                    } else if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+                    } else if (const auto* val = find_json_value(*json_opt, "Value")) {
                         date_str = val->get<std::string>();
                     }
                 }
                 if (date_str.empty()) {
-                    if (auto value = get_form_value_ci(request.body(), "UTCDate")) {
+                    if (auto value = get_form_value(request.body(), "UTCDate")) {
                         date_str = *value;
-                    } else if (auto value = get_form_value_ci(request.body(), "Value")) {
+                    } else if (auto value = get_form_value(request.body(), "Value")) {
                         date_str = *value;
                     }
                 }
@@ -1872,20 +2296,24 @@ Response Router::dispatch_telescope_method(
         
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in telescope method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in telescope method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -1901,69 +2329,108 @@ Response Router::dispatch_camera_method(
     Response response;
     auto parse_double = [&](const std::string& param_name) -> double {
         if (request.has_query_param(param_name)) {
-            return std::stod(request.get_query_param(param_name));
+            return parse_double_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<double>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_number()) {
+                    return val->get<double>();
+                }
+                if (val->is_string()) {
+                    return parse_double_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                return val->get<double>();
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number()) {
+                    return val->get<double>();
+                }
+                if (val->is_string()) {
+                    return parse_double_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
         }
-        if (auto value = get_form_value_ci(request.body(), param_name)) {
-            return std::stod(*value);
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_double_value(*value, param_name);
         }
-        if (auto value = get_form_value_ci(request.body(), "Value")) {
-            return std::stod(*value);
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_double_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
 
     auto parse_int = [&](const std::string& param_name) -> int {
         if (request.has_query_param(param_name)) {
-            return std::stoi(request.get_query_param(param_name));
+            return parse_int_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<int>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_number_integer()) {
+                    return val->get<int>();
+                }
+                if (val->is_number()) {
+                    return static_cast<int>(val->get<double>());
+                }
+                if (val->is_string()) {
+                    return parse_int_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                return val->get<int>();
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number_integer()) {
+                    return val->get<int>();
+                }
+                if (val->is_number()) {
+                    return static_cast<int>(val->get<double>());
+                }
+                if (val->is_string()) {
+                    return parse_int_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
         }
-        if (auto value = get_form_value_ci(request.body(), param_name)) {
-            return std::stoi(*value);
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_int_value(*value, param_name);
         }
-        if (auto value = get_form_value_ci(request.body(), "Value")) {
-            return std::stoi(*value);
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_int_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
         if (request.has_query_param(param_name)) {
-            std::string value = to_lower_copy(request.get_query_param(param_name));
-            return (value == "true" || value == "1");
+            return parse_bool_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<bool>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_boolean()) {
+                    return val->get<bool>();
+                }
+                if (val->is_string()) {
+                    return parse_bool_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                return val->get<bool>();
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_boolean()) {
+                    return val->get<bool>();
+                }
+                if (val->is_string()) {
+                    return parse_bool_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
         }
-        if (auto value = get_form_value_ci(request.body(), param_name)) {
-            std::string lowered = to_lower_copy(*value);
-            return (lowered == "true" || lowered == "1");
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_bool_value(*value, param_name);
         }
-        if (auto value = get_form_value_ci(request.body(), "Value")) {
-            std::string lowered = to_lower_copy(*value);
-            return (lowered == "true" || lowered == "1");
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_bool_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
@@ -1974,17 +2441,23 @@ Response Router::dispatch_camera_method(
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (!val->is_string()) {
+                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                }
                 return val->get<std::string>();
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (!val->is_string()) {
+                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                }
                 return val->get<std::string>();
             }
         }
-        if (auto value = get_form_value_ci(request.body(), param_name)) {
+        if (auto value = get_form_value(request.body(), param_name)) {
             return *value;
         }
-        if (auto value = get_form_value_ci(request.body(), "Value")) {
+        if (auto value = get_form_value(request.body(), "Value")) {
             return *value;
         }
         throw std::runtime_error("Missing parameter: " + param_name);
@@ -2442,20 +2915,24 @@ Response Router::dispatch_camera_method(
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in camera method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in camera method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -2472,69 +2949,108 @@ Response Router::dispatch_switch_method(
 
     auto parse_double = [&](const std::string& param_name) -> double {
         if (request.has_query_param(param_name)) {
-            return std::stod(request.get_query_param(param_name));
+            return parse_double_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<double>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_number()) {
+                    return val->get<double>();
+                }
+                if (val->is_string()) {
+                    return parse_double_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                return val->get<double>();
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number()) {
+                    return val->get<double>();
+                }
+                if (val->is_string()) {
+                    return parse_double_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
         }
-        if (auto value = get_form_value_ci(request.body(), param_name)) {
-            return std::stod(*value);
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_double_value(*value, param_name);
         }
-        if (auto value = get_form_value_ci(request.body(), "Value")) {
-            return std::stod(*value);
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_double_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
 
     auto parse_int = [&](const std::string& param_name) -> int {
         if (request.has_query_param(param_name)) {
-            return std::stoi(request.get_query_param(param_name));
+            return parse_int_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<int>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_number_integer()) {
+                    return val->get<int>();
+                }
+                if (val->is_number()) {
+                    return static_cast<int>(val->get<double>());
+                }
+                if (val->is_string()) {
+                    return parse_int_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                return val->get<int>();
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number_integer()) {
+                    return val->get<int>();
+                }
+                if (val->is_number()) {
+                    return static_cast<int>(val->get<double>());
+                }
+                if (val->is_string()) {
+                    return parse_int_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
         }
-        if (auto value = get_form_value_ci(request.body(), param_name)) {
-            return std::stoi(*value);
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_int_value(*value, param_name);
         }
-        if (auto value = get_form_value_ci(request.body(), "Value")) {
-            return std::stoi(*value);
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_int_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
         if (request.has_query_param(param_name)) {
-            std::string value = to_lower_copy(request.get_query_param(param_name));
-            return (value == "true" || value == "1");
+            return parse_bool_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<bool>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_boolean()) {
+                    return val->get<bool>();
+                }
+                if (val->is_string()) {
+                    return parse_bool_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                return val->get<bool>();
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_boolean()) {
+                    return val->get<bool>();
+                }
+                if (val->is_string()) {
+                    return parse_bool_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
         }
-        if (auto value = get_form_value_ci(request.body(), param_name)) {
-            std::string lowered = to_lower_copy(*value);
-            return (lowered == "true" || lowered == "1");
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_bool_value(*value, param_name);
         }
-        if (auto value = get_form_value_ci(request.body(), "Value")) {
-            std::string lowered = to_lower_copy(*value);
-            return (lowered == "true" || lowered == "1");
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_bool_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
@@ -2545,17 +3061,23 @@ Response Router::dispatch_switch_method(
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (!val->is_string()) {
+                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                }
                 return val->get<std::string>();
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (!val->is_string()) {
+                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                }
                 return val->get<std::string>();
             }
         }
-        if (auto value = get_form_value_ci(request.body(), param_name)) {
+        if (auto value = get_form_value(request.body(), param_name)) {
             return *value;
         }
-        if (auto value = get_form_value_ci(request.body(), "Value")) {
+        if (auto value = get_form_value(request.body(), "Value")) {
             return *value;
         }
         throw std::runtime_error("Missing parameter: " + param_name);
@@ -2679,20 +3201,24 @@ Response Router::dispatch_switch_method(
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in switch method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in switch method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -2709,13 +3235,40 @@ Response Router::dispatch_filterwheel_method(
 
     auto parse_int = [&](const std::string& param_name) -> int {
         if (request.has_query_param(param_name)) {
-            return std::stoi(request.get_query_param(param_name));
+            return parse_int_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<int>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_number_integer()) {
+                    return val->get<int>();
+                }
+                if (val->is_number()) {
+                    return static_cast<int>(val->get<double>());
+                }
+                if (val->is_string()) {
+                    return parse_int_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number_integer()) {
+                    return val->get<int>();
+                }
+                if (val->is_number()) {
+                    return static_cast<int>(val->get<double>());
+                }
+                if (val->is_string()) {
+                    return parse_int_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+            }
+        }
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_int_value(*value, param_name);
+        }
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_int_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
@@ -2757,7 +3310,7 @@ Response Router::dispatch_filterwheel_method(
                 return response;
             } else if (method_name == "names") {
                 auto json_opt = parse_json(request.body());
-                const auto* names_val = json_opt ? find_json_value_ci(*json_opt, "Names") : nullptr;
+                const auto* names_val = json_opt ? find_json_value(*json_opt, "Names") : nullptr;
                 if (!names_val) {
                     throw std::runtime_error("Missing parameter: Names");
                 }
@@ -2768,7 +3321,7 @@ Response Router::dispatch_filterwheel_method(
                 return response;
             } else if (method_name == "focusoffsets") {
                 auto json_opt = parse_json(request.body());
-                const auto* offsets_val = json_opt ? find_json_value_ci(*json_opt, "FocusOffsets") : nullptr;
+                const auto* offsets_val = json_opt ? find_json_value(*json_opt, "FocusOffsets") : nullptr;
                 if (!offsets_val) {
                     throw std::runtime_error("Missing parameter: FocusOffsets");
                 }
@@ -2789,20 +3342,24 @@ Response Router::dispatch_filterwheel_method(
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in filter wheel method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in filter wheel method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -2819,29 +3376,74 @@ Response Router::dispatch_focuser_method(
 
     auto parse_int = [&](const std::string& param_name) -> int {
         if (request.has_query_param(param_name)) {
-            return std::stoi(request.get_query_param(param_name));
+            return parse_int_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
-        if (json_opt && json_opt->contains(param_name)) {
-            return json_opt->at(param_name).get<int>();
+        if (json_opt) {
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_number_integer()) {
+                    return val->get<int>();
+                }
+                if (val->is_number()) {
+                    return static_cast<int>(val->get<double>());
+                }
+                if (val->is_string()) {
+                    return parse_int_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+            }
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number_integer()) {
+                    return val->get<int>();
+                }
+                if (val->is_number()) {
+                    return static_cast<int>(val->get<double>());
+                }
+                if (val->is_string()) {
+                    return parse_int_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+            }
+        }
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_int_value(*value, param_name);
+        }
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_int_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
         if (request.has_query_param(param_name)) {
-            std::string value = request.get_query_param(param_name);
-            std::transform(value.begin(), value.end(), value.begin(), ::tolower);
-            return (value == "true" || value == "1");
+            return parse_bool_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<bool>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_boolean()) {
+                    return val->get<bool>();
+                }
+                if (val->is_string()) {
+                    return parse_bool_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                return val->get<bool>();
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_boolean()) {
+                    return val->get<bool>();
+                }
+                if (val->is_string()) {
+                    return parse_bool_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
+        }
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_bool_value(*value, param_name);
+        }
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_bool_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
@@ -2926,20 +3528,24 @@ Response Router::dispatch_focuser_method(
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in focuser method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in focuser method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -2956,29 +3562,68 @@ Response Router::dispatch_rotator_method(
 
     auto parse_double = [&](const std::string& param_name) -> double {
         if (request.has_query_param(param_name)) {
-            return std::stod(request.get_query_param(param_name));
+            return parse_double_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
-        if (json_opt && json_opt->contains(param_name)) {
-            return json_opt->at(param_name).get<double>();
+        if (json_opt) {
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_number()) {
+                    return val->get<double>();
+                }
+                if (val->is_string()) {
+                    return parse_double_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+            }
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number()) {
+                    return val->get<double>();
+                }
+                if (val->is_string()) {
+                    return parse_double_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+            }
+        }
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_double_value(*value, param_name);
+        }
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_double_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
         if (request.has_query_param(param_name)) {
-            std::string value = request.get_query_param(param_name);
-            std::transform(value.begin(), value.end(), value.begin(), ::tolower);
-            return (value == "true" || value == "1");
+            return parse_bool_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<bool>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_boolean()) {
+                    return val->get<bool>();
+                }
+                if (val->is_string()) {
+                    return parse_bool_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                return val->get<bool>();
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_boolean()) {
+                    return val->get<bool>();
+                }
+                if (val->is_string()) {
+                    return parse_bool_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
+        }
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_bool_value(*value, param_name);
+        }
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_bool_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
@@ -3077,20 +3722,24 @@ Response Router::dispatch_rotator_method(
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in rotator method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in rotator method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -3107,31 +3756,68 @@ Response Router::dispatch_dome_method(
 
     auto parse_double = [&](const std::string& param_name) -> double {
         if (request.has_query_param(param_name)) {
-            return std::stod(request.get_query_param(param_name));
+            return parse_double_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<double>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_number()) {
+                    return val->get<double>();
+                }
+                if (val->is_string()) {
+                    return parse_double_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number()) {
+                    return val->get<double>();
+                }
+                if (val->is_string()) {
+                    return parse_double_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+            }
+        }
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_double_value(*value, param_name);
+        }
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_double_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
         if (request.has_query_param(param_name)) {
-            std::string value = request.get_query_param(param_name);
-            std::transform(value.begin(), value.end(), value.begin(), ::tolower);
-            return (value == "true" || value == "1");
+            return parse_bool_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<bool>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_boolean()) {
+                    return val->get<bool>();
+                }
+                if (val->is_string()) {
+                    return parse_bool_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
-            if (const auto* val = find_json_value_ci(*json_opt, "Value")) {
-                return val->get<bool>();
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_boolean()) {
+                    return val->get<bool>();
+                }
+                if (val->is_string()) {
+                    return parse_bool_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
+        }
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_bool_value(*value, param_name);
+        }
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_bool_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
@@ -3288,20 +3974,24 @@ Response Router::dispatch_dome_method(
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in dome method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in dome method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -3349,20 +4039,24 @@ Response Router::dispatch_shutter_method(
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in shutter method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in shutter method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -3379,11 +4073,40 @@ Response Router::dispatch_covercalibrator_method(
 
     auto parse_int = [&](const std::string& param_name) -> int {
         if (request.has_query_param(param_name)) {
-            return std::stoi(request.get_query_param(param_name));
+            return parse_int_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
-        if (json_opt && json_opt->contains(param_name)) {
-            return json_opt->at(param_name).get<int>();
+        if (json_opt) {
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_number_integer()) {
+                    return val->get<int>();
+                }
+                if (val->is_number()) {
+                    return static_cast<int>(val->get<double>());
+                }
+                if (val->is_string()) {
+                    return parse_int_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+            }
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number_integer()) {
+                    return val->get<int>();
+                }
+                if (val->is_number()) {
+                    return static_cast<int>(val->get<double>());
+                }
+                if (val->is_string()) {
+                    return parse_int_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+            }
+        }
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_int_value(*value, param_name);
+        }
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_int_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
@@ -3462,20 +4185,24 @@ Response Router::dispatch_covercalibrator_method(
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in cover calibrator method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in cover calibrator method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -3492,13 +4219,34 @@ Response Router::dispatch_observingconditions_method(
 
     auto parse_double = [&](const std::string& param_name) -> double {
         if (request.has_query_param(param_name)) {
-            return std::stod(request.get_query_param(param_name));
+            return parse_double_value(request.get_query_param(param_name), param_name);
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
-                return val->get<double>();
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (val->is_number()) {
+                    return val->get<double>();
+                }
+                if (val->is_string()) {
+                    return parse_double_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
             }
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number()) {
+                    return val->get<double>();
+                }
+                if (val->is_string()) {
+                    return parse_double_value(val->get<std::string>(), param_name);
+                }
+                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+            }
+        }
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return parse_double_value(*value, param_name);
+        }
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return parse_double_value(*value, param_name);
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
@@ -3509,9 +4257,24 @@ Response Router::dispatch_observingconditions_method(
         }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
-            if (const auto* val = find_json_value_ci(*json_opt, param_name)) {
+            if (const auto* val = find_json_value(*json_opt, param_name)) {
+                if (!val->is_string()) {
+                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                }
                 return val->get<std::string>();
             }
+            if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (!val->is_string()) {
+                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                }
+                return val->get<std::string>();
+            }
+        }
+        if (auto value = get_form_value(request.body(), param_name)) {
+            return *value;
+        }
+        if (auto value = get_form_value(request.body(), "Value")) {
+            return *value;
         }
         throw std::runtime_error("Missing parameter: " + param_name);
     };
@@ -3632,20 +4395,24 @@ Response Router::dispatch_observingconditions_method(
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in observing conditions method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in observing conditions method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -3679,20 +4446,24 @@ Response Router::dispatch_safetymonitor_method(
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         util::log_error("AlpacaException in safety monitor method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::map_error_code(e.error_code()),
+            error_code,
             std::string(e.what())
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in safety monitor method '" + method_name + "': " + std::string(e.what()));
+        auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
+        apply_error_status(response, error_code);
         response.set_body(alpaca_response);
         return response;
     }
@@ -3704,11 +4475,7 @@ Response Router::handle_root(const Request& request, std::uint32_t server_tx_id)
     
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
-        try {
-            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-        } catch (...) {
-            // Invalid transaction ID
-        }
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
     // Return a simple JSON response with server information
@@ -3735,11 +4502,7 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
     
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
-        try {
-            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-        } catch (...) {
-            // Invalid transaction ID
-        }
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
     try {
@@ -3893,11 +4656,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
     
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
-        try {
-            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-        } catch (...) {
-            // Invalid transaction ID
-        }
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
     
     // Only allow POST or PUT requests
@@ -3986,11 +4745,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
     
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
-        try {
-            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-        } catch (...) {
-            // Invalid transaction ID
-        }
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
     
     // Only allow POST or PUT requests
@@ -4088,11 +4843,7 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
 
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
-        try {
-            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-        } catch (...) {
-            // ignore invalid id
-        }
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
     auto send_payload = [&](std::uint32_t ctx_id) {
@@ -4189,11 +4940,7 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
 
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
-        try {
-            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-        } catch (...) {
-            // Invalid transaction ID
-        }
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
     if (request.method() != HttpMethod::GET) {
@@ -4237,11 +4984,7 @@ Response Router::handle_log_history(const Request& request, std::uint32_t server
 
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
-        try {
-            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-        } catch (...) {
-            // ignore invalid id
-        }
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
     auto send_payload = [&](std::uint32_t ctx_id) {
@@ -4361,11 +5104,7 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
-        try {
-            client_tx_id = static_cast<std::uint32_t>(std::stoul(request.get_query_param("ClientTransactionID")));
-        } catch (...) {
-            // Invalid transaction ID
-        }
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
     
     // Only allow POST or PUT requests
