@@ -161,9 +161,9 @@ SKIP("reason");                        // Skip test with reason
 2. **Add to `tests/CMakeLists.txt`**:
    ```cmake
    set(TEST_SOURCES
-       test_camera.cpp
-       test_telescope.cpp
-       test_management.cpp
+       test_alpaca_defs.cpp
+       test_device_registry.cpp
+       test_error_handling.cpp
        test_units.cpp
        test_zwo_camera.cpp      # Add your test
    )

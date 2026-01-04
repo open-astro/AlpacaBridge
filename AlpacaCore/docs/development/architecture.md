@@ -109,8 +109,9 @@ AlpacaCore/
 │
 ├─ tests/
 │   ├─ CMakeLists.txt
-│   ├─ test_camera.cpp
-│   ├─ test_telescope.cpp
+│   ├─ test_alpaca_defs.cpp
+│   ├─ test_device_registry.cpp
+│   ├─ test_error_handling.cpp
 │   └─ ...
 │
 └─ examples/
@@ -307,4 +308,3 @@ AlpacaCore is designed to be used by higher-level servers:
 - [Testing Guide](testing.md) - Testing architecture and practices
 - [ASCOM Alpaca API Specification](https://ascom-standards.org/api/)
 - [README.md](../../README.md) - Project overview
-

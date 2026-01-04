@@ -77,12 +77,20 @@ LogLevel get_log_level() {
 void log(LogLevel level,
          std::string_view component,
          std::string_view message) {
-    std::lock_guard<std::mutex> lock(g_log_mutex);
-    if (level < g_min_log_level) {
+    LogSink sink;
+    LogLevel min_level;
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        min_level = g_min_log_level;
+        sink = g_log_sink;
+    }
+
+    if (level < min_level) {
         return;
     }
-    if (g_log_sink) {
-        g_log_sink(level, component, message);
+
+    if (sink) {
+        sink(level, component, message);
     } else {
         default_stderr_sink(level, component, message);
     }

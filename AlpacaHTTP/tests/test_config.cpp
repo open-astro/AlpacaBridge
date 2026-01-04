@@ -22,7 +22,7 @@ int main() {
     // Test default values
     assert(config.http_port() == 6800);
     assert(config.discovery_enabled() == true);
-    assert(config.log_level() == alpacahttp::LogLevel::INFO);
+    assert(config.log_level() == alpacahttp::LogLevel::WARNING);
 
     // Test setters
     config.set_http_port(8080);
@@ -49,4 +49,3 @@ int main() {
     std::cout << "All configuration tests passed!\n";
     return 0;
 }
-

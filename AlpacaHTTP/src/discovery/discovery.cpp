@@ -41,10 +41,6 @@ void Discovery::start() {
 }
 
 void Discovery::stop() {
-    if (!running_) {
-        return;
-    }
-
     running_ = false;
     if (socket_fd_ >= 0) {
         close(socket_fd_);
@@ -172,4 +168,3 @@ std::string Discovery::build_response() const {
 }
 
 } // namespace alpacahttp
-
