@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
 #include <alpacahttp/router.h>
+#include <alpacahttp/version.h>
 #include <alpacahttp/json_utils.h>
 #include <alpacahttp/util/error_mapping.h>
 #include <alpacahttp/util/logging_adapter.h>
@@ -26,6 +27,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cctype>
+#include <string_view>
 #include <cmath>
 #include <ctime>
 #include <cstdlib>
@@ -76,6 +78,145 @@ std::string log_level_to_string(LogLevel level) {
         case LogLevel::Critical: return "CRITICAL";
         default: return "INFO";
     }
+}
+
+std::string escape_yaml_string(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (char ch : value) {
+        if (ch == '\\' || ch == '"') {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(ch);
+    }
+    return escaped;
+}
+
+bool update_location_in_config(const std::string& config_path,
+                               const std::string& location,
+                               std::string& error_message) {
+    if (config_path.empty()) {
+        error_message = "Config path not set";
+        return false;
+    }
+
+    std::ifstream input(config_path);
+    if (!input.is_open()) {
+        std::ofstream output(config_path, std::ios::trunc);
+        if (!output.is_open()) {
+            error_message = "Unable to open config file for writing";
+            return false;
+        }
+        output << "server:\n  location: \"" << escape_yaml_string(location) << "\"\n";
+        return true;
+    }
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line)) {
+        lines.push_back(line);
+    }
+
+    auto leading_spaces = [](const std::string& text) {
+        std::size_t count = 0;
+        while (count < text.size() && text[count] == ' ') {
+            ++count;
+        }
+        return count;
+    };
+
+    auto trim_copy = [](std::string_view value) {
+        std::size_t start = 0;
+        std::size_t end = value.size();
+        while (start < end && std::isspace(static_cast<unsigned char>(value[start]))) {
+            ++start;
+        }
+        while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+            --end;
+        }
+        return std::string(value.substr(start, end - start));
+    };
+
+    auto strip_comment = [](const std::string& text) {
+        auto pos = text.find('#');
+        if (pos == std::string::npos) {
+            return text;
+        }
+        return text.substr(0, pos);
+    };
+
+    bool in_server_section = false;
+    bool server_section_found = false;
+    bool location_written = false;
+    std::size_t server_indent = 0;
+    std::vector<std::string> output;
+    output.reserve(lines.size() + 2);
+
+    for (const auto& current_line : lines) {
+        std::string stripped_comment = strip_comment(current_line);
+        std::string trimmed = trim_copy(stripped_comment);
+        std::size_t indent = leading_spaces(current_line);
+
+        if (indent == 0) {
+            if (in_server_section && !location_written) {
+                output.push_back(std::string(server_indent + 2, ' ') +
+                                 "location: \"" + escape_yaml_string(location) + "\"");
+                location_written = true;
+            }
+            in_server_section = false;
+        }
+
+        if (indent == 0 && trimmed == "server:") {
+            in_server_section = true;
+            server_section_found = true;
+            server_indent = indent;
+            output.push_back(current_line);
+            continue;
+        }
+
+        if (in_server_section && indent > server_indent && !trimmed.empty()) {
+            auto delimiter = trimmed.find(':');
+            if (delimiter != std::string::npos) {
+                std::string key = trim_copy(trimmed.substr(0, delimiter));
+                if (key == "location") {
+                    output.push_back(std::string(indent, ' ') +
+                                     "location: \"" + escape_yaml_string(location) + "\"");
+                    location_written = true;
+                    continue;
+                }
+            }
+        }
+
+        output.push_back(current_line);
+    }
+
+    if (in_server_section && !location_written) {
+        output.push_back(std::string(server_indent + 2, ' ') +
+                         "location: \"" + escape_yaml_string(location) + "\"");
+        location_written = true;
+    }
+
+    if (!server_section_found) {
+        if (!output.empty() && !output.back().empty()) {
+            output.push_back("");
+        }
+        output.push_back("server:");
+        output.push_back("  location: \"" + escape_yaml_string(location) + "\"");
+    }
+
+    std::ofstream output_file(config_path, std::ios::trunc);
+    if (!output_file.is_open()) {
+        error_message = "Unable to open config file for writing";
+        return false;
+    }
+    for (std::size_t i = 0; i < output.size(); ++i) {
+        output_file << output[i];
+        if (i + 1 < output.size()) {
+            output_file << '\n';
+        }
+    }
+
+    return true;
 }
 
 std::optional<LogLevel> parse_log_level_string(const std::string& input) {
@@ -512,8 +653,12 @@ bool is_valid_method(alpacacore::DeviceType type, const std::string& method_name
 }
 
 void apply_error_status(alpacahttp::Response& response, std::int32_t error_code) {
-    (void)response;
-    (void)error_code;
+    if (response.status_code() != 200) {
+        return;
+    }
+    if (error_code == alpacahttp::util::ErrorCode::INVALID_VALUE) {
+        response.set_status(400, "Bad Request");
+    }
 }
 
 const nlohmann::json* find_json_value(const nlohmann::json& json_obj, const std::string& key) {
@@ -525,6 +670,19 @@ const nlohmann::json* find_json_value(const nlohmann::json& json_obj, const std:
         return &it.value();
     }
     return nullptr;
+}
+
+std::optional<std::string> get_query_param_case_insensitive(const alpacahttp::Request& request, const std::string& key) {
+    if (request.has_query_param(key)) {
+        return request.get_query_param(key);
+    }
+    const std::string target = to_lower_copy(key);
+    for (const auto& entry : request.query_params()) {
+        if (to_lower_copy(entry.first) == target) {
+            return entry.second;
+        }
+    }
+    return std::nullopt;
 }
 
 std::optional<std::string> get_form_value(std::string_view body, const std::string& key) {
@@ -539,6 +697,26 @@ std::optional<std::string> get_form_value(std::string_view body, const std::stri
             std::string form_key = url_decode(pair.substr(0, eq_pos));
             std::string value = url_decode(pair.substr(eq_pos + 1));
             if (form_key == key) {
+                return value;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> get_form_value_case_insensitive(std::string_view body, const std::string& key) {
+    if (body.empty()) {
+        return std::nullopt;
+    }
+    const std::string target = to_lower_copy(key);
+    std::istringstream iss{std::string(body)};
+    std::string pair;
+    while (std::getline(iss, pair, '&')) {
+        auto eq_pos = pair.find('=');
+        if (eq_pos != std::string::npos) {
+            std::string form_key = url_decode(pair.substr(0, eq_pos));
+            std::string value = url_decode(pair.substr(eq_pos + 1));
+            if (to_lower_copy(form_key) == target) {
                 return value;
             }
         }
@@ -566,12 +744,29 @@ nlohmann::json make_log_history_payload() {
 namespace alpacahttp {
 
 Router::Router() {
+    set_server_info("AlpacaHTTP", "AlpacaHTTP", alpacahttp::kVersion, "");
     load_persisted_devices();
 }
 Router::~Router() = default;
 
 void Router::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver) {
     management_driver_ = mgmt_driver;
+}
+
+void Router::set_server_info(std::string server_name,
+                             std::string manufacturer,
+                             std::string manufacturer_version,
+                             std::string location) {
+    std::lock_guard<std::mutex> lock(server_info_mutex_);
+    server_name_ = std::move(server_name);
+    manufacturer_ = std::move(manufacturer);
+    manufacturer_version_ = std::move(manufacturer_version);
+    location_ = std::move(location);
+}
+
+void Router::set_config_path(std::string config_path) {
+    std::lock_guard<std::mutex> lock(server_info_mutex_);
+    config_path_ = std::move(config_path);
 }
 
 void Router::set_shutdown_callback(std::function<void()> callback) {
@@ -746,35 +941,134 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
     return response;
 }
 
+nlohmann::json Router::build_description_payload() const {
+    nlohmann::json desc;
+
+    if (management_driver_) {
+        desc["ServerName"] = management_driver_->get_name();
+        desc["Manufacturer"] = management_driver_->get_manufacturer();
+        desc["ManufacturerVersion"] = management_driver_->get_manufacturer_version();
+        desc["Location"] = management_driver_->get_location();
+        return desc;
+    }
+
+    std::string server_name;
+    std::string manufacturer;
+    std::string manufacturer_version;
+    std::string location;
+    {
+        std::lock_guard<std::mutex> lock(server_info_mutex_);
+        server_name = server_name_;
+        manufacturer = manufacturer_;
+        manufacturer_version = manufacturer_version_;
+        location = location_;
+    }
+
+    desc["ServerName"] = server_name;
+    desc["Manufacturer"] = manufacturer;
+    desc["ManufacturerVersion"] = manufacturer_version;
+    desc["Location"] = location;
+    return desc;
+}
+
 Response Router::handle_description(const Request& request, std::uint32_t server_tx_id) {
     Response response;
-    
+    response.set_content_type("application/json");
+
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
     try {
-        if (!management_driver_) {
-            // Fallback to default values if no management driver is set
-            nlohmann::json desc;
-            desc["ServerName"] = "AlpacaHTTP";
-            desc["Manufacturer"] = "AlpacaHTTP";
-            desc["ManufacturerVersion"] = "0.1.0";
-            desc["Location"] = "";
+        if (request.method() == HttpMethod::POST || request.method() == HttpMethod::PUT) {
+            if (management_driver_) {
+                AlpacaResponse err = make_error_response(
+                    client_tx_id, server_tx_id,
+                    util::ErrorCode::INVALID_OPERATION,
+                    "Location updates are not supported when a management driver is active"
+                );
+                response.set_body(err);
+                return response;
+            }
 
-            AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-            alpaca_response.value = desc.dump();
+            if (request.body().empty()) {
+                AlpacaResponse err = make_error_response(
+                    client_tx_id, server_tx_id,
+                    util::ErrorCode::VALUE_NOT_SET,
+                    "Missing request body"
+                );
+                response.set_body(err);
+                return response;
+            }
+
+            auto json_opt = parse_json(request.body());
+            if (!json_opt) {
+                AlpacaResponse err = make_error_response(
+                    client_tx_id, server_tx_id,
+                    util::ErrorCode::INVALID_VALUE,
+                    "Invalid JSON payload"
+                );
+                response.set_body(err);
+                return response;
+            }
+
+            const auto& body = *json_opt;
+            auto body_client_tx = extract_client_transaction_id(body);
+            if (body_client_tx != 0) {
+                client_tx_id = body_client_tx;
+            }
+
+            std::string new_location;
+            if (body.contains("Location")) {
+                new_location = body["Location"].get<std::string>();
+            } else if (body.contains("location")) {
+                new_location = body["location"].get<std::string>();
+            } else {
+                AlpacaResponse err = make_error_response(
+                    client_tx_id, server_tx_id,
+                    util::ErrorCode::VALUE_NOT_SET,
+                    "Request must include a 'Location' property"
+                );
+                response.set_body(err);
+                return response;
+            }
+
+            std::string config_path;
+            {
+                std::lock_guard<std::mutex> lock(server_info_mutex_);
+                config_path = config_path_;
+            }
+
+            if (!config_path.empty()) {
+                std::string persist_error;
+                if (!update_location_in_config(config_path, new_location, persist_error)) {
+                    AlpacaResponse err = make_error_response(
+                        client_tx_id, server_tx_id,
+                        util::ErrorCode::DRIVER_ERROR,
+                        "Failed to persist location: " + persist_error
+                    );
+                    response.set_body(err);
+                    return response;
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(server_info_mutex_);
+                location_ = new_location;
+            }
+        } else if (request.method() != HttpMethod::GET) {
+            AlpacaResponse alpaca_response = make_error_response(
+                client_tx_id, server_tx_id,
+                util::ErrorCode::INVALID_OPERATION,
+                "Unsupported HTTP method for description endpoint"
+            );
             response.set_body(alpaca_response);
+            response.set_status(405, "Method Not Allowed");
             return response;
         }
 
-        nlohmann::json desc;
-        desc["ServerName"] = management_driver_->get_name();
-        desc["Manufacturer"] = management_driver_->get_manufacturer();
-        desc["ManufacturerVersion"] = management_driver_->get_manufacturer_version();
-        desc["Location"] = management_driver_->get_location();
-
+        nlohmann::json desc = build_description_payload();
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         alpaca_response.value = desc.dump();
         response.set_body(alpaca_response);
@@ -865,6 +1159,8 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
             client_tx_id = extract_client_transaction_id(*json_opt);
         } else {
             if (auto value = get_form_value(request.body(), "ClientTransactionID")) {
+                client_tx_id = parse_client_transaction_id(*value);
+            } else if (auto value = get_form_value_case_insensitive(request.body(), "ClientTransactionID")) {
                 client_tx_id = parse_client_transaction_id(*value);
             }
         }
@@ -1696,8 +1992,16 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "destinationsideofpier") {
-                double ra = parse_double("RightAscension");
-                double dec = parse_double("Declination");
+                auto ra_value = get_query_param_case_insensitive(request, "RightAscension");
+                if (!ra_value) {
+                    throw std::runtime_error("Missing parameter: RightAscension");
+                }
+                auto dec_value = get_query_param_case_insensitive(request, "Declination");
+                if (!dec_value) {
+                    throw std::runtime_error("Missing parameter: Declination");
+                }
+                double ra = parse_double_value(*ra_value, "RightAscension");
+                double dec = parse_double_value(*dec_value, "Declination");
                 int side = telescope->get_destination_side_of_pier(ra, dec);
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, side);
@@ -4481,8 +4785,21 @@ Response Router::handle_root(const Request& request, std::uint32_t server_tx_id)
 
     // Return a simple JSON response with server information
     nlohmann::json info;
-    info["ServerName"] = "AlpacaHTTP";
-    info["Version"] = "0.1.0";
+    std::string server_name;
+    std::string version;
+    {
+        std::lock_guard<std::mutex> lock(server_info_mutex_);
+        server_name = server_name_;
+        version = manufacturer_version_;
+    }
+
+    if (management_driver_) {
+        server_name = management_driver_->get_name();
+        version = management_driver_->get_version();
+    }
+
+    info["ServerName"] = server_name;
+    info["Version"] = version;
     info["ManagementAPI"] = "/management/v1";
     info["DeviceAPI"] = "/api/v1";
     info["Endpoints"] = nlohmann::json::array({

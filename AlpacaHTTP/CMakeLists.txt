@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.15)
-project(AlpacaHTTP VERSION 0.1.0 LANGUAGES CXX)
+
+# Read version from VERSION file
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PROJECT_VERSION LIMIT_COUNT 1)
+string(STRIP "${PROJECT_VERSION}" PROJECT_VERSION)
+
+project(AlpacaHTTP VERSION ${PROJECT_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,16 +24,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/CMakeLists.txt")
     # AlpacaCore is in the same workspace
     add_subdirectory(../AlpacaCore ${CMAKE_BINARY_DIR}/AlpacaCore)
     
-    # Propagate AlpacaCore vendor options as compile definitions for AlpacaHTTP
-    # This allows AlpacaHTTP code to use #ifdef checks for vendor support
-    # Check both explicit options and the ALL_VENDORS option
-    if(ALPACACORE_ENABLE_ALL_VENDORS OR ALPACACORE_ENABLE_IOPTRON)
+    # Propagate AlpacaCore vendor targets as compile definitions for AlpacaHTTP
+    # This keeps AlpacaHTTP in sync with the drivers that actually built.
+    if(TARGET alpacacore_ioptron)
         add_definitions(-DALPACACORE_ENABLE_IOPTRON)
     endif()
-    if(ALPACACORE_ENABLE_ALL_VENDORS OR ALPACACORE_ENABLE_ZWO)
+    if(TARGET alpacacore_zwo)
         add_definitions(-DALPACACORE_ENABLE_ZWO)
     endif()
-    if(ALPACACORE_ENABLE_ALL_VENDORS OR ALPACACORE_ENABLE_QHY)
+    if(TARGET alpacacore_qhy)
         add_definitions(-DALPACACORE_ENABLE_QHY)
     endif()
 else()
@@ -38,6 +42,12 @@ else()
     # Check if vendor libraries exist (this is a best-effort check)
     if(TARGET alpacacore_ioptron)
         add_definitions(-DALPACACORE_ENABLE_IOPTRON)
+    endif()
+    if(TARGET alpacacore_zwo)
+        add_definitions(-DALPACACORE_ENABLE_ZWO)
+    endif()
+    if(TARGET alpacacore_qhy)
+        add_definitions(-DALPACACORE_ENABLE_QHY)
     endif()
 endif()
 
@@ -91,6 +101,7 @@ endif()
 
 # Create library
 add_library(alpacahttp STATIC ${ALPACAHTTP_SOURCES})
+target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_VERSION=\"${PROJECT_VERSION}\")
 
 target_link_libraries(alpacahttp
     PUBLIC
@@ -144,4 +155,3 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_config alpacahttp)
     add_test(NAME test_config COMMAND test_config)
 endif()
-

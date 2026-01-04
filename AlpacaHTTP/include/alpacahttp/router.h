@@ -32,6 +32,7 @@
 #include <memory>
 #include <functional>
 #include <vector>
+#include <mutex>
 #include <nlohmann/json.hpp>
 
 namespace alpacahttp {
@@ -51,6 +52,11 @@ public:
 
     // Set management driver (from AlpacaCore)
     void set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver);
+    void set_server_info(std::string server_name,
+                         std::string manufacturer,
+                         std::string manufacturer_version,
+                         std::string location);
+    void set_config_path(std::string config_path);
 
     // Set shutdown callback (called when shutdown endpoint is requested)
     void set_shutdown_callback(std::function<void()> callback);
@@ -101,6 +107,8 @@ private:
     void remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);
     void save_persisted_devices() const;
     void load_persisted_devices();
+
+    nlohmann::json build_description_payload() const;
     
     // Dispatch telescope-specific method calls
     Response dispatch_telescope_method(
@@ -193,6 +201,13 @@ private:
 
     std::vector<nlohmann::json> persisted_devices_;
     bool persisted_devices_loaded_ = false;
+
+    mutable std::mutex server_info_mutex_;
+    std::string server_name_ = "AlpacaHTTP";
+    std::string manufacturer_ = "AlpacaHTTP";
+    std::string manufacturer_version_ = "0.1.0";
+    std::string location_;
+    std::string config_path_;
 };
 
 } // namespace alpacahttp

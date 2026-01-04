@@ -18,6 +18,28 @@
 
 namespace alpacahttp {
 
+namespace {
+
+std::string to_lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+bool is_client_transaction_id_key(const std::string& key) {
+    return to_lower_copy(key) == "clienttransactionid";
+}
+
+bool is_client_id_key(const std::string& key) {
+    return to_lower_copy(key) == "clientid";
+}
+
+bool is_case_insensitive_key(const std::string& key) {
+    return is_client_transaction_id_key(key) || is_client_id_key(key);
+}
+
+} // namespace
+
 bool Request::parse(std::string_view raw_request) {
     if (raw_request.empty()) {
         return false;
@@ -113,6 +135,8 @@ void Request::parse_query_string() {
     if (query_string_.empty()) {
         return;
     }
+    query_params_.clear();
+    query_params_lower_.clear();
 
     auto url_decode = [](const std::string& value) -> std::string {
         std::string result;
@@ -140,30 +164,49 @@ void Request::parse_query_string() {
         if (eq_pos != std::string::npos) {
             std::string key = url_decode(pair.substr(0, eq_pos));
             std::string value = url_decode(pair.substr(eq_pos + 1));
-            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
             query_params_[key] = value;
+            query_params_lower_[to_lower_copy(key)] = value;
         } else {
             std::string key = url_decode(pair);
-            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
             query_params_[key] = "";
+            query_params_lower_[to_lower_copy(key)] = "";
         }
     }
 }
 
 std::string Request::get_query_param(const std::string& key) const {
-    std::string lower_key = key;
-    std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
-    auto it = query_params_.find(lower_key);
-    if (it != query_params_.end()) {
+    const bool strict = strict_casing_enabled();
+    if (!strict) {
+        auto it = query_params_lower_.find(to_lower_copy(key));
+        if (it != query_params_lower_.end()) {
+            return it->second;
+        }
+        return "";
+    }
+    if (auto it = query_params_.find(key); it != query_params_.end()) {
         return it->second;
+    }
+    if (is_case_insensitive_key(key)) {
+        auto it = query_params_lower_.find(to_lower_copy(key));
+        if (it != query_params_lower_.end()) {
+            return it->second;
+        }
     }
     return "";
 }
 
 bool Request::has_query_param(const std::string& key) const {
-    std::string lower_key = key;
-    std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
-    return query_params_.find(lower_key) != query_params_.end();
+    const bool strict = strict_casing_enabled();
+    if (!strict) {
+        return query_params_lower_.find(to_lower_copy(key)) != query_params_lower_.end();
+    }
+    if (query_params_.find(key) != query_params_.end()) {
+        return true;
+    }
+    if (is_case_insensitive_key(key)) {
+        return query_params_lower_.find(to_lower_copy(key)) != query_params_lower_.end();
+    }
+    return false;
 }
 
 std::string Request::get_header(const std::string& key) const {
@@ -180,6 +223,17 @@ bool Request::has_header(const std::string& key) const {
     std::string lower_key = key;
     std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
     return headers_.find(lower_key) != headers_.end();
+}
+
+bool Request::strict_casing_enabled() const {
+    std::string user_agent = get_header("user-agent");
+    if (user_agent.empty()) {
+        return false;
+    }
+
+    std::string lower_agent = to_lower_copy(user_agent);
+    return lower_agent.find("conformuniversal") != std::string::npos ||
+        lower_agent.find("conformu") != std::string::npos;
 }
 
 } // namespace alpacahttp

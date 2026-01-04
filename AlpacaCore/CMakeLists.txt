@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-project(AlpacaCore VERSION 0.1.0 LANGUAGES CXX)
+
+# Read version from VERSION file
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PROJECT_VERSION LIMIT_COUNT 1)
+string(STRIP "${PROJECT_VERSION}" PROJECT_VERSION)
+
+project(AlpacaCore VERSION ${PROJECT_VERSION} LANGUAGES CXX)
 
 # C++20 required
 set(CMAKE_CXX_STANDARD 20)
@@ -8,7 +13,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(ALPACACORE_BUILD_TESTS "Build unit tests" ON)
-option(ALPACACORE_ENABLE_ALL_VENDORS "Enable all vendor drivers" OFF)
+option(ALPACACORE_ENABLE_ALL_VENDORS "Enable all vendor drivers" ON)
 option(ALPACACORE_ENABLE_ZWO "Enable ZWO vendor support" OFF)
 option(ALPACACORE_ENABLE_QHY "Enable QHY vendor support" OFF)
 option(ALPACACORE_ENABLE_IOPTRON "Enable iOptron vendor support" OFF)
@@ -186,4 +191,3 @@ install(EXPORT AlpacaCoreTargets
     NAMESPACE AlpacaCore::
     DESTINATION lib/cmake/AlpacaCore
 )
-

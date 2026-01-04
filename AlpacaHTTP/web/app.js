@@ -397,6 +397,7 @@ function startEditDevice(device) {
     setFormValue('device-type', deviceType);
     setFormValue('device-number', device.DeviceNumber);
     setFormValue('vendor', vendor);
+    updateVendorOptions();
 
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
@@ -505,32 +506,42 @@ async function loadServerInfo() {
             return;
         }
 
-        // Handle Value field - it can be a string (JSON), an object, or undefined
-        let desc;
-        if (data.Value !== undefined && data.Value !== null) {
-            if (typeof data.Value === 'string') {
-                // JSON string - parse it
-                try {
-                    desc = JSON.parse(data.Value);
-                } catch (e) {
-                    console.error('Failed to parse Value as JSON:', e, 'Value was:', data.Value);
-                    serverInfo.innerHTML = `<p class="error">Error loading server info: Invalid JSON format in Value field</p>`;
-                    return;
-                }
-            } else if (typeof data.Value === 'object') {
-                // Already an object
-                desc = data.Value;
-            } else {
-                console.warn('Unexpected Value type:', typeof data.Value, data.Value);
-                desc = data.Value;
-            }
-        } else {
-            desc = {};
-        }
-        
+        const desc = parseResponseValue(data.Value) || {};
+        const serverName = resolveDescriptionValue(desc, ['ServerName', 'serverName']) || '—';
+        const manufacturer = resolveDescriptionValue(desc, ['Manufacturer', 'manufacturer']) || '—';
+        const manufacturerVersion = resolveDescriptionValue(desc, ['ManufacturerVersion', 'manufacturerVersion', 'Version', 'version']) || '—';
+        const location = resolveDescriptionValue(desc, ['Location', 'location']) || '';
+
         serverInfo.innerHTML = `
-            <pre>${JSON.stringify(desc, null, 2)}</pre>
+            <div class="server-info-grid">
+                ${renderServerInfoRow('Server Name', serverName)}
+                ${renderServerInfoRow('Manufacturer', manufacturer)}
+                ${renderServerInfoRow('Version', manufacturerVersion)}
+                <div class="server-info-row">
+                    <span class="info-label">Location</span>
+                    <div class="server-location">
+                        <input id="server-location-input" type="text" placeholder="City, State/Province, Country">
+                    </div>
+                    <button id="server-location-save" class="btn btn-secondary btn-small" type="button">Save</button>
+                </div>
+            </div>
         `;
+
+        const locationInput = document.getElementById('server-location-input');
+        if (locationInput) {
+            locationInput.value = location;
+            locationInput.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    updateServerLocation();
+                }
+            });
+        }
+        const locationSaveButton = document.getElementById('server-location-save');
+        if (locationSaveButton) {
+            locationSaveButton.addEventListener('click', updateServerLocation);
+        }
+        setServerInfoStatus('');
     } catch (error) {
         console.error('Error loading server info:', error);
         let errorMsg = 'Unknown error';
@@ -546,6 +557,104 @@ async function loadServerInfo() {
             }
         }
         serverInfo.innerHTML = `<p class="error">Error loading server info: ${escapeHtml(errorMsg)}</p>`;
+        setServerInfoStatus('');
+    }
+}
+
+function renderServerInfoRow(label, value) {
+    const displayValue = value !== undefined && value !== null && value !== '' ? value : '—';
+    return `
+        <div class="server-info-row">
+            <span class="info-label">${escapeHtml(label)}</span>
+            <span class="info-value">${escapeHtml(String(displayValue))}</span>
+        </div>
+    `;
+}
+
+function resolveDescriptionValue(desc, keys) {
+    if (!desc || typeof desc !== 'object') {
+        return '';
+    }
+    for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(desc, key)) {
+            return desc[key];
+        }
+    }
+    return '';
+}
+
+function setServerInfoStatus(message, isError = false) {
+    const status = document.getElementById('server-info-status');
+    if (!status) {
+        return;
+    }
+    status.textContent = message;
+    status.classList.toggle('error', isError);
+}
+
+async function updateServerLocation() {
+    const locationInput = document.getElementById('server-location-input');
+    const locationSaveButton = document.getElementById('server-location-save');
+    if (!locationInput) {
+        return;
+    }
+
+    const location = locationInput.value || '';
+    setServerInfoStatus('Updating location...');
+    if (locationSaveButton) {
+        locationSaveButton.dataset.originalLabel = locationSaveButton.textContent;
+        locationSaveButton.textContent = 'Saving...';
+        locationSaveButton.disabled = true;
+    }
+    locationInput.disabled = true;
+
+    try {
+        const response = await fetch(API_BASE + '/management/v1/description', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({Location: location})
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const text = await response.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (e) {
+            throw new Error('Invalid JSON response from server');
+        }
+
+        if (data.ErrorNumber !== 0) {
+            throw new Error(data.ErrorMessage || 'Unknown server error');
+        }
+
+        const payload = parseResponseValue(data.Value) || {};
+        const updatedLocation = resolveDescriptionValue(payload, ['Location', 'location']);
+        if (updatedLocation !== undefined && updatedLocation !== null) {
+            locationInput.value = updatedLocation;
+        }
+        setServerInfoStatus('Location updated.');
+        if (locationSaveButton) {
+            locationSaveButton.textContent = 'Saved';
+            setTimeout(() => {
+                locationSaveButton.textContent = locationSaveButton.dataset.originalLabel || 'Save';
+                delete locationSaveButton.dataset.originalLabel;
+            }, 1500);
+        }
+    } catch (error) {
+        setServerInfoStatus(`Failed to update location: ${error.message}`, true);
+        if (locationSaveButton) {
+            locationSaveButton.textContent = locationSaveButton.dataset.originalLabel || 'Save';
+            delete locationSaveButton.dataset.originalLabel;
+        }
+    } finally {
+        if (locationSaveButton) {
+            locationSaveButton.disabled = false;
+        }
+        locationInput.disabled = false;
     }
 }
 
@@ -741,6 +850,30 @@ async function downloadLogs() {
 }
 
 // Device form handling
+function updateVendorOptions() {
+    const deviceTypeSelect = document.getElementById('device-type');
+    const vendorSelect = document.getElementById('vendor');
+    if (!deviceTypeSelect || !vendorSelect) {
+        return;
+    }
+
+    const deviceType = normalizeDeviceType(deviceTypeSelect.value);
+    const isTelescope = deviceType === 'telescope';
+    const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
+    if (ioptronOption) {
+        ioptronOption.disabled = !isTelescope;
+        ioptronOption.hidden = !isTelescope;
+    }
+
+    if (!isTelescope && vendorSelect.value === 'ioptron') {
+        vendorSelect.value = '';
+    }
+
+    vendorSelect.dispatchEvent(new Event('change'));
+}
+
+document.getElementById('device-type').addEventListener('change', updateVendorOptions);
+
 document.getElementById('vendor').addEventListener('change', function() {
     const vendor = this.value;
     const configs = document.querySelectorAll('.vendor-config');
@@ -997,6 +1130,7 @@ document.addEventListener('DOMContentLoaded', function() {
     loadServerInfo();
     loadLogSettings();
     loadLogHistorySettings();
+    updateVendorOptions();
 
     const logHistoryToggle = document.getElementById('log-history-toggle');
     if (logHistoryToggle) {

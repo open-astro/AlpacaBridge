@@ -12,6 +12,7 @@
 
 #include <alpacahttp/server.h>
 #include <alpacahttp/util/logging_adapter.h>
+#include <alpacahttp/version.h>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <netinet/in.h>
@@ -30,6 +31,11 @@ Server::Server(const Config& config)
     : config_(config)
 {
     router_.set_shutdown_callback([this]() { handle_shutdown_request(); });
+    router_.set_server_info(config_.server_name(),
+                            config_.manufacturer(),
+                            alpacahttp::kVersion,
+                            config_.location());
+    router_.set_config_path(config_.config_path());
 }
 
 void Server::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver) {

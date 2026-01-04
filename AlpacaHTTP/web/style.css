@@ -327,6 +327,47 @@ h2 {
     margin-bottom: 20px;
 }
 
+.server-info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px 24px;
+}
+
+.server-info-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.server-location {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.server-location input {
+    flex: 1;
+    padding: 10px 12px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 0.95em;
+}
+
+.server-status {
+    margin: 4px 0 16px;
+    color: #555;
+    font-size: 0.95em;
+}
+
+.server-status.error {
+    color: #721c24;
+}
+
+.server-helper {
+    color: #666;
+    font-size: 0.85em;
+}
+
 .log-control {
     background: #f9f9f9;
     border: 1px solid #e0e0e0;

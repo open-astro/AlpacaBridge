@@ -56,13 +56,14 @@ private:
     std::string path_;
     std::string query_string_;
     std::unordered_map<std::string, std::string> query_params_;
+    std::unordered_map<std::string, std::string> query_params_lower_;
     std::unordered_map<std::string, std::string> headers_;
     std::string body_;
     std::string_view http_version_;
 
     void parse_query_string();
     HttpMethod parse_method(std::string_view method_str);
+    bool strict_casing_enabled() const;
 };
 
 } // namespace alpacahttp
-

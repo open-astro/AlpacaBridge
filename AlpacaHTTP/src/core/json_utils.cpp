@@ -14,6 +14,8 @@
 #include <sstream>
 #include <type_traits>
 #include <limits>
+#include <algorithm>
+#include <cctype>
 
 namespace alpacahttp {
 
@@ -89,6 +91,17 @@ std::uint32_t extract_client_transaction_id(const nlohmann::json& j) {
     const nlohmann::json* candidate = nullptr;
     if (j.contains("ClientTransactionID")) {
         candidate = &j["ClientTransactionID"];
+    }
+    if (!candidate && j.is_object()) {
+        for (auto it = j.begin(); it != j.end(); ++it) {
+            std::string key = it.key();
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (key == "clienttransactionid") {
+                candidate = &it.value();
+                break;
+            }
+        }
     }
 
     if (candidate) {

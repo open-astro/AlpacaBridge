@@ -44,6 +44,7 @@ public:
     const std::string& location() const { return location_; }
     std::size_t thread_pool_size() const { return thread_pool_size_; }
     std::size_t log_history_limit() const { return log_history_limit_; }
+    const std::string& config_path() const { return config_path_; }
 
     // Device enable/disable
     bool is_device_enabled(const std::string& device_type, std::uint32_t device_number) const;
@@ -67,16 +68,18 @@ private:
     bool discovery_enabled_ = true;
     LogLevel log_level_ = LogLevel::WARNING;
     std::string server_name_ = "AlpacaHTTP";
-    std::string manufacturer_ = "AlpacaHTTP";
+    std::string manufacturer_ = "OpenAstro.net";
     std::string location_ = "";
     std::size_t thread_pool_size_ = 32;  // Default: 32 concurrent requests (supports multiple devices + clients)
     std::size_t log_history_limit_ = 2000;  // 0 = unlimited
+    std::string config_path_;
 
     // Device enable/disable map: "devicetype:number" -> enabled
     std::unordered_map<std::string, bool> device_enable_map_;
 
     LogLevel parse_log_level(const std::string& level_str);
     void apply_environment_overrides();
+    void load_config_from_yaml(const std::string& config_path);
 };
 
 } // namespace alpacahttp

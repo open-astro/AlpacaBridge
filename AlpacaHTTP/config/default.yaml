@@ -17,7 +17,7 @@ logging:
 # Server information
 server:
   name: AlpacaHTTP
-  manufacturer: AlpacaHTTP
+  manufacturer: OpenAstro.net
   location: ""
 
 # Device enable/disable (optional)
