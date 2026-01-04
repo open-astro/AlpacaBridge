@@ -1,0 +1,91 @@
+// AlpacaCore
+// Copyright (c) 2025 Joey Troy and contributors
+//
+// This file is part of AlpacaCore.
+//
+// AlpacaCore is licensed under the Server Side Public License, Version 1 (SSPL v1).
+// See the LICENSE file in this repository or the official license at:
+// https://www.mongodb.com/legal/licensing/server-side-public-license
+//
+// If you use this program to provide a network-accessible service, appliance,
+// or any commercial offering, you must comply
+// with all SSPL v1 requirements.
+
+#include <alpacacore/util/logging.h>
+#include <mutex>
+#include <iostream>
+#include <iomanip>
+#include <chrono>
+#include <ctime>
+
+namespace alpacacore::logging {
+
+namespace {
+    std::mutex g_log_mutex;
+    LogSink g_log_sink;
+    LogLevel g_min_log_level = LogLevel::Info;
+    
+    const char* level_to_string(LogLevel level) {
+        switch (level) {
+            case LogLevel::Trace:    return "TRACE";
+            case LogLevel::Debug:    return "DEBUG";
+            case LogLevel::Info:     return "INFO ";
+            case LogLevel::Warn:     return "WARN ";
+            case LogLevel::Error:    return "ERROR";
+            case LogLevel::Critical: return "CRIT ";
+            default:                 return "UNKNW";
+        }
+    }
+    
+    void default_stderr_sink(LogLevel level,
+                             std::string_view component,
+                             std::string_view message) {
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+        
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        std::cerr << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S")
+                  << "." << std::setfill('0') << std::setw(3) << ms.count()
+                  << " [" << level_to_string(level) << "] "
+                  << "[" << component << "] "
+                  << message << std::endl;
+    }
+}
+
+void set_log_sink(LogSink sink) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    g_log_sink = std::move(sink);
+}
+
+LogSink get_log_sink() {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    return g_log_sink;
+}
+
+void set_log_level(LogLevel level) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    g_min_log_level = level;
+}
+
+LogLevel get_log_level() {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    return g_min_log_level;
+}
+
+void log(LogLevel level,
+         std::string_view component,
+         std::string_view message) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    if (level < g_min_log_level) {
+        return;
+    }
+    if (g_log_sink) {
+        g_log_sink(level, component, message);
+    } else {
+        default_stderr_sink(level, component, message);
+    }
+}
+
+} // namespace alpacacore::logging

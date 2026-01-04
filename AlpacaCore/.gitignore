@@ -1,0 +1,48 @@
+# Build directories
+build/
+_build/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+!*.cmake.in
+
+# Compiled files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test results
+*.gcov
+*.gcda
+*.gcno
+
+# Vendor SDKs - exclude all files except documentation
+# Exclude all files in vendor subdirectories
+external/*/*
+# But allow markdown documentation files
+!external/README.md
+!external/*.md
+!external/*/*.md
+!external/*/README.md
+!external/**/.gitkeep
