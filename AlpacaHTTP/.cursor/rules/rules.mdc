@@ -1,0 +1,348 @@
+---
+alwaysApply: true
+---
+# AlpacaHTTP - Cursor Rules
+
+These rules tell Cursor how to work inside the **AlpacaHTTP** repository.
+
+**AlpacaHTTP** is the Alpaca-over-HTTP transport layer for **AlpacaCore**:
+
+- Implements **HTTP/1.1 + JSON** transport for Alpaca
+- Exposes AlpacaCore devices via `/api/v1/...` endpoints
+- Implements **discovery**, **routing**, **transaction IDs**, and **error mapping**
+- Does **not** contain device logic or vendor SDK calls
+
+AlpacaHTTP depends entirely on **AlpacaCore** for device behavior.
+
+---
+
+## 1. Tech Stack & General Rules
+
+- **Language:** Modern C++ (**C++20 preferred**)
+- **Build system:** **CMake**
+- **HTTP Server:** Prefer **Boost.Beast**; alternative: `cpp-httplib`
+- **JSON library:** Use **nlohmann/json**
+- **OS Targets:** Linux first, then macOS and Windows
+- Follow the ASCOM Alpaca Management API: https://ascom-standards.org/api/?urls.primaryName=ASCOM+Alpaca+Management+API
+
+**Dependencies:**
+
+- Must link to **AlpacaCore**
+- Must NOT link to vendor SDKs
+- Should NOT introduce GUI or heavy frameworks
+- Allowed: Beast, Asio, nlohmann/json, yaml-cpp (optional)
+
+**Coding style:**
+- RAII only, no raw pointers unless absolutely required
+- `#pragma once` in headers
+- `std::string_view` when appropriate
+- `enum class` for enums
+- `std::chrono` for time/durations
+- No `using namespace std;` in headers
+
+---
+
+## 2. License
+
+Use **SSPL v1**, same as AlpacaHTTP.
+
+Include this header at the top of all new `.h` and `.cpp` files:
+
+```cpp
+// AlpacaHTTP
+// Copyright (c) 2025 Joey Troy and contributors
+//
+// This file is part of AlpacaHTTP.
+//
+// AlpacaHTTP is licensed under the Server Side Public License, Version 1 (SSPL v1).
+// See the LICENSE file in this repository or the official license at:
+// https://www.mongodb.com/legal/licensing/server-side-public-license
+//
+// If you use this program to provide a network-accessible service, appliance,
+// or any commercial offering, you must comply with all SSPL v1 requirements.
+```
+
+Cursor must never change this license or add another license.
+
+---
+
+## 3. Responsibilities & Relationship With AlpacaCore
+
+AlpacaHTTP handles:
+
+- HTTP/1.1 server
+- Request parsing
+- URL routing (GET/PUT)
+- JSON serialization/deserialization
+- Alpaca Discovery (UDP multicast)
+- Error handling + mapping to Alpaca spec
+- Configuration loading
+- Transaction ID management
+- Logging sink adaptation
+
+AlpacaHTTP **must NOT**:
+
+- Implement device logic
+- Touch vendor SDKs
+- Duplicate AlpacaCore behavior
+
+Device calls always go through:
+
+```
+AlpacaHTTP -> AlpacaCore::DeviceDriver -> Vendor SDK (only inside AlpacaCore)
+```
+
+---
+
+## 4. Directory Structure
+
+```
+AlpacaHTTP/
+|-- .cursor/
+|   `-- rules/
+|       `-- rules.mdc
+|-- CMakeLists.txt
+|-- LICENSE
+|-- README.md
+|-- CHANGELOG.md
+|-- VERSION
+|-- CONTRIBUTING.md
+|
+|-- config/
+|   |-- default.yaml
+|   `-- schema/
+|
+|-- include/
+|   `-- alpacahttp/
+|       |-- server.h
+|       |-- router.h
+|       |-- request.h
+|       |-- response.h
+|       |-- discovery.h
+|       |-- config.h
+|       |-- json_utils.h
+|       `-- util/
+|           |-- threading.h
+|           |-- logging_adapter.h
+|           `-- error_mapping.h
+|
+|-- src/
+|   |-- http/
+|   |   |-- server.cpp
+|   |   |-- session.cpp
+|   |   `-- router.cpp
+|   |
+|   |-- core/
+|   |   |-- request.cpp
+|   |   |-- response.cpp
+|   |   |-- json_utils.cpp
+|   |   `-- config.cpp
+|   |
+|   |-- discovery/
+|   |   `-- discovery.cpp
+|   |
+|   `-- util/
+|       |-- threading.cpp
+|       |-- logging_adapter.cpp
+|       `-- error_mapping.cpp
+|
+|-- tests/
+|   |-- test_routing.cpp
+|   |-- test_json.cpp
+|   |-- test_discovery.cpp
+|   `-- test_config.cpp
+|
+`-- examples/
+    |-- simple_server/
+    |   `-- main.cpp
+    `-- curl_examples/
+```
+
+---
+
+## 5. HTTP Rules
+
+### HTTP Requirements
+- Must support **HTTP/1.1**
+- Keep-alive enabled
+- Support GET + PUT
+- Correct Content-Length
+- Proper JSON content type
+
+### URL Routing Patterns
+
+Follow ASCOM Alpaca:
+
+```
+/management/v1/description
+/management/v1/configureddevices
+/api/v1/{devicetype}/{devicenumber}/{method}
+```
+
+Examples:
+
+```
+GET /api/v1/camera/0/canconnect
+PUT /api/v1/mount/0/slewto?RightAscension=1.5&Declination=-20.3
+```
+
+Routing must decode:
+- device type
+- device number
+- method name
+- query parameters
+
+Routing must call **AlpacaCore** methods.
+
+---
+
+## 6. JSON Mapping Rules
+
+All Alpaca responses require:
+
+```
+ClientTransactionID
+ServerTransactionID
+ErrorNumber
+ErrorMessage
+Value   (if applicable)
+```
+
+Cursor must:
+
+- Implement DTOs in `response.h`
+- Implement conversion functions in `json_utils.cpp`
+- Always return HTTP **200 OK** even when Alpaca returns an error (`ErrorNumber != 0`)
+
+---
+
+## 7. Discovery Rules
+
+Implement Alpaca Discovery via UDP multicast:
+
+- Listen on Alpaca discovery port
+- Reply to discovery probe with:
+  - Manufacturer
+  - Location
+  - Server name
+  - Base URL ("/api/v1")
+
+Discovery must run independently of HTTP server.
+
+---
+
+## 8. Configuration Rules
+
+Config locations:
+
+```
+config/default.yaml
+user config (optional)
+environment overrides (optional)
+```
+
+Minimum config parameters:
+
+- HTTP port (default 6800)
+- Discovery enabled (true/false)
+- Logging level
+- Device enable/disable sections (optional)
+
+Cursor must place config logic in:
+
+```
+include/alpacahttp/config.h
+src/core/config.cpp
+```
+
+---
+
+## 9. Logging Rules
+
+- AlpacaHTTP must integrate with AlpacaCore via `set_log_sink`.
+- All HTTP events must use AlpacaCore log system.
+- No direct usage of `std::cout`/`std::cerr`.
+
+Cursor must implement:
+
+```
+util/logging_adapter.h
+util/logging_adapter.cpp
+```
+
+---
+
+## 10. Threading Rules
+
+- Must support concurrent HTTP requests.
+- Recommended: Beast async model with multiple `io_context` threads.
+- No global mutable state without a mutex.
+- Device instances in AlpacaCore are assumed thread-safe.
+
+---
+
+## 11. Error Handling Rules
+
+- Wrap all AlpacaCore calls in try/catch blocks.
+- Convert exceptions to Alpaca error response using:
+
+```
+util/error_mapping.h
+util/error_mapping.cpp
+```
+
+Never crash the server on device errors.
+
+---
+
+## 12. Build Options (CMake)
+
+```
+ALPACAHTTP_BUILD_TESTS
+ALPACAHTTP_USE_BOOST_BEAST
+ALPACAHTTP_ENABLE_DISCOVERY
+```
+
+Cursor must guard optional components behind these flags.
+
+---
+
+## 13. Testing Rules
+
+Tests must cover:
+
+- Routing resolution
+- JSON serialization/deserialization
+- Discovery logic
+- Error mapping
+- Config loading
+
+Integration test: start server, send HTTP requests, validate JSON.
+
+---
+
+## 14. Out of Scope
+
+Cursor must NOT add:
+
+- Device logic
+- Vendor SDK integration
+- GUI components
+- WebSockets
+- HTTP/2
+- Database layers
+- Cloud components
+- Branding or images
+
+---
+
+## 15. Cursor Behavior
+
+When generating or modifying code:
+
+- Always explain which directory is being changed and why.
+- Use the directory layout above.
+- Follow all rules strictly.
+- Add `TODO` for incomplete vendor/API items.
+- Keep API naming consistent.
+- Never bypass AlpacaCore for device operations.

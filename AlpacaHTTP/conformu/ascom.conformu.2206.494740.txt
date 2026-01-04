@@ -1,0 +1,20 @@
+22:06:49.482 Check Alpaca Protocol - Conform Universal 4.1.0 (Build 34701.5571b36) 
+22:06:49.485                                     
+22:06:49.486 Test Telescope device: iOptron Telescope - 192.168.1.206:6800 through URL: http://192.168.1.206:6800 
+22:06:49.487                                     
+22:06:49.487 OK messages are suppressed, they can be enabled through the Alpaca and COM settings page. 
+22:06:49.487                                     
+22:06:49.487 Connecting to device...             
+22:06:50.846                                     
+22:06:50.847 Successfully connected to device, disconnecting in order to test that connection using a different PUT parameter order is successful... 
+22:06:51.570                                     
+22:06:51.572 Successfully disconnected from device, re-connecting using re-ordered PUT parameters... 
+22:06:51.574                                     
+22:06:52.905 Successfully connected to device using re-ordered PUT parameters, testing device... 
+22:06:52.907                                     
+22:06:52.924 Device exposes interface version 3  
+22:11:20.450                                     
+22:11:20.957                                     
+22:11:20.966 Successfully disconnected from device. 
+22:11:20.967                                     
+22:11:20.967 Congratulations there were no errors, issues or information alerts - Your device passes ASCOM Alpaca protocol validation!! 
