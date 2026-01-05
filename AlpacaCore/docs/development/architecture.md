@@ -47,10 +47,10 @@ AlpacaCore/
 ├─ VERSION
 ├─ CONTRIBUTING.md
 │
-├─ external/                         # Vendor SDKs ONLY
-│   ├─ ASICamera2_SDK/              # Vendor SDK folders (not in Git)
-│   ├─ qhy_sdk/
-│   └─ iOptron_SDK/
+├─ external/                         # Vendor SDKs and vendor docs
+│   ├─ ASI_Camera_SDK/              # ZWO SDK subset (vendored)
+│   ├─ qhy_sdk/                     # Vendor SDK folders (not in Git)
+│   └─ ioptron/                     # iOptron protocol docs
 │
 ├─ include/
 │   └─ alpacacore/                   # Official AlpacaCore SDK

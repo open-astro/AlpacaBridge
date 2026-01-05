@@ -30,7 +30,8 @@ Common build issues and solutions for AlpacaCore.
 **Solution**: 
 1. Ensure the vendor SDK is placed in the `external/` directory
    - See [external/README.md](../../external/README.md) for details on SDK placement
-   - SDKs should be extracted directly into `external/` (e.g., `external/ASICamera2_SDK/`)
+   - SDKs should be extracted directly into `external/` (e.g., `external/ASI_Camera_SDK/`)
+   - ZWO builds use the vendored subset in `external/ASI_Camera_SDK/`
 2. Verify the SDK folder structure matches what the CMakeLists.txt expects
 3. Check that the SDK folder name matches the expected pattern
 4. Ensure you've enabled the vendor option: `-DALPACACORE_ENABLE_<VENDOR>=ON`

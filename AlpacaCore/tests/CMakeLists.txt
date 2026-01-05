@@ -23,6 +23,10 @@ set(TEST_SOURCES
     test_units.cpp
 )
 
+if(TARGET alpacacore_zwo)
+    list(APPEND TEST_SOURCES test_zwo_camera.cpp)
+endif()
+
 # Create test executable
 if(TEST_FRAMEWORK STREQUAL "catch2")
     add_executable(alpacacore_tests ${TEST_SOURCES})

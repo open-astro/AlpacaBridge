@@ -46,6 +46,9 @@
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_ZWO
+#include <alpacacore/vendor/zwo/zwo_camera_driver.h>
+#endif
 
 namespace {
 
@@ -5550,6 +5553,34 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "zwo" && device_type_str == "camera") {
+#ifdef ALPACACORE_ENABLE_ZWO
+        int camera_id = config.value("cameraId", -1);
+        int camera_index = config.value("cameraIndex", -1);
+
+        std::unique_ptr<alpacacore::CameraDriver> camera;
+        if (camera_id >= 0) {
+            camera = alpacacore::vendor::zwo::create_zwo_camera(device_number, camera_id);
+        } else if (camera_index >= 0) {
+            camera = alpacacore::vendor::zwo::create_zwo_camera_by_index(device_number, camera_index);
+        } else {
+            error_message = "ZWO camera requires cameraIndex or cameraId";
+            return false;
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+            util::log_info("Registered ZWO camera");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -5566,15 +5597,21 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     copy_if_present("vendor");
     copy_if_present("deviceType");
     copy_if_present("deviceNumber");
-    copy_if_present("connectionType");
 
-    std::string connection_type = config.value("connectionType", "");
-    if (connection_type == "serial") {
-        copy_if_present("portPath");
-        copy_if_present("baudRate");
-    } else if (connection_type == "network") {
-        copy_if_present("host");
-        copy_if_present("tcpPort");
+    std::string vendor = config.value("vendor", "");
+    if (vendor == "ioptron") {
+        copy_if_present("connectionType");
+        std::string connection_type = config.value("connectionType", "");
+        if (connection_type == "serial") {
+            copy_if_present("portPath");
+            copy_if_present("baudRate");
+        } else if (connection_type == "network") {
+            copy_if_present("host");
+            copy_if_present("tcpPort");
+        }
+    } else if (vendor == "zwo") {
+        copy_if_present("cameraIndex");
+        copy_if_present("cameraId");
     }
 
     copy_if_present("responseTimeoutMs");

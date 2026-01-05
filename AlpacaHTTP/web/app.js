@@ -414,6 +414,8 @@ function startEditDevice(device) {
     setFormValue('tcp-port', config.tcpPort);
     setFormValue('aperture-diameter', config.apertureDiameter);
     setFormValue('focal-length', config.focalLength);
+    setFormValue('camera-index', config.cameraIndex);
+    setFormValue('camera-id', config.cameraId);
     updateApertureAreaFromDiameter();
 
     const messageDiv = document.getElementById('form-message');
@@ -859,13 +861,22 @@ function updateVendorOptions() {
 
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
     const isTelescope = deviceType === 'telescope';
+    const isCamera = deviceType === 'camera';
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
         ioptronOption.disabled = !isTelescope;
         ioptronOption.hidden = !isTelescope;
     }
+    const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
+    if (zwoOption) {
+        zwoOption.disabled = !isCamera;
+        zwoOption.hidden = !isCamera;
+    }
 
     if (!isTelescope && vendorSelect.value === 'ioptron') {
+        vendorSelect.value = '';
+    }
+    if (!isCamera && vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
     }
 
@@ -881,6 +892,8 @@ document.getElementById('vendor').addEventListener('change', function() {
     
     if (vendor === 'ioptron') {
         document.getElementById('ioptron-config').style.display = 'block';
+    } else if (vendor === 'zwo') {
+        document.getElementById('zwo-config').style.display = 'block';
     }
 });
 
@@ -937,6 +950,18 @@ document.getElementById('device-form').addEventListener('submit', async function
         const focalLength = readOptionalNumber(formData, 'focalLength');
         if (focalLength !== null) {
             deviceData.focalLength = focalLength;
+        }
+    } else if (deviceData.vendor === 'zwo') {
+        const cameraIndex = Number.parseInt(formData.get('cameraIndex'), 10);
+        if (!Number.isNaN(cameraIndex)) {
+            deviceData.cameraIndex = cameraIndex;
+        }
+        const cameraIdValue = formData.get('cameraId');
+        if (cameraIdValue !== null && cameraIdValue !== undefined && cameraIdValue !== '') {
+            const cameraId = Number.parseInt(cameraIdValue, 10);
+            if (!Number.isNaN(cameraId)) {
+                deviceData.cameraId = cameraId;
+            }
         }
     }
 
@@ -1038,6 +1063,8 @@ function renderDeviceSettings(config) {
         ['baudRate', 'Baud Rate'],
         ['host', 'Host'],
         ['tcpPort', 'TCP Port'],
+        ['cameraIndex', 'Camera Index'],
+        ['cameraId', 'Camera ID'],
         ['apertureDiameter', 'Aperture Diameter (m)'],
         ['focalLength', 'Focal Length (m)'],
         ['responseTimeoutMs', 'Response Timeout (ms)'],
