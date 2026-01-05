@@ -9,13 +9,14 @@ This comprehensive guide walks you through building vendor-specific drivers for 
 
 1. [Overview](#overview)
 2. [Architecture Principles](#architecture-principles)
-3. [SDK Organization](#sdk-organization)
-4. [Driver Structure](#driver-structure)
-5. [Step-by-Step Driver Implementation](#step-by-step-driver-implementation)
-6. [CMake Configuration](#cmake-configuration)
-7. [Testing Your Driver](#testing-your-driver)
-8. [Vendor-Specific Examples](#vendor-specific-examples)
-9. [Troubleshooting](#troubleshooting)
+3. [Gold-Standard Driver Behavior (Required)](#gold-standard-driver-behavior-required)
+4. [SDK Organization](#sdk-organization)
+5. [Driver Structure](#driver-structure)
+6. [Step-by-Step Driver Implementation](#step-by-step-driver-implementation)
+7. [CMake Configuration](#cmake-configuration)
+8. [Testing Your Driver](#testing-your-driver)
+9. [Vendor-Specific Examples](#vendor-specific-examples)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -50,8 +51,8 @@ AlpacaCore drivers follow a **three-layer architecture**:
 ### File Organization
 
 ```
-external/                       # Raw SDK folders (untouched, not in Git)
-├─ ASICamera2_SDK/              # Vendor SDK folder (name varies by vendor)
+external/                       # Vendor SDK folders or vendored SDK assets (policy varies by repo/license)
+├─ ASI_Camera_SDK/              # ZWO SDK subset (vendored)
 │   └─ SDK files...
 ├─ qhy_sdk/                     # Another vendor SDK
 │   └─ SDK files...
@@ -72,6 +73,21 @@ src/
 
 ---
 
+## Gold-Standard Driver Behavior (Required)
+
+All vendor drivers should follow these runtime semantics to keep Alpaca behavior consistent
+across devices and avoid blocking HTTP threads:
+
+- **Async connect/disconnect**: Implement `connect()` and `disconnect()` as asynchronous operations that return immediately and do work in a background task.
+- **Connecting state**: Implement `get_connecting()` to report true while connect/disconnect is in progress.
+- **Device state snapshot**: Implement `get_device_state()` with a populated list of Name/Value telemetry (e.g., Connected, Temperatures, State).
+- **Connected property**: Keep `set_connected()` synchronous to support legacy clients; async flows live in `connect()`/`disconnect()`.
+- **Thread cleanup**: Ensure background threads/tasks are stopped in the driver destructor.
+
+Use the iOptron telescope driver as a reference implementation for these behaviors.
+
+---
+
 ## SDK Organization
 
 ### Step 1: Place SDK in `external/`
@@ -79,19 +95,26 @@ src/
 **Simply extract the vendor SDK folder directly into `external/`** - no subdirectories or reorganization needed:
 
 ```bash
-# Example: ZWO SDK extracts as "ASICamera2_SDK"
+# Example: ZWO vendored subset in external/ASI_Camera_SDK/
 external/
-└─ ASICamera2_SDK/              # Vendor's folder name (use as-is)
+└─ ASI_Camera_SDK/
    ├─ include/
    │   └─ ASICamera2.h
    ├─ lib/
    │   ├─ linux/x64/libASICamera2.a
-   │   ├─ macos/libASICamera2.dylib
+   │   ├─ mac/x64/libASICamera2.a
    │   └─ windows/x64/ASICamera2.lib
-   └─ examples/                 # Ignore these
+   └─ README.md
 ```
 
-**Important**: Use the SDK structure exactly as provided by the vendor. The folder name will vary (e.g., `ASICamera2_SDK/`, `qhy_sdk/`, `iOptron_SDK/`). Your CMake configuration will locate files within whatever folder name the vendor uses.
+**Important**: Use the SDK structure exactly as provided by the vendor. The folder name will vary (e.g., `ASI_Camera_SDK/`, `qhy_sdk/`). Your CMake configuration will locate files within whatever folder name the vendor uses.
+
+**Vendoring option**: If the vendor license allows, you may commit the **minimal required SDK files**
+(headers + platform libraries) into `external/` to remove manual SDK downloads. Document exactly
+which files are vendored and avoid committing unnecessary examples or docs.
+
+**Git ignore**: When vendoring SDK assets, update `.gitignore` with a **narrow allowlist**
+for the specific header and libraries you commit.
 
 ### Step 2: Identify Required Files
 
@@ -110,9 +133,9 @@ In your driver's CMakeLists.txt, document the SDK folder name and which files ar
 
 ```cmake
 # ZWO SDK Structure (example - actual folder name may vary):
-# - external/ASICamera2_SDK/include/ASICamera2.h (header)
-# - external/ASICamera2_SDK/lib/linux/x64/libASICamera2.a (Linux static lib)
-# - external/ASICamera2_SDK/lib/macos/libASICamera2.dylib (macOS dynamic lib)
+# - external/ASI_Camera_SDK/include/ASICamera2.h (header)
+# - external/ASI_Camera_SDK/lib/linux/x64/libASICamera2.a (Linux static lib)
+# - external/ASI_Camera_SDK/lib/mac/x64/libASICamera2.a (macOS static lib)
 ```
 
 ---
@@ -296,7 +319,7 @@ Implement all pure virtual methods from `CameraDriver`.
 ```cpp
 // In zwo_camera_driver.cpp or separate header
 std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id) {
-    return std::make_unique<ZWOCameraDriver>(camera_id, device_number);
+    return std::make_unique<ZWOCameraDriver>(device_number, camera_id);
 }
 ```
 
@@ -310,27 +333,15 @@ See [CMake Configuration](#cmake-configuration) section below.
 
 ### Finding the SDK Folder
 
-Since vendor SDKs are placed directly in `external/` with varying folder names, you need to locate the SDK folder. You can either:
+For ZWO, the SDK subset is vendored in `external/ASI_Camera_SDK`, so use the
+fixed path. For other vendors, you can still search for a known header file.
 
-1. **Search for a known file** (recommended):
-   ```cmake
-   # Find the SDK folder by searching for a known header file
-   file(GLOB_RECURSE ZWO_HEADER "${CMAKE_SOURCE_DIR}/external/*/ASICamera2.h")
-   if(NOT ZWO_HEADER)
-       message(FATAL_ERROR "ZWO SDK not found. Please extract SDK to external/")
-   endif()
-   get_filename_component(ZWO_SDK_DIR "${ZWO_HEADER}" DIRECTORY)
-   get_filename_component(ZWO_SDK_DIR "${ZWO_SDK_DIR}" DIRECTORY)  # Go up from include/
-   ```
-
-2. **Use a specific folder name** (if you know it):
-   ```cmake
-   # If you know the exact folder name
-   set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ASICamera2_SDK")
-   if(NOT EXISTS "${ZWO_SDK_DIR}/include/ASICamera2.h")
-       message(FATAL_ERROR "ZWO SDK not found at ${ZWO_SDK_DIR}")
-   endif()
-   ```
+```cmake
+set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ASI_Camera_SDK")
+if(NOT EXISTS "${ZWO_SDK_DIR}/include/ASICamera2.h")
+    message(FATAL_ERROR "ZWO SDK not found at ${ZWO_SDK_DIR}")
+endif()
+```
 
 ### Vendor CMakeLists.txt Template
 
@@ -338,21 +349,18 @@ Since vendor SDKs are placed directly in `external/` with varying folder names, 
 # src/vendors/zwo/CMakeLists.txt
 
 if(ALPACACORE_ENABLE_ZWO)
-    # Find SDK folder by searching for header file
-    file(GLOB_RECURSE ZWO_HEADER "${CMAKE_SOURCE_DIR}/external/*/ASICamera2.h")
-    if(NOT ZWO_HEADER)
-        message(FATAL_ERROR "ZWO SDK not found. Please extract SDK to external/")
+    set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ASI_Camera_SDK")
+    if(NOT EXISTS "${ZWO_SDK_DIR}/include/ASICamera2.h")
+        message(FATAL_ERROR "ZWO SDK not found at ${ZWO_SDK_DIR}")
     endif()
-    get_filename_component(ZWO_SDK_DIR "${ZWO_HEADER}" DIRECTORY)
-    get_filename_component(ZWO_SDK_DIR "${ZWO_SDK_DIR}" DIRECTORY)  # Go up from include/
-    
+
     message(STATUS "Found ZWO SDK at: ${ZWO_SDK_DIR}")
-    
-    # Platform-specific library selection
+
+    # Platform-specific library selection (see src/vendors/zwo/CMakeLists.txt)
     if(APPLE)
-        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/macos")
+        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/mac")
         set(ZWO_LIB_NAME "ASICamera2")
-        set(ZWO_LIB_TYPE SHARED)
+        set(ZWO_LIB_TYPE STATIC)
     elseif(UNIX)
         set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/linux/x64")
         set(ZWO_LIB_NAME "ASICamera2")
@@ -590,18 +598,16 @@ The testing guide covers:
 
 ### ZWO Camera Driver
 
-**SDK Location**: `external/ASICamera2_SDK/` (or similar - folder name varies)
+**SDK Location**: `external/ASI_Camera_SDK/` (vendored subset)
 
-**Required Files** (within the SDK folder):
+**Required Files**:
 - `include/ASICamera2.h`
-- `lib/<platform>/libASICamera2.*`
+- `lib/<platform>/<arch>/libASICamera2.*` (or `ASICamera2.lib` on Windows)
 
 **Wrapper API**:
 - `ZWOSDKWrapper::enumerate_cameras()`
 - `ZWOSDKWrapper::open_camera(int id)`
 - `ZWOSDKWrapper::start_exposure(...)`
-
-**CMake**: Use `file(GLOB_RECURSE ...)` to find `ASICamera2.h` and locate the SDK folder.
 
 ### QHY Camera Driver
 
@@ -620,18 +626,17 @@ The testing guide covers:
 
 ### iOptron Mount Driver
 
-**SDK Location**: `external/iOptron_SDK/` (or similar - folder name varies)
+**Protocol Docs**: `external/ioptron/` (command language markdown)
 
-**Required Files** (within the SDK folder):
-- `include/ioptron.h`
-- `lib/<platform>/libioptron.*`
+**Required Files**:
+- No vendor SDK libraries are required; the driver implements the RS-232 protocol directly.
 
 **Wrapper API**:
-- `iOptronSDKWrapper::enumerate_mounts()`
-- `iOptronSDKWrapper::connect(int id)`
-- `iOptronSDKWrapper::slew_to_coordinates(...)`
+- `iOptronProtocolWrapper::connect(...)`
+- `iOptronProtocolWrapper::get_position()`
+- `iOptronProtocolWrapper::slew_to_coordinates(...)`
 
-**CMake**: Use `file(GLOB_RECURSE ...)` to find `ioptron.h` and locate the SDK folder.
+**CMake**: No SDK discovery needed; just build the wrapper + driver sources.
 
 ---
 
@@ -667,9 +672,9 @@ The testing guide covers:
 
 ### Platform-Specific Issues
 
-**macOS**: May need `-F` flag for framework paths
-**Linux**: May need `rpath` settings for shared libraries
-**Windows**: Check DLL search paths
+**macOS**: May need `-F` flag for framework paths or `@rpath`/`@loader_path` install names for dylibs  
+**Linux**: May need `rpath` settings for shared libraries or to install `.so` next to binaries  
+**Windows**: Ensure required DLLs are deployed alongside the executable or in the system PATH
 
 ---
 
@@ -679,6 +684,8 @@ The testing guide covers:
 - [ ] SDK wrapper uses PIMPL pattern
 - [ ] No SDK headers included outside wrapper implementation
 - [ ] All SDK errors converted to `AlpacaException`
+- [ ] Async connect/disconnect with `get_connecting()` implemented
+- [ ] `get_device_state()` returns a meaningful telemetry snapshot
 - [ ] Thread safety documented and handled
 - [ ] Platform-specific code only in CMake
 - [ ] Documentation comments for public API
@@ -692,6 +699,7 @@ The testing guide covers:
 - [ ] Main `CMakeLists.txt` updated in ENABLE_ALL_VENDORS block (Step 2)
 - [ ] Main `CMakeLists.txt` updated with subdirectory inclusion (Step 3)
 - [ ] Main `CMakeLists.txt` updated with installation rules (Step 4)
+- [ ] Runtime SDK libraries (DLL/dylib/so) are installed or copied for execution
 
 ### Testing
 - [ ] Unit tests for driver functionality

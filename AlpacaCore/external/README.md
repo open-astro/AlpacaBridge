@@ -5,7 +5,7 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
 ## Quick Start
 
 1. **Download the vendor SDK** from the vendor's official website
-2. **Extract the SDK archive** - the vendor's SDK will typically extract into a folder (e.g., `ASICamera2_SDK/`, `qhy_sdk/`, etc.)
+2. **Extract the SDK archive** - the vendor's SDK will typically extract into a folder (e.g., `ASI_Camera_SDK/`, `qhy_sdk/`, etc.)
 3. **Place the extracted SDK folder** directly into this `external/` directory
    - No need to create subdirectories or reorganize files
    - Use the SDK structure exactly as provided by the vendor
@@ -20,9 +20,10 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
 
 ## Important Notes
 
-- **Vendor SDK files are NOT tracked in Git** - binaries, libraries, headers, and other SDK files are excluded from version control
+- **Vendor SDK files are typically NOT tracked in Git** - binaries, libraries, headers, and other SDK files are excluded from version control by default
+- **Vendored exceptions**: If a vendor license allows, a **minimal subset** (headers + platform libraries) may be committed under `external/` to make builds turnkey
 - **Documentation files ARE tracked** - markdown files (`.md`), README files, and `.gitkeep` files in this directory are tracked in Git
-- The `.gitignore` file is configured to exclude SDK files while allowing documentation to be tracked
+- The `.gitignore` file is configured to exclude SDK files while allowing documentation to be tracked, with explicit allowlists for vendored SDK subsets
 
 ## What's Tracked vs. Not Tracked
 
@@ -30,10 +31,11 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
 - `README.md` files (this file and any vendor-specific READMEs)
 - Markdown documentation files (`.md`) in this directory and subdirectories
 - `.gitkeep` files (if used to preserve empty directories)
+- Vendored SDK subsets (only when explicitly allowlisted in `.gitignore`)
 
 ### Not tracked in Git
-- Vendor SDK binaries (`.dylib`, `.so`, `.dll`, `.a`, `.lib`)
-- SDK header files (`.h`, `.hpp`)
+- Vendor SDK binaries (`.dylib`, `.so`, `.dll`, `.a`, `.lib`) unless explicitly allowlisted
+- SDK header files (`.h`, `.hpp`) unless explicitly allowlisted
 - SDK source files (`.c`, `.cpp`)
 - SDK example code
 - Any other vendor-provided SDK files
@@ -42,14 +44,9 @@ This keeps the repository clean while allowing important documentation to be ver
 
 ## Example: ZWO SDK
 
-If you're building a ZWO camera driver:
-
-1. Download the ZWO ASI Camera SDK from [ZWO's website](https://www.zwoastro.com/)
-2. Extract the SDK archive - it might create a folder like `ASICamera2_SDK/` or similar
-3. Place that entire folder into `external/`
-   - Your `external/` directory will now contain the vendor's SDK folder
-   - No renaming or reorganization needed
-4. Build with `cmake .. -DALPACACORE_ENABLE_ZWO=ON`
+The ZWO SDK is vendored as a minimal subset in `external/ASI_Camera_SDK/`, so
+no manual download is required for standard builds. If you need to update the
+SDK version, replace only the allowlisted files and keep the set minimal.
 
 ## Building Drivers
 

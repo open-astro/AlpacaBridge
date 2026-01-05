@@ -43,8 +43,8 @@ Enable vendor-specific drivers by setting the appropriate CMake option:
 - `ALPACACORE_ENABLE_ALL_VENDORS`: Enable all implemented vendor drivers (default: OFF)
 
 - `ALPACACORE_ENABLE_ZWO`: Enable ZWO vendor support (default: OFF)
-  - Requires ZWO SDK in `external/` directory
-  - See [external/README.md](../../external/README.md) for SDK placement
+  - Uses the vendored ZWO SDK subset in `external/ASI_Camera_SDK/`
+  - See [external/README.md](../../external/README.md) for SDK notes
 
 - `ALPACACORE_ENABLE_QHY`: Enable QHY vendor support (default: OFF)
   - Requires QHY SDK in `external/` directory

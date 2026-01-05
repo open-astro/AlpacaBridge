@@ -56,6 +56,7 @@
                     <select id="vendor" name="vendor" required>
                         <option value="">Select vendor...</option>
                         <option value="ioptron">iOptron</option>
+                        <option value="zwo">ZWO</option>
                     </select>
                 </div>
 
@@ -114,6 +115,22 @@
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
 
+                </div>
+
+                <!-- ZWO Camera Configuration -->
+                <div id="zwo-config" class="vendor-config" style="display: none;">
+                    <h3>ZWO Camera Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="camera-index">Camera Index:</label>
+                        <input type="number" id="camera-index" name="cameraIndex" value="0" min="0">
+                        <small>0-based index from the ZWO SDK enumeration.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="camera-id">Camera ID (optional):</label>
+                        <input type="number" id="camera-id" name="cameraId" min="0">
+                        <small>If set, overrides the camera index.</small>
+                    </div>
                 </div>
 
                 <div class="form-actions">

@@ -21,8 +21,8 @@ option(ALPACACORE_ENABLE_IOPTRON "Enable iOptron vendor support" OFF)
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
 if(ALPACACORE_ENABLE_ALL_VENDORS)
-    # ZWO and QHY are not yet implemented, so don't enable them
-    # set(ALPACACORE_ENABLE_ZWO ON)
+    set(ALPACACORE_ENABLE_ZWO ON)
+    # QHY is not yet implemented, so don't enable it
     # set(ALPACACORE_ENABLE_QHY ON)
     set(ALPACACORE_ENABLE_IOPTRON ON)
 endif()
@@ -91,12 +91,10 @@ add_library(AlpacaCore::alpacacore ALIAS alpacacore)
 # Only add subdirectories for vendors that are actually implemented
 # Check if CMakeLists.txt exists and is not empty before adding
 if(ALPACACORE_ENABLE_ZWO)
-    # ZWO not yet implemented - skip for now
-    # add_subdirectory(src/vendors/zwo)
-    # if(TARGET alpacacore_zwo)
-    #     target_link_libraries(alpacacore PRIVATE alpacacore_zwo)
-    # endif()
-    message(WARNING "ZWO vendor support is not yet implemented")
+    add_subdirectory(src/vendors/zwo)
+    if(TARGET alpacacore_zwo)
+        target_link_libraries(alpacacore PRIVATE alpacacore_zwo)
+    endif()
 endif()
 
 if(ALPACACORE_ENABLE_QHY)
