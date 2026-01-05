@@ -338,17 +338,29 @@ public:
 
     bool get_cooler_on() const override {
         ensure_connected();
+        if (!can_get_control(ZWOControlType::CoolerOn)) {
+            return false;
+        }
         long value = get_control_value_or_throw(ZWOControlType::CoolerOn);
         return value != 0;
     }
 
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
+        if (!can_get_control(ZWOControlType::CoolerOn)) {
+            if (cooler_on) {
+                throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
+            }
+            return;
+        }
         set_control_value_or_throw(ZWOControlType::CoolerOn, cooler_on ? 1 : 0);
     }
 
     double get_cooler_power() const override {
         ensure_connected();
+        if (!can_get_control(ZWOControlType::CoolerPower)) {
+            return 0.0;
+        }
         long value = get_control_value_or_throw(ZWOControlType::CoolerPower);
         return static_cast<double>(value);
     }
@@ -428,8 +440,24 @@ public:
 
     ImageArray get_image_array() const override {
         ensure_connected();
-        if (!get_image_ready()) {
-            throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+        bool ready = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (image_cached_) {
+                return last_image_;
+            }
+            ready = image_ready_;
+        }
+        if (!ready) {
+            auto status = ZWOSDKWrapper::instance().get_exposure_status(camera_id_value());
+            if (status == ZWOExposureStatus::Failed) {
+                throw AlpacaException("Exposure failed", AlpacaError::DriverException);
+            }
+            if (status != ZWOExposureStatus::Success) {
+                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            image_ready_ = true;
         }
 
         int active_camera_id = camera_id_value();
@@ -453,11 +481,17 @@ public:
     }
 
     std::string get_image_array_variant() const override {
-        return "int32";
+        return "Int32";
     }
 
     bool get_image_ready() const override {
         ensure_connected();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (image_cached_ || image_ready_) {
+                return true;
+            }
+        }
         auto status = ZWOSDKWrapper::instance().get_exposure_status(camera_id_value());
         bool ready = (status == ZWOExposureStatus::Success);
         {
@@ -831,10 +865,19 @@ private:
         if (!camera_index_.has_value()) {
             throw AlpacaException("Camera ID not specified", AlpacaError::InvalidValue);
         }
-        ZWOCameraInfo info;
-        if (!ZWOSDKWrapper::instance().get_camera_info_by_index(camera_index_.value(), info)) {
+        auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
+        if (cameras.empty()) {
+            ALPACA_LOG_WARN("ZWO", "No ZWO cameras detected by SDK");
+            throw AlpacaException("No ZWO cameras detected", AlpacaError::NotConnected);
+        }
+        int index = camera_index_.value();
+        if (index < 0 || index >= static_cast<int>(cameras.size())) {
+            ALPACA_LOG_WARN("ZWO", "Camera index out of range: " + std::to_string(index) + " (count=" + std::to_string(cameras.size()) + ")");
             throw AlpacaException("Camera index not found", AlpacaError::InvalidValue);
         }
+
+        const auto& info = cameras[static_cast<std::size_t>(index)];
+        ALPACA_LOG_INFO("ZWO", "Using camera index " + std::to_string(index) + ": " + info.name + " (ID " + std::to_string(info.camera_id) + ")");
         camera_id_ = info.camera_id;
         camera_info_ = info;
         camera_info_valid_ = true;
@@ -862,16 +905,16 @@ private:
             image_type_ = ZWOImageType::Raw8;
             return;
         }
-        if (camera_info_.is_color && supports_format(camera_info_.supported_formats, ZWOImageType::Rgb24)) {
-            image_type_ = ZWOImageType::Rgb24;
-            return;
-        }
         if (supports_format(camera_info_.supported_formats, ZWOImageType::Raw16)) {
             image_type_ = ZWOImageType::Raw16;
             return;
         }
         if (supports_format(camera_info_.supported_formats, ZWOImageType::Raw8)) {
             image_type_ = ZWOImageType::Raw8;
+            return;
+        }
+        if (supports_format(camera_info_.supported_formats, ZWOImageType::Rgb24)) {
+            image_type_ = ZWOImageType::Rgb24;
             return;
         }
         image_type_ = ZWOImageType::Raw8;

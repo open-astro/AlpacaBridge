@@ -2968,14 +2968,72 @@ Response Router::dispatch_camera_method(
                         array.push_back(row);
                     }
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, array.dump());
-                response.set_body(alpaca_response);
+                nlohmann::json body;
+                body["ClientTransactionID"] = client_tx_id;
+                body["ServerTransactionID"] = server_tx_id;
+                body["ErrorNumber"] = 0;
+                body["ErrorMessage"] = "";
+                body["Type"] = 2;
+                body["Rank"] = image.rank;
+                body["Value"] = array;
+                response.set_content_type("application/json");
+                response.set_body(body.dump());
                 return response;
             } else if (method_name == "imagearrayvariant") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_image_array_variant());
-                response.set_body(alpaca_response);
+                auto image = camera->get_image_array();
+                nlohmann::json array = nlohmann::json::array();
+                if (image.rank == 2 && image.width > 0 && image.height > 0) {
+                    std::size_t idx = 0;
+                    for (int y = 0; y < image.height; ++y) {
+                        nlohmann::json row = nlohmann::json::array();
+                        for (int x = 0; x < image.width; ++x) {
+                            int value = 0;
+                            if (idx < image.data.size()) {
+                                value = image.data[idx];
+                            }
+                            row.push_back(value);
+                            ++idx;
+                        }
+                        array.push_back(row);
+                    }
+                } else if (image.rank == 3 && image.width > 0 && image.height > 0) {
+                    std::size_t idx = 0;
+                    for (int y = 0; y < image.height; ++y) {
+                        nlohmann::json row = nlohmann::json::array();
+                        for (int x = 0; x < image.width; ++x) {
+                            nlohmann::json pixel = nlohmann::json::array();
+                            for (int c = 0; c < 3; ++c) {
+                                int value = 0;
+                                if (idx < image.data.size()) {
+                                    value = image.data[idx];
+                                }
+                                pixel.push_back(value);
+                                ++idx;
+                            }
+                            row.push_back(pixel);
+                        }
+                        array.push_back(row);
+                    }
+                }
+
+                auto variant = camera->get_image_array_variant();
+                int type = 2;
+                if (variant == "Int16" || variant == "UInt16" || variant == "Short") {
+                    type = 1;
+                } else if (variant == "Double") {
+                    type = 3;
+                }
+
+                nlohmann::json body;
+                body["ClientTransactionID"] = client_tx_id;
+                body["ServerTransactionID"] = server_tx_id;
+                body["ErrorNumber"] = 0;
+                body["ErrorMessage"] = "";
+                body["Type"] = type;
+                body["Rank"] = image.rank;
+                body["Value"] = array;
+                response.set_content_type("application/json");
+                response.set_body(body.dump());
                 return response;
             } else if (method_name == "imageready") {
                 AlpacaResponse alpaca_response = make_success_response(
