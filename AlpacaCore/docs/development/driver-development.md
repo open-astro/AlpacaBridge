@@ -140,10 +140,12 @@ Use the iOptron telescope driver as the reference implementation for these behav
 
 ### Step 1: Place SDK in `external/`
 
-Extract the vendor SDK folder directly into `external/`:
+For ZWO, AlpacaCore uses a **vendored SDK subset** at `external/ASI_Camera_SDK/`,
+so no manual extraction is required. For other vendors, extract the SDK folder
+directly into `external/`:
 ```bash
 external/
-`-- ASICamera2_SDK/             # Vendor's folder name (use as-is)
+`-- ASI_Camera_SDK/             # Vendored ZWO SDK subset
    |-- include/
    |   `-- ASICamera2.h
    |-- lib/
@@ -180,7 +182,7 @@ Implement all pure virtual methods from `CameraDriver` using the wrapper.
 ```cpp
 // In zwo_camera_driver.cpp or separate header
 std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id) {
-    return std::make_unique<ZWOCameraDriver>(camera_id, device_number);
+    return std::make_unique<ZWOCameraDriver>(device_number, camera_id);
 }
 ```
 
@@ -190,30 +192,14 @@ Create `src/vendors/zwo/CMakeLists.txt`:
 
 ```cmake
 if(ALPACACORE_ENABLE_ZWO)
-    # Find SDK folder by searching for header file
-    file(GLOB_RECURSE ZWO_HEADER "${CMAKE_SOURCE_DIR}/external/*/ASICamera2.h")
-    if(NOT ZWO_HEADER)
-        message(FATAL_ERROR "ZWO SDK not found. Please extract SDK to external/")
+    set(ZWO_SDK_ROOT "${CMAKE_SOURCE_DIR}/external/ASI_Camera_SDK")
+    if(NOT EXISTS "${ZWO_SDK_ROOT}/include/ASICamera2.h")
+        message(FATAL_ERROR "ZWO SDK header not found in external/ASI_Camera_SDK")
     endif()
-    get_filename_component(ZWO_SDK_DIR "${ZWO_HEADER}" DIRECTORY)
-    get_filename_component(ZWO_SDK_DIR "${ZWO_SDK_DIR}" DIRECTORY)  # Go up from include/
-    
-    # Platform-specific library selection
-    if(APPLE)
-        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/macos")
-        set(ZWO_LIB_NAME "ASICamera2")
-        set(ZWO_LIB_TYPE SHARED)
-    elseif(UNIX)
-        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/linux/x64")
-        set(ZWO_LIB_NAME "ASICamera2")
-        set(ZWO_LIB_TYPE STATIC)
-    elseif(WIN32)
-        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/windows/x64")
-        set(ZWO_LIB_NAME "ASICamera2")
-        set(ZWO_LIB_TYPE STATIC)
-    endif()
-    
-    # Create vendor library
+
+    # Select platform/arch library (x64, armv7, armv8, etc.)
+    # (See src/vendors/zwo/CMakeLists.txt for the full selection logic.)
+
     add_library(alpacacore_zwo STATIC
         zwo_sdk_wrapper.cpp
         zwo_camera_driver.cpp
@@ -244,8 +230,8 @@ See [Testing Guide](testing.md) for comprehensive testing instructions.
 ## File Organization
 
 ```
-external/                       # Raw SDK folders (untouched, not in Git)
-|-- ASICamera2_SDK/             # Vendor SDK folder
+external/                       # Vendor SDK folders or vendored SDK assets
+|-- ASI_Camera_SDK/             # ZWO SDK subset (vendored)
 |   `-- SDK files...
 
 include/alpacacore/
@@ -308,15 +294,15 @@ After implementing your driver:
 
 ### ZWO Camera Driver
 
-- **SDK Location**: `external/ASICamera2_SDK/` (or similar - folder name varies)
+- **SDK Location**: `external/ASI_Camera_SDK/` (vendored subset)
 - **Wrapper API**: `ZWOSDKWrapper::enumerate_cameras()`, `ZWOSDKWrapper::open_camera()`, etc.
-- **CMake**: Use `file(GLOB_RECURSE ...)` to find `ASICamera2.h` and locate the SDK folder
+- **CMake**: Use the fixed `external/ASI_Camera_SDK` path and select the library by OS/arch
 
 ### iOptron Telescope Driver
 
-- **SDK Location**: `external/iOptron_SDK/` (or similar - folder name varies)
-- **Wrapper API**: `iOptronSDKWrapper::enumerate_mounts()`, `iOptronSDKWrapper::connect()`, etc.
-- **CMake**: Use `file(GLOB_RECURSE ...)` to find the SDK header and locate the SDK folder
+- **Protocol Docs**: `external/ioptron/` (command language markdown)
+- **Wrapper API**: `iOptronProtocolWrapper::connect()`, `iOptronProtocolWrapper::get_position()`, etc.
+- **CMake**: No SDK discovery needed; just build the wrapper + driver sources
 
 ## Troubleshooting
 
@@ -325,9 +311,9 @@ After implementing your driver:
 **Error**: `FATAL_ERROR: ZWO SDK not found`
 
 **Solution**: 
-1. Verify SDK folder is in `external/` (extracted directly, not in a subdirectory)
-2. Check that the SDK folder contains the expected header file
-3. Verify the CMake `file(GLOB_RECURSE ...)` pattern matches your SDK's folder structure
+1. Verify the vendored SDK subset exists in `external/ASI_Camera_SDK/`
+2. Check that the SDK folder contains the expected header file (`include/ASICamera2.h`)
+3. Verify CMake is pointing at `external/ASI_Camera_SDK/`
 
 ### Linker Errors
 

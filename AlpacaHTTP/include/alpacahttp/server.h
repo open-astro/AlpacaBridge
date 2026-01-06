@@ -37,6 +37,8 @@ public:
 
     // Set shutdown callback (called when shutdown endpoint is requested)
     void set_shutdown_callback(std::function<void()> callback);
+    // Set restart callback (called when restart endpoint is requested)
+    void set_restart_callback(std::function<void()> callback);
 
     // Start the server (blocking)
     void start();
@@ -71,10 +73,14 @@ private:
     void handle_connection(int socket_fd);
     void worker_thread();
     void handle_shutdown_request();
+    void handle_restart_request();
 
     std::function<void()> shutdown_callback_;
     std::mutex shutdown_mutex_;
     std::atomic<bool> shutdown_requested_{false};
+    std::function<void()> restart_callback_;
+    std::mutex restart_mutex_;
+    std::atomic<bool> restart_requested_{false};
 };
 
 } // namespace alpacahttp

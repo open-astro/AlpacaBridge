@@ -46,6 +46,10 @@
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_ZWO
+#include <alpacacore/vendor/zwo/zwo_camera_driver.h>
+#include <alpacacore/vendor/zwo/zwo_switch_driver.h>
+#endif
 
 namespace {
 
@@ -545,6 +549,7 @@ const std::unordered_set<std::string> kShutterMethods = {
 };
 
 const std::unordered_set<std::string> kSwitchMethods = {
+    "cancelasync",
     "canasync",
     "canwrite",
     "getswitch",
@@ -656,8 +661,9 @@ void apply_error_status(alpacahttp::Response& response, std::int32_t error_code)
     if (response.status_code() != 200) {
         return;
     }
-    if (error_code == alpacahttp::util::ErrorCode::INVALID_VALUE) {
-        response.set_status(400, "Bad Request");
+    if (error_code != alpacahttp::util::ErrorCode::SUCCESS) {
+        // Alpaca responses must remain HTTP 200; ErrorNumber conveys failures.
+        return;
     }
 }
 
@@ -739,6 +745,99 @@ nlohmann::json make_log_history_payload() {
     return payload;
 }
 
+void append_int(std::string& out, std::int64_t value) {
+    out.append(std::to_string(value));
+}
+
+std::string build_image_array_payload(const alpacacore::ImageArray& image,
+                                      int type,
+                                      std::uint32_t client_tx_id,
+                                      std::uint32_t server_tx_id) {
+    std::size_t estimate = 256;
+    if (image.width > 0 && image.height > 0) {
+        std::size_t pixels = static_cast<std::size_t>(image.width) *
+                             static_cast<std::size_t>(image.height);
+        std::size_t per_value = 6;
+        if (image.rank == 3) {
+            pixels *= 3;
+        }
+        estimate += pixels * per_value;
+    }
+
+    std::string body;
+    body.reserve(estimate);
+    body.append("{\"ClientTransactionID\":");
+    append_int(body, client_tx_id);
+    body.append(",\"ServerTransactionID\":");
+    append_int(body, server_tx_id);
+    body.append(",\"ErrorNumber\":0,\"ErrorMessage\":\"\",\"Type\":");
+    append_int(body, type);
+    body.append(",\"Rank\":");
+    append_int(body, image.rank);
+    body.append(",\"Value\":");
+
+    if (image.rank == 2 && image.width > 0 && image.height > 0) {
+        body.push_back('[');
+        for (int x = 0; x < image.width; ++x) {
+            if (x > 0) {
+                body.push_back(',');
+            }
+            body.push_back('[');
+            for (int y = 0; y < image.height; ++y) {
+                if (y > 0) {
+                    body.push_back(',');
+                }
+                std::size_t idx = static_cast<std::size_t>(y) *
+                                  static_cast<std::size_t>(image.width) +
+                                  static_cast<std::size_t>(x);
+                std::int32_t value = 0;
+                if (idx < image.data.size()) {
+                    value = image.data[idx];
+                }
+                append_int(body, value);
+            }
+            body.push_back(']');
+        }
+        body.push_back(']');
+    } else if (image.rank == 3 && image.width > 0 && image.height > 0) {
+        body.push_back('[');
+        for (int x = 0; x < image.width; ++x) {
+            if (x > 0) {
+                body.push_back(',');
+            }
+            body.push_back('[');
+            for (int y = 0; y < image.height; ++y) {
+                if (y > 0) {
+                    body.push_back(',');
+                }
+                body.push_back('[');
+                std::size_t base = (static_cast<std::size_t>(y) *
+                                    static_cast<std::size_t>(image.width) +
+                                    static_cast<std::size_t>(x)) * 3;
+                for (int c = 0; c < 3; ++c) {
+                    if (c > 0) {
+                        body.push_back(',');
+                    }
+                    std::size_t idx = base + static_cast<std::size_t>(c);
+                    std::int32_t value = 0;
+                    if (idx < image.data.size()) {
+                        value = image.data[idx];
+                    }
+                    append_int(body, value);
+                }
+                body.push_back(']');
+            }
+            body.push_back(']');
+        }
+        body.push_back(']');
+    } else {
+        body.append("[]");
+    }
+
+    body.push_back('}');
+    return body;
+}
+
 } // namespace
 
 namespace alpacahttp {
@@ -771,6 +870,10 @@ void Router::set_config_path(std::string config_path) {
 
 void Router::set_shutdown_callback(std::function<void()> callback) {
     shutdown_callback_ = callback;
+}
+
+void Router::set_restart_callback(std::function<void()> callback) {
+    restart_callback_ = callback;
 }
 
 Response Router::route(const Request& request, std::uint32_t server_transaction_id) {
@@ -893,6 +996,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "shutdown";
         return match;
     }
+    if (path == "/management/v1/restart" || path == "/management/restart") {
+        match.is_management = true;
+        match.management_endpoint = "restart";
+        return match;
+    }
 
     // Device API: /api/v1/{devicetype}/{devicenumber}/{method}
     std::regex device_regex(R"(/api/v1/([^/]+)/(\d+)/([^/?]+))");
@@ -929,6 +1037,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_log_history(request, server_tx_id);
     } else if (match.management_endpoint == "shutdown") {
         return handle_shutdown(request, server_tx_id);
+    } else if (match.management_endpoint == "restart") {
+        return handle_restart(request, server_tx_id);
     }
 
     Response response;
@@ -2772,9 +2882,6 @@ Response Router::dispatch_camera_method(
         auto time_t = std::chrono::system_clock::to_time_t(time_point);
         std::ostringstream oss;
         oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            time_point.time_since_epoch()) % 1000;
-        oss << "." << std::setfill('0') << std::setw(3) << ms.count() << "Z";
         return oss.str();
     };
 
@@ -2931,48 +3038,20 @@ Response Router::dispatch_camera_method(
                 return response;
             } else if (method_name == "imagearray") {
                 auto image = camera->get_image_array();
-                nlohmann::json array = nlohmann::json::array();
-                if (image.rank == 2 && image.width > 0 && image.height > 0) {
-                    std::size_t idx = 0;
-                    for (int y = 0; y < image.height; ++y) {
-                        nlohmann::json row = nlohmann::json::array();
-                        for (int x = 0; x < image.width; ++x) {
-                            int value = 0;
-                            if (idx < image.data.size()) {
-                                value = image.data[idx];
-                            }
-                            row.push_back(value);
-                            ++idx;
-                        }
-                        array.push_back(row);
-                    }
-                } else if (image.rank == 3 && image.width > 0 && image.height > 0) {
-                    std::size_t idx = 0;
-                    for (int y = 0; y < image.height; ++y) {
-                        nlohmann::json row = nlohmann::json::array();
-                        for (int x = 0; x < image.width; ++x) {
-                            nlohmann::json pixel = nlohmann::json::array();
-                            for (int c = 0; c < 3; ++c) {
-                                int value = 0;
-                                if (idx < image.data.size()) {
-                                    value = image.data[idx];
-                                }
-                                pixel.push_back(value);
-                                ++idx;
-                            }
-                            row.push_back(pixel);
-                        }
-                        array.push_back(row);
-                    }
-                }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, array.dump());
-                response.set_body(alpaca_response);
+                response.set_content_type("application/json");
+                response.set_body(build_image_array_payload(image, 2, client_tx_id, server_tx_id));
                 return response;
             } else if (method_name == "imagearrayvariant") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_image_array_variant());
-                response.set_body(alpaca_response);
+                auto image = camera->get_image_array();
+                auto variant = camera->get_image_array_variant();
+                int type = 2;
+                if (variant == "Int16" || variant == "UInt16" || variant == "Short") {
+                    type = 1;
+                } else if (variant == "Double") {
+                    type = 3;
+                }
+                response.set_content_type("application/json");
+                response.set_body(build_image_array_payload(image, type, client_tx_id, server_tx_id));
                 return response;
             } else if (method_name == "imageready") {
                 AlpacaResponse alpaca_response = make_success_response(
@@ -3044,8 +3123,10 @@ Response Router::dispatch_camera_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "percentcompleted") {
+                auto percent = camera->get_percent_completed();
+                auto value = static_cast<std::int32_t>(percent);
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, camera->get_percent_completed());
+                    client_tx_id, server_tx_id, value);
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "pixelsizex") {
@@ -3395,6 +3476,17 @@ Response Router::dispatch_switch_method(
                     client_tx_id, server_tx_id, sw->get_max_switch());
                 response.set_body(alpaca_response);
                 return response;
+            } else if (method_name == "cancelasync") {
+                int id = parse_int("Id");
+                if (!sw->get_can_async(id)) {
+                    throw alpacacore::AlpacaException(
+                        "Async switch control not supported",
+                        alpacacore::AlpacaError::NotImplemented
+                    );
+                }
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
             } else if (method_name == "canasync") {
                 int id = parse_int("Id");
                 AlpacaResponse alpaca_response = make_success_response(
@@ -3463,6 +3555,17 @@ Response Router::dispatch_switch_method(
                 int id = parse_int("Id");
                 bool state = parse_bool("State");
                 sw->set_switch(id, state);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "cancelasync") {
+                int id = parse_int("Id");
+                if (!sw->get_can_async(id)) {
+                    throw alpacacore::AlpacaException(
+                        "Async switch control not supported",
+                        alpacacore::AlpacaError::NotImplemented
+                    );
+                }
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -5464,6 +5567,50 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     }
 }
 
+Response Router::handle_restart(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::INVALID_VALUE,
+            "Method not allowed. Use POST or PUT."
+        );
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        return response;
+    }
+
+    if (restart_callback_) {
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = std::string("Restart initiated");
+        response.set_body(alpaca_response);
+
+        std::thread([this]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (restart_callback_) {
+                restart_callback_();
+            }
+        }).detach();
+
+        return response;
+    }
+
+    AlpacaResponse alpaca_response = make_error_response(
+        client_tx_id, server_tx_id,
+        util::ErrorCode::NOT_IMPLEMENTED,
+        "Restart callback not configured"
+    );
+    response.set_body(alpaca_response);
+    return response;
+}
+
 bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message) {
     std::string device_type_str = config.value("deviceType", "");
     std::string vendor = config.value("vendor", "");
@@ -5550,6 +5697,69 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "zwo" && device_type_str == "camera") {
+#ifdef ALPACACORE_ENABLE_ZWO
+        int camera_id = config.value("cameraId", -1);
+        int camera_index = config.value("cameraIndex", -1);
+
+        std::unique_ptr<alpacacore::CameraDriver> camera;
+        if (camera_id >= 0) {
+            camera = alpacacore::vendor::zwo::create_zwo_camera(device_number, camera_id);
+        } else if (camera_index >= 0) {
+            camera = alpacacore::vendor::zwo::create_zwo_camera_by_index(device_number, camera_index);
+        } else {
+            error_message = "ZWO camera requires cameraIndex or cameraId";
+            return false;
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+            util::log_info("Registered ZWO camera");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
+        return false;
+#endif
+    }
+
+    if (vendor == "zwo" && device_type_str == "switch") {
+#ifdef ALPACACORE_ENABLE_ZWO
+        std::string switch_type = config.value("switchType", "dewheater");
+        switch_type = to_lower_copy(switch_type);
+        if (switch_type != "dewheater") {
+            error_message = "ZWO switchType must be 'dewheater'";
+            return false;
+        }
+
+        int camera_id = config.value("cameraId", -1);
+        int camera_index = config.value("cameraIndex", -1);
+
+        std::unique_ptr<alpacacore::SwitchDriver> sw;
+        if (camera_id >= 0) {
+            sw = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(device_number, camera_id);
+        } else if (camera_index >= 0) {
+            sw = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(device_number, camera_index);
+        } else {
+            error_message = "ZWO dew heater switch requires cameraIndex or cameraId";
+            return false;
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+            util::log_info("Registered ZWO dew heater switch");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -5566,15 +5776,22 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     copy_if_present("vendor");
     copy_if_present("deviceType");
     copy_if_present("deviceNumber");
-    copy_if_present("connectionType");
 
-    std::string connection_type = config.value("connectionType", "");
-    if (connection_type == "serial") {
-        copy_if_present("portPath");
-        copy_if_present("baudRate");
-    } else if (connection_type == "network") {
-        copy_if_present("host");
-        copy_if_present("tcpPort");
+    std::string vendor = config.value("vendor", "");
+    if (vendor == "ioptron") {
+        copy_if_present("connectionType");
+        std::string connection_type = config.value("connectionType", "");
+        if (connection_type == "serial") {
+            copy_if_present("portPath");
+            copy_if_present("baudRate");
+        } else if (connection_type == "network") {
+            copy_if_present("host");
+            copy_if_present("tcpPort");
+        }
+    } else if (vendor == "zwo") {
+        copy_if_present("cameraIndex");
+        copy_if_present("cameraId");
+        copy_if_present("switchType");
     }
 
     copy_if_present("responseTimeoutMs");

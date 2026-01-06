@@ -31,6 +31,7 @@ Server::Server(const Config& config)
     : config_(config)
 {
     router_.set_shutdown_callback([this]() { handle_shutdown_request(); });
+    router_.set_restart_callback([this]() { handle_restart_request(); });
     router_.set_server_info(config_.server_name(),
                             config_.manufacturer(),
                             alpacahttp::kVersion,
@@ -45,6 +46,11 @@ void Server::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver>
 void Server::set_shutdown_callback(std::function<void()> callback) {
     std::lock_guard<std::mutex> lock(shutdown_mutex_);
     shutdown_callback_ = std::move(callback);
+}
+
+void Server::set_restart_callback(std::function<void()> callback) {
+    std::lock_guard<std::mutex> lock(restart_mutex_);
+    restart_callback_ = std::move(callback);
 }
 
 Server::~Server() {
@@ -343,6 +349,37 @@ void Server::handle_shutdown_request() {
     }
 
     stop();
+}
+
+void Server::handle_restart_request() {
+    bool expected = false;
+    if (!restart_requested_.compare_exchange_strong(expected, true)) {
+        util::log_info("Restart request already in progress, ignoring duplicate request");
+        return;
+    }
+
+    util::log_info("Restart requested via management endpoint");
+
+    std::function<void()> callback_copy;
+    {
+        std::lock_guard<std::mutex> lock(restart_mutex_);
+        callback_copy = restart_callback_;
+    }
+
+    if (callback_copy) {
+        try {
+            callback_copy();
+        } catch (const std::exception& e) {
+            util::log_error("Restart callback threw exception: " + std::string(e.what()));
+        } catch (...) {
+            util::log_error("Restart callback threw unknown exception");
+        }
+    }
+
+    util::log_info("Restarting HTTP server");
+    stop();
+    start_async();
+    restart_requested_ = false;
 }
 
 } // namespace alpacahttp

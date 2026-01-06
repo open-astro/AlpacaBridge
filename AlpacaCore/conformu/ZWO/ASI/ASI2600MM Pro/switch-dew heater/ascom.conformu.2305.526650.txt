@@ -1,0 +1,123 @@
+23:05:52.666 ASCOM Universal Device Conformance Checker Version 4.1.0.34701, Build time: Tue 17 December 2024 07:03:29          
+23:05:52.673                                              
+23:05:52.674 Operating system is Darwin 25.2.0 Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:56 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T6041, Processor is ARM 64bit, Application is 64bit.          
+23:05:52.674                                              
+23:05:52.675 Alpaca device: ZWO Dew Heater (192.168.1.206:6800 Switch/0)          
+23:05:52.675                                              
+23:05:52.684 CreateDevice                        INFO     Creating Alpaca device: IP address: 192.168.1.206, IP Port: 6800, Alpaca device number: 0
+23:05:52.690 CreateDevice                        INFO     Alpaca device created OK
+23:05:52.691 CreateDevice                        INFO     Successfully created driver
+23:05:53.736 CreateDevice                        OK       Found a valid interface version: 3
+23:05:53.736 CreateDevice                        OK       Driver instance created successfully
+23:05:53.736                                              
+23:05:53.736 Connect to device                            
+23:05:54.365 Connected                           OK       Connected to device successfully using Connected = True
+23:05:54.889 Connected                           OK       Disconnected from device successfully using Connected = False
+23:05:55.909 Connect                             OK       Connected to device successfully using Connect()
+23:05:55.910                                              
+23:05:55.918 Common Driver Methods                        
+23:05:55.919 InterfaceVersion                    OK       3
+23:05:55.926 Connected                           OK       True
+23:05:55.932 Description                         OK       ZWO camera dew heater switch
+23:05:55.934 DriverInfo                          OK       AlpacaCore ZWO Dew Heater Switch
+23:05:55.936 DriverVersion                       OK       1.0.0
+23:05:55.937 Name                                OK       ZWO Dew Heater
+23:05:55.938                                              
+23:05:55.938 Action                              INFO     Conform cannot test the Action method
+23:05:55.941 SupportedActions                    OK       Driver returned an empty action list
+23:05:55.942                                              
+23:05:55.953 DeviceState                         OK       Received 3 operational state properties.
+23:05:55.955 DeviceState                         INFO     MaxSwitch: 1
+23:05:55.955 DeviceState                         OK         GetSwitch0 = False
+23:05:55.955 DeviceState                         OK         GetSwitchValue0 = 0
+23:05:55.955 DeviceState                         OK         StateChangeComplete0 = True
+23:05:55.957 DeviceState                         OK       Found all expected operational properties
+23:05:55.957                                              
+23:05:55.957 Properties                                   
+23:05:55.958 MaxSwitch                           OK       1
+23:05:55.958                                              
+23:05:55.958 Methods                                      
+23:05:55.979 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: CanWrite
+23:05:55.980 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: CanWrite
+23:05:55.981 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: GetSwitch
+23:05:55.982 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: GetSwitch
+23:05:55.983 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: GetSwitchDescription
+23:05:55.984 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: GetSwitchDescription
+23:05:55.985 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: GetSwitchName
+23:05:55.986 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: GetSwitchName
+23:05:55.994 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: GetSwitchValue
+23:05:55.995 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: GetSwitchValue
+23:05:55.996 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: MaxSwitchValue
+23:05:55.997 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: MaxSwitchValue
+23:05:55.998 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: MinSwitchValue
+23:05:55.999 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: MinSwitchValue
+23:05:56.000 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: SetSwitch
+23:05:56.000 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: SetSwitch
+23:05:56.001 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: SetSwitchValue
+23:05:56.002 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: SetSwitchValue
+23:05:56.003 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: SwitchStep
+23:05:56.003 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: SwitchStep
+23:05:56.005 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: CanAsync
+23:05:56.005 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: CanAsync
+23:05:56.006 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: CancelAsync
+23:05:56.007 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: CancelAsync
+23:05:56.008 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: SetAsync
+23:05:56.009 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: SetAsync
+23:05:56.009 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: SetAsyncValue
+23:05:56.010 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: SetAsyncValue
+23:05:56.011 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID below 0 was used in method: StateChangeComplete
+23:05:56.011 SwitchNumber                        OK       Switch device threw an InvalidOperationException when a switch ID above MaxSwitch was used in method: StateChangeComplete
+23:05:56.067 GetSwitchName                       OK       Found switch 0
+23:05:56.067 GetSwitchName                       OK         Name: DewHeater
+23:05:56.067 GetSwitchDescription                OK         Description: ZWO camera anti-dew heater control (ZWO ASI2600MM Pro)
+23:05:56.068 MinSwitchValue                      OK         Minimum: 0
+23:05:56.069 MaxSwitchValue                      OK         Maximum: 1
+23:05:56.069 SwitchStep                          OK         Step size: 1
+23:05:56.070 SwitchStep                          OK         Step size is greater than zero
+23:05:56.070 SwitchStep                          OK         Step size is less than the range of possible values
+23:05:56.070 SwitchStep                          OK         The switch range is an integer multiple of the step size.
+23:05:56.070 CanWrite                            OK         CanWrite: True
+23:05:56.071 CanAsync                            OK         CanAsync: False
+23:05:56.574 GetSwitch                           OK         False
+23:05:57.080 GetSwitchValue                      OK         0
+23:05:57.080 SetSwitch                           INFO       All write tests have been skipped because the "Set Switches" checkbox is unchecked
+23:05:57.082                                              
+23:05:57.170                                              
+23:05:57.170 Disconnect from device                       
+23:05:57.678 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+23:05:57.681                                              
+23:05:57.684 Conformance test has finished                
+23:05:57.687                                              
+23:05:57.688 Your device had 0 issues, 0 errors and 1 configuration alert          
+23:05:57.689                                              
+23:05:57.689 Configuration Alert Summary                  
+23:05:57.689 Conform configuration                        Set switch tests were omitted due to Conform configuration.
+23:05:57.689                                              
+23:05:57.689 Timing Summary                               See Help for further information.
+23:05:57.689 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+23:05:57.689 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+23:05:57.689 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+23:05:57.689 Timing Summary                               The log shows good and bad timings.
+23:05:57.689                                              
+23:05:57.690 Connect                                      At 23:05:54.896 Connect                   0.005 seconds. ✓ (STANDARD)
+23:05:57.690 InterfaceVersion                             At 23:05:55.919 InterfaceVersion          0.000 seconds. ✓ (FAST)
+23:05:57.690 Connected                                    At 23:05:55.926 Connected                 0.006 seconds. ✓ (FAST)
+23:05:57.690 Description                                  At 23:05:55.932 Description               0.004 seconds. ✓ (FAST)
+23:05:57.690 DriverInfo                                   At 23:05:55.934 DriverInfo                0.002 seconds. ✓ (FAST)
+23:05:57.690 DriverVersion                                At 23:05:55.936 DriverVersion             0.001 seconds. ✓ (FAST)
+23:05:57.690 Name                                         At 23:05:55.937 Name                      0.001 seconds. ✓ (FAST)
+23:05:57.690 SupportedActions                             At 23:05:55.941 SupportedActions          0.003 seconds. ✓ (FAST)
+23:05:57.690 DeviceState                                  At 23:05:55.953 DeviceState               0.012 seconds. ✓ (FAST)
+23:05:57.690 MaxSwitch                                    At 23:05:55.958 MaxSwitch                 0.001 seconds. ✓ (FAST)
+23:05:57.691 SwitchName (0)                               At 23:05:56.067 SwitchName (0)            0.000 seconds. ✓ (FAST)
+23:05:57.691 GetSwitchDescription (0)                     At 23:05:56.067 GetSwitchDescription (0)  0.000 seconds. ✓ (FAST)
+23:05:57.691 MinSwitchValue (0)                           At 23:05:56.068 MinSwitchValue (0)        0.001 seconds. ✓ (FAST)
+23:05:57.691 MinSwitchValue (0)                           At 23:05:56.069 MinSwitchValue (0)        0.000 seconds. ✓ (FAST)
+23:05:57.691 SwitchStep (0)                               At 23:05:56.069 SwitchStep (0)            0.000 seconds. ✓ (FAST)
+23:05:57.691 CanWrite (0)                                 At 23:05:56.070 CanWrite (0)              0.000 seconds. ✓ (FAST)
+23:05:57.691 CanAsync (0)                                 At 23:05:56.071 CanAsync (0)              0.000 seconds. ✓ (FAST)
+23:05:57.691 GetSwitch (0)                                At 23:05:56.073 GetSwitch (0)             0.002 seconds. ✓ (FAST)
+23:05:57.691 MinSwitchValue (0)                           At 23:05:56.578 MinSwitchValue (0)        0.004 seconds. ✓ (FAST)
+23:05:57.691 Disconnect                                   At 23:05:57.172 Disconnect                0.001 seconds. ✓ (STANDARD)
+23:05:57.694                                              
+23:05:57.694 Congratulations, all members returned within their target response times!!          

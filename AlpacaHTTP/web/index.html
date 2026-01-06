@@ -56,6 +56,7 @@
                     <select id="vendor" name="vendor" required>
                         <option value="">Select vendor...</option>
                         <option value="ioptron">iOptron</option>
+                        <option value="zwo">ZWO</option>
                     </select>
                 </div>
 
@@ -116,6 +117,30 @@
 
                 </div>
 
+                <!-- ZWO Configuration -->
+                <div id="zwo-config" class="vendor-config" style="display: none;">
+                    <h3>ZWO Configuration</h3>
+
+                    <div id="zwo-switch-type-group" class="form-group" style="display: none;">
+                        <label for="zwo-switch-type">Switch Type:</label>
+                        <select id="zwo-switch-type" name="switchType">
+                            <option value="dewheater">Dew Heater</option>
+                        </select>
+                        <small>Available when Device Type is Switch.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="camera-index">Camera Index:</label>
+                        <input type="number" id="camera-index" name="cameraIndex" value="0" min="0">
+                        <small>0-based index from the ZWO SDK enumeration.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="camera-id">Camera ID (optional):</label>
+                        <input type="number" id="camera-id" name="cameraId" min="0">
+                        <small>If set, overrides the camera index.</small>
+                    </div>
+                </div>
+
                 <div class="form-actions">
                     <button type="submit" class="btn btn-primary">Add Device</button>
                     <button type="reset" class="btn btn-secondary">Reset</button>
@@ -162,6 +187,7 @@
             </div>
             <div class="server-actions">
                 <button class="btn btn-primary" onclick="refreshServerInfo()">Refresh</button>
+                <button class="btn btn-secondary" onclick="restartServer()">Restart Server</button>
                 <button class="btn btn-danger" onclick="shutdownServer()">Shutdown Server</button>
             </div>
         </div>

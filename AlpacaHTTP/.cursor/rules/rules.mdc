@@ -94,7 +94,19 @@ AlpacaHTTP -> AlpacaCore::DeviceDriver -> Vendor SDK (only inside AlpacaCore)
 
 ---
 
-## 4. Directory Structure
+## 4. Vendor Integration Checklist
+
+When adding a new vendor/device type in AlpacaCore, make the matching AlpacaHTTP updates:
+
+- Router registration: handle `vendor/deviceType` in `Router::register_device_from_config`.
+- Config schema: add any vendor-specific fields and validation.
+- Web UI: update vendor options and any vendor-specific config panels.
+- Build flags: ensure the AlpacaCore vendor target propagates compile definitions.
+- Tests: add or extend routing/config tests for the new vendor.
+
+---
+
+## 5. Directory Structure
 
 ```
 AlpacaHTTP/
@@ -160,7 +172,7 @@ AlpacaHTTP/
 
 ---
 
-## 5. HTTP Rules
+## 6. HTTP Rules
 
 ### HTTP Requirements
 - Must support **HTTP/1.1**
@@ -196,7 +208,7 @@ Routing must call **AlpacaCore** methods.
 
 ---
 
-## 6. JSON Mapping Rules
+## 7. JSON Mapping Rules
 
 All Alpaca responses require:
 
@@ -216,7 +228,7 @@ Cursor must:
 
 ---
 
-## 7. Discovery Rules
+## 8. Discovery Rules
 
 Implement Alpaca Discovery via UDP multicast:
 
@@ -231,7 +243,7 @@ Discovery must run independently of HTTP server.
 
 ---
 
-## 8. Configuration Rules
+## 9. Configuration Rules
 
 Config locations:
 
@@ -257,7 +269,7 @@ src/core/config.cpp
 
 ---
 
-## 9. Logging Rules
+## 10. Logging Rules
 
 - AlpacaHTTP must integrate with AlpacaCore via `set_log_sink`.
 - All HTTP events must use AlpacaCore log system.
@@ -272,7 +284,7 @@ util/logging_adapter.cpp
 
 ---
 
-## 10. Threading Rules
+## 11. Threading Rules
 
 - Must support concurrent HTTP requests.
 - Recommended: Beast async model with multiple `io_context` threads.
@@ -281,7 +293,7 @@ util/logging_adapter.cpp
 
 ---
 
-## 11. Error Handling Rules
+## 12. Error Handling Rules
 
 - Wrap all AlpacaCore calls in try/catch blocks.
 - Convert exceptions to Alpaca error response using:
@@ -295,7 +307,7 @@ Never crash the server on device errors.
 
 ---
 
-## 12. Build Options (CMake)
+## 13. Build Options (CMake)
 
 ```
 ALPACAHTTP_BUILD_TESTS
@@ -307,7 +319,7 @@ Cursor must guard optional components behind these flags.
 
 ---
 
-## 13. Testing Rules
+## 14. Testing Rules
 
 Tests must cover:
 
@@ -321,7 +333,7 @@ Integration test: start server, send HTTP requests, validate JSON.
 
 ---
 
-## 14. Out of Scope
+## 15. Out of Scope
 
 Cursor must NOT add:
 
@@ -336,7 +348,7 @@ Cursor must NOT add:
 
 ---
 
-## 15. Cursor Behavior
+## 16. Cursor Behavior
 
 When generating or modifying code:
 
