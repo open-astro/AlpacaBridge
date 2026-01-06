@@ -14,3 +14,4 @@ Additional project notes:
 - ST4 pulse guiding should be enabled only when the SDK reports `has_st4_port`.
 - ConformU logs live under `AlpacaCore/conformu/`; Windows logs are prefixed with `W-` for comparison.
 - On macOS, the ZWO SDK links against libusb even if the camera appears in System Report.
+- When building a driver, also build the test targets so they can be exercised via `run_all_tests.cmd` and `run_all_tests.sh`.

@@ -1,0 +1,103 @@
+{
+  "ErrorCount": 0,
+  "IssueCount": 0,
+  "ConfigurationAlertCount": 0,
+  "TimingIssuesCount": 0,
+  "Errors": [],
+  "Issues": [],
+  "ConfigurationAlerts": [],
+  "Timings": [
+    {
+      "Key": "Timing Summary",
+      "Value": "See Help for further information."
+    },
+    {
+      "Key": "Timing Summary",
+      "Value": "FAST target response time: 0.1 seconds, (configuration and state reporting members)."
+    },
+    {
+      "Key": "Timing Summary",
+      "Value": "STANDARD target response time: 1.0 second, (property write and asynchronous initiators)."
+    },
+    {
+      "Key": "Timing Summary",
+      "Value": "EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant)."
+    },
+    {
+      "Key": "Timing Summary",
+      "Value": "The log shows good and bad timings."
+    },
+    {
+      "Key": "",
+      "Value": ""
+    },
+    {
+      "Key": "InterfaceVersion",
+      "Value": "At 10:10:14.614 InterfaceVersion         0.000 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Connected",
+      "Value": "At 10:10:14.615 Connected                0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Description",
+      "Value": "At 10:10:14.617 Description              0.002 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "DriverInfo",
+      "Value": "At 10:10:14.618 DriverInfo               0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "DriverVersion",
+      "Value": "At 10:10:14.619 DriverVersion            0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Name",
+      "Value": "At 10:10:14.620 Name                     0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "SupportedActions",
+      "Value": "At 10:10:14.622 SupportedActions         0.002 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Absolute",
+      "Value": "At 10:10:14.624 Absolute                 0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "IsMoving",
+      "Value": "At 10:10:14.625 IsMoving                 0.002 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "MaxStep",
+      "Value": "At 10:10:14.636 MaxStep                  0.010 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "MaxIncrement",
+      "Value": "At 10:10:14.638 MaxIncrement             0.002 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Position",
+      "Value": "At 10:10:14.639 Position                 0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "TempCompAvailable",
+      "Value": "At 10:10:14.649 TempCompAvailable        0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "TempComp Read",
+      "Value": "At 10:10:14.649 TempComp Read            0.000 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Temperature",
+      "Value": "At 10:10:14.659 Temperature              0.002 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Halt",
+      "Value": "At 10:10:14.662 Halt                     0.002 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "Move to 42149",
+      "Value": "At 10:10:14.873 Move to 42149            0.207 seconds. \u2713 (STANDARD)"
+    }
+  ]
+}

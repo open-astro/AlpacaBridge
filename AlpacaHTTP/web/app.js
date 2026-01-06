@@ -548,6 +548,8 @@ function startEditDevice(device) {
     setFormValue('focal-length', config.focalLength);
     setFormValue('camera-index', config.cameraIndex);
     setFormValue('camera-id', config.cameraId);
+    setFormValue('focuser-index', config.focuserIndex);
+    setFormValue('focuser-id', config.focuserId);
     setFormValue('zwo-switch-type', config.switchType);
     updateApertureAreaFromDiameter();
 
@@ -1027,6 +1029,7 @@ function updateVendorOptions() {
     const isTelescope = deviceType === 'telescope';
     const isCamera = deviceType === 'camera';
     const isSwitch = deviceType === 'switch';
+    const isFocuser = deviceType === 'focuser';
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
         ioptronOption.disabled = !isTelescope;
@@ -1034,7 +1037,7 @@ function updateVendorOptions() {
     }
     const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
     if (zwoOption) {
-        const zwoAllowed = isCamera || isSwitch;
+        const zwoAllowed = isCamera || isSwitch || isFocuser;
         zwoOption.disabled = !zwoAllowed;
         zwoOption.hidden = !zwoAllowed;
     }
@@ -1042,7 +1045,7 @@ function updateVendorOptions() {
     if (!isTelescope && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
     }
-    if (!isCamera && !isSwitch && vendorSelect.value === 'zwo') {
+    if (!isCamera && !isSwitch && !isFocuser && vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
     }
 
@@ -1086,6 +1089,13 @@ if (cameraIndexInput) {
     });
 }
 
+const focuserIndexInput = document.getElementById('focuser-index');
+if (focuserIndexInput) {
+    focuserIndexInput.addEventListener('input', () => {
+        focuserIndexInput.dataset.userModified = 'true';
+    });
+}
+
 const apertureDiameterInput = document.getElementById('aperture-diameter');
 if (apertureDiameterInput) {
     apertureDiameterInput.addEventListener('input', updateApertureAreaFromDiameter);
@@ -1104,14 +1114,39 @@ function readOptionalNumber(formData, name) {
     return Number.isFinite(value) ? value : null;
 }
 
+function setFieldGroupEnabled(groupEl, enabled) {
+    if (!groupEl) {
+        return;
+    }
+    const fields = groupEl.querySelectorAll('input, select, textarea');
+    fields.forEach(field => {
+        field.disabled = !enabled;
+    });
+}
+
 function updateZwoConfigFields() {
     const deviceTypeSelect = document.getElementById('device-type');
     const switchTypeGroup = document.getElementById('zwo-switch-type-group');
+    const cameraFields = document.getElementById('zwo-camera-fields');
+    const focuserFields = document.getElementById('zwo-focuser-fields');
     if (!deviceTypeSelect || !switchTypeGroup) {
         return;
     }
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
-    switchTypeGroup.style.display = deviceType === 'switch' ? 'block' : 'none';
+    const isCamera = deviceType === 'camera';
+    const isSwitch = deviceType === 'switch';
+    const isFocuser = deviceType === 'focuser';
+    switchTypeGroup.style.display = isSwitch ? 'block' : 'none';
+
+    const showCameraFields = isCamera || isSwitch;
+    if (cameraFields) {
+        cameraFields.style.display = showCameraFields ? 'block' : 'none';
+        setFieldGroupEnabled(cameraFields, showCameraFields);
+    }
+    if (focuserFields) {
+        focuserFields.style.display = isFocuser ? 'block' : 'none';
+        setFieldGroupEnabled(focuserFields, isFocuser);
+    }
 }
 
 document.getElementById('device-form').addEventListener('submit', async function(e) {
@@ -1145,21 +1180,37 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.focalLength = focalLength;
         }
     } else if (deviceData.vendor === 'zwo') {
-        if (deviceData.deviceType === 'switch') {
+        const normalizedType = normalizeDeviceType(deviceData.deviceType);
+        if (normalizedType === 'switch') {
             const switchType = formData.get('switchType');
             if (switchType) {
                 deviceData.switchType = switchType;
             }
         }
-        const cameraIndex = Number.parseInt(formData.get('cameraIndex'), 10);
-        if (!Number.isNaN(cameraIndex)) {
-            deviceData.cameraIndex = cameraIndex;
+        if (normalizedType === 'camera' || normalizedType === 'switch') {
+            const cameraIndex = Number.parseInt(formData.get('cameraIndex'), 10);
+            if (!Number.isNaN(cameraIndex)) {
+                deviceData.cameraIndex = cameraIndex;
+            }
+            const cameraIdValue = formData.get('cameraId');
+            if (cameraIdValue !== null && cameraIdValue !== undefined && cameraIdValue !== '') {
+                const cameraId = Number.parseInt(cameraIdValue, 10);
+                if (!Number.isNaN(cameraId)) {
+                    deviceData.cameraId = cameraId;
+                }
+            }
         }
-        const cameraIdValue = formData.get('cameraId');
-        if (cameraIdValue !== null && cameraIdValue !== undefined && cameraIdValue !== '') {
-            const cameraId = Number.parseInt(cameraIdValue, 10);
-            if (!Number.isNaN(cameraId)) {
-                deviceData.cameraId = cameraId;
+        if (normalizedType === 'focuser') {
+            const focuserIndex = Number.parseInt(formData.get('focuserIndex'), 10);
+            if (!Number.isNaN(focuserIndex)) {
+                deviceData.focuserIndex = focuserIndex;
+            }
+            const focuserIdValue = formData.get('focuserId');
+            if (focuserIdValue !== null && focuserIdValue !== undefined && focuserIdValue !== '') {
+                const focuserId = Number.parseInt(focuserIdValue, 10);
+                if (!Number.isNaN(focuserId)) {
+                    deviceData.focuserId = focuserId;
+                }
             }
         }
     }

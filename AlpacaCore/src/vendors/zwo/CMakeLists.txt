@@ -7,39 +7,57 @@ if(ALPACACORE_ENABLE_ZWO)
     get_filename_component(ALPACACORE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
     set(ZWO_SDK_ROOT "${ALPACACORE_ROOT}/external/ASI_Camera_SDK")
     set(ZWO_SDK_INCLUDE "${ZWO_SDK_ROOT}/include")
+    set(ZWO_EAF_ROOT "${ALPACACORE_ROOT}/external/ZWO/EAF")
+    set(ZWO_EAF_INCLUDE "${ZWO_EAF_ROOT}/include")
 
     if(NOT EXISTS "${ZWO_SDK_INCLUDE}/ASICamera2.h")
         message(FATAL_ERROR "ZWO SDK header not found at ${ZWO_SDK_INCLUDE}/ASICamera2.h")
     endif()
+    if(NOT EXISTS "${ZWO_EAF_INCLUDE}/EAF_focuser.h")
+        message(FATAL_ERROR "ZWO EAF SDK header not found at ${ZWO_EAF_INCLUDE}/EAF_focuser.h")
+    endif()
 
     set(ZWO_LIB_PATH "")
     set(ZWO_RUNTIME_DLL "")
+    set(ZWO_EAF_LIB_PATH "")
+    set(ZWO_EAF_RUNTIME_DLL "")
 
     if(WIN32)
         if(CMAKE_SIZEOF_VOID_P EQUAL 8)
             set(ZWO_LIB_DIR "${ZWO_SDK_ROOT}/lib/windows/x64")
+            set(ZWO_EAF_LIB_DIR "${ZWO_EAF_ROOT}/EAF_Windows_SDK_V1.7.7/lib/Windows/x64/Release")
         else()
             set(ZWO_LIB_DIR "${ZWO_SDK_ROOT}/lib/windows/x86")
+            set(ZWO_EAF_LIB_DIR "${ZWO_EAF_ROOT}/EAF_Windows_SDK_V1.7.7/lib/Windows/Win32/Release")
         endif()
         set(ZWO_LIB_PATH "${ZWO_LIB_DIR}/ASICamera2.lib")
         set(ZWO_RUNTIME_DLL "${ZWO_LIB_DIR}/ASICamera2.dll")
+        set(ZWO_EAF_LIB_PATH "${ZWO_EAF_LIB_DIR}/EAF_focuser.lib")
+        set(ZWO_EAF_RUNTIME_DLL "${ZWO_EAF_LIB_DIR}/EAF_focuser.dll")
     elseif(APPLE)
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
             set(ZWO_LIB_PATH "${ZWO_SDK_ROOT}/lib/mac/arm64/libASICamera2.a")
+            set(ZWO_EAF_LIB_PATH "${ZWO_EAF_ROOT}/lib/mac_arm64/libEAFFocuser.a")
         else()
             set(ZWO_LIB_PATH "${ZWO_SDK_ROOT}/lib/mac/x64/libASICamera2.a")
+            set(ZWO_EAF_LIB_PATH "${ZWO_EAF_ROOT}/lib/mac_x64/libEAFFocuser.a")
         endif()
     elseif(UNIX)
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
             set(ZWO_LIB_PATH "${ZWO_SDK_ROOT}/lib/linux/x64/libASICamera2.a")
+            set(ZWO_EAF_LIB_PATH "${ZWO_EAF_ROOT}/lib/x64/libEAFFocuser.a")
         elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "i386|i686|x86")
             set(ZWO_LIB_PATH "${ZWO_SDK_ROOT}/lib/linux/x86/libASICamera2.a")
+            set(ZWO_EAF_LIB_PATH "${ZWO_EAF_ROOT}/lib/x86/libEAFFocuser.a")
         elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
             set(ZWO_LIB_PATH "${ZWO_SDK_ROOT}/lib/linux/armv8/libASICamera2.a")
+            set(ZWO_EAF_LIB_PATH "${ZWO_EAF_ROOT}/lib/armv8/libEAFFocuser.a")
         elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "armv7|armv7l")
             set(ZWO_LIB_PATH "${ZWO_SDK_ROOT}/lib/linux/armv7/libASICamera2.a")
+            set(ZWO_EAF_LIB_PATH "${ZWO_EAF_ROOT}/lib/armv7/libEAFFocuser.a")
         elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "armv6|armv6l")
             set(ZWO_LIB_PATH "${ZWO_SDK_ROOT}/lib/linux/armv6/libASICamera2.a")
+            set(ZWO_EAF_LIB_PATH "${ZWO_EAF_ROOT}/lib/armv6/libEAFFocuser.a")
         else()
             message(FATAL_ERROR "Unsupported Linux architecture: ${CMAKE_SYSTEM_PROCESSOR}")
         endif()
@@ -48,11 +66,16 @@ if(ALPACACORE_ENABLE_ZWO)
     if(NOT EXISTS "${ZWO_LIB_PATH}")
         message(FATAL_ERROR "ZWO SDK library not found at ${ZWO_LIB_PATH}")
     endif()
+    if(NOT EXISTS "${ZWO_EAF_LIB_PATH}")
+        message(FATAL_ERROR "ZWO EAF SDK library not found at ${ZWO_EAF_LIB_PATH}")
+    endif()
 
     set(ZWO_SOURCES
         zwo_sdk_wrapper.cpp
         zwo_camera_driver.cpp
         zwo_switch_driver.cpp
+        zwo_eaf_wrapper.cpp
+        zwo_focuser_driver.cpp
     )
 
     add_library(alpacacore_zwo STATIC ${ZWO_SOURCES})
@@ -60,9 +83,10 @@ if(ALPACACORE_ENABLE_ZWO)
     target_include_directories(alpacacore_zwo PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${ZWO_SDK_INCLUDE}
+        ${ZWO_EAF_INCLUDE}
     )
 
-    target_link_libraries(alpacacore_zwo PRIVATE ${ZWO_LIB_PATH})
+    target_link_libraries(alpacacore_zwo PRIVATE ${ZWO_LIB_PATH} ${ZWO_EAF_LIB_PATH})
 
     if(UNIX)
         find_package(PkgConfig)
@@ -89,18 +113,38 @@ if(ALPACACORE_ENABLE_ZWO)
         endif()
     endif()
 
-    if(WIN32 AND EXISTS "${ZWO_RUNTIME_DLL}")
+    if(APPLE)
+        target_link_libraries(alpacacore_zwo PRIVATE
+            "-framework CoreFoundation"
+            "-framework IOKit"
+            "-framework CoreBluetooth"
+            "-framework Foundation"
+            "-framework AppKit"
+        )
+    endif()
+
+    if(WIN32)
         set(ZWO_RUNTIME_OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
         if(NOT ZWO_RUNTIME_OUTPUT_DIR)
             set(ZWO_RUNTIME_OUTPUT_DIR "${CMAKE_BINARY_DIR}")
         endif()
 
-        add_custom_command(TARGET alpacacore_zwo POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${ZWO_RUNTIME_DLL}"
-                "${ZWO_RUNTIME_OUTPUT_DIR}"
-        )
+        if(EXISTS "${ZWO_RUNTIME_DLL}")
+            add_custom_command(TARGET alpacacore_zwo POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${ZWO_RUNTIME_DLL}"
+                    "${ZWO_RUNTIME_OUTPUT_DIR}"
+            )
+            install(FILES "${ZWO_RUNTIME_DLL}" DESTINATION bin)
+        endif()
 
-        install(FILES "${ZWO_RUNTIME_DLL}" DESTINATION bin)
+        if(EXISTS "${ZWO_EAF_RUNTIME_DLL}")
+            add_custom_command(TARGET alpacacore_zwo POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${ZWO_EAF_RUNTIME_DLL}"
+                    "${ZWO_RUNTIME_OUTPUT_DIR}"
+            )
+            install(FILES "${ZWO_EAF_RUNTIME_DLL}" DESTINATION bin)
+        endif()
     endif()
 endif()
