@@ -48,6 +48,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
+#include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #endif
 
@@ -5725,6 +5726,34 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "zwo" && device_type_str == "focuser") {
+#ifdef ALPACACORE_ENABLE_ZWO
+        int focuser_id = config.value("focuserId", -1);
+        int focuser_index = config.value("focuserIndex", -1);
+
+        std::unique_ptr<alpacacore::FocuserDriver> focuser;
+        if (focuser_id >= 0) {
+            focuser = alpacacore::vendor::zwo::create_zwo_eaf_focuser(device_number, focuser_id);
+        } else if (focuser_index >= 0) {
+            focuser = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(device_number, focuser_index);
+        } else {
+            error_message = "ZWO EAF focuser requires focuserIndex or focuserId";
+            return false;
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(focuser.release()))) {
+            util::log_info("Registered ZWO EAF focuser");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "zwo" && device_type_str == "switch") {
 #ifdef ALPACACORE_ENABLE_ZWO
         std::string switch_type = config.value("switchType", "dewheater");
@@ -5792,6 +5821,8 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
         copy_if_present("switchType");
+        copy_if_present("focuserIndex");
+        copy_if_present("focuserId");
     }
 
     copy_if_present("responseTimeoutMs");

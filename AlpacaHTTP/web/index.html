@@ -129,15 +129,30 @@
                         <small>Available when Device Type is Switch.</small>
                     </div>
 
-                    <div class="form-group">
-                        <label for="camera-index">Camera Index:</label>
-                        <input type="number" id="camera-index" name="cameraIndex" value="0" min="0">
-                        <small>0-based index from the ZWO SDK enumeration.</small>
+                    <div id="zwo-camera-fields">
+                        <div class="form-group">
+                            <label for="camera-index">Camera Index:</label>
+                            <input type="number" id="camera-index" name="cameraIndex" value="0" min="0">
+                            <small>0-based index from the ZWO SDK enumeration.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="camera-id">Camera ID (optional):</label>
+                            <input type="number" id="camera-id" name="cameraId" min="0">
+                            <small>If set, overrides the camera index.</small>
+                        </div>
                     </div>
-                    <div class="form-group">
-                        <label for="camera-id">Camera ID (optional):</label>
-                        <input type="number" id="camera-id" name="cameraId" min="0">
-                        <small>If set, overrides the camera index.</small>
+
+                    <div id="zwo-focuser-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="focuser-index">Focuser Index:</label>
+                            <input type="number" id="focuser-index" name="focuserIndex" value="0" min="0">
+                            <small>0-based index from the ZWO EAF SDK enumeration.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="focuser-id">Focuser ID (optional):</label>
+                            <input type="number" id="focuser-id" name="focuserId" min="0">
+                            <small>If set, overrides the focuser index.</small>
+                        </div>
                     </div>
                 </div>
 

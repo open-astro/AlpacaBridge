@@ -35,6 +35,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Supported Platforms (SDK)**: Windows (x64, x86), macOS (x64, arm64), Linux (x64, x86, armv6, armv7, armv8)
 - **Linux USB Permissions**: Install `lib/linux/asi.rules` udev rules for USB device access
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
+- **EAF SDK**: ZWO EAF Focuser SDK Version 1.7.7 (build target)
 - **Verified OS/Arch**: macOS (arm64) (ConformU validated)
 
 ## Switch Drivers
@@ -51,6 +52,25 @@ This document lists all hardware vendors and device types that are verified to w
 - **Device Type**: Dew Heater (`switchType: dewheater`)
 - **Connection**: Exposed as a Switch device when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`
 - **Binding**: Use `cameraId` or `cameraIndex` to bind to the target camera
+- **Verified OS/Arch**: macOS (arm64) (ConformU validated)
+
+## Focuser Drivers
+
+### ZWO
+
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARM) | Status |
+|--------------|------------|------------------|----------------|------------------|---------------|----------------|--------|
+| EAF | USB | | | ✓ | | | [ConformU Validation 2026-01-06](conformu/ZWO/EAF/) |
+| EAF Pro | USB | | | ✓ | | | [ConformU Validation 2026-01-06](conformu/ZWO/EAF/) |
+
+### ZWO Focuser Driver Notes
+
+- **SDK**: ZWO EAF Focuser SDK Version 1.7.7 (build target)
+- **Connection**: USB (requires libusb-1.0 on macOS and Linux)
+- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (x64, arm64), Linux (x64, x86, armv6, armv7, armv8)
+- **Linux USB Permissions**: Install `lib/eaf.rules` udev rules for USB device access
+- **EAF Pro Bluetooth**: The ZWO EAF Pro Bluetooth version will only currently work with USB connection. Bluetooth support is not yet implemented.
+- **Binding**: Use `focuserId` or `focuserIndex` to bind to the target focuser
 - **Verified OS/Arch**: macOS (arm64) (ConformU validated)
 
 ## Telescope/Mount Drivers

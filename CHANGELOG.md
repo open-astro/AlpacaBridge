@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.6.0] - 2026-01-06
+
+### Added
+- **ZWO EAF Focuser Driver** (AlpacaCore)
+  - Complete ZWO EAF (Electronic Auto Focuser) driver implementation with full ASCOM Alpaca Focuser API support
+  - SDK wrapper layer for ZWO EAF Focuser SDK Version 1.7.7
+  - Support for USB connection via libusb-1.0
+  - Comprehensive focuser property support (position, max step, temperature, etc.)
+  - Absolute position control with step range support
+  - Focuser movement control (move, stop, is moving detection)
+  - Device state telemetry and connection management
+  - Asynchronous connection/disconnection support
+  - Focuser binding via `focuserId` or `focuserIndex` configuration
+  - Support for EAF and EAF Pro models
+  - ConformU validated for EAF and EAF Pro on macOS (arm64)
+  - Note: EAF Pro Bluetooth version currently only works with USB connection (Bluetooth support not yet implemented)
+- **Focuser Device Support** (AlpacaHTTP)
+  - Complete Focuser device method routing and dispatch
+  - Support for all ASCOM Alpaca Focuser API methods
+  - ZWO EAF focuser device registration and configuration
+  - Focuser device discovery and management via web UI
+  - Smart auto-numbering for focuser device numbers and indices
+
+### Changed
+- **Device Registration** (AlpacaHTTP)
+  - Enhanced ZWO EAF focuser device registration with validation
+  - Focuser device registration with focuser binding support
+  - Improved device configuration validation for focuser devices
+  - Smart focuser index auto-fill in web UI
+- **Web UI Enhancements** (AlpacaHTTP)
+  - Focuser device type support in device configuration
+  - ZWO focuser index and ID configuration fields
+  - Auto-fill support for focuser indices
+  - Enhanced vendor-specific configuration UI for ZWO focusers
+- **Documentation** (AlpacaCore)
+  - Updated SUPPORTED-DRIVERS.md with ZWO EAF focuser information
+  - Added Focuser Drivers section to supported drivers documentation
+  - Documented EAF SDK version and platform support
+  - Added note about EAF Pro Bluetooth limitation (USB only)
+
 ## [0.5.0] - 2026-01-05
 
 ### Added

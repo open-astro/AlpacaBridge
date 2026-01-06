@@ -25,6 +25,7 @@ set(TEST_SOURCES
 
 if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_camera.cpp)
+    list(APPEND TEST_SOURCES test_zwo_focuser.cpp)
 endif()
 
 # Create test executable
