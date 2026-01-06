@@ -201,6 +201,126 @@ function showTab(tabName) {
 
 let currentDevices = [];
 
+function extractDeviceConfig(device) {
+    return device.Config || device.config || null;
+}
+
+function extractDeviceType(device) {
+    const config = extractDeviceConfig(device);
+    return normalizeDeviceType(device.DeviceType || device.deviceType || (config && config.deviceType));
+}
+
+function extractDeviceNumber(device) {
+    const config = extractDeviceConfig(device);
+    const value = device.DeviceNumber ?? device.deviceNumber ?? (config && config.deviceNumber);
+    const parsed = Number.parseInt(value, 10);
+    return Number.isNaN(parsed) ? null : parsed;
+}
+
+function extractVendor(device) {
+    const config = extractDeviceConfig(device);
+    const value = device.Vendor || (config && config.vendor) || '';
+    return value.toString().trim().toLowerCase();
+}
+
+function getNextAvailableNumber(usedNumbers) {
+    let candidate = 0;
+    while (usedNumbers.has(candidate)) {
+        candidate += 1;
+    }
+    return candidate;
+}
+
+function getNextDeviceNumberForType(deviceType) {
+    const normalizedType = normalizeDeviceType(deviceType);
+    if (!normalizedType) {
+        return null;
+    }
+    const used = new Set();
+    currentDevices.forEach(device => {
+        const type = extractDeviceType(device);
+        if (type !== normalizedType) {
+            return;
+        }
+        const number = extractDeviceNumber(device);
+        if (number !== null && number >= 0) {
+            used.add(number);
+        }
+    });
+    return getNextAvailableNumber(used);
+}
+
+function getNextZwoCameraIndex() {
+    const used = new Set();
+    currentDevices.forEach(device => {
+        const vendor = extractVendor(device);
+        const type = extractDeviceType(device);
+        if (vendor !== 'zwo' || type !== 'camera') {
+            return;
+        }
+        const config = extractDeviceConfig(device);
+        const indexValue = config && config.cameraIndex;
+        const parsed = Number.parseInt(indexValue, 10);
+        if (!Number.isNaN(parsed) && parsed >= 0) {
+            used.add(parsed);
+        }
+    });
+    return getNextAvailableNumber(used);
+}
+
+function maybeAutoFillDeviceNumber() {
+    const form = document.getElementById('device-form');
+    const deviceNumberInput = document.getElementById('device-number');
+    const deviceTypeSelect = document.getElementById('device-type');
+    if (!form || !deviceNumberInput || !deviceTypeSelect) {
+        return;
+    }
+    if (form.dataset.editing === 'true') {
+        return;
+    }
+    if (deviceNumberInput.dataset.userModified === 'true') {
+        return;
+    }
+    const nextNumber = getNextDeviceNumberForType(deviceTypeSelect.value);
+    if (nextNumber === null) {
+        return;
+    }
+    deviceNumberInput.value = nextNumber;
+}
+
+function maybeAutoFillZwoCameraIndex() {
+    const form = document.getElementById('device-form');
+    const vendorSelect = document.getElementById('vendor');
+    const deviceTypeSelect = document.getElementById('device-type');
+    const cameraIndexInput = document.getElementById('camera-index');
+    const cameraIdInput = document.getElementById('camera-id');
+    if (!form || !vendorSelect || !deviceTypeSelect || !cameraIndexInput) {
+        return;
+    }
+    if (form.dataset.editing === 'true') {
+        return;
+    }
+    if (vendorSelect.value !== 'zwo' || normalizeDeviceType(deviceTypeSelect.value) !== 'camera') {
+        return;
+    }
+    if (cameraIdInput && cameraIdInput.value.trim() !== '') {
+        return;
+    }
+    if (cameraIndexInput.dataset.userModified === 'true') {
+        return;
+    }
+    const nextIndex = getNextZwoCameraIndex();
+    if (nextIndex === null) {
+        return;
+    }
+    cameraIndexInput.value = nextIndex;
+}
+
+function updateAutoNumbering() {
+    maybeAutoFillDeviceNumber();
+    maybeAutoFillZwoCameraIndex();
+}
+
 // Load devices
 async function loadDevices() {
     const devicesList = document.getElementById('devices-list');
@@ -259,12 +379,14 @@ async function loadDevices() {
         }
         
         if (devices.length === 0) {
+            currentDevices = [];
             devicesList.innerHTML = `
                 <div class="empty-state">
                     <p>No devices configured</p>
                     <p>Go to the "Configure" tab to add a device</p>
                 </div>
             `;
+            updateAutoNumbering();
             return;
         }
 
@@ -307,6 +429,7 @@ async function loadDevices() {
         document.querySelectorAll('.btn-edit-device').forEach(button => {
             button.addEventListener('click', handleEditDeviceClick);
         });
+        updateAutoNumbering();
     } catch (error) {
         console.error('Error loading devices:', error);
         let errorMsg = 'Unknown error';
@@ -358,6 +481,15 @@ function setEditMode(isEditing) {
             delete form.dataset.originalDeviceType;
             delete form.dataset.originalDeviceNumber;
             delete form.dataset.originalVendor;
+            const deviceNumberInput = document.getElementById('device-number');
+            const cameraIndexInput = document.getElementById('camera-index');
+            if (deviceNumberInput) {
+                delete deviceNumberInput.dataset.userModified;
+            }
+            if (cameraIndexInput) {
+                delete cameraIndexInput.dataset.userModified;
+            }
+            updateAutoNumbering();
         }
     }
 }
@@ -416,6 +548,7 @@ function startEditDevice(device) {
     setFormValue('focal-length', config.focalLength);
     setFormValue('camera-index', config.cameraIndex);
     setFormValue('camera-id', config.cameraId);
+    setFormValue('zwo-switch-type', config.switchType);
     updateApertureAreaFromDiameter();
 
     const messageDiv = document.getElementById('form-message');
@@ -698,6 +831,37 @@ async function shutdownServer() {
     }
 }
 
+// Restart server
+async function restartServer() {
+    if (!confirm('Are you sure you want to restart the server? This will briefly interrupt services.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(API_BASE + '/management/v1/restart', {
+            method: 'POST'
+        });
+
+        let result = null;
+        try {
+            result = await response.json();
+        } catch (e) {
+            result = null;
+        }
+
+        if (!result || result.ErrorNumber === 0) {
+            alert('Server restart initiated. The server will restart shortly.');
+            setTimeout(() => {
+                window.location.reload();
+            }, 3000);
+        } else {
+            alert('Error restarting server: ' + result.ErrorMessage);
+        }
+    } catch (error) {
+        alert('Restart request sent. If the server does not restart, check the server logs. Error: ' + error.message);
+    }
+}
+
 // Log level management
 async function loadLogSettings() {
     const statusEl = document.getElementById('log-level-status');
@@ -862,6 +1026,7 @@ function updateVendorOptions() {
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
     const isTelescope = deviceType === 'telescope';
     const isCamera = deviceType === 'camera';
+    const isSwitch = deviceType === 'switch';
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
         ioptronOption.disabled = !isTelescope;
@@ -869,14 +1034,15 @@ function updateVendorOptions() {
     }
     const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
     if (zwoOption) {
-        zwoOption.disabled = !isCamera;
-        zwoOption.hidden = !isCamera;
+        const zwoAllowed = isCamera || isSwitch;
+        zwoOption.disabled = !zwoAllowed;
+        zwoOption.hidden = !zwoAllowed;
     }
 
     if (!isTelescope && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
     }
-    if (!isCamera && vendorSelect.value === 'zwo') {
+    if (!isCamera && !isSwitch && vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
     }
 
@@ -895,6 +1061,9 @@ document.getElementById('vendor').addEventListener('change', function() {
     } else if (vendor === 'zwo') {
         document.getElementById('zwo-config').style.display = 'block';
     }
+
+    updateZwoConfigFields();
+    updateAutoNumbering();
 });
 
 document.getElementById('connection-type').addEventListener('change', function() {
@@ -902,6 +1071,20 @@ document.getElementById('connection-type').addEventListener('change', function()
     document.getElementById('serial-config').style.display = type === 'serial' ? 'block' : 'none';
     document.getElementById('network-config').style.display = type === 'network' ? 'block' : 'none';
 });
+
+const deviceNumberInput = document.getElementById('device-number');
+if (deviceNumberInput) {
+    deviceNumberInput.addEventListener('input', () => {
+        deviceNumberInput.dataset.userModified = 'true';
+    });
+}
+
+const cameraIndexInput = document.getElementById('camera-index');
+if (cameraIndexInput) {
+    cameraIndexInput.addEventListener('input', () => {
+        cameraIndexInput.dataset.userModified = 'true';
+    });
+}
 
 const apertureDiameterInput = document.getElementById('aperture-diameter');
 if (apertureDiameterInput) {
@@ -919,6 +1102,16 @@ function readOptionalNumber(formData, name) {
     }
     const value = Number.parseFloat(trimmed);
     return Number.isFinite(value) ? value : null;
+}
+
+function updateZwoConfigFields() {
+    const deviceTypeSelect = document.getElementById('device-type');
+    const switchTypeGroup = document.getElementById('zwo-switch-type-group');
+    if (!deviceTypeSelect || !switchTypeGroup) {
+        return;
+    }
+    const deviceType = normalizeDeviceType(deviceTypeSelect.value);
+    switchTypeGroup.style.display = deviceType === 'switch' ? 'block' : 'none';
 }
 
 document.getElementById('device-form').addEventListener('submit', async function(e) {
@@ -952,6 +1145,12 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.focalLength = focalLength;
         }
     } else if (deviceData.vendor === 'zwo') {
+        if (deviceData.deviceType === 'switch') {
+            const switchType = formData.get('switchType');
+            if (switchType) {
+                deviceData.switchType = switchType;
+            }
+        }
         const cameraIndex = Number.parseInt(formData.get('cameraIndex'), 10);
         if (!Number.isNaN(cameraIndex)) {
             deviceData.cameraIndex = cameraIndex;

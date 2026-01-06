@@ -16,6 +16,7 @@
 #include <mutex>
 #include <sstream>
 #include <iomanip>
+#include <unordered_map>
 
 namespace alpacacore::vendor::zwo {
 
@@ -112,6 +113,8 @@ std::optional<ZWOControlType> to_control_type(ASI_CONTROL_TYPE type) {
         return ZWOControlType::TargetTemperature;
     case ASI_HIGH_SPEED_MODE:
         return ZWOControlType::HighSpeedMode;
+    case ASI_ANTI_DEW_HEATER:
+        return ZWOControlType::AntiDewHeater;
     default:
         return std::nullopt;
     }
@@ -135,6 +138,8 @@ ASI_CONTROL_TYPE to_asi_control_type(ZWOControlType type) {
         return ASI_TARGET_TEMP;
     case ZWOControlType::HighSpeedMode:
         return ASI_HIGH_SPEED_MODE;
+    case ZWOControlType::AntiDewHeater:
+        return ASI_ANTI_DEW_HEATER;
     }
     return ASI_GAIN;
 }
@@ -259,6 +264,11 @@ ZWOCameraInfo convert_camera_info(const ASI_CAMERA_INFO& info) {
 class ZWOSDKWrapper::Impl {
 public:
     std::mutex mutex_;
+    struct CameraUsage {
+        int open_count = 0;
+        bool initialized = false;
+    };
+    std::unordered_map<int, CameraUsage> usage_;
 };
 
 ZWOSDKWrapper::ZWOSDKWrapper()
@@ -311,17 +321,34 @@ bool ZWOSDKWrapper::get_camera_info_by_index(int camera_index, ZWOCameraInfo& in
 
 void ZWOSDKWrapper::open_camera(int camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(ASIOpenCamera(camera_id), "ASIOpenCamera");
+    auto& usage = pimpl_->usage_[camera_id];
+    if (usage.open_count == 0) {
+        throw_on_error(ASIOpenCamera(camera_id), "ASIOpenCamera");
+    }
+    ++usage.open_count;
 }
 
 void ZWOSDKWrapper::init_camera(int camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(ASIInitCamera(camera_id), "ASIInitCamera");
+    auto& usage = pimpl_->usage_[camera_id];
+    if (!usage.initialized) {
+        throw_on_error(ASIInitCamera(camera_id), "ASIInitCamera");
+        usage.initialized = true;
+    }
 }
 
 void ZWOSDKWrapper::close_camera(int camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(ASICloseCamera(camera_id), "ASICloseCamera");
+    auto it = pimpl_->usage_.find(camera_id);
+    if (it == pimpl_->usage_.end() || it->second.open_count <= 0) {
+        return;
+    }
+    --it->second.open_count;
+    if (it->second.open_count == 0) {
+        throw_on_error(ASICloseCamera(camera_id), "ASICloseCamera");
+        it->second.initialized = false;
+        pimpl_->usage_.erase(it);
+    }
 }
 
 std::vector<ZWOControlCaps> ZWOSDKWrapper::get_control_caps(int camera_id) {

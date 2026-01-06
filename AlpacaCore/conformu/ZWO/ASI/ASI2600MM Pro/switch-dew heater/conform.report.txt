@@ -1,0 +1,120 @@
+{
+  "ErrorCount": 0,
+  "IssueCount": 0,
+  "ConfigurationAlertCount": 1,
+  "TimingIssuesCount": 0,
+  "Errors": [],
+  "Issues": [],
+  "ConfigurationAlerts": [
+    {
+      "Key": "Conform configuration",
+      "Value": "Set switch tests were omitted due to Conform configuration."
+    }
+  ],
+  "Timings": [
+    {
+      "Key": "Timing Summary",
+      "Value": "See Help for further information."
+    },
+    {
+      "Key": "Timing Summary",
+      "Value": "FAST target response time: 0.1 seconds, (configuration and state reporting members)."
+    },
+    {
+      "Key": "Timing Summary",
+      "Value": "STANDARD target response time: 1.0 second, (property write and asynchronous initiators)."
+    },
+    {
+      "Key": "Timing Summary",
+      "Value": "EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant)."
+    },
+    {
+      "Key": "Timing Summary",
+      "Value": "The log shows good and bad timings."
+    },
+    {
+      "Key": "",
+      "Value": ""
+    },
+    {
+      "Key": "Connect",
+      "Value": "At 23:05:54.896 Connect                   0.005 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "InterfaceVersion",
+      "Value": "At 23:05:55.919 InterfaceVersion          0.000 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Connected",
+      "Value": "At 23:05:55.926 Connected                 0.006 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Description",
+      "Value": "At 23:05:55.932 Description               0.004 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "DriverInfo",
+      "Value": "At 23:05:55.934 DriverInfo                0.002 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "DriverVersion",
+      "Value": "At 23:05:55.936 DriverVersion             0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Name",
+      "Value": "At 23:05:55.937 Name                      0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "SupportedActions",
+      "Value": "At 23:05:55.941 SupportedActions          0.003 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "DeviceState",
+      "Value": "At 23:05:55.953 DeviceState               0.012 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "MaxSwitch",
+      "Value": "At 23:05:55.958 MaxSwitch                 0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "SwitchName (0)",
+      "Value": "At 23:05:56.067 SwitchName (0)            0.000 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "GetSwitchDescription (0)",
+      "Value": "At 23:05:56.067 GetSwitchDescription (0)  0.000 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "MinSwitchValue (0)",
+      "Value": "At 23:05:56.068 MinSwitchValue (0)        0.001 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "MinSwitchValue (0)",
+      "Value": "At 23:05:56.069 MinSwitchValue (0)        0.000 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "SwitchStep (0)",
+      "Value": "At 23:05:56.069 SwitchStep (0)            0.000 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "CanWrite (0)",
+      "Value": "At 23:05:56.070 CanWrite (0)              0.000 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "CanAsync (0)",
+      "Value": "At 23:05:56.071 CanAsync (0)              0.000 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "GetSwitch (0)",
+      "Value": "At 23:05:56.073 GetSwitch (0)             0.002 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "MinSwitchValue (0)",
+      "Value": "At 23:05:56.578 MinSwitchValue (0)        0.004 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Disconnect",
+      "Value": "At 23:05:57.172 Disconnect                0.001 seconds. \u2713 (STANDARD)"
+    }
+  ]
+}

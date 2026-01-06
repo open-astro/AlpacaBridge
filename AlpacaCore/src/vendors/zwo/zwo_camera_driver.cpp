@@ -70,6 +70,8 @@ public:
         , bin_y_(1)
         , num_x_(0)
         , num_y_(0)
+        , roi_width_effective_(0)
+        , roi_height_effective_(0)
         , start_x_(0)
         , start_y_(0)
         , image_ready_(false)
@@ -77,6 +79,7 @@ public:
         , last_image_()
         , last_exposure_duration_(0.0)
         , last_exposure_start_()
+        , last_exposure_valid_(false)
         , pulse_guiding_(false)
         , pulse_guiding_end_(std::chrono::steady_clock::time_point{})
     {
@@ -152,6 +155,9 @@ public:
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (connected == connected_.load()) {
+            if (connected) {
+                reset_exposure_state_locked();
+            }
             return;
         }
 
@@ -170,19 +176,24 @@ public:
             bin_y_ = 1;
             start_x_ = 0;
             start_y_ = 0;
-            num_x_ = camera_info_valid_ ? camera_info_.max_width : 0;
-            num_y_ = camera_info_valid_ ? camera_info_.max_height : 0;
+            int max_width = camera_info_valid_ ? camera_info_.max_width : 0;
+            int max_height = camera_info_valid_ ? camera_info_.max_height : 0;
+            num_x_ = max_width;
+            num_y_ = max_height;
+            roi_width_effective_ = align_roi_dimension(max_width, 8);
+            roi_height_effective_ = align_roi_dimension(max_height, 2);
 
-            if (num_x_ > 0 && num_y_ > 0) {
-                sdk.set_roi_format(resolved_id, num_x_, num_y_, bin_x_, image_type_);
+            if (roi_width_effective_ > 0 && roi_height_effective_ > 0) {
+                sdk.set_roi_format(resolved_id,
+                                   roi_width_effective_,
+                                   roi_height_effective_,
+                                   bin_x_,
+                                   image_type_);
                 sdk.set_start_pos(resolved_id, start_x_, start_y_);
             }
 
             serial_number_ = sdk.get_serial_number(resolved_id);
-            image_ready_ = false;
-            image_cached_ = false;
-            last_exposure_duration_ = 0.0;
-            last_exposure_start_ = std::chrono::system_clock::time_point{};
+            reset_exposure_state_locked();
             connected_.store(true);
             return;
         }
@@ -194,6 +205,13 @@ public:
             }
             sdk.close_camera(camera_id_.value());
         }
+        if (camera_index_.has_value()) {
+            camera_id_.reset();
+            camera_info_ = {};
+            camera_info_valid_ = false;
+            serial_number_.clear();
+        }
+        reset_exposure_state_locked();
         connected_.store(false);
     }
 
@@ -242,7 +260,7 @@ public:
     int get_bayer_offset_x() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
-            return 0;
+            throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
         }
         return bayer_offsets(camera_info_.bayer_pattern).first;
     }
@@ -250,7 +268,7 @@ public:
     int get_bayer_offset_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
-            return 0;
+            throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
         }
         return bayer_offsets(camera_info_.bayer_pattern).second;
     }
@@ -284,7 +302,7 @@ public:
         case ZWOExposureStatus::Working:
             return CameraState::Exposing;
         case ZWOExposureStatus::Success:
-            return CameraState::Reading;
+            return CameraState::Idle;
         case ZWOExposureStatus::Failed:
         default:
             return CameraState::Error;
@@ -402,7 +420,12 @@ public:
     }
 
     double get_full_well_capacity() const override {
-        return 0.0;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!camera_info_valid_ || camera_info_.electrons_per_adu <= 0.0 || camera_info_.bit_depth <= 0) {
+            return 0.0;
+        }
+        double max_adu = static_cast<double>((1ULL << camera_info_.bit_depth) - 1ULL);
+        return camera_info_.electrons_per_adu * 1000.0 * max_adu;
     }
 
     int get_gain() const override {
@@ -426,7 +449,7 @@ public:
     }
 
     std::vector<std::string> get_gains() const override {
-        return {};
+        throw AlpacaException("Gain descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
     bool get_has_shutter() const override {
@@ -443,6 +466,9 @@ public:
         bool ready = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!last_exposure_valid_) {
+                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+            }
             if (image_cached_) {
                 return last_image_;
             }
@@ -488,6 +514,11 @@ public:
         ensure_connected();
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!last_exposure_valid_) {
+                image_ready_ = false;
+                image_cached_ = false;
+                return false;
+            }
             if (image_cached_ || image_ready_) {
                 return true;
             }
@@ -523,11 +554,17 @@ public:
 
     double get_last_exposure_duration() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!last_exposure_valid_) {
+            throw AlpacaException("Last exposure duration not set", AlpacaError::ValueNotSet);
+        }
         return last_exposure_duration_;
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!last_exposure_valid_) {
+            throw AlpacaException("Last exposure start time not set", AlpacaError::ValueNotSet);
+        }
         return last_exposure_start_;
     }
 
@@ -591,7 +628,7 @@ public:
     }
 
     std::vector<std::string> get_offsets() const override {
-        return {};
+        throw AlpacaException("Offset descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
     double get_percent_completed() const override {
@@ -775,12 +812,19 @@ public:
 
         auto& sdk = ZWOSDKWrapper::instance();
         int active_camera_id = camera_id_value();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!is_roi_valid_locked(num_x_, num_y_, start_x_, start_y_)) {
+                throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
+            }
+        }
         sdk.set_control_value(active_camera_id, ZWOControlType::Exposure, exposure_us, false);
         sdk.start_exposure(active_camera_id, !light);
 
         std::lock_guard<std::mutex> lock(mutex_);
         last_exposure_duration_ = duration;
         last_exposure_start_ = std::chrono::system_clock::now();
+        last_exposure_valid_ = true;
         image_ready_ = false;
         image_cached_ = false;
     }
@@ -814,6 +858,8 @@ private:
     int bin_y_;
     int num_x_;
     int num_y_;
+    int roi_width_effective_;
+    int roi_height_effective_;
     int start_x_;
     int start_y_;
 
@@ -822,6 +868,7 @@ private:
     mutable ImageArray last_image_;
     double last_exposure_duration_;
     std::chrono::system_clock::time_point last_exposure_start_;
+    bool last_exposure_valid_;
 
     mutable std::atomic<bool> pulse_guiding_;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
@@ -830,6 +877,75 @@ private:
         if (!connected_.load()) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
+    }
+
+    void reset_exposure_state_locked() {
+        image_ready_ = false;
+        image_cached_ = false;
+        last_exposure_duration_ = 0.0;
+        last_exposure_start_ = std::chrono::system_clock::time_point{};
+        last_exposure_valid_ = false;
+    }
+
+    bool is_roi_valid_locked(int width, int height, int start_x, int start_y) const {
+        if (!camera_info_valid_) {
+            return false;
+        }
+        if (width <= 0 || height <= 0) {
+            return false;
+        }
+        int max_width = camera_info_.max_width / bin_x_;
+        int max_height = camera_info_.max_height / bin_y_;
+        if (width > max_width || height > max_height) {
+            return false;
+        }
+        if (start_x < 0 || start_y < 0) {
+            return false;
+        }
+        if (start_x + width > max_width || start_y + height > max_height) {
+            return false;
+        }
+        int adjusted_width = 0;
+        int adjusted_height = 0;
+        if (!adjust_roi_size_locked(width, height, adjusted_width, adjusted_height)) {
+            return false;
+        }
+        return true;
+    }
+
+    int align_roi_dimension(int value, int multiple) const {
+        if (multiple <= 1) {
+            return value;
+        }
+        return value - (value % multiple);
+    }
+
+    bool adjust_roi_size_locked(int requested_width,
+                                int requested_height,
+                                int& adjusted_width,
+                                int& adjusted_height) const {
+        if (!camera_info_valid_) {
+            return false;
+        }
+        if (requested_width <= 0 || requested_height <= 0) {
+            return false;
+        }
+
+        int max_width = camera_info_.max_width / bin_x_;
+        int max_height = camera_info_.max_height / bin_y_;
+        if (requested_width > max_width || requested_height > max_height) {
+            return false;
+        }
+
+        int candidate_width = align_roi_dimension(requested_width, 8);
+        int candidate_height = align_roi_dimension(requested_height, 2);
+        if (candidate_width <= 0 || candidate_height <= 0) {
+            return false;
+        }
+
+        adjusted_width = candidate_width;
+        adjusted_height = candidate_height;
+        return true;
     }
 
     void start_connection_task(bool connect) {
@@ -859,29 +975,31 @@ private:
     }
 
     int resolve_camera_id_locked() {
+        if (camera_index_.has_value()) {
+            auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
+            if (cameras.empty()) {
+                ALPACA_LOG_WARN("ZWO", "No ZWO cameras detected by SDK");
+                throw AlpacaException("No ZWO cameras detected", AlpacaError::NotConnected);
+            }
+            int index = camera_index_.value();
+            if (index < 0 || index >= static_cast<int>(cameras.size())) {
+                ALPACA_LOG_WARN("ZWO", "Camera index out of range: " + std::to_string(index) + " (count=" + std::to_string(cameras.size()) + ")");
+                throw AlpacaException("Camera index not found", AlpacaError::InvalidValue);
+            }
+
+            const auto& info = cameras[static_cast<std::size_t>(index)];
+            ALPACA_LOG_INFO("ZWO", "Using camera index " + std::to_string(index) + ": " + info.name + " (ID " + std::to_string(info.camera_id) + ")");
+            camera_id_ = info.camera_id;
+            camera_info_ = info;
+            camera_info_valid_ = true;
+            return camera_id_.value();
+        }
+
         if (camera_id_.has_value()) {
             return camera_id_.value();
         }
-        if (!camera_index_.has_value()) {
-            throw AlpacaException("Camera ID not specified", AlpacaError::InvalidValue);
-        }
-        auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
-        if (cameras.empty()) {
-            ALPACA_LOG_WARN("ZWO", "No ZWO cameras detected by SDK");
-            throw AlpacaException("No ZWO cameras detected", AlpacaError::NotConnected);
-        }
-        int index = camera_index_.value();
-        if (index < 0 || index >= static_cast<int>(cameras.size())) {
-            ALPACA_LOG_WARN("ZWO", "Camera index out of range: " + std::to_string(index) + " (count=" + std::to_string(cameras.size()) + ")");
-            throw AlpacaException("Camera index not found", AlpacaError::InvalidValue);
-        }
 
-        const auto& info = cameras[static_cast<std::size_t>(index)];
-        ALPACA_LOG_INFO("ZWO", "Using camera index " + std::to_string(index) + ": " + info.name + " (ID " + std::to_string(info.camera_id) + ")");
-        camera_id_ = info.camera_id;
-        camera_info_ = info;
-        camera_info_valid_ = true;
-        return camera_id_.value();
+        throw AlpacaException("Camera ID not specified", AlpacaError::InvalidValue);
     }
 
     void refresh_camera_info_locked(int camera_id) {
@@ -973,12 +1091,24 @@ private:
         if (!camera_info_valid_ || !supports_bin(camera_info_.supported_bins, bin_x)) {
             throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
         }
-        if (num_x_ <= 0 || num_y_ <= 0) {
-            throw AlpacaException("ROI not initialized", AlpacaError::InvalidOperation);
-        }
-        ZWOSDKWrapper::instance().set_roi_format(active_camera_id, num_x_, num_y_, bin_x, image_type_);
         bin_x_ = bin_x;
         bin_y_ = bin_y;
+        int max_width = camera_info_.max_width / bin_x_;
+        int max_height = camera_info_.max_height / bin_y_;
+        int width = 0;
+        int height = 0;
+        if (!adjust_roi_size_locked(max_width, max_height, width, height)) {
+            throw AlpacaException("ROI size invalid for binning", AlpacaError::InvalidValue);
+        }
+        ZWOSDKWrapper::instance().set_roi_format(active_camera_id, width, height, bin_x_, image_type_);
+        ZWOSDKWrapper::instance().set_start_pos(active_camera_id, 0, 0);
+        num_x_ = max_width;
+        num_y_ = max_height;
+        roi_width_effective_ = width;
+        roi_height_effective_ = height;
+        start_x_ = 0;
+        start_y_ = 0;
+        image_cached_ = false;
     }
 
     void set_roi_size_locked(int width, int height) {
@@ -988,17 +1118,20 @@ private:
         }
         int active_camera_id = camera_id_value();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_info_valid_) {
-            if (width > camera_info_.max_width || height > camera_info_.max_height) {
-                throw AlpacaException("ROI size exceeds sensor size", AlpacaError::InvalidValue);
-            }
-            if (start_x_ + width > camera_info_.max_width || start_y_ + height > camera_info_.max_height) {
-                throw AlpacaException("ROI exceeds sensor bounds", AlpacaError::InvalidValue);
-            }
-        }
-        ZWOSDKWrapper::instance().set_roi_format(active_camera_id, width, height, bin_x_, image_type_);
+        int adjusted_width = 0;
+        int adjusted_height = 0;
+        bool valid = adjust_roi_size_locked(width, height, adjusted_width, adjusted_height);
         num_x_ = width;
         num_y_ = height;
+        if (valid && is_roi_valid_locked(width, height, start_x_, start_y_)) {
+            roi_width_effective_ = adjusted_width;
+            roi_height_effective_ = adjusted_height;
+            ZWOSDKWrapper::instance().set_roi_format(active_camera_id,
+                                                     adjusted_width,
+                                                     adjusted_height,
+                                                     bin_x_,
+                                                     image_type_);
+        }
         image_cached_ = false;
     }
 
@@ -1009,19 +1142,17 @@ private:
         }
         int active_camera_id = camera_id_value();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_info_valid_) {
-            if (start_x + num_x_ > camera_info_.max_width || start_y + num_y_ > camera_info_.max_height) {
-                throw AlpacaException("Start position out of bounds", AlpacaError::InvalidValue);
-            }
-        }
-        ZWOSDKWrapper::instance().set_start_pos(active_camera_id, start_x, start_y);
+        bool valid = is_roi_valid_locked(num_x_, num_y_, start_x, start_y);
         start_x_ = start_x;
         start_y_ = start_y;
+        if (valid) {
+            ZWOSDKWrapper::instance().set_start_pos(active_camera_id, start_x, start_y);
+        }
     }
 
     std::size_t image_buffer_size_locked() const {
-        int width = num_x_;
-        int height = num_y_;
+        int width = roi_width_effective_ > 0 ? roi_width_effective_ : num_x_;
+        int height = roi_height_effective_ > 0 ? roi_height_effective_ : num_y_;
         if (width <= 0 || height <= 0) {
             return 0;
         }
@@ -1046,38 +1177,77 @@ private:
             return image;
         }
 
+        int out_width = image.width;
+        int out_height = image.height;
+        int eff_width = roi_width_effective_ > 0 ? roi_width_effective_ : out_width;
+        int eff_height = roi_height_effective_ > 0 ? roi_height_effective_ : out_height;
+        if (eff_width <= 0 || eff_height <= 0) {
+            image.rank = 0;
+            return image;
+        }
+
         if (image_type_ == ZWOImageType::Rgb24) {
             image.rank = 3;
-            image.data.resize(static_cast<std::size_t>(image.width) *
-                              static_cast<std::size_t>(image.height) * 3);
-            std::size_t idx = 0;
-            for (std::size_t i = 0; i + 2 < buffer.size(); i += 3) {
-                image.data[idx++] = buffer[i];
-                image.data[idx++] = buffer[i + 1];
-                image.data[idx++] = buffer[i + 2];
+            image.data.resize(static_cast<std::size_t>(out_width) *
+                              static_cast<std::size_t>(out_height) * 3);
+            std::size_t buffer_stride = static_cast<std::size_t>(eff_width) * 3;
+            std::size_t output_stride = static_cast<std::size_t>(out_width) * 3;
+            for (int row = 0; row < out_height; ++row) {
+                std::size_t output_row = static_cast<std::size_t>(row) * output_stride;
+                if (row < eff_height) {
+                    std::size_t buffer_row = static_cast<std::size_t>(row) * buffer_stride;
+                    std::size_t copy_bytes = std::min(buffer_stride, output_stride);
+                    for (std::size_t i = 0; i < copy_bytes && buffer_row + i < buffer.size(); ++i) {
+                        image.data[output_row + i] = buffer[buffer_row + i];
+                    }
+                }
             }
             return image;
         }
 
         image.rank = 2;
-        const std::size_t pixel_count = static_cast<std::size_t>(image.width) *
-                                        static_cast<std::size_t>(image.height);
+        const std::size_t pixel_count = static_cast<std::size_t>(out_width) *
+                                        static_cast<std::size_t>(out_height);
         image.data.resize(pixel_count);
         if (image_type_ == ZWOImageType::Raw16) {
-            for (std::size_t i = 0; i < pixel_count; ++i) {
-                std::size_t offset = i * 2;
-                if (offset + 1 >= buffer.size()) {
-                    break;
+            for (int row = 0; row < out_height; ++row) {
+                for (int col = 0; col < out_width; ++col) {
+                    std::size_t out_index = static_cast<std::size_t>(row) *
+                                            static_cast<std::size_t>(out_width) +
+                                            static_cast<std::size_t>(col);
+                    if (row < eff_height && col < eff_width) {
+                        std::size_t offset = (static_cast<std::size_t>(row) *
+                                              static_cast<std::size_t>(eff_width) +
+                                              static_cast<std::size_t>(col)) * 2;
+                        if (offset + 1 < buffer.size()) {
+                            std::uint16_t value = static_cast<std::uint16_t>(buffer[offset]) |
+                                                  static_cast<std::uint16_t>(buffer[offset + 1] << 8);
+                            image.data[out_index] = static_cast<std::int32_t>(value);
+                            continue;
+                        }
+                    }
+                    image.data[out_index] = 0;
                 }
-                std::uint16_t value = static_cast<std::uint16_t>(buffer[offset]) |
-                                      static_cast<std::uint16_t>(buffer[offset + 1] << 8);
-                image.data[i] = static_cast<std::int32_t>(value);
             }
             return image;
         }
 
-        for (std::size_t i = 0; i < pixel_count && i < buffer.size(); ++i) {
-            image.data[i] = buffer[i];
+        for (int row = 0; row < out_height; ++row) {
+            for (int col = 0; col < out_width; ++col) {
+                std::size_t out_index = static_cast<std::size_t>(row) *
+                                        static_cast<std::size_t>(out_width) +
+                                        static_cast<std::size_t>(col);
+                if (row < eff_height && col < eff_width) {
+                    std::size_t buffer_index = static_cast<std::size_t>(row) *
+                                               static_cast<std::size_t>(eff_width) +
+                                               static_cast<std::size_t>(col);
+                    if (buffer_index < buffer.size()) {
+                        image.data[out_index] = buffer[buffer_index];
+                        continue;
+                    }
+                }
+                image.data[out_index] = 0;
+            }
         }
         return image;
     }

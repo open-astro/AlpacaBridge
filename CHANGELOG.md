@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.5.0] - 2026-01-05
+
+### Added
+- **ZWO Camera Driver** (AlpacaCore)
+  - Complete ZWO ASI camera driver implementation with full ASCOM Alpaca Camera API support
+  - SDK wrapper layer for ZWO ASI Camera SDK Version 1.40
+  - Support for USB connection via libusb-1.0
+  - Comprehensive camera property support (binning, ROI, gain, offset, temperature, etc.)
+  - Exposure control with light/dark frame support
+  - Pulse guiding support for autoguiding
+  - Image array retrieval with optimized payload building
+  - Asynchronous pulse guide implementation
+  - Device state telemetry and connection management
+  - ConformU validated for 6 camera models:
+    - ASI174MM Mini
+    - ASI290MM Mini
+    - ASI462MM
+    - ASI662MC
+    - ASI2600MC Pro
+    - ASI2600MM Pro
+- **ZWO Switch Driver** (AlpacaCore)
+  - Dew heater switch device implementation for ZWO cameras with anti-dew heater support
+  - Automatic detection of cameras with `ASI_ANTI_DEW_HEATER` SDK control
+  - Camera binding via `cameraId` or `cameraIndex` configuration
+  - Full ASCOM Alpaca Switch API implementation (ISwitchV3)
+  - Asynchronous switch state change support
+  - ConformU validated for dew heater on:
+    - ASI2600MC Pro
+    - ASI2600MM Pro
+- **Switch Device Support** (AlpacaHTTP)
+  - Complete Switch device method routing and dispatch
+  - Support for all ASCOM Alpaca Switch API methods
+  - ZWO dew heater switch device registration and configuration
+  - Switch device discovery and management via web UI
+- **Server Restart Functionality** (AlpacaHTTP)
+  - `/management/v1/restart` endpoint for graceful server restart
+  - Restart callback support for custom restart handling
+  - Thread-safe restart request handling with duplicate request prevention
+  - Automatic server restart with connection cleanup and reinitialization
+  - Restart button in web UI for easy server management
+- **Smart Auto-Numbering** (AlpacaHTTP)
+  - Automatic device number assignment based on existing devices
+  - Smart camera index auto-fill for ZWO cameras
+  - Automatic detection of next available device number per device type
+  - User-modified field detection to preserve manual entries
+  - Real-time auto-fill as device type changes in web UI
+- **Transaction ID Management** (AlpacaHTTP)
+  - Automatic server transaction ID generation using atomic counter
+  - Thread-safe transaction ID assignment for concurrent requests
+  - Client transaction ID parsing from query parameters, JSON bodies, and form data
+  - Case-insensitive transaction ID extraction from form data
+  - Proper transaction ID propagation in all Alpaca responses
+- **Image Array Optimization** (AlpacaHTTP)
+  - Optimized image array JSON payload building with pre-allocated buffers
+  - Efficient integer-to-string conversion for large image arrays
+  - Support for 2D and 3D image arrays (monochrome and color)
+  - Improved performance for image transfer over HTTP
+  - Direct string building to avoid JSON library overhead for large arrays
+- **ConformU Validation Infrastructure** (AlpacaCore)
+  - Comprehensive ConformU test results for all verified drivers
+  - Test result organization by vendor and device type
+  - Documentation of validated devices in SUPPORTED-DRIVERS.md
+  - ConformU validation date tracking for all certified devices
+- **Workspace Infrastructure** (AlpacaBridge)
+  - Added AGENTS.md file with instructions for AI agents and Cursor workflows
+  - Centralized reference to Cursor rules files for AlpacaCore and AlpacaHTTP
+  - Clear documentation of agent workflow requirements and rule locations
+
+### Changed
+- **Router Architecture** (AlpacaHTTP)
+  - Enhanced error handling to maintain HTTP 200 status for Alpaca error responses
+  - Added `cancelasync` method to Switch device method set
+  - Improved switch device method routing and parameter handling
+  - Better device registration error messages for ZWO devices
+  - Improved transaction ID extraction from multiple request sources (query, JSON, form)
+  - Enhanced parameter parsing for query parameters, JSON bodies, and form data
+- **Device Registration** (AlpacaHTTP)
+  - Enhanced ZWO camera device registration with validation
+  - ZWO switch device registration with camera binding support
+  - Improved device configuration validation and error reporting
+  - Smart device number and camera index auto-fill in web UI
+- **Web UI Enhancements** (AlpacaHTTP)
+  - Smart auto-numbering for device numbers and camera indices
+  - Automatic next available number detection per device type
+  - ZWO switch type selection (dew heater) in device configuration
+  - Server restart button in server management interface
+  - Improved device configuration form with auto-fill capabilities
+  - Better handling of device editing vs. new device creation
+  - Enhanced vendor-specific configuration UI for ZWO devices
+- **Documentation** (AlpacaCore)
+  - Updated SUPPORTED-DRIVERS.md with all ConformU-validated ZWO cameras and switches
+  - Added Switch Drivers section to supported drivers documentation
+  - Updated ConformU README with ZWO test results
+  - Documented dew heater switch functionality and camera binding
+
 ## [0.4.0] - 2026-01-03
 
 ### Added

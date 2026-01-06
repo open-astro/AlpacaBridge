@@ -60,6 +60,8 @@ public:
 
     // Set shutdown callback (called when shutdown endpoint is requested)
     void set_shutdown_callback(std::function<void()> callback);
+    // Set restart callback (called when restart endpoint is requested)
+    void set_restart_callback(std::function<void()> callback);
 
     // Route request and generate response
     Response route(const Request& request, std::uint32_t server_transaction_id);
@@ -67,6 +69,7 @@ public:
 private:
     std::shared_ptr<alpacacore::ManagementDriver> management_driver_;
     std::function<void()> shutdown_callback_;
+    std::function<void()> restart_callback_;
 
     // Parse route from path
     RouteMatch parse_route(const std::string& path);
@@ -83,6 +86,7 @@ private:
     Response handle_configure_device(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
     Response handle_shutdown(const Request& request, std::uint32_t server_tx_id);
+    Response handle_restart(const Request& request, std::uint32_t server_tx_id);
     Response handle_log_level(const Request& request, std::uint32_t server_tx_id);
     Response handle_logs(const Request& request, std::uint32_t server_tx_id);
     Response handle_log_history(const Request& request, std::uint32_t server_tx_id);

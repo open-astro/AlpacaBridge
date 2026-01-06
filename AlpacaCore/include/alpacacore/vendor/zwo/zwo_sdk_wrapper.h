@@ -57,7 +57,8 @@ enum class ZWOControlType {
     CoolerOn,
     CoolerPower,
     TargetTemperature,
-    HighSpeedMode
+    HighSpeedMode,
+    AntiDewHeater
 };
 
 struct ZWOControlCaps {
