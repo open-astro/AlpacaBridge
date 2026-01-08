@@ -83,6 +83,7 @@ public:
         , pulse_guiding_(false)
         , pulse_guiding_end_(std::chrono::steady_clock::time_point{})
     {
+        preload_camera_info_locked();
     }
 
     ~ZWOCameraDriver() override {
@@ -101,6 +102,7 @@ public:
     }
 
     std::string get_name() const override {
+        const_cast<ZWOCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_info_valid_ && !camera_info_.name.empty()) {
             return camera_info_.name;
@@ -1007,6 +1009,86 @@ private:
         if (ZWOSDKWrapper::instance().get_camera_info_by_id(camera_id, info)) {
             camera_info_ = info;
             camera_info_valid_ = true;
+        }
+    }
+
+    void preload_camera_info_locked() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (camera_info_valid_) {
+            return;
+        }
+
+        try {
+            if (camera_id_.has_value()) {
+                ZWOCameraInfo info;
+                if (ZWOSDKWrapper::instance().get_camera_info_by_id(camera_id_.value(), info)) {
+                    camera_info_ = info;
+                    camera_info_valid_ = true;
+                    return;
+                }
+            } else if (camera_index_.has_value()) {
+                auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
+                int index = camera_index_.value();
+                if (index >= 0 && index < static_cast<int>(cameras.size())) {
+                    camera_info_ = cameras[static_cast<std::size_t>(index)];
+                    camera_info_valid_ = true;
+                    camera_id_ = camera_info_.camera_id;
+                }
+            }
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ZWO", "Unable to preload camera info: " + std::string(e.what()));
+        }
+    }
+
+    void refresh_cached_camera_info_if_needed() {
+        if (connected_.load()) {
+            return;
+        }
+
+        std::optional<int> camera_id;
+        std::optional<int> camera_index;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            camera_id = camera_id_;
+            camera_index = camera_index_;
+        }
+
+        try {
+            bool refreshed = false;
+            if (camera_id.has_value()) {
+                ZWOCameraInfo info;
+                if (ZWOSDKWrapper::instance().get_camera_info_by_id(camera_id.value(), info)) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    camera_info_ = info;
+                    camera_info_valid_ = true;
+                    refreshed = true;
+                } else {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    camera_id_.reset();
+                    serial_number_.clear();
+                }
+            }
+
+            if (refreshed) {
+                return;
+            }
+
+            if (camera_index.has_value()) {
+                auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
+                int index = camera_index.value();
+                if (index >= 0 && index < static_cast<int>(cameras.size())) {
+                    const auto& info = cameras[static_cast<std::size_t>(index)];
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (!camera_id_.has_value() || camera_id_.value() != info.camera_id) {
+                        serial_number_.clear();
+                    }
+                    camera_info_ = info;
+                    camera_info_valid_ = true;
+                    camera_id_ = info.camera_id;
+                }
+            }
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ZWO", "Unable to refresh camera info: " + std::string(e.what()));
         }
     }
 

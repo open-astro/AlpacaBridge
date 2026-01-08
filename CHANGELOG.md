@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.6.1] - 2026-01-08
+
+### Added
+- **ZWO Camera Support** (AlpacaCore)
+  - Added ASI120MM Mini camera to supported devices list
+  - ConformU validated for ASI120MM Mini on macOS (arm64)
+
+### Changed
+- **ZWO Camera Driver** (AlpacaCore)
+  - Improved camera info preloading for faster device name resolution
+  - Added camera info refresh mechanism to ensure accurate device information
+  - Enhanced camera enumeration and info caching for better performance
+- **iOptron Telescope Driver** (AlpacaCore)
+  - Updated driver description to accurately reflect supported mount series
+  - Improved description clarity for all supported iOptron mount models
+- **Web UI** (AlpacaHTTP)
+  - Added cache busting for device list loading to prevent stale data
+  - Improved device list refresh reliability with timestamp-based cache control
+- **Documentation** (AlpacaCore)
+  - Updated SUPPORTED-DRIVERS.md with ASI120MM Mini camera
+  - Enhanced building guide with workspace-level script documentation
+  - Improved documentation for ZWO driver support (camera, switch, focuser)
+
 ## [0.6.0] - 2026-01-06
 
 ### Added

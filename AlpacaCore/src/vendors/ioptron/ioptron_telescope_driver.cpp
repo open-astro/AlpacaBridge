@@ -134,7 +134,7 @@ public:
     }
     
     std::string get_description() const override {
-        return "iOptron " + mount_info_.model_name + " Telescope Driver";
+        return "iOptron CEM120,70,40,26, GEM, HEM, HAE, HAZ series and SkyHunter Mount Driver";
     }
     
     std::string get_driver_info() const override {

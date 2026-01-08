@@ -327,7 +327,10 @@ async function loadDevices() {
     devicesList.innerHTML = '<p class="loading">Loading devices...</p>';
 
     try {
-        const response = await fetch(API_BASE + '/management/v1/configureddevices');
+        const response = await fetch(
+            API_BASE + '/management/v1/configureddevices?ts=' + Date.now(),
+            { cache: 'no-store' }
+        );
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }

@@ -21,6 +21,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARM) | Status |
 |--------------|------------|------------------|----------------|------------------|---------------|----------------|--------|
+| ASI120MM Mini | USB | | | ✓ | | | [ConformU Validation 2026-01-06](conformu/ZWO/ASI/ASI120MM%20Mini/) |
 | ASI174MM Mini | USB | | | ✓ | | | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI174MM%20Mini/) |
 | ASI290MM Mini | USB | | | ✓ | | | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI290MM%20Mini/) |
 | ASI462MM | USB | | | ✓ | | | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI462MM/) |

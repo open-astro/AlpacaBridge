@@ -8,8 +8,28 @@ See [Installation Guide](../getting-started/installation.md) for detailed prereq
 
 ## Quick Start
 
-### macOS / Linux
+### Workspace-Level Build (Recommended)
 
+If you're working from the AlpacaBridge workspace root, you can use the convenience scripts:
+
+**macOS/Linux:**
+```bash
+chmod +x build_and_run.sh
+./build_and_run.sh
+```
+
+**Windows:**
+```cmd
+build_and_run.cmd
+```
+
+These scripts build both AlpacaCore and AlpacaHTTP, then start the HTTP server. See the [AlpacaBridge README](../../../README.md) for more details.
+
+### Standalone Build
+
+To build AlpacaCore independently:
+
+**macOS / Linux:**
 ```bash
 mkdir build
 cd build
@@ -17,8 +37,7 @@ cmake ..
 cmake --build . --parallel
 ```
 
-### Windows
-
+**Windows:**
 ```cmd
 mkdir build
 cd build
@@ -43,8 +62,10 @@ Enable vendor-specific drivers by setting the appropriate CMake option:
 - `ALPACACORE_ENABLE_ALL_VENDORS`: Enable all implemented vendor drivers (default: OFF)
 
 - `ALPACACORE_ENABLE_ZWO`: Enable ZWO vendor support (default: OFF)
-  - Uses the vendored ZWO SDK subset in `external/ASI_Camera_SDK/`
+  - Uses the vendored ZWO SDK subsets in `external/ASI_Camera_SDK/` and `external/ZWO/EAF/`
+  - Supports Camera, Switch (dew heater), and Focuser (EAF) device types
   - See [external/README.md](../../external/README.md) for SDK notes
+  - See [SUPPORTED-DRIVERS.md](../../SUPPORTED-DRIVERS.md) for validated devices
 
 - `ALPACACORE_ENABLE_QHY`: Enable QHY vendor support (default: OFF)
   - Requires QHY SDK in `external/` directory
@@ -92,6 +113,25 @@ After building, you'll find:
 - **Examples**: `build/examples/` (if examples enabled)
 
 ## Running Tests
+
+### Workspace-Level Testing
+
+If you're working from the AlpacaBridge workspace root, you can use the convenience script:
+
+**macOS/Linux:**
+```bash
+chmod +x run_all_tests.sh
+./run_all_tests.sh
+```
+
+**Windows:**
+```cmd
+run_all_tests.cmd
+```
+
+These scripts build and run tests for both AlpacaCore and AlpacaHTTP.
+
+### Standalone Testing
 
 After building with tests enabled:
 
