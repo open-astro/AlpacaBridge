@@ -553,6 +553,8 @@ function startEditDevice(device) {
     setFormValue('camera-id', config.cameraId);
     setFormValue('focuser-index', config.focuserIndex);
     setFormValue('focuser-id', config.focuserId);
+    setFormValue('rotator-index', config.rotatorIndex);
+    setFormValue('rotator-id', config.rotatorId);
     setFormValue('zwo-switch-type', config.switchType);
     updateApertureAreaFromDiameter();
 
@@ -1033,6 +1035,7 @@ function updateVendorOptions() {
     const isCamera = deviceType === 'camera';
     const isSwitch = deviceType === 'switch';
     const isFocuser = deviceType === 'focuser';
+    const isRotator = deviceType === 'rotator';
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
         ioptronOption.disabled = !isTelescope;
@@ -1040,7 +1043,7 @@ function updateVendorOptions() {
     }
     const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
     if (zwoOption) {
-        const zwoAllowed = isCamera || isSwitch || isFocuser;
+        const zwoAllowed = isCamera || isSwitch || isFocuser || isRotator;
         zwoOption.disabled = !zwoAllowed;
         zwoOption.hidden = !zwoAllowed;
     }
@@ -1048,7 +1051,7 @@ function updateVendorOptions() {
     if (!isTelescope && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
     }
-    if (!isCamera && !isSwitch && !isFocuser && vendorSelect.value === 'zwo') {
+    if (!isCamera && !isSwitch && !isFocuser && !isRotator && vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
     }
 
@@ -1099,6 +1102,13 @@ if (focuserIndexInput) {
     });
 }
 
+const rotatorIndexInput = document.getElementById('rotator-index');
+if (rotatorIndexInput) {
+    rotatorIndexInput.addEventListener('input', () => {
+        rotatorIndexInput.dataset.userModified = 'true';
+    });
+}
+
 const apertureDiameterInput = document.getElementById('aperture-diameter');
 if (apertureDiameterInput) {
     apertureDiameterInput.addEventListener('input', updateApertureAreaFromDiameter);
@@ -1132,6 +1142,7 @@ function updateZwoConfigFields() {
     const switchTypeGroup = document.getElementById('zwo-switch-type-group');
     const cameraFields = document.getElementById('zwo-camera-fields');
     const focuserFields = document.getElementById('zwo-focuser-fields');
+    const rotatorFields = document.getElementById('zwo-rotator-fields');
     if (!deviceTypeSelect || !switchTypeGroup) {
         return;
     }
@@ -1139,6 +1150,7 @@ function updateZwoConfigFields() {
     const isCamera = deviceType === 'camera';
     const isSwitch = deviceType === 'switch';
     const isFocuser = deviceType === 'focuser';
+    const isRotator = deviceType === 'rotator';
     switchTypeGroup.style.display = isSwitch ? 'block' : 'none';
 
     const showCameraFields = isCamera || isSwitch;
@@ -1149,6 +1161,10 @@ function updateZwoConfigFields() {
     if (focuserFields) {
         focuserFields.style.display = isFocuser ? 'block' : 'none';
         setFieldGroupEnabled(focuserFields, isFocuser);
+    }
+    if (rotatorFields) {
+        rotatorFields.style.display = isRotator ? 'block' : 'none';
+        setFieldGroupEnabled(rotatorFields, isRotator);
     }
 }
 
@@ -1213,6 +1229,19 @@ document.getElementById('device-form').addEventListener('submit', async function
                 const focuserId = Number.parseInt(focuserIdValue, 10);
                 if (!Number.isNaN(focuserId)) {
                     deviceData.focuserId = focuserId;
+                }
+            }
+        }
+        if (normalizedType === 'rotator') {
+            const rotatorIndex = Number.parseInt(formData.get('rotatorIndex'), 10);
+            if (!Number.isNaN(rotatorIndex)) {
+                deviceData.rotatorIndex = rotatorIndex;
+            }
+            const rotatorIdValue = formData.get('rotatorId');
+            if (rotatorIdValue !== null && rotatorIdValue !== undefined && rotatorIdValue !== '') {
+                const rotatorId = Number.parseInt(rotatorIdValue, 10);
+                if (!Number.isNaN(rotatorId)) {
+                    deviceData.rotatorId = rotatorId;
                 }
             }
         }
@@ -1318,6 +1347,10 @@ function renderDeviceSettings(config) {
         ['tcpPort', 'TCP Port'],
         ['cameraIndex', 'Camera Index'],
         ['cameraId', 'Camera ID'],
+        ['focuserIndex', 'Focuser Index'],
+        ['focuserId', 'Focuser ID'],
+        ['rotatorIndex', 'Rotator Index'],
+        ['rotatorId', 'Rotator ID'],
         ['apertureDiameter', 'Aperture Diameter (m)'],
         ['focalLength', 'Focal Length (m)'],
         ['responseTimeoutMs', 'Response Timeout (ms)'],

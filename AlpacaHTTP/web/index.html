@@ -154,6 +154,19 @@
                             <small>If set, overrides the focuser index.</small>
                         </div>
                     </div>
+
+                    <div id="zwo-rotator-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="rotator-index">Rotator Index:</label>
+                            <input type="number" id="rotator-index" name="rotatorIndex" value="0" min="0">
+                            <small>0-based index from the ZWO CAA SDK enumeration.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="rotator-id">Rotator ID (optional):</label>
+                            <input type="number" id="rotator-id" name="rotatorId" min="0">
+                            <small>If set, overrides the rotator index.</small>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="form-actions">

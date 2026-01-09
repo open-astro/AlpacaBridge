@@ -49,6 +49,7 @@
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
+#include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #endif
 
@@ -5754,6 +5755,34 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "zwo" && device_type_str == "rotator") {
+#ifdef ALPACACORE_ENABLE_ZWO
+        int rotator_id = config.value("rotatorId", -1);
+        int rotator_index = config.value("rotatorIndex", -1);
+
+        std::unique_ptr<alpacacore::RotatorDriver> rotator;
+        if (rotator_id >= 0) {
+            rotator = alpacacore::vendor::zwo::create_zwo_caa_rotator(device_number, rotator_id);
+        } else if (rotator_index >= 0) {
+            rotator = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(device_number, rotator_index);
+        } else {
+            error_message = "ZWO rotator requires rotatorIndex or rotatorId";
+            return false;
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(rotator.release()))) {
+            util::log_info("Registered ZWO CAA rotator");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "zwo" && device_type_str == "switch") {
 #ifdef ALPACACORE_ENABLE_ZWO
         std::string switch_type = config.value("switchType", "dewheater");
@@ -5823,6 +5852,8 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("switchType");
         copy_if_present("focuserIndex");
         copy_if_present("focuserId");
+        copy_if_present("rotatorIndex");
+        copy_if_present("rotatorId");
     }
 
     copy_if_present("responseTimeoutMs");

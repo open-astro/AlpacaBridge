@@ -48,6 +48,9 @@ The ZWO SDK is vendored as a minimal subset in `external/ASI_Camera_SDK/`, so
 no manual download is required for standard builds. If you need to update the
 SDK version, replace only the allowlisted files and keep the set minimal.
 
+ZWO CAA and EAF SDK subsets are vendored in `external/ZWO/CAA/` and `external/ZWO/EAF/`
+for the rotator and focuser drivers.
+
 ## Building Drivers
 
 For complete instructions on building vendor-specific drivers:

@@ -220,7 +220,7 @@ public:
     }
 
     double get_step_size() const override {
-        return 1.0;
+        return 0.0;
     }
 
     bool get_temp_comp_available() const override {

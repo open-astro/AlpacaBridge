@@ -63,7 +63,8 @@ Enable vendor-specific drivers by setting the appropriate CMake option:
 
 - `ALPACACORE_ENABLE_ZWO`: Enable ZWO vendor support (default: OFF)
   - Uses the vendored ZWO SDK subsets in `external/ASI_Camera_SDK/` and `external/ZWO/EAF/`
-  - Supports Camera, Switch (dew heater), and Focuser (EAF) device types
+  - Uses the vendored ZWO CAA SDK subset in `external/ZWO/CAA/`
+  - Supports Camera, Switch (dew heater), Focuser (EAF), and Rotator (CAA) device types
   - See [external/README.md](../../external/README.md) for SDK notes
   - See [SUPPORTED-DRIVERS.md](../../SUPPORTED-DRIVERS.md) for validated devices
 
