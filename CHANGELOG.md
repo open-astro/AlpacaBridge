@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.7.0] - 2026-01-09
+
+### Added
+- **ZWO CAA Rotator Driver** (AlpacaCore)
+  - Complete ZWO CAA (Camera Angle Adjuster) rotator driver implementation with full ASCOM Alpaca Rotator API support
+  - SDK wrapper layer for ZWO CAA SDK Version 1.5.9
+  - Support for USB connection via libusb-1.0
+  - Comprehensive rotator property support (position, mechanical position, target position, step size, reverse, etc.)
+  - Absolute position control with mechanical position support
+  - Rotator movement control (move absolute, move, move mechanical, halt)
+  - Position synchronization with sync offset support
+  - Device state telemetry and connection management
+  - Asynchronous connection/disconnection support
+  - Rotator binding via `rotatorId` or `rotatorIndex` configuration
+  - ConformU validated for CAA on macOS (arm64) with 0 errors and 0 issues
+- **Rotator Device Support** (AlpacaHTTP)
+  - Complete Rotator device method routing and dispatch
+  - Support for all ASCOM Alpaca Rotator API methods
+  - ZWO CAA rotator device registration and configuration
+  - Rotator device discovery and management via web UI
+  - Smart auto-numbering for rotator device numbers and indices
+
+### Changed
+- **Device Registration** (AlpacaHTTP)
+  - Enhanced ZWO CAA rotator device registration with validation
+  - Rotator device registration with rotator binding support
+  - Improved device configuration validation for rotator devices
+  - Smart rotator index auto-fill in web UI
+- **Web UI Enhancements** (AlpacaHTTP)
+  - Rotator device type support in device configuration
+  - ZWO rotator index and ID configuration fields
+  - Auto-fill support for rotator indices
+  - Enhanced vendor-specific configuration UI for ZWO rotators
+- **Documentation** (AlpacaCore)
+  - Updated SUPPORTED-DRIVERS.md with ZWO CAA rotator information
+  - Reordered all driver sections to match ASCOM API device type order (Camera, CoverCalibrator, Dome, FilterWheel, Focuser, ObservingConditions, Rotator, SafetyMonitor, Switch, Telescope)
+  - Added placeholders for all ASCOM device types not yet implemented
+  - Documented CAA SDK version and platform support
+  - Added Linux USB permissions documentation for CAA devices
+
 ## [0.6.1] - 2026-01-08
 
 ### Added

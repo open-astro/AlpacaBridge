@@ -15,3 +15,5 @@ Additional project notes:
 - ConformU logs live under `AlpacaCore/conformu/`; Windows logs are prefixed with `W-` for comparison.
 - On macOS, the ZWO SDK links against libusb even if the camera appears in System Report.
 - When building a driver, also build the test targets so they can be exercised via `run_all_tests.cmd` and `run_all_tests.sh`.
+- When adding a new vendor/device type, update AlpacaHTTP router registration plus web UI fields and config sanitization (vendor registration alone isn't enough to appear in the HTTP UI).
+- If vendor SDKs are linked via pkg-config, prefer the imported target (e.g., `PkgConfig::LIBUSB`) so test binaries link with correct `-L` paths.

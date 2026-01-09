@@ -37,23 +37,20 @@ This document lists all hardware vendors and device types that are verified to w
 - **Linux USB Permissions**: Install `lib/linux/asi.rules` udev rules for USB device access
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
 - **EAF SDK**: ZWO EAF Focuser SDK Version 1.7.7 (build target)
+- **CAA SDK**: ZWO CAA SDK Version 1.5.9 (build target)
 - **Verified OS/Arch**: macOS (arm64) (ConformU validated)
 
-## Switch Drivers
+## CoverCalibrator Drivers
 
-### ZWO
+*No drivers currently available.*
 
-| Device Type | Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARM) | Status |
-|-------------|--------------|------------|------------------|----------------|------------------|---------------|----------------|--------|
-| Dew Heater | ASI2600MC Pro | USB (via Camera) | | | ✓ | | | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MC%20Pro/switch-dew%20heater/) |
-| Dew Heater | ASI2600MM Pro | USB (via Camera) | | | ✓ | | | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MM%20Pro/switch-dew%20heater/) |
+## Dome Drivers
 
-### ZWO Switch Driver Notes
+*No drivers currently available.*
 
-- **Device Type**: Dew Heater (`switchType: dewheater`)
-- **Connection**: Exposed as a Switch device when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`
-- **Binding**: Use `cameraId` or `cameraIndex` to bind to the target camera
-- **Verified OS/Arch**: macOS (arm64) (ConformU validated)
+## FilterWheel Drivers
+
+*No drivers currently available.*
 
 ## Focuser Drivers
 
@@ -74,7 +71,48 @@ This document lists all hardware vendors and device types that are verified to w
 - **Binding**: Use `focuserId` or `focuserIndex` to bind to the target focuser
 - **Verified OS/Arch**: macOS (arm64) (ConformU validated)
 
-## Telescope/Mount Drivers
+## ObservingConditions Drivers
+
+*No drivers currently available.*
+
+## Rotator Drivers
+
+### ZWO
+
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARM) | Status |
+|--------------|------------|------------------|----------------|------------------|---------------|----------------|--------|
+| CAA | USB | | | ✓ | | | [ConformU Validation](conformu/ZWO/CAA/) |
+
+### ZWO Rotator Driver Notes
+
+- **SDK**: ZWO CAA SDK Version 1.5.9 (build target)
+- **Connection**: USB (requires libusb-1.0 on macOS and Linux)
+- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (x64, arm64), Linux (x64, x86, armv6, armv7, armv8)
+- **Linux USB Permissions**: Install `lib/linux/caa.rules` udev rules for USB device access
+- **Binding**: Use `rotatorId` or `rotatorIndex` to bind to the target rotator
+- **Verified OS/Arch**: macOS (arm64) (ConformU validated)
+
+## SafetyMonitor Drivers
+
+*No drivers currently available.*
+
+## Switch Drivers
+
+### ZWO
+
+| Device Type | Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARM) | Status |
+|-------------|--------------|------------|------------------|----------------|------------------|---------------|----------------|--------|
+| Dew Heater | ASI2600MC Pro | USB (via Camera) | | | ✓ | | | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MC%20Pro/switch-dew%20heater/) |
+| Dew Heater | ASI2600MM Pro | USB (via Camera) | | | ✓ | | | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MM%20Pro/switch-dew%20heater/) |
+
+### ZWO Switch Driver Notes
+
+- **Device Type**: Dew Heater (`switchType: dewheater`)
+- **Connection**: Exposed as a Switch device when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`
+- **Binding**: Use `cameraId` or `cameraIndex` to bind to the target camera
+- **Verified OS/Arch**: macOS (arm64) (ConformU validated)
+
+## Telescope Drivers
 
 ### iOptron
 

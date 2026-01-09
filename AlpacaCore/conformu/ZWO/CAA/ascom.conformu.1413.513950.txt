@@ -1,0 +1,149 @@
+14:13:51.396 ASCOM Universal Device Conformance Checker Version 4.1.0.34701, Build time: Tue 17 December 2024 07:03:29          
+14:13:51.403                                              
+14:13:51.403 Operating system is Darwin 25.2.0 Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:56 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T6041, Processor is ARM 64bit, Application is 64bit.          
+14:13:51.403                                              
+14:13:51.404 Alpaca device: ZWO CAA (192.168.1.206:6800 Rotator/0)          
+14:13:51.404                                              
+14:13:51.410 CreateDevice                        INFO     Creating Alpaca device: IP address: 192.168.1.206, IP Port: 6800, Alpaca device number: 0
+14:13:51.416 CreateDevice                        INFO     Alpaca device created OK
+14:13:51.417 CreateDevice                        INFO     Successfully created driver
+14:13:52.465 CreateDevice                        OK       Found a valid interface version: 3
+14:13:52.466 CreateDevice                        OK       Driver instance created successfully
+14:13:52.466                                              
+14:13:52.466 Connect to device                            
+14:13:54.177 Connected                           OK       Connected to device successfully using Connected = True
+14:13:54.178                                              
+14:13:54.182 Common Driver Methods                        
+14:13:54.183 InterfaceVersion                    OK       3
+14:13:54.186 Connected                           OK       True
+14:13:54.190 Description                         OK       ZWO CAA Rotator Driver
+14:13:54.191 DriverInfo                          OK       AlpacaCore ZWO CAA Rotator Driver
+14:13:54.194 DriverVersion                       OK       1.0.0
+14:13:54.195 Name                                OK       CAA
+14:13:54.195                                              
+14:13:54.196 Action                              INFO     Conform cannot test the Action method
+14:13:54.198 SupportedActions                    OK       Driver returned an empty action list
+14:13:54.198                                              
+14:13:54.198 DeviceState                         INFO     DeviceState tests omitted - DeviceState is not available in this interface version.
+14:13:54.198                                              
+14:13:54.198 Can Properties                               
+14:13:54.200 CanReverse                          OK       True
+14:13:54.200                                              
+14:13:54.200 Pre-run Checks                               
+14:13:54.409 Pre-run Check                       OK       Rotator is stationary
+14:13:54.422 Pre-run Check                       OK       Rotator initial position: 179.02
+14:13:54.424 Pre-run Check                       OK       Rotator initial mechanical position: 179.02, Initial sync offset: 0
+14:13:54.424                                              
+14:13:54.424 Properties                                   
+14:13:54.427 IsMoving                            OK       False
+14:13:54.430 Position                            OK       179.02
+14:13:54.431 TargetPosition                      OK       0
+14:13:54.432 StepSize                            OK       0
+14:13:54.434 Reverse Read                        OK       False
+14:13:54.846 Reverse Write                       OK       Reverse state successfully changed and restored
+14:13:54.848 MechanicalPosition                  OK       179.02
+14:13:54.848 MechanicalPosition                  INFO     Rotator sync offset: 0
+14:13:54.848                                              
+14:13:54.848 Methods                                      
+14:13:55.054 Halt                                OK       Halt command successful
+14:14:13.293 MoveAbsolute 45                     OK       Rotator is at the expected position: 45
+14:14:26.028 MoveAbsolute 135                    INFO     Rotator is 0.010 degrees from expected position: 134.99
+14:14:38.766 MoveAbsolute 225                    OK       Rotator is at the expected position: 225
+14:14:51.506 MoveAbsolute 315                    INFO     Rotator is 0.010 degrees from expected position: 314.99
+14:14:51.726 MoveAbsolute -405                   INFO     Rotator is 0.010 degrees from expected position: 314.99
+14:15:27.967 MoveAbsolute 405                    OK       Rotator is at the expected position: 45
+14:15:30.207 Move -10                            INFO     Rotator is 0.010 degrees from expected position: 34.99
+14:15:32.446 Move 10                             INFO     Rotator is 0.010 degrees from expected position: 44.98
+14:15:38.686 Move -40                            INFO     Rotator is 0.000 degrees from expected position: 4.98
+14:15:44.932 Move 40                             OK       Rotator is at the expected position: 44.98
+14:16:02.674 Move 130                            INFO     Rotator is 0.010 degrees from expected position: 174.97
+14:16:20.413 Move -130                           INFO     Rotator is 0.010 degrees from expected position: 44.96
+14:16:23.151 Move -375                           INFO     Rotator is 0.010 degrees from expected position: 29.95
+14:16:25.894 Move 375                            INFO     Rotator is 0.010 degrees from expected position: 44.94
+14:16:26.119 MoveMechanical 45                   OK       Rotator is at the expected position: 45
+14:16:38.857 MoveMechanical 135                  INFO     Rotator is 0.010 degrees from expected position: 134.99
+14:16:51.594 MoveMechanical 225                  OK       Rotator is at the expected position: 225
+14:17:04.331 MoveMechanical 315                  INFO     Rotator is 0.010 degrees from expected position: 314.99
+14:17:04.551 MoveMechanical -405                 INFO     Rotator is 0.010 degrees from expected position: 314.99
+14:17:40.791 MoveMechanical 405                  OK       Rotator is at the expected position: 45
+14:17:47.528 Sync 90                             OK       Rotator is at the expected position: 90
+14:17:47.536 Sync                                OK       Synced OK
+14:17:47.538 Sync                                OK       Rotator Position has synced to 90 OK.
+14:17:47.756 Sync 90                             OK       Rotator is at the expected position: 90
+14:17:47.765 Sync                                OK       Synced OK
+14:17:47.772 Sync                                OK       Rotator Position has synced to 120 OK.
+14:17:47.989 Sync 90                             OK       Rotator is at the expected position: 90
+14:17:47.997 Sync                                OK       Synced OK
+14:17:48.000 Sync                                OK       Rotator Position has synced to 60 OK.
+14:18:00.738 Sync 0                              OK       Rotator is at the expected position: 0
+14:18:00.745 Sync                                OK       Synced OK
+14:18:00.747 Sync                                OK       Rotator Position has synced to 0 OK.
+14:18:00.967 Sync 0                              OK       Rotator is at the expected position: 0
+14:18:00.976 Sync                                OK       Synced OK
+14:18:00.980 Sync                                OK       Rotator Position has synced to 30 OK.
+14:18:01.197 Sync 0                              OK       Rotator is at the expected position: 0
+14:18:01.203 Sync                                OK       Synced OK
+14:18:01.207 Sync                                OK       Rotator Position has synced to 330 OK.
+14:18:01.207                                              
+14:18:01.208 Post-run Checks                              
+14:18:01.213 Post-run Check                      OK       Current position: 330
+14:18:01.215 Post-run Check                      OK       Current mechanical position: 0
+14:18:01.215 Post-run Check                      OK       New sync position: 0
+14:18:01.216 Post-run Check                      OK       Completed Sync (0 degrees) from position: 330 to 0
+14:18:01.218 Post-run Check                      OK       New current position: 0
+14:18:25.450 Post-run Check                      OK       Rotator starting position successfully restored to 179.02
+14:18:25.450                                              
+14:18:25.453 Disconnect from device                       
+14:18:25.874 Connected                           OK       False
+14:18:25.875                                              
+14:18:25.876 Conformance test has finished                
+14:18:25.876                                              
+14:18:25.879 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+14:18:25.879                                              
+14:18:25.880 Timing Summary                               See Help for further information.
+14:18:25.880 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+14:18:25.881 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+14:18:25.881 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+14:18:25.881 Timing Summary                               The log shows good and bad timings.
+14:18:25.881                                              
+14:18:25.882 InterfaceVersion                             At 14:13:54.183 InterfaceVersion         0.000 seconds. ✓ (FAST)
+14:18:25.882 Connected                                    At 14:13:54.186 Connected                0.002 seconds. ✓ (FAST)
+14:18:25.882 Description                                  At 14:13:54.190 Description              0.003 seconds. ✓ (FAST)
+14:18:25.882 DriverInfo                                   At 14:13:54.191 DriverInfo               0.001 seconds. ✓ (FAST)
+14:18:25.882 DriverVersion                                At 14:13:54.194 DriverVersion            0.002 seconds. ✓ (FAST)
+14:18:25.882 Name                                         At 14:13:54.195 Name                     0.001 seconds. ✓ (FAST)
+14:18:25.882 SupportedActions                             At 14:13:54.198 SupportedActions         0.002 seconds. ✓ (FAST)
+14:18:25.882 CanReverse                                   At 14:13:54.200 CanReverse               0.001 seconds. ✓ (FAST)
+14:18:25.882 Position                                     At 14:13:54.430 Position                 0.002 seconds. ✓ (FAST)
+14:18:25.882 TargetPosition                               At 14:13:54.431 TargetPosition           0.002 seconds. ✓ (FAST)
+14:18:25.882 StepSize                                     At 14:13:54.432 StepSize                 0.001 seconds. ✓ (FAST)
+14:18:25.882 Reverse                                      At 14:13:54.434 Reverse                  0.002 seconds. ✓ (FAST)
+14:18:25.882 Reverse                                      At 14:13:54.848 Reverse                  0.002 seconds. ✓ (STANDARD)
+14:18:25.882 MoveAbsolute 45                              At 14:13:55.269 MoveAbsolute 45          0.209 seconds. ✓ (STANDARD)
+14:18:25.883 MoveAbsolute 135                             At 14:14:13.504 MoveAbsolute 135         0.206 seconds. ✓ (STANDARD)
+14:18:25.883 MoveAbsolute 225                             At 14:14:26.246 MoveAbsolute 225         0.209 seconds. ✓ (STANDARD)
+14:18:25.883 MoveAbsolute 315                             At 14:14:38.983 MoveAbsolute 315         0.209 seconds. ✓ (STANDARD)
+14:18:25.883 MoveAbsolute -405                            At 14:14:51.720 MoveAbsolute -405        0.208 seconds. ✓ (STANDARD)
+14:18:25.883 MoveAbsolute 405                             At 14:14:51.945 MoveAbsolute 405         0.212 seconds. ✓ (STANDARD)
+14:18:25.883 Move -10                                     At 14:15:28.187 Move -10                 0.210 seconds. ✓ (STANDARD)
+14:18:25.883 Move 10                                      At 14:15:30.424 Move 10                  0.210 seconds. ✓ (STANDARD)
+14:18:25.883 Move -40                                     At 14:15:32.664 Move -40                 0.209 seconds. ✓ (STANDARD)
+14:18:25.883 Move 40                                      At 14:15:38.908 Move 40                  0.209 seconds. ✓ (STANDARD)
+14:18:25.883 Move 130                                     At 14:15:45.153 Move 130                 0.210 seconds. ✓ (STANDARD)
+14:18:25.883 Move -130                                    At 14:16:02.891 Move -130                0.210 seconds. ✓ (STANDARD)
+14:18:25.886 Move -375                                    At 14:16:20.628 Move -375                0.209 seconds. ✓ (STANDARD)
+14:18:25.887 Move 375                                     At 14:16:23.371 Move 375                 0.214 seconds. ✓ (STANDARD)
+14:18:25.887 MoveMechanical 45                            At 14:16:26.113 MoveMechanical 45        0.207 seconds. ✓ (STANDARD)
+14:18:25.887 MoveMechanical 135                           At 14:16:26.337 MoveMechanical 135       0.208 seconds. ✓ (STANDARD)
+14:18:25.887 MoveMechanical 225                           At 14:16:39.073 MoveMechanical 225       0.209 seconds. ✓ (STANDARD)
+14:18:25.887 MoveMechanical 315                           At 14:16:51.810 MoveMechanical 315       0.210 seconds. ✓ (STANDARD)
+14:18:25.887 MoveMechanical -405                          At 14:17:04.545 MoveMechanical -405      0.208 seconds. ✓ (STANDARD)
+14:18:25.887 MoveMechanical 405                           At 14:17:04.771 MoveMechanical 405       0.208 seconds. ✓ (STANDARD)
+14:18:25.887 Sync 90                                      At 14:17:41.004 Sync 90                  0.207 seconds. ✓ (STANDARD)
+14:18:25.887 Sync 90                                      At 14:17:47.750 Sync 90                  0.207 seconds. ✓ (STANDARD)
+14:18:25.887 Sync 90                                      At 14:17:47.983 Sync 90                  0.203 seconds. ✓ (STANDARD)
+14:18:25.887 Sync 0                                       At 14:17:48.216 Sync 0                   0.208 seconds. ✓ (STANDARD)
+14:18:25.887 Sync 0                                       At 14:18:00.961 Sync 0                   0.208 seconds. ✓ (STANDARD)
+14:18:25.887 Sync 0                                       At 14:18:01.192 Sync 0                   0.205 seconds. ✓ (STANDARD)
+14:18:25.887                                              
+14:18:25.888 Congratulations, all members returned within their target response times!!          
