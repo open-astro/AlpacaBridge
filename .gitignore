@@ -32,9 +32,6 @@ cmake_install.cmake
 *.dylib
 *.dll
 *.exe
-!AlpacaCore/external/ASI_Camera_SDK/lib/**/*.a
-!AlpacaCore/external/ASI_Camera_SDK/lib/**/*.lib
-!AlpacaCore/external/ASI_Camera_SDK/lib/**/*.dll
 
 # IDE
 .vscode/

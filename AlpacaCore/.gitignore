@@ -40,20 +40,6 @@ Thumbs.db
 *.gcno
 
 # Vendor SDKs - exclude all files except documentation
-# Exclude all files in vendor subdirectories
-external/*/*
-# But allow markdown documentation files
-!external/README.md
-!external/*.md
-!external/*/*.md
-!external/*/README.md
-!external/**/.gitkeep
-!external/ASI_Camera_SDK/README.md
-!external/ASI_Camera_SDK/license.txt
-!external/ASI_Camera_SDK/include/
-!external/ASI_Camera_SDK/include/ASICamera2.h
-!external/ASI_Camera_SDK/lib/
-!external/ASI_Camera_SDK/lib/**
 # Explicitly exclude .DS_Store files even in allowed directories
 external/**/.DS_Store
 external/**/.DS_Store?
