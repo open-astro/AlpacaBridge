@@ -142,6 +142,24 @@
                         </div>
                     </div>
 
+                    <div id="zwo-filterwheel-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="filterwheel-index">Filter Wheel Index:</label>
+                            <input type="number" id="filterwheel-index" name="filterwheelIndex" value="0" min="0">
+                            <small>0-based index from the ZWO EFW SDK enumeration.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="filterwheel-id">Filter Wheel ID (optional):</label>
+                            <input type="number" id="filterwheel-id" name="filterwheelId" min="0">
+                            <small>If set, overrides the filter wheel index.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="filterwheel-names">Filter Names (optional):</label>
+                            <textarea id="filterwheel-names" name="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                            <small>One name per line. Provide the same number of names as filter slots.</small>
+                        </div>
+                    </div>
+
                     <div id="zwo-focuser-fields" style="display: none;">
                         <div class="form-group">
                             <label for="focuser-index">Focuser Index:</label>
