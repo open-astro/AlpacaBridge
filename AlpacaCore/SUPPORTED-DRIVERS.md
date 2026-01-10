@@ -14,6 +14,12 @@ This document lists all hardware vendors and device types that are verified to w
   - **USB/Serial**: USB-to-serial adapter or direct serial connection
   - **Ethernet**: Network-based connection (TCP/IP)
 
+- **ZWO SDK Versions** (for reference):
+  - **ASI Camera SDK**: Version 1.40 (build target)
+  - **EAF Focuser SDK**: Version 1.7.7 (build target)
+  - **CAA Rotator SDK**: Version 1.5.9 (build target)
+  - **EFW FilterWheel SDK**: Version 1.8.4 (build target)
+
 
 ## Camera Drivers
 
@@ -36,8 +42,6 @@ This document lists all hardware vendors and device types that are verified to w
 - **Supported Platforms (SDK)**: Windows (x64, x86), macOS (x64, arm64), Linux (x64, x86, armv6, armv7, armv8)
 - **Linux USB Permissions**: Install `lib/linux/asi.rules` udev rules for USB device access
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
-- **EAF SDK**: ZWO EAF Focuser SDK Version 1.7.7 (build target)
-- **CAA SDK**: ZWO CAA SDK Version 1.5.9 (build target)
 - **Verified OS/Arch**: macOS (arm64) (ConformU validated)
 
 ## CoverCalibrator Drivers
@@ -50,7 +54,20 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## FilterWheel Drivers
 
-*No drivers currently available.*
+### ZWO
+
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARM) | Status |
+|--------------|------------|------------------|----------------|------------------|---------------|----------------|--------|
+| EFW | USB | | | ✓ | | | [ConformU Validation 2026-01-10](conformu/ZWO/EFW/) |
+
+### ZWO FilterWheel Driver Notes
+
+- **SDK**: ZWO EFW SDK Version 1.8.4 (build target)
+- **Connection**: USB (requires libusb-1.0 on macOS and Linux)
+- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (x64, arm64), Linux (x64, x86, armv6, armv7, armv8)
+- **Linux USB Permissions**: Install `lib/efw.rules` udev rules for USB device access
+- **Binding**: Use `filterwheelId` or `filterwheelIndex` to bind to the target filter wheel
+- **Verified OS/Arch**: macOS (arm64) (ConformU validated)
 
 ## Focuser Drivers
 
@@ -81,7 +98,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARM) | Status |
 |--------------|------------|------------------|----------------|------------------|---------------|----------------|--------|
-| CAA | USB | | | ✓ | | | [ConformU Validation](conformu/ZWO/CAA/) |
+| CAA | USB | | | ✓ | | | [ConformU Validation 2026-01-09](conformu/ZWO/CAA/) |
 
 ### ZWO Rotator Driver Notes
 

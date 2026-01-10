@@ -551,6 +551,17 @@ function startEditDevice(device) {
     setFormValue('focal-length', config.focalLength);
     setFormValue('camera-index', config.cameraIndex);
     setFormValue('camera-id', config.cameraId);
+    setFormValue('filterwheel-index', config.filterwheelIndex);
+    setFormValue('filterwheel-id', config.filterwheelId);
+    const filterNamesField = document.getElementById('filterwheel-names');
+    if (filterNamesField) {
+        if (Array.isArray(config.filterNames)) {
+            filterNamesField.value = config.filterNames.join('\n');
+        } else {
+            filterNamesField.value = '';
+        }
+    }
+
     setFormValue('focuser-index', config.focuserIndex);
     setFormValue('focuser-id', config.focuserId);
     setFormValue('rotator-index', config.rotatorIndex);
@@ -1034,6 +1045,7 @@ function updateVendorOptions() {
     const isTelescope = deviceType === 'telescope';
     const isCamera = deviceType === 'camera';
     const isSwitch = deviceType === 'switch';
+    const isFilterWheel = deviceType === 'filterwheel';
     const isFocuser = deviceType === 'focuser';
     const isRotator = deviceType === 'rotator';
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
@@ -1043,7 +1055,7 @@ function updateVendorOptions() {
     }
     const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
     if (zwoOption) {
-        const zwoAllowed = isCamera || isSwitch || isFocuser || isRotator;
+        const zwoAllowed = isCamera || isSwitch || isFilterWheel || isFocuser || isRotator;
         zwoOption.disabled = !zwoAllowed;
         zwoOption.hidden = !zwoAllowed;
     }
@@ -1051,7 +1063,7 @@ function updateVendorOptions() {
     if (!isTelescope && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
     }
-    if (!isCamera && !isSwitch && !isFocuser && !isRotator && vendorSelect.value === 'zwo') {
+    if (!isCamera && !isSwitch && !isFilterWheel && !isFocuser && !isRotator && vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
     }
 
@@ -1092,6 +1104,13 @@ const cameraIndexInput = document.getElementById('camera-index');
 if (cameraIndexInput) {
     cameraIndexInput.addEventListener('input', () => {
         cameraIndexInput.dataset.userModified = 'true';
+    });
+}
+
+const filterwheelIndexInput = document.getElementById('filterwheel-index');
+if (filterwheelIndexInput) {
+    filterwheelIndexInput.addEventListener('input', () => {
+        filterwheelIndexInput.dataset.userModified = 'true';
     });
 }
 
@@ -1141,6 +1160,7 @@ function updateZwoConfigFields() {
     const deviceTypeSelect = document.getElementById('device-type');
     const switchTypeGroup = document.getElementById('zwo-switch-type-group');
     const cameraFields = document.getElementById('zwo-camera-fields');
+    const filterwheelFields = document.getElementById('zwo-filterwheel-fields');
     const focuserFields = document.getElementById('zwo-focuser-fields');
     const rotatorFields = document.getElementById('zwo-rotator-fields');
     if (!deviceTypeSelect || !switchTypeGroup) {
@@ -1149,6 +1169,7 @@ function updateZwoConfigFields() {
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
     const isCamera = deviceType === 'camera';
     const isSwitch = deviceType === 'switch';
+    const isFilterWheel = deviceType === 'filterwheel';
     const isFocuser = deviceType === 'focuser';
     const isRotator = deviceType === 'rotator';
     switchTypeGroup.style.display = isSwitch ? 'block' : 'none';
@@ -1157,6 +1178,10 @@ function updateZwoConfigFields() {
     if (cameraFields) {
         cameraFields.style.display = showCameraFields ? 'block' : 'none';
         setFieldGroupEnabled(cameraFields, showCameraFields);
+    }
+    if (filterwheelFields) {
+        filterwheelFields.style.display = isFilterWheel ? 'block' : 'none';
+        setFieldGroupEnabled(filterwheelFields, isFilterWheel);
     }
     if (focuserFields) {
         focuserFields.style.display = isFocuser ? 'block' : 'none';
@@ -1216,6 +1241,36 @@ document.getElementById('device-form').addEventListener('submit', async function
                 const cameraId = Number.parseInt(cameraIdValue, 10);
                 if (!Number.isNaN(cameraId)) {
                     deviceData.cameraId = cameraId;
+                }
+            }
+        }
+        if (normalizedType === 'filterwheel') {
+            const filterwheelIndex = Number.parseInt(formData.get('filterwheelIndex'), 10);
+            if (!Number.isNaN(filterwheelIndex)) {
+                deviceData.filterwheelIndex = filterwheelIndex;
+            }
+            const filterwheelIdValue = formData.get('filterwheelId');
+            if (filterwheelIdValue !== null && filterwheelIdValue !== undefined && filterwheelIdValue !== '') {
+                const filterwheelId = Number.parseInt(filterwheelIdValue, 10);
+                if (!Number.isNaN(filterwheelId)) {
+                    deviceData.filterwheelId = filterwheelId;
+                }
+            }
+            const filterNamesRaw = formData.get('filterNames');
+            if (filterNamesRaw) {
+                let names = filterNamesRaw
+                    .toString()
+                    .split(/\r?\n/)
+                    .map(name => name.trim())
+                    .filter(name => name.length > 0);
+                if (names.length === 1) {
+                    const candidate = names[0];
+                    if (candidate.length > 1 && !/[,\s;]/.test(candidate)) {
+                        names = candidate.split('');
+                    }
+                }
+                if (names.length > 0) {
+                    deviceData.filterNames = names;
                 }
             }
         }
@@ -1347,6 +1402,9 @@ function renderDeviceSettings(config) {
         ['tcpPort', 'TCP Port'],
         ['cameraIndex', 'Camera Index'],
         ['cameraId', 'Camera ID'],
+        ['filterwheelIndex', 'Filter Wheel Index'],
+        ['filterwheelId', 'Filter Wheel ID'],
+        ['filterNames', 'Filter Names'],
         ['focuserIndex', 'Focuser Index'],
         ['focuserId', 'Focuser ID'],
         ['rotatorIndex', 'Rotator Index'],
