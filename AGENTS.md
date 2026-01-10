@@ -17,3 +17,5 @@ Additional project notes:
 - When building a driver, also build the test targets so they can be exercised via `run_all_tests.cmd` and `run_all_tests.sh`.
 - When adding a new vendor/device type, update AlpacaHTTP router registration plus web UI fields and config sanitization (vendor registration alone isn't enough to appear in the HTTP UI).
 - If vendor SDKs are linked via pkg-config, prefer the imported target (e.g., `PkgConfig::LIBUSB`) so test binaries link with correct `-L` paths.
+- Filter wheel DeviceState should only include operational fields (e.g., Position); omit Connected to satisfy ConformU.
+- Filter wheel Names must be non-empty; default to "Filter 1..N" and allow setting names/offsets while disconnected.
