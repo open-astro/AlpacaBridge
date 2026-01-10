@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.8.0] - 2026-01-10
+
+### Added
+- **ZWO EFW Filter Wheel Driver** (AlpacaCore)
+  - Complete ZWO EFW (Electronic Filter Wheel) driver implementation with full ASCOM Alpaca FilterWheel API support
+  - SDK wrapper layer for ZWO EFW SDK Version 1.8.4
+  - Support for USB connection via libusb-1.0
+  - Comprehensive filter wheel property support (position, names, focus offsets, slot count)
+  - Position control with slot count validation
+  - Filter name and focus offset management
+  - Device state telemetry and connection management
+  - Asynchronous connection/disconnection support
+  - Filter wheel binding via `filterwheelId` or `filterwheelIndex` configuration
+  - ConformU validated for EFW on macOS (arm64) with 0 errors and 0 issues
+- **FilterWheel Device Support** (AlpacaHTTP)
+  - Complete FilterWheel device method routing and dispatch
+  - Support for all ASCOM Alpaca FilterWheel API methods (position, names, focusoffsets)
+  - ZWO EFW filter wheel device registration and configuration
+  - Filter wheel device discovery and management via web UI
+  - Smart auto-numbering for filter wheel device numbers and indices
+
+### Changed
+- **Device Registration** (AlpacaHTTP)
+  - Enhanced ZWO EFW filter wheel device registration with validation
+  - Filter wheel device registration with filter wheel binding support
+  - Improved device configuration validation for filter wheel devices
+  - Smart filter wheel index auto-fill in web UI
+- **Web UI Enhancements** (AlpacaHTTP)
+  - Filter wheel device type support in device configuration
+  - ZWO filter wheel index and ID configuration fields
+  - Filter names textarea input for custom filter naming
+  - Auto-fill support for filter wheel indices
+  - Enhanced vendor-specific configuration UI for ZWO filter wheels
+- **Build System** (AlpacaBridge)
+  - Updated `.gitignore` to allow `AlpacaCore/external/ZWO` folder and subfolders
+  - ZWO SDK files (CAA, EAF, and EFW) now included in repository for easier distribution
+
 ## [0.7.0] - 2026-01-09
 
 ### Added

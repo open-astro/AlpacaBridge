@@ -17,6 +17,7 @@
 #include <alpacahttp/util/logging_adapter.h>
 #include <alpacacore/device_registry.h>
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/alpaca_defs.h>
@@ -48,6 +49,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
+#include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
@@ -5727,6 +5729,43 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "zwo" && device_type_str == "filterwheel") {
+#ifdef ALPACACORE_ENABLE_ZWO
+        int wheel_id = config.value("filterwheelId", -1);
+        int wheel_index = config.value("filterwheelIndex", -1);
+
+        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
+        if (wheel_id >= 0) {
+            wheel = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(device_number, wheel_id);
+        } else if (wheel_index >= 0) {
+            wheel = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(device_number, wheel_index);
+        } else {
+            error_message = "ZWO filter wheel requires filterwheelIndex or filterwheelId";
+            return false;
+        }
+
+        if (config.contains("filterNames")) {
+            const auto& names_value = config.at("filterNames");
+            if (!names_value.is_array()) {
+                error_message = "ZWO filter wheel filterNames must be an array";
+                return false;
+            }
+            wheel->set_names(names_value.get<std::vector<std::string>>());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(wheel.release()))) {
+            util::log_info("Registered ZWO EFW filter wheel");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "zwo" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_ZWO
         int focuser_id = config.value("focuserId", -1);
@@ -5850,6 +5889,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
         copy_if_present("switchType");
+        copy_if_present("filterwheelIndex");
+        copy_if_present("filterwheelId");
+        copy_if_present("filterNames");
         copy_if_present("focuserIndex");
         copy_if_present("focuserId");
         copy_if_present("rotatorIndex");
