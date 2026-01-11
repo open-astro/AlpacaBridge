@@ -12,11 +12,7 @@
 
 #include <alpacahttp/discovery.h>
 #include <alpacahttp/util/logging_adapter.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <cerrno>
+#include <alpacahttp/util/socket_utils.h>
 #include <cstring>
 #include <sstream>
 
@@ -42,9 +38,9 @@ void Discovery::start() {
 
 void Discovery::stop() {
     running_ = false;
-    if (socket_fd_ >= 0) {
-        close(socket_fd_);
-        socket_fd_ = -1;
+    if (socket_fd_ != util::kInvalidSocket) {
+        util::socket_close(socket_fd_);
+        socket_fd_ = util::kInvalidSocket;
     }
     if (discovery_thread_.joinable()) {
         discovery_thread_.join();
@@ -52,8 +48,9 @@ void Discovery::stop() {
 }
 
 void Discovery::run_discovery() {
+    util::ensure_winsock();
     socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
-    if (socket_fd_ < 0) {
+    if (socket_fd_ == util::kInvalidSocket) {
         util::log_error("Failed to create discovery socket");
         running_ = false;
         return;
@@ -61,7 +58,8 @@ void Discovery::run_discovery() {
 
     // Set socket options for multicast
     int reuse = 1;
-    setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    const char* reuse_ptr = reinterpret_cast<const char*>(&reuse);
+    setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEADDR, reuse_ptr, sizeof(reuse));
 
     // Bind to discovery port
     struct sockaddr_in addr;
@@ -72,8 +70,8 @@ void Discovery::run_discovery() {
 
     if (bind(socket_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         util::log_error("Failed to bind discovery socket");
-        close(socket_fd_);
-        socket_fd_ = -1;
+        util::socket_close(socket_fd_);
+        socket_fd_ = util::kInvalidSocket;
         running_ = false;
         return;
     }
@@ -82,10 +80,11 @@ void Discovery::run_discovery() {
     struct ip_mreq mreq;
     mreq.imr_multiaddr.s_addr = inet_addr(ALPACA_DISCOVERY_MULTICAST_GROUP);
     mreq.imr_interface.s_addr = INADDR_ANY;
-    if (setsockopt(socket_fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+    const char* mreq_ptr = reinterpret_cast<const char*>(&mreq);
+    if (setsockopt(socket_fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq_ptr, sizeof(mreq)) < 0) {
         util::log_error("Failed to join multicast group");
-        close(socket_fd_);
-        socket_fd_ = -1;
+        util::socket_close(socket_fd_);
+        socket_fd_ = util::kInvalidSocket;
         running_ = false;
         return;
     }
@@ -96,12 +95,12 @@ void Discovery::run_discovery() {
     char buffer[1024];
     while (running_) {
         struct sockaddr_in sender_addr;
-        socklen_t sender_len = sizeof(sender_addr);
+        util::SocketLen sender_len = sizeof(sender_addr);
         
-        ssize_t bytes_received = recvfrom(
-            socket_fd_, buffer, sizeof(buffer) - 1, 0,
+        int bytes_received = static_cast<int>(recvfrom(
+            socket_fd_, buffer, static_cast<int>(sizeof(buffer) - 1), 0,
             (struct sockaddr*)&sender_addr, &sender_len
-        );
+        ));
 
         if (bytes_received > 0) {
             buffer[bytes_received] = '\0';
@@ -113,8 +112,8 @@ void Discovery::run_discovery() {
         }
     }
 
-    close(socket_fd_);
-    socket_fd_ = -1;
+    util::socket_close(socket_fd_);
+    socket_fd_ = util::kInvalidSocket;
     util::log_info("Discovery service stopped");
 }
 
@@ -135,16 +134,19 @@ void Discovery::handle_probe(const std::string& probe_data, const std::string& s
         target_addr.sin_addr.s_addr = inet_addr(sender_address.c_str());
         target_addr.sin_port = htons(sender_port);
 
-        ssize_t sent = sendto(
-            socket_fd_, json_response.c_str(), json_response.size(), 0,
+        const int payload_len = static_cast<int>(json_response.size());
+        int sent = static_cast<int>(sendto(
+            socket_fd_, json_response.c_str(), payload_len, 0,
             (struct sockaddr*)&target_addr, sizeof(target_addr)
-        );
+        ));
         
         if (sent > 0) {
             util::log_info("Discovery: Sent JSON response to " + sender_address + ":" + std::to_string(sender_port) + 
                           " (AlpacaPort=" + std::to_string(config_.http_port()) + ", " + std::to_string(sent) + " bytes)");
         } else {
-            util::log_error("Discovery: Failed to send response to " + sender_address + ":" + std::to_string(sender_port) + " - " + std::string(strerror(errno)));
+            int err = util::socket_get_last_error();
+            util::log_error("Discovery: Failed to send response to " + sender_address + ":" +
+                            std::to_string(sender_port) + " - " + util::socket_error_message(err));
         }
     } else {
         util::log_warning("Discovery: Received non-Alpaca probe from " + sender_address + ":" + std::to_string(sender_port));

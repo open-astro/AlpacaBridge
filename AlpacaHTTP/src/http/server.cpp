@@ -12,18 +12,14 @@
 
 #include <alpacahttp/server.h>
 #include <alpacahttp/util/logging_adapter.h>
+#include <alpacahttp/util/socket_utils.h>
 #include <alpacahttp/version.h>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <netinet/in.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <cerrno>
 #include <cstring>
 #include <algorithm>
 #include <queue>
 #include <atomic>
 #include <utility>
+#include <limits>
 
 namespace alpacahttp {
 
@@ -121,10 +117,10 @@ void Server::stop() {
     worker_threads_.clear();
     
     // Shutdown and close the server socket to interrupt accept() call
-    int fd = server_fd_.exchange(-1);
-    if (fd >= 0) {
-        shutdown(fd, SHUT_RDWR);  // Shutdown before close to ensure accept() wakes up
-        close(fd);
+    auto fd = server_fd_.exchange(util::kInvalidSocket);
+    if (fd != util::kInvalidSocket) {
+        util::socket_shutdown(fd);  // Shutdown before close to ensure accept() wakes up
+        util::socket_close(fd);
     }
     
     if (server_thread_.joinable()) {
@@ -144,8 +140,9 @@ void Server::wait() {
 }
 
 void Server::run_server() {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
+    util::ensure_winsock();
+    util::SocketHandle server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd == util::kInvalidSocket) {
         util::log_error("Failed to create socket");
         running_ = false;
         return;
@@ -156,19 +153,28 @@ void Server::run_server() {
 
     // Set socket options
     int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    const char* opt_ptr = reinterpret_cast<const char*>(&opt);
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, opt_ptr, sizeof(opt));
 
     // Bind socket
     struct sockaddr_in address;
     std::memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(config_.http_port());
+    const int port = config_.http_port();
+    if (port < 0 || port > static_cast<int>(std::numeric_limits<u_short>::max())) {
+        util::log_error("Invalid HTTP port: " + std::to_string(port));
+        util::socket_close(server_fd);
+        server_fd_.store(util::kInvalidSocket);
+        running_ = false;
+        return;
+    }
+    address.sin_port = htons(static_cast<u_short>(port));
 
     if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
         util::log_error("Failed to bind socket to port " + std::to_string(config_.http_port()));
-        close(server_fd);
-        server_fd_.store(-1);
+        util::socket_close(server_fd);
+        server_fd_.store(util::kInvalidSocket);
         running_ = false;
         return;
     }
@@ -176,8 +182,8 @@ void Server::run_server() {
     // Listen
     if (listen(server_fd, 10) < 0) {
         util::log_error("Failed to listen on socket");
-        close(server_fd);
-        server_fd_.store(-1);
+        util::socket_close(server_fd);
+        server_fd_.store(util::kInvalidSocket);
         running_ = false;
         return;
     }
@@ -203,19 +209,20 @@ void Server::run_server() {
         timeout.tv_sec = 0;
         timeout.tv_usec = 500000;  // 500ms timeout
         
-        int select_result = select(server_fd + 1, &read_fds, nullptr, nullptr, &timeout);
+        int select_result = util::socket_select(server_fd, &read_fds, nullptr, nullptr, &timeout);
         
         if (select_result < 0) {
             // Error in select
-            if (errno == EINTR) {
+            int err = util::socket_get_last_error();
+            if (util::socket_interrupted(err)) {
                 // Interrupted by signal - continue
                 continue;
-            } else if (errno == EBADF || errno == ENOTSOCK) {
+            } else if (util::socket_bad_descriptor(err) || util::socket_not_socket(err)) {
                 // Socket was closed - exit
                 break;
             } else {
                 if (running_) {
-                    util::log_error("Server select error: " + std::string(strerror(errno)));
+                    util::log_error("Server select error: " + util::socket_error_message(err));
                 }
                 break;
             }
@@ -227,19 +234,20 @@ void Server::run_server() {
         // Connection available - accept it
         if (FD_ISSET(server_fd, &read_fds)) {
             struct sockaddr_in client_address;
-            socklen_t client_len = sizeof(client_address);
+            util::SocketLen client_len = sizeof(client_address);
             
-            int client_fd = accept(server_fd, (struct sockaddr*)&client_address, &client_len);
-            if (client_fd < 0) {
-                if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+            util::SocketHandle client_fd = accept(server_fd, (struct sockaddr*)&client_address, &client_len);
+            if (client_fd == util::kInvalidSocket) {
+                int err = util::socket_get_last_error();
+                if (util::socket_interrupted(err) || util::socket_would_block(err)) {
                     // Interrupted or would block - continue
                     continue;
-                } else if (errno == EBADF || errno == ENOTSOCK) {
+                } else if (util::socket_bad_descriptor(err) || util::socket_not_socket(err)) {
                     // Socket was closed - exit
                     break;
                 } else {
                     if (running_) {
-                        util::log_error("Failed to accept connection: " + std::string(strerror(errno)));
+                        util::log_error("Failed to accept connection: " + util::socket_error_message(err));
                     }
                     continue;
                 }
@@ -255,17 +263,17 @@ void Server::run_server() {
     }
 
     // Clean up socket if not already closed
-    int fd = server_fd_.exchange(-1);
-    if (fd >= 0) {
-        close(fd);
+    auto fd = server_fd_.exchange(util::kInvalidSocket);
+    if (fd != util::kInvalidSocket) {
+        util::socket_close(fd);
     }
     util::log_info("Server stopped");
 }
 
-void Server::handle_connection(int socket_fd) {
+void Server::handle_connection(util::SocketHandle socket_fd) {
     // Read request
     char buffer[8192] = {0};
-    ssize_t bytes_read = read(socket_fd, buffer, sizeof(buffer) - 1);
+    int bytes_read = util::socket_recv(socket_fd, buffer, static_cast<int>(sizeof(buffer) - 1));
     if (bytes_read <= 0) {
         return;
     }
@@ -277,7 +285,7 @@ void Server::handle_connection(int socket_fd) {
         error_response.set_status(400, "Bad Request");
         error_response.set_body("Invalid request");
         std::string response_str = error_response.to_string();
-        write(socket_fd, response_str.c_str(), response_str.size());
+        util::socket_send(socket_fd, response_str.c_str(), static_cast<int>(response_str.size()));
         return;
     }
 
@@ -290,12 +298,12 @@ void Server::handle_connection(int socket_fd) {
 
     // Send response
     std::string response_str = response.to_string();
-    write(socket_fd, response_str.c_str(), response_str.size());
+    util::socket_send(socket_fd, response_str.c_str(), static_cast<int>(response_str.size()));
 }
 
 void Server::worker_thread() {
     while (true) {
-        int client_fd = -1;
+        util::SocketHandle client_fd = util::kInvalidSocket;
         
         // Wait for a connection to handle
         {
@@ -315,10 +323,10 @@ void Server::worker_thread() {
             }
         }
         
-        if (client_fd >= 0) {
+        if (client_fd != util::kInvalidSocket) {
             // Handle the connection
             handle_connection(client_fd);
-            close(client_fd);
+            util::socket_close(client_fd);
         }
     }
 }

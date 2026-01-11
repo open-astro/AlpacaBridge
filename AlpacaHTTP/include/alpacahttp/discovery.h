@@ -13,6 +13,7 @@
 #pragma once
 
 #include "config.h"
+#include <alpacahttp/util/socket_utils.h>
 #include <memory>
 #include <thread>
 #include <atomic>
@@ -39,7 +40,7 @@ private:
     Config config_;
     std::atomic<bool> running_{false};
     std::thread discovery_thread_;
-    int socket_fd_ = -1;
+    util::SocketHandle socket_fd_ = util::kInvalidSocket;
 
     void run_discovery();
     void handle_probe(const std::string& probe_data, const std::string& sender_address, std::uint16_t sender_port);

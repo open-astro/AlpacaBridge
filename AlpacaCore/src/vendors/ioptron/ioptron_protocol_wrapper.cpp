@@ -21,14 +21,21 @@
 #include <sstream>
 #include <iomanip>
 #include <cmath>
+#include <limits>
 #include <cstring>
 #include <ctime>
 
 // Platform-specific includes
 #ifdef _WIN32
-    #include <windows.h>
+    #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef NOMINMAX
+    #define NOMINMAX
+    #endif
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    #include <windows.h>
     #pragma comment(lib, "ws2_32.lib")
 #else
     #include <unistd.h>
@@ -395,6 +402,11 @@ private:
     bool connect_network(const std::string& host, int port) {
         ALPACA_LOG_INFO("iOptron", "connect_network() called with host: [" + host + "], port: " + std::to_string(port));
 #ifdef _WIN32
+        if (port < 0 || port > static_cast<int>(std::numeric_limits<u_short>::max())) {
+            ALPACA_LOG_ERROR("iOptron", "Network port out of range: " + std::to_string(port));
+            return false;
+        }
+        const u_short port_value = static_cast<u_short>(port);
         socket_handle_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (socket_handle_ == INVALID_SOCKET) {
             return false;
@@ -403,7 +415,7 @@ private:
         sockaddr_in addr{};
         std::memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
+        addr.sin_port = htons(port_value);
         
         // Resolve hostname
         addrinfo hints{};
@@ -421,7 +433,7 @@ private:
         addr.sin_addr = ((sockaddr_in*)result->ai_addr)->sin_addr;
         freeaddrinfo(result);
         
-        if (connect(socket_handle_, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+        if (::connect(socket_handle_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
             closesocket(socket_handle_);
             socket_handle_ = INVALID_SOCKET;
             return false;
@@ -487,9 +499,14 @@ private:
     
     bool write_serial(const std::string& data) {
 #ifdef _WIN32
+        const auto data_size = data.size();
+        if (data_size > std::numeric_limits<DWORD>::max()) {
+            return false;
+        }
+        const DWORD requested = static_cast<DWORD>(data_size);
         DWORD bytes_written = 0;
-        return WriteFile(serial_handle_, data.c_str(), data.length(), &bytes_written, nullptr) &&
-               bytes_written == data.length();
+        return WriteFile(serial_handle_, data.c_str(), requested, &bytes_written, nullptr) &&
+               bytes_written == requested;
 #else
         ssize_t bytes_written = write(serial_fd_, data.c_str(), data.length());
         return bytes_written == static_cast<ssize_t>(data.length());
@@ -498,8 +515,13 @@ private:
     
     bool write_network(const std::string& data) {
 #ifdef _WIN32
-        int bytes_sent = send(socket_handle_, data.c_str(), data.length(), 0);
-        return bytes_sent == static_cast<int>(data.length());
+        const auto data_size = data.size();
+        if (data_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            return false;
+        }
+        const int requested = static_cast<int>(data_size);
+        int bytes_sent = send(socket_handle_, data.c_str(), requested, 0);
+        return bytes_sent == requested;
 #else
         ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.length(), 0);
         return bytes_sent == static_cast<ssize_t>(data.length());
@@ -1223,10 +1245,14 @@ std::pair<double, double> iOptronProtocolWrapper::get_guide_rates() {
     double dec_rate = std::stod("0." + dec_str);
     
     // Suppress ABI change warning for std::pair return (C++14 vs C++17)
+    #if defined(__GNUC__) && !defined(_MSC_VER)
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wpsabi"
+    #endif
     return std::make_pair(ra_rate, dec_rate);
+    #if defined(__GNUC__) && !defined(_MSC_VER)
     #pragma GCC diagnostic pop
+    #endif
 }
 
 void iOptronProtocolWrapper::set_guide_rates(double ra_rate, double dec_rate) {

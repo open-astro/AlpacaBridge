@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.8.2] - 2026-01-12
+
+### Added
+- **Windows 11 x64 Platform Support** (AlpacaCore)
+  - Added Windows 11 x64 verification and testing documentation
+  - Windows support verified for all ZWO drivers (ASI cameras, EFW filter wheel, EAF focuser, CAA rotator)
+  - Windows support verified for iOptron telescope mounts
+  - Added Windows library binaries for ZWO CAA rotator SDK
+  - Windows driver requirement documentation for ZWO ASI cameras
+  - Updated SUPPORTED-DRIVERS.md with Windows 11 x64 platform support across all driver tables
+  - Added Windows Notes section to General Notes with USB and serial connection guidance
+- **Socket Utilities** (AlpacaHTTP)
+  - New `socket_utils.h` header for cross-platform socket operations
+
+### Changed
+- **Documentation** (AlpacaCore)
+  - Updated SUPPORTED-DRIVERS.md with Windows 11 x64 verification status for all drivers
+  - Added Windows driver requirement note for ZWO ASI cameras (driver must be installed from ZWO)
+  - Updated Verified OS/Arch entries to include Windows 11 (x64) for all tested drivers
+  - Removed EAF Pro from focuser table (not available for testing)
+  - Enhanced Windows Notes section with USB and serial connection information
+- **Build System** (AlpacaCore)
+  - Updated ZWO CMakeLists.txt to support Windows library binaries
+- **Discovery Protocol** (AlpacaHTTP)
+  - Enhanced discovery protocol implementation
+- **Server Implementation** (AlpacaHTTP)
+  - Improved server socket handling and utilities
+- **iOptron Protocol** (AlpacaCore)
+  - Enhanced iOptron protocol wrapper and telescope driver implementation
+- **Logging** (AlpacaCore)
+  - Improved logging implementation
+- **Build Scripts** (AlpacaBridge)
+  - Updated Windows build script (`build_and_run.cmd`)
+
 ## [0.8.1] - 2026-01-11
 
 ### Added
