@@ -50,6 +50,22 @@ When the server starts, it prints:
 - `ALPACACORE_ENABLE_ALL_VENDORS` (default: ON): set to OFF to disable vendor drivers.
 - `ALPACA_BUILD_CONFIG` (Windows only): set to `Debug` or `Release` for multi-config generators.
 
+## Installation (Linux)
+
+For Linux systems, you can use the installation script to build and install AlpacaCore and AlpacaHTTP as a systemd service.
+
+```bash
+chmod +x install_alpaca_service.sh
+./install_alpaca_service.sh install
+```
+
+### Commands
+
+- **`install`** - Builds AlpacaCore and AlpacaHTTP, installs udev rules, creates a systemd service, and starts the service
+- **`update`** - Stops the service, rebuilds the projects, and restarts the service
+- **`uninstall`** - Stops and disables the systemd service, removes the service file
+- **`status`** - Shows the current status of the AlpacaHTTP service
+
 ## Building Custom Drivers
 
 AlpacaBridge supports AI-assisted driver development, making it easy to build drivers for any vendor device. The workspace includes comprehensive guides and Cursor rules that help AI agents understand the architecture and build drivers following established patterns.

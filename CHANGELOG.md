@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.8.1] - 2026-01-11
+
+### Added
+- **Linux Installation Script** (AlpacaBridge)
+  - New `install_alpaca_service.sh` script for Linux (arm64) systems
+  - Supports `install`, `update`, `uninstall`, and `status` commands
+  - Automatically builds AlpacaCore and AlpacaHTTP, installs udev rules, and creates systemd service
+  - Configurable via environment variables (ALPACAHTTP_USE_BOOST_BEAST, ALPACACORE_ENABLE_ALL_VENDORS, ALPACA_INSTALL_UDEV_RULES, ALPACA_GIT_PULL, ALPACA_CLEAN_BUILD)
+  - Auto-detects CPU cores for parallel builds
+- **Linux ARMv8 Platform Support** (AlpacaCore)
+  - Added ARMv8 (arm64) Linux library binaries for all ZWO drivers (CAA, EAF, EFW)
+  - Marked Linux ARMv8 as tested and verified for all ZWO and iOptron drivers
+  - Updated SUPPORTED-DRIVERS.md with Linux ARMv8 verification status
+  - Added udev rules for ZWO CAA rotator devices
+- **Parallel Test Execution** (AlpacaBridge)
+  - Enabled parallel test execution in `run_all_tests.sh`
+  - Auto-detects CPU cores (sysctl on macOS, nproc on Linux)
+  - Uses parallel cmake builds and ctest execution for faster test runs
+
+### Changed
+- **Build System** (AlpacaCore)
+  - Added libudev dependency detection and linking for ZWO driver on Linux
+  - Prefer pkg-config for libudev detection, fallback to find_library
+  - Require libudev on Linux (non-Apple) platforms
+- **Build Scripts** (AlpacaBridge)
+  - Added automatic udev rules installation in `build_and_run.sh` for Linux
+  - Configurable via `ALPACA_INSTALL_UDEV_RULES` environment variable (default: ON)
+  - Automatically finds and installs all `.rules` files from `external/` directory
+  - Reloads udev rules and triggers after installation
+- **Test Infrastructure** (AlpacaCore)
+  - Updated all test files to use `catch2_compat.h` instead of `catch2/catch_all.hpp`
+  - Improved test compatibility and consistency across test suite
+- **Documentation** (AlpacaBridge)
+  - Added installation section to README.md with install script documentation
+  - Updated AGENTS.md with note about udev rules installation requirement
+  - Updated SUPPORTED-DRIVERS.md with Linux ARMv8 testing notes and verification status
+- **Git Configuration** (AlpacaCore)
+  - Added vendor SDK allowlist rules in `.gitignore` for ZWO SDK directories (CAA, EFW, EAF)
+  - Allows vendor SDK files to be tracked in repository for easier distribution
+
 ## [0.8.0] - 2026-01-10
 
 ### Added
