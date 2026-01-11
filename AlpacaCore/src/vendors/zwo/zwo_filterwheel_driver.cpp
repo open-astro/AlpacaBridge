@@ -198,7 +198,6 @@ public:
     }
 
     std::vector<int> get_focus_offsets() const override {
-        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         return focus_offsets_;
     }
@@ -212,7 +211,6 @@ public:
     }
 
     std::vector<std::string> get_names() const override {
-        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         return filter_names_;
     }

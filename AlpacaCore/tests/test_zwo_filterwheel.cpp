@@ -17,6 +17,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <functional>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -51,10 +52,12 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Disconnected Behavior", "[zwo][filterwh
 
     require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_position(0); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->get_focus_offsets(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->set_focus_offsets({0}); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->get_names(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->set_names({"L"}); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE(driver->get_focus_offsets().empty());
+    REQUIRE(driver->get_names().empty());
+    REQUIRE_NOTHROW(driver->set_focus_offsets({0}));
+    REQUIRE_NOTHROW(driver->set_names({"L"}));
+    REQUIRE(driver->get_focus_offsets() == std::vector<int>{0});
+    REQUIRE(driver->get_names() == std::vector<std::string>{"L"});
 
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
