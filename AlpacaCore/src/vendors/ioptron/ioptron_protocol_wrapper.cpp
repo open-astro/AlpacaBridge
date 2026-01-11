@@ -43,6 +43,24 @@
 
 namespace alpacacore::vendor::ioptron {
 
+namespace {
+
+std::string strip_status_prefix(std::string response) {
+    auto sign_pos = response.find_first_of("+-");
+    if (sign_pos == std::string::npos || sign_pos == 0) {
+        return response;
+    }
+    for (std::size_t i = 0; i < sign_pos; ++i) {
+        char ch = response[i];
+        if (ch != '0' && ch != '1') {
+            return response;
+        }
+    }
+    return response.substr(sign_pos);
+}
+
+} // namespace
+
 // PIMPL implementation class
 class iOptronProtocolWrapper::Impl {
 public:
@@ -507,7 +525,12 @@ private:
             
             if (got_char) {
                 last_char_time = std::chrono::steady_clock::now();
-                
+
+                // TCP bridges can insert CR/LF; ignore them to keep parsing aligned.
+                if (ch == '\r' || ch == '\n') {
+                    continue;
+                }
+
                 if (ch == '#') {
                     break;  // Command terminator found
                 }
@@ -721,13 +744,7 @@ MountInfo iOptronProtocolWrapper::get_mount_info() {
 Position iOptronProtocolWrapper::get_position() {
     std::string response = send_command(":GEP");
 
-    // Some mounts may leave a pending "0"/"1" response in the buffer (e.g. after :MS1).
-    // If we see a leading status digit before the sign, strip it to realign parsing.
-    if (response.size() >= 21 &&
-        (response[0] == '0' || response[0] == '1') &&
-        (response[1] == '+' || response[1] == '-')) {
-        response = response.substr(1);
-    }
+    response = strip_status_prefix(std::move(response));
     
     if (response.length() < 20) {
         throw AlpacaException("Invalid position response from mount");
@@ -757,11 +774,7 @@ Position iOptronProtocolWrapper::get_position() {
 AltAz iOptronProtocolWrapper::get_alt_az() {
     std::string response = send_command(":GAC");
 
-    if (response.size() >= 19 &&
-        (response[0] == '0' || response[0] == '1') &&
-        (response[1] == '+' || response[1] == '-')) {
-        response = response.substr(1);
-    }
+    response = strip_status_prefix(std::move(response));
     
     if (response.length() < 17) {
         throw AlpacaException("Invalid Alt/Az response from mount");
@@ -787,11 +800,7 @@ AltAz iOptronProtocolWrapper::get_alt_az() {
 MountStatus iOptronProtocolWrapper::get_status() {
     std::string response = send_command(":GLS");
 
-    if (response.size() >= 24 &&
-        (response[0] == '0' || response[0] == '1') &&
-        (response[1] == '+' || response[1] == '-')) {
-        response = response.substr(1);
-    }
+    response = strip_status_prefix(std::move(response));
     
     if (response.length() < 23) {
         throw AlpacaException("Invalid status response from mount");
@@ -818,16 +827,8 @@ SiteInfo iOptronProtocolWrapper::get_site_info() {
     std::string gls_response = send_command(":GLS");
     std::string gut_response = send_command(":GUT");
 
-    if (gls_response.size() >= 2 &&
-        (gls_response[0] == '0' || gls_response[0] == '1') &&
-        (gls_response[1] == '+' || gls_response[1] == '-')) {
-        gls_response = gls_response.substr(1);
-    }
-    if (gut_response.size() >= 2 &&
-        (gut_response[0] == '0' || gut_response[0] == '1') &&
-        (gut_response[1] == '+' || gut_response[1] == '-')) {
-        gut_response = gut_response.substr(1);
-    }
+    gls_response = strip_status_prefix(std::move(gls_response));
+    gut_response = strip_status_prefix(std::move(gut_response));
     
     if (gls_response.length() < 23 || gut_response.length() < 17) {
         throw AlpacaException("Invalid site info response from mount");
@@ -1085,6 +1086,7 @@ std::chrono::system_clock::time_point iOptronProtocolWrapper::get_utc_time() {
     // Some mounts reply to :GUT without a trailing '#', so allow responses
     // that omit the terminator.
     std::string response = send_command(":GUT", false);
+    response = strip_status_prefix(std::move(response));
     if (response.length() < 18) {
         throw AlpacaException("Invalid UTC time response from mount");
     }
