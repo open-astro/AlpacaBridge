@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_DIR="${ROOT_DIR}/AlpacaCore"
+HTTP_DIR="${ROOT_DIR}/AlpacaHTTP"
+SERVICE_NAME="alpacahttp.service"
+HTTP_BEAST="${ALPACAHTTP_USE_BOOST_BEAST:-OFF}"
+CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
+INSTALL_UDEV_RULES="${ALPACA_INSTALL_UDEV_RULES:-ON}"
+GIT_PULL="${ALPACA_GIT_PULL:-OFF}"
+CLEAN_BUILD="${ALPACA_CLEAN_BUILD:-OFF}"
+
+usage() {
+  cat <<'USAGE'
+Usage: install_alpaca_service.sh <install|update|uninstall|status>
+
+Environment overrides:
+  ALPACAHTTP_USE_BOOST_BEAST=ON|OFF
+  ALPACACORE_ENABLE_ALL_VENDORS=ON|OFF
+  ALPACA_INSTALL_UDEV_RULES=ON|OFF
+  ALPACA_GIT_PULL=ON|OFF          (update only)
+  ALPACA_CLEAN_BUILD=ON|OFF       (install/update)
+USAGE
+}
+
+ensure_repo_paths() {
+  if [[ ! -d "${CORE_DIR}" ]]; then
+    echo "AlpacaCore not found at ${CORE_DIR}"
+    exit 1
+  fi
+  if [[ ! -d "${HTTP_DIR}" ]]; then
+    echo "AlpacaHTTP not found at ${HTTP_DIR}"
+    exit 1
+  fi
+}
+
+require_linux() {
+  if [[ "${OSTYPE:-}" != "linux"* ]]; then
+    echo "This script is intended for Linux (arm64)."
+    exit 1
+  fi
+}
+
+detect_parallel() {
+  if command -v nproc >/dev/null 2>&1; then
+    echo "$(nproc)"
+  else
+    echo "4"
+  fi
+}
+
+install_udev_rules() {
+  if [[ "${INSTALL_UDEV_RULES}" != "ON" ]]; then
+    return
+  fi
+
+  RULES_SRC=()
+  while IFS= read -r -d '' rule; do
+    RULES_SRC+=("${rule}")
+  done < <(find "${CORE_DIR}/external" -name "*.rules" -type f -print0 | sort -z)
+
+  if [[ ${#RULES_SRC[@]} -eq 0 ]]; then
+    echo "No udev rules found under ${CORE_DIR}/external"
+    return
+  fi
+
+  for rule in "${RULES_SRC[@]}"; do
+    echo "Installing udev rule: ${rule}"
+    sudo install -m 644 "${rule}" /etc/udev/rules.d/
+  done
+
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger
+}
+
+clean_build_dir() {
+  local build_dir="$1"
+  if [[ -d "${build_dir}" ]]; then
+    rm -rf "${build_dir}"
+  fi
+}
+
+build_projects() {
+  local parallel
+  parallel="$(detect_parallel)"
+
+  if [[ "${CLEAN_BUILD}" == "ON" ]]; then
+    clean_build_dir "${CORE_DIR}/build"
+    clean_build_dir "${HTTP_DIR}/build"
+  fi
+
+  echo "== AlpacaCore =="
+  cmake -S "${CORE_DIR}" -B "${CORE_DIR}/build" \
+    -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}"
+  cmake --build "${CORE_DIR}/build" --parallel "${parallel}"
+
+  echo "== AlpacaHTTP =="
+  cmake -S "${HTTP_DIR}" -B "${HTTP_DIR}/build" \
+    -DALPACAHTTP_USE_BOOST_BEAST="${HTTP_BEAST}" \
+    -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}"
+  cmake --build "${HTTP_DIR}/build" --parallel "${parallel}"
+}
+
+write_service_unit() {
+  local user group
+  user="$(id -un)"
+  group="$(id -gn)"
+
+  sudo tee "/etc/systemd/system/${SERVICE_NAME}" >/dev/null <<EOF_UNIT
+[Unit]
+Description=AlpacaHTTP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${user}
+Group=${group}
+WorkingDirectory=${HTTP_DIR}
+ExecStart=${HTTP_DIR}/build/alpacahttp_server
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+
+  sudo systemctl daemon-reload
+}
+
+start_service() {
+  sudo systemctl enable "${SERVICE_NAME}"
+  sudo systemctl restart "${SERVICE_NAME}"
+}
+
+stop_service() {
+  if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    sudo systemctl stop "${SERVICE_NAME}"
+  fi
+}
+
+case "${1:-}" in
+  install)
+    require_linux
+    ensure_repo_paths
+    install_udev_rules
+    build_projects
+    write_service_unit
+    start_service
+    ;;
+  update)
+    require_linux
+    ensure_repo_paths
+    if [[ "${GIT_PULL}" == "ON" ]]; then
+      git -C "${ROOT_DIR}" pull
+    fi
+    stop_service
+    install_udev_rules
+    build_projects
+    start_service
+    ;;
+  uninstall)
+    require_linux
+    stop_service
+    if systemctl is-enabled --quiet "${SERVICE_NAME}"; then
+      sudo systemctl disable "${SERVICE_NAME}"
+    fi
+    if [[ -f "/etc/systemd/system/${SERVICE_NAME}" ]]; then
+      sudo rm -f "/etc/systemd/system/${SERVICE_NAME}"
+      sudo systemctl daemon-reload
+    fi
+    ;;
+  status)
+    require_linux
+    systemctl status "${SERVICE_NAME}" --no-pager
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

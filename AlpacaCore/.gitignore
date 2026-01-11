@@ -39,6 +39,12 @@ Thumbs.db
 *.gcda
 *.gcno
 
+# Vendored SDK allowlist (keep minimal subsets tracked)
+!external/ASI_Camera_SDK/**
+!external/ZWO/CAA/**
+!external/ZWO/EFW/**
+!external/ZWO/EAF/**
+
 # Vendor SDKs - exclude all files except documentation
 # Explicitly exclude .DS_Store files even in allowed directories
 external/**/.DS_Store

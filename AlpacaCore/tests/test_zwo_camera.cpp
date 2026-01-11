@@ -11,7 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <catch2/catch_all.hpp>
+#include "catch2_compat.h"
 
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 

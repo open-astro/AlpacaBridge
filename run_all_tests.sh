@@ -20,17 +20,27 @@ fi
 
 rm -rf "${CORE_DIR}/build" "${HTTP_DIR}/build"
 
+if [[ "${OSTYPE:-}" == "darwin"* ]]; then
+  PARALLEL="$(sysctl -n hw.ncpu)"
+else
+  if command -v nproc >/dev/null 2>&1; then
+    PARALLEL="$(nproc)"
+  else
+    PARALLEL="4"
+  fi
+fi
+
 echo "== AlpacaCore =="
 cmake -S "${CORE_DIR}" -B "${CORE_DIR}/build" \
   -DALPACACORE_BUILD_TESTS=ON \
   -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}"
-cmake --build "${CORE_DIR}/build"
-ctest --test-dir "${CORE_DIR}/build" --output-on-failure
+cmake --build "${CORE_DIR}/build" --parallel "${PARALLEL}"
+ctest --test-dir "${CORE_DIR}/build" --output-on-failure -j "${PARALLEL}"
 
 echo "== AlpacaHTTP =="
 cmake -S "${HTTP_DIR}" -B "${HTTP_DIR}/build" \
   -DALPACAHTTP_BUILD_TESTS=ON \
   -DALPACAHTTP_USE_BOOST_BEAST="${HTTP_BEAST}" \
   -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}"
-cmake --build "${HTTP_DIR}/build"
-ctest --test-dir "${HTTP_DIR}/build" --output-on-failure
+cmake --build "${HTTP_DIR}/build" --parallel "${PARALLEL}"
+ctest --test-dir "${HTTP_DIR}/build" --output-on-failure -j "${PARALLEL}"
