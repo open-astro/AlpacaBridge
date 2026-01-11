@@ -6,6 +6,7 @@ CORE_DIR="${ROOT_DIR}/AlpacaCore"
 HTTP_DIR="${ROOT_DIR}/AlpacaHTTP"
 HTTP_BEAST="${ALPACAHTTP_USE_BOOST_BEAST:-OFF}"
 CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
+INSTALL_UDEV_RULES="${ALPACA_INSTALL_UDEV_RULES:-ON}"
 
 if [[ ! -d "${CORE_DIR}" ]]; then
   echo "AlpacaCore not found at ${CORE_DIR}"
@@ -18,6 +19,19 @@ if [[ ! -d "${HTTP_DIR}" ]]; then
 fi
 
 rm -rf "${CORE_DIR}/build" "${HTTP_DIR}/build"
+
+if [[ "${INSTALL_UDEV_RULES}" == "ON" && "${OSTYPE:-}" == "linux"* ]]; then
+  RULES_SRC=()
+  while IFS= read -r -d '' rule; do
+    RULES_SRC+=("${rule}")
+  done < <(find "${CORE_DIR}/external" -name "*.rules" -type f -print0 | sort -z)
+  for rule in "${RULES_SRC[@]}"; do
+    echo "Installing udev rule: ${rule}"
+    sudo install -m 644 "${rule}" /etc/udev/rules.d/
+  done
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger
+fi
 
 if [[ "${OSTYPE:-}" == "darwin"* ]]; then
   PARALLEL="$(sysctl -n hw.ncpu)"
