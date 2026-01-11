@@ -15,6 +15,7 @@
 #include "config.h"
 #include "router.h"
 #include <alpacacore/managementdriver.h>
+#include <alpacahttp/util/socket_utils.h>
 #include <memory>
 #include <thread>
 #include <atomic>
@@ -59,18 +60,18 @@ private:
     Config config_;
     Router router_;
     std::atomic<bool> running_{false};
-    std::atomic<int> server_fd_{-1};
+    std::atomic<util::SocketHandle> server_fd_{util::kInvalidSocket};
     std::thread server_thread_;
     
     // Thread pool for handling concurrent requests
     std::vector<std::thread> worker_threads_;
-    std::queue<int> connection_queue_;
+    std::queue<util::SocketHandle> connection_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_condition_;
     bool shutdown_workers_{false};
 
     void run_server();
-    void handle_connection(int socket_fd);
+    void handle_connection(util::SocketHandle socket_fd);
     void worker_thread();
     void handle_shutdown_request();
     void handle_restart_request();

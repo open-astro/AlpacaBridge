@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <sstream>
 #include <algorithm>
 #include <thread>
@@ -442,7 +443,7 @@ public:
         aperture_diameter_m_ = meters;
         if (meters > 0.0) {
             double radius = meters / 2.0;
-            aperture_area_m2_ = M_PI * radius * radius;
+            aperture_area_m2_ = std::numbers::pi * radius * radius;
         } else {
             aperture_area_m2_ = 0.0;
         }
@@ -2332,8 +2333,8 @@ private:
                                                       double latitude_degrees,
                                                       double longitude_degrees,
                                                       std::chrono::system_clock::time_point utc_time) {
-        const double deg_to_rad = M_PI / 180.0;
-        const double rad_to_deg = 180.0 / M_PI;
+        const double deg_to_rad = std::numbers::pi / 180.0;
+        const double rad_to_deg = 180.0 / std::numbers::pi;
         const double alt_rad = altitude_degrees * deg_to_rad;
         const double az_rad = azimuth_degrees * deg_to_rad;
         const double lat_rad = latitude_degrees * deg_to_rad;
@@ -2355,7 +2356,7 @@ private:
             ha_rad = std::atan2(sin_h, cos_h);
         }
 
-        const double ha_hours = ha_rad * 12.0 / M_PI;
+        const double ha_hours = ha_rad * 12.0 / std::numbers::pi;
         const double lst_hours = compute_local_sidereal_time_hours(utc_time, longitude_degrees);
         const double ra_hours = normalize_ra_hours(lst_hours - ha_hours);
         const double dec_degrees = dec_rad * rad_to_deg;
