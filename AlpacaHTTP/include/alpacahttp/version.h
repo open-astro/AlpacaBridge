@@ -12,8 +12,11 @@
 
 #pragma once
 
+// ALPACAHTTP_VERSION is defined by CMake from the VERSION file
+// If this header is included without going through CMake, this will fail to compile
+// which is intentional - the version should always come from the VERSION file
 #ifndef ALPACAHTTP_VERSION
-#define ALPACAHTTP_VERSION "0.1.0"
+#error "ALPACAHTTP_VERSION must be defined by CMake. Ensure you're building through CMake."
 #endif
 
 namespace alpacahttp {

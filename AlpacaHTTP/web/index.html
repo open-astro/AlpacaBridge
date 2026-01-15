@@ -154,10 +154,28 @@
                             <small>If set, overrides the filter wheel index.</small>
                         </div>
                         <div class="form-group">
-                            <label for="filterwheel-names">Filter Names (optional):</label>
-                            <textarea id="filterwheel-names" name="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
-                            <small>One name per line. Provide the same number of names as filter slots.</small>
+                            <label for="filterwheel-slot-count">Filter Wheel Slots:</label>
+                            <div class="filterwheel-slot-controls">
+                                <select id="filterwheel-slot-count">
+                                    <option value="">Select slot count</option>
+                                    <option value="5">5 slots</option>
+                                    <option value="7">7 slots</option>
+                                    <option value="8">8 slots</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                                <input type="number" id="filterwheel-slot-custom" min="1" max="16" placeholder="Custom">
+                            </div>
+                            <small>Pick a slot count to build filter dropdowns, or leave blank to edit manually.</small>
                         </div>
+                        <div id="filterwheel-slot-list" class="filterwheel-slot-list"></div>
+                        <details class="filterwheel-advanced">
+                            <summary>Advanced: edit filter names as lines</summary>
+                            <div class="form-group">
+                                <label for="filterwheel-names">Filter Names (optional):</label>
+                                <textarea id="filterwheel-names" name="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                                <small>One name per line. Provide the same number of names as filter slots.</small>
+                            </div>
+                        </details>
                     </div>
 
                     <div id="zwo-focuser-fields" style="display: none;">
@@ -199,36 +217,57 @@
         <!-- Server Info Tab -->
         <div id="server-tab" class="tab-content">
             <h2>Server Information</h2>
-            <div id="server-info" class="info-box">
-                <p class="loading">Loading server information...</p>
+            <div id="server-info-section" class="section-card collapsed">
+                <div class="section-card-header">
+                    <h3>Server Info</h3>
+                    <button class="section-toggle" type="button" aria-expanded="false">
+                        <span class="section-toggle-icon" aria-hidden="true"></span>
+                        <span class="section-toggle-label">Details</span>
+                    </button>
+                </div>
+                <div class="section-card-body">
+                    <div id="server-info" class="info-box">
+                        <p class="loading">Loading server information...</p>
+                    </div>
+                    <p id="server-info-status" class="server-status"></p>
+                </div>
             </div>
-            <p id="server-info-status" class="server-status"></p>
-            <div class="log-control">
-                <div class="log-control-header">
-                    <div>
-                        <h3>Logging</h3>
-                        <p>Choose the minimum severity to include in server logs.</p>
-                    </div>
+            <div id="logging-section" class="section-card collapsed">
+                <div class="section-card-header">
+                    <h3>Logging</h3>
+                    <button class="section-toggle" type="button" aria-expanded="false">
+                        <span class="section-toggle-icon" aria-hidden="true"></span>
+                        <span class="section-toggle-label">Details</span>
+                    </button>
                 </div>
-                <p id="log-level-status" class="log-status">Detecting log level...</p>
-                <div class="log-levels">
-                    <div id="log-level-toggles" class="log-levels-grid"></div>
-                    <div class="log-download">
-                        <button class="btn btn-secondary" type="button" onclick="downloadLogs()">Download Logs</button>
-                    </div>
-                </div>
-                <div class="log-history">
-                    <div class="log-history-row">
-                        <div>
-                            <h4>Log history retention</h4>
-                            <p>Keep all log lines in memory until restart.</p>
+                <div class="section-card-body">
+                    <div class="log-control">
+                        <div class="log-control-header">
+                            <div>
+                                <p>Choose the minimum severity to include in server logs.</p>
+                            </div>
                         </div>
-                        <label class="switch">
-                            <input id="log-history-toggle" type="checkbox">
-                            <span class="slider round"></span>
-                        </label>
+                        <p id="log-level-status" class="log-status">Detecting log level...</p>
+                        <div class="log-levels">
+                            <div id="log-level-toggles" class="log-levels-grid"></div>
+                            <div class="log-download">
+                                <button class="btn btn-secondary" type="button" onclick="downloadLogs()">Download Logs</button>
+                            </div>
+                        </div>
+                        <div class="log-history">
+                            <div class="log-history-row">
+                                <div>
+                                    <h4>Log history retention</h4>
+                                    <p>Keep all log lines in memory until restart.</p>
+                                </div>
+                                <label class="switch">
+                                    <input id="log-history-toggle" type="checkbox">
+                                    <span class="slider round"></span>
+                                </label>
+                            </div>
+                            <p id="log-history-status" class="log-status">Detecting log history limit...</p>
+                        </div>
                     </div>
-                    <p id="log-history-status" class="log-status">Detecting log history limit...</p>
                 </div>
             </div>
             <div class="server-actions">

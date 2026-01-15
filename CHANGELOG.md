@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.8.3] - 2026-01-13
+
+### Changed
+- **Web UI Enhancements** (AlpacaHTTP)
+  - Added collapsible device cards with expand/collapse toggle buttons
+  - Improved device list organization with consistent device type ordering (telescope, camera, filterwheel, focuser, rotator, dome, switch)
+  - Enhanced device sorting by type, device number, and name
+  - Improved filter wheel configuration UI with slot count selector (5, 7, 8 slots, or custom)
+  - Added filter wheel preset options with common filter names (Luminance, RGB, Ha, OIII, SII, Sloan filters, Clear, Dark, UV, IR)
+  - Filter wheel preset lookup with alias support for flexible filter name matching
+  - Filter wheel slot management with individual slot configuration rows
+  - Advanced filter name editing moved to collapsible details section
+  - Better visual organization of device information and settings
+  - Enhanced CSS styling for device cards, toggles, and filter wheel controls
+
 ## [0.8.2] - 2026-01-12
 
 ### Added

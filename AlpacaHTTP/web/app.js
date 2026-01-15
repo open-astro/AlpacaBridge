@@ -5,7 +5,67 @@ const LOGS_ENDPOINT = '/management/v1/logs';
 const LOG_HISTORY_ENDPOINT = '/management/v1/loghistory';
 const QUIET_LOG_LEVEL = 'WARNING';
 const LOG_LEVEL_ORDER = ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
+const FILTERWHEEL_CUSTOM_VALUE = '__custom__';
+const FILTERWHEEL_PRESET_OPTIONS = [
+    { value: 'Luminance', label: 'Luminance (L)', aliases: ['L', 'lum', 'luminance'] },
+    { value: 'Red', label: 'Red (R)', aliases: ['R', 'red'] },
+    { value: 'Green', label: 'Green (G)', aliases: ['G', 'green'] },
+    { value: 'Blue', label: 'Blue (B)', aliases: ['B', 'blue'] },
+    { value: 'Ha', label: 'H-alpha (H)', aliases: ['H', 'halpha', 'h-alpha'] },
+    { value: 'OIII', label: 'OIII (O)', aliases: ['O', 'o3'] },
+    { value: 'SII', label: 'SII (S)', aliases: ['S', 's2'] },
+    { value: "U'", label: "Sloan (U')", aliases: ["U'", 'uprime', 'sloan-u', 'sloan-uprime'] },
+    { value: "G'", label: "Sloan (G')", aliases: ["G'", 'gprime', 'sloan-g', 'sloan-gprime'] },
+    { value: "R'", label: "Sloan (R')", aliases: ["R'", 'rprime', 'sloan-r', 'sloan-rprime'] },
+    { value: "I'", label: "Sloan (I')", aliases: ["I'", 'iprime', 'sloan-i', 'sloan-iprime'] },
+    { value: "Z'", label: "Sloan (Z')", aliases: ["Z'", 'zprime', 'sloan-z', 'sloan-zprime'] },
+    { value: 'Clear', label: 'Clear (C)', aliases: ['clear', 'clr'] },
+    { value: 'Dark', label: 'Dark (D)', aliases: ['dark'] },
+    { value: 'UV', label: 'UV (U)', aliases: ['uv'] },
+    { value: 'IR', label: 'IR (I)', aliases: ['ir'] }
+];
+const FILTERWHEEL_PRESET_LOOKUP = new Map();
+const FILTERWHEEL_SHORT_CODES = new Map();
+const ALPACA_DEVICE_ORDER = [
+    'telescope',
+    'camera',
+    'filterwheel',
+    'focuser',
+    'rotator',
+    'dome',
+    'switch'
+];
 let lastLogHistoryLimit = 2000;
+
+FILTERWHEEL_PRESET_OPTIONS.forEach(option => {
+    FILTERWHEEL_PRESET_LOOKUP.set(normalizeFilterName(option.value), option.value);
+    (option.aliases || []).forEach(alias => {
+        FILTERWHEEL_PRESET_LOOKUP.set(normalizeFilterName(alias), option.value);
+    });
+});
+
+[
+    { code: 'L', names: ['luminance', 'lum', 'l'] },
+    { code: 'R', names: ['red', 'r'] },
+    { code: 'G', names: ['green', 'g'] },
+    { code: 'B', names: ['blue', 'b'] },
+    { code: 'H', names: ['ha', 'halpha', 'h-alpha'] },
+    { code: 'O', names: ['oiii', 'o3'] },
+    { code: 'S', names: ['sii', 's2'] },
+    { code: "U'", names: ["u'", 'uprime', 'sloan-u', 'sloan-uprime'] },
+    { code: "G'", names: ["g'", 'gprime', 'sloan-g', 'sloan-gprime'] },
+    { code: "R'", names: ["r'", 'rprime', 'sloan-r', 'sloan-rprime'] },
+    { code: "I'", names: ["i'", 'iprime', 'sloan-i', 'sloan-iprime'] },
+    { code: "Z'", names: ["z'", 'zprime', 'sloan-z', 'sloan-zprime'] },
+    { code: 'CLR', names: ['clear', 'clr'] },
+    { code: 'DRK', names: ['dark'] },
+    { code: 'UV', names: ['uv'] },
+    { code: 'IR', names: ['ir'] }
+].forEach(entry => {
+    entry.names.forEach(name => {
+        FILTERWHEEL_SHORT_CODES.set(normalizeFilterName(name), entry.code);
+    });
+});
 
 function normalizeLogLevel(level) {
     return String(level || '').trim().toUpperCase();
@@ -393,15 +453,40 @@ async function loadDevices() {
             return;
         }
 
-        currentDevices = devices;
-        devicesList.innerHTML = devices.map((device, index) => {
+        const orderMap = new Map(ALPACA_DEVICE_ORDER.map((type, index) => [type, index]));
+        const sortedDevices = devices.slice().sort((a, b) => {
+            const aType = normalizeDeviceType(a.DeviceType || a.deviceType);
+            const bType = normalizeDeviceType(b.DeviceType || b.deviceType);
+            const aOrder = orderMap.has(aType) ? orderMap.get(aType) : ALPACA_DEVICE_ORDER.length;
+            const bOrder = orderMap.has(bType) ? orderMap.get(bType) : ALPACA_DEVICE_ORDER.length;
+            if (aOrder !== bOrder) {
+                return aOrder - bOrder;
+            }
+            const aNumber = Number.isFinite(a.DeviceNumber) ? a.DeviceNumber : Number.parseInt(a.DeviceNumber, 10);
+            const bNumber = Number.isFinite(b.DeviceNumber) ? b.DeviceNumber : Number.parseInt(b.DeviceNumber, 10);
+            if (Number.isFinite(aNumber) && Number.isFinite(bNumber) && aNumber !== bNumber) {
+                return aNumber - bNumber;
+            }
+            const aName = (a.DeviceName || a.Name || '').toString().toLowerCase();
+            const bName = (b.DeviceName || b.Name || '').toString().toLowerCase();
+            return aName.localeCompare(bName);
+        });
+
+        currentDevices = sortedDevices;
+        devicesList.innerHTML = sortedDevices.map((device, index) => {
             const config = device.Config || device.config || null;
             const vendor = (device.Vendor || (config && config.vendor) || '—').toString();
             const settingsHtml = renderDeviceSettings(config);
             const deviceName = device.DeviceName || device.Name || 'Unknown Device';
             return `
-            <div class="device-card">
-                <h3>${escapeHtml(deviceName)}</h3>
+            <div class="device-card collapsed">
+                <div class="device-card-header">
+                    <h3>${escapeHtml(deviceName)}</h3>
+                    <button class="device-toggle" type="button" aria-expanded="false" data-device-index="${index}">
+                        <span class="device-toggle-icon" aria-hidden="true"></span>
+                        <span class="device-toggle-label">Details</span>
+                    </button>
+                </div>
                 <div class="device-info">
                     <div class="info-item">
                         <span class="info-label">Type</span>
@@ -431,6 +516,16 @@ async function loadDevices() {
 
         document.querySelectorAll('.btn-edit-device').forEach(button => {
             button.addEventListener('click', handleEditDeviceClick);
+        });
+        document.querySelectorAll('.device-toggle').forEach(button => {
+            button.addEventListener('click', () => {
+                const card = button.closest('.device-card');
+                if (!card) {
+                    return;
+                }
+                const isCollapsed = card.classList.toggle('collapsed');
+                button.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+            });
         });
         updateAutoNumbering();
     } catch (error) {
@@ -560,6 +655,7 @@ function startEditDevice(device) {
         } else {
             filterNamesField.value = '';
         }
+        syncFilterwheelSlotsFromTextarea();
     }
 
     setFormValue('focuser-index', config.focuserIndex);
@@ -1114,6 +1210,45 @@ if (filterwheelIndexInput) {
     });
 }
 
+const filterwheelSlotCountSelect = document.getElementById('filterwheel-slot-count');
+const filterwheelSlotCustomInput = document.getElementById('filterwheel-slot-custom');
+const filterwheelNamesTextarea = document.getElementById('filterwheel-names');
+
+if (filterwheelSlotCountSelect) {
+    updateFilterwheelSlotCountVisibility();
+    filterwheelSlotCountSelect.addEventListener('change', () => {
+        updateFilterwheelSlotCountVisibility();
+        const slotCount = getFilterwheelSlotCount();
+        if (!slotCount) {
+            renderFilterwheelSlots(0, []);
+            return;
+        }
+        renderFilterwheelSlots(slotCount, []);
+        syncFilterwheelNamesFromSlots();
+    });
+}
+
+if (filterwheelSlotCustomInput) {
+    filterwheelSlotCustomInput.addEventListener('input', () => {
+        if (!filterwheelSlotCountSelect || filterwheelSlotCountSelect.value !== 'custom') {
+            return;
+        }
+        const slotCount = getFilterwheelSlotCount();
+        if (!slotCount) {
+            renderFilterwheelSlots(0, []);
+            return;
+        }
+        renderFilterwheelSlots(slotCount, []);
+        syncFilterwheelNamesFromSlots();
+    });
+}
+
+if (filterwheelNamesTextarea) {
+    filterwheelNamesTextarea.addEventListener('input', () => {
+        syncFilterwheelSlotsFromTextarea();
+    });
+}
+
 const focuserIndexInput = document.getElementById('focuser-index');
 if (focuserIndexInput) {
     focuserIndexInput.addEventListener('input', () => {
@@ -1144,6 +1279,239 @@ function readOptionalNumber(formData, name) {
     }
     const value = Number.parseFloat(trimmed);
     return Number.isFinite(value) ? value : null;
+}
+
+function normalizeFilterName(name) {
+    return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function parseFilterNamesInput(rawValue) {
+    if (!rawValue) {
+        return [];
+    }
+    let names = rawValue
+        .toString()
+        .split(/\r?\n/)
+        .map(name => name.trim())
+        .filter(name => name.length > 0);
+    if (names.length === 1) {
+        const candidate = names[0];
+        if (candidate.length > 1 && !/[,\s;]/.test(candidate)) {
+            names = candidate.split('');
+        }
+    }
+    return names;
+}
+
+function resolveFilterPreset(name) {
+    if (!name) {
+        return null;
+    }
+    return FILTERWHEEL_PRESET_LOOKUP.get(normalizeFilterName(name)) || null;
+}
+
+function resolveFilterShortCode(name) {
+    if (!name) {
+        return '';
+    }
+    const normalized = normalizeFilterName(name);
+    return FILTERWHEEL_SHORT_CODES.get(normalized) || name.trim();
+}
+
+function formatFilterNamesShort(names) {
+    if (!Array.isArray(names)) {
+        return formatSettingValue(names);
+    }
+    const mapped = names.map(name => resolveFilterShortCode(name)).filter(Boolean);
+    return mapped.join(', ');
+}
+
+function getFilterwheelSlotCount() {
+    const countSelect = document.getElementById('filterwheel-slot-count');
+    const customInput = document.getElementById('filterwheel-slot-custom');
+    if (!countSelect) {
+        return null;
+    }
+    const selected = countSelect.value;
+    if (!selected) {
+        return null;
+    }
+    if (selected === 'custom') {
+        if (!customInput) {
+            return null;
+        }
+        const customValue = Number.parseInt(customInput.value, 10);
+        return Number.isFinite(customValue) && customValue > 0 ? customValue : null;
+    }
+    const parsed = Number.parseInt(selected, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function updateFilterwheelSlotCountVisibility() {
+    const countSelect = document.getElementById('filterwheel-slot-count');
+    const customInput = document.getElementById('filterwheel-slot-custom');
+    if (!countSelect || !customInput) {
+        return;
+    }
+    const showCustom = countSelect.value === 'custom';
+    customInput.style.display = showCustom ? 'block' : 'none';
+    if (!showCustom) {
+        customInput.value = '';
+    }
+}
+
+function buildFilterwheelSlotRow(index, name) {
+    const row = document.createElement('div');
+    row.className = 'filterwheel-slot-row';
+
+    const label = document.createElement('span');
+    label.className = 'filterwheel-slot-label';
+    label.textContent = `Slot ${index}`;
+
+    const select = document.createElement('select');
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select filter';
+    select.appendChild(placeholder);
+
+    FILTERWHEEL_PRESET_OPTIONS.forEach(option => {
+        const opt = document.createElement('option');
+        opt.value = option.value;
+        opt.textContent = option.label;
+        select.appendChild(opt);
+    });
+
+    const customOpt = document.createElement('option');
+    customOpt.value = FILTERWHEEL_CUSTOM_VALUE;
+    customOpt.textContent = 'Custom';
+    select.appendChild(customOpt);
+
+    const customInput = document.createElement('input');
+    customInput.type = 'text';
+    customInput.placeholder = 'Custom name';
+
+    const resolvedPreset = resolveFilterPreset(name);
+    if (resolvedPreset) {
+        select.value = resolvedPreset;
+    } else if (name) {
+        select.value = FILTERWHEEL_CUSTOM_VALUE;
+        customInput.value = name;
+    } else {
+        select.value = '';
+    }
+
+    const updateCustomState = () => {
+        const isCustom = select.value === FILTERWHEEL_CUSTOM_VALUE;
+        row.classList.toggle('custom-active', isCustom);
+        customInput.disabled = !isCustom;
+        if (!isCustom) {
+            customInput.value = '';
+        }
+    };
+
+    select.addEventListener('change', () => {
+        updateCustomState();
+        syncFilterwheelNamesFromSlots();
+    });
+
+    customInput.addEventListener('input', () => {
+        syncFilterwheelNamesFromSlots();
+    });
+
+    updateCustomState();
+
+    row.appendChild(label);
+    row.appendChild(select);
+    row.appendChild(customInput);
+    return row;
+}
+
+let filterwheelSyncInProgress = false;
+
+function renderFilterwheelSlots(slotCount, names) {
+    const slotList = document.getElementById('filterwheel-slot-list');
+    if (!slotList) {
+        return;
+    }
+    slotList.innerHTML = '';
+    if (!slotCount || slotCount <= 0) {
+        return;
+    }
+    for (let i = 0; i < slotCount; i += 1) {
+        const defaultName = `Filter ${i + 1}`;
+        const name = names[i] || defaultName;
+        slotList.appendChild(buildFilterwheelSlotRow(i + 1, name));
+    }
+}
+
+function syncFilterwheelNamesFromSlots() {
+    if (filterwheelSyncInProgress) {
+        return;
+    }
+    const textarea = document.getElementById('filterwheel-names');
+    const slotList = document.getElementById('filterwheel-slot-list');
+    if (!textarea || !slotList) {
+        return;
+    }
+    const rows = Array.from(slotList.querySelectorAll('.filterwheel-slot-row'));
+    if (rows.length === 0) {
+        return;
+    }
+    filterwheelSyncInProgress = true;
+    const names = rows.map((row, index) => {
+        const select = row.querySelector('select');
+        const customInput = row.querySelector('input[type="text"]');
+        const selected = select ? select.value : '';
+        if (selected === FILTERWHEEL_CUSTOM_VALUE) {
+            const customName = customInput ? customInput.value.trim() : '';
+            return customName || `Filter ${index + 1}`;
+        }
+        if (selected) {
+            return selected;
+        }
+        return `Filter ${index + 1}`;
+    });
+    textarea.value = names.join('\n');
+    filterwheelSyncInProgress = false;
+}
+
+function syncFilterwheelSlotsFromTextarea() {
+    if (filterwheelSyncInProgress) {
+        return;
+    }
+    const textarea = document.getElementById('filterwheel-names');
+    const countSelect = document.getElementById('filterwheel-slot-count');
+    const customInput = document.getElementById('filterwheel-slot-custom');
+    if (!textarea || !countSelect) {
+        return;
+    }
+    filterwheelSyncInProgress = true;
+    const names = parseFilterNamesInput(textarea.value);
+    if (names.length === 0) {
+        countSelect.value = '';
+        if (customInput) {
+            customInput.value = '';
+        }
+        updateFilterwheelSlotCountVisibility();
+        renderFilterwheelSlots(0, []);
+        filterwheelSyncInProgress = false;
+        return;
+    }
+    const countOption = countSelect.querySelector(`option[value="${names.length}"]`);
+    if (countOption) {
+        countSelect.value = String(names.length);
+        if (customInput) {
+            customInput.value = '';
+        }
+    } else {
+        countSelect.value = 'custom';
+        if (customInput) {
+            customInput.value = String(names.length);
+        }
+    }
+    updateFilterwheelSlotCountVisibility();
+    renderFilterwheelSlots(names.length, names);
+    filterwheelSyncInProgress = false;
 }
 
 function setFieldGroupEnabled(groupEl, enabled) {
@@ -1257,21 +1625,9 @@ document.getElementById('device-form').addEventListener('submit', async function
                 }
             }
             const filterNamesRaw = formData.get('filterNames');
-            if (filterNamesRaw) {
-                let names = filterNamesRaw
-                    .toString()
-                    .split(/\r?\n/)
-                    .map(name => name.trim())
-                    .filter(name => name.length > 0);
-                if (names.length === 1) {
-                    const candidate = names[0];
-                    if (candidate.length > 1 && !/[,\s;]/.test(candidate)) {
-                        names = candidate.split('');
-                    }
-                }
-                if (names.length > 0) {
-                    deviceData.filterNames = names;
-                }
+            const names = parseFilterNamesInput(filterNamesRaw);
+            if (names.length > 0) {
+                deviceData.filterNames = names;
             }
         }
         if (normalizedType === 'focuser') {
@@ -1419,7 +1775,9 @@ function renderDeviceSettings(config) {
         if (config[key] === undefined || config[key] === null || config[key] === '') {
             return;
         }
-        const value = formatSettingValue(config[key]);
+        const value = key === 'filterNames'
+            ? formatFilterNamesShort(config[key])
+            : formatSettingValue(config[key]);
         rows.push(`
             <div class="setting-row">
                 <span class="setting-label">${escapeHtml(label)}</span>
@@ -1449,8 +1807,10 @@ function renderDeviceSettings(config) {
         addRowValue('Aperture Area (m^2)', area.toFixed(6));
     }
 
+    const hiddenKeys = new Set(['vendor', 'deviceType', 'deviceNumber']);
+
     Object.keys(config)
-        .filter(key => !labelMap.has(key))
+        .filter(key => !labelMap.has(key) && !hiddenKeys.has(key))
         .sort()
         .forEach(key => addRow(key, humanizeSettingKey(key)));
 
@@ -1502,6 +1862,17 @@ document.addEventListener('DOMContentLoaded', function() {
     loadLogSettings();
     loadLogHistorySettings();
     updateVendorOptions();
+
+    document.querySelectorAll('.section-toggle').forEach(button => {
+        button.addEventListener('click', () => {
+            const card = button.closest('.section-card');
+            if (!card) {
+                return;
+            }
+            const isCollapsed = card.classList.toggle('collapsed');
+            button.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+        });
+    });
 
     const logHistoryToggle = document.getElementById('log-history-toggle');
     if (logHistoryToggle) {

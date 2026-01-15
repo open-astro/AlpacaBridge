@@ -14,6 +14,7 @@
 
 #include "request.h"
 #include "response.h"
+#include "version.h"
 #include <alpacacore/device_registry.h>
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/managementdriver.h>
@@ -209,7 +210,9 @@ private:
     mutable std::mutex server_info_mutex_;
     std::string server_name_ = "AlpacaHTTP";
     std::string manufacturer_ = "AlpacaHTTP";
-    std::string manufacturer_version_ = "0.1.0";
+    // Default version - will be overridden by set_server_info() which uses alpacahttp::kVersion
+    // This fallback uses the version constant from version.h (which comes from VERSION file via CMake)
+    std::string manufacturer_version_ = alpacahttp::kVersion;
     std::string location_;
     std::string config_path_;
 };
