@@ -842,6 +842,292 @@ std::string build_image_array_payload(const alpacacore::ImageArray& image,
     return body;
 }
 
+constexpr std::uint32_t kImageTypeInt16 = 1;
+constexpr std::uint32_t kImageTypeInt32 = 2;
+constexpr std::uint32_t kImageTypeDouble = 3;
+constexpr std::uint32_t kImageTypeSingle = 4;
+constexpr std::uint32_t kImageTypeByte = 5;
+constexpr std::uint32_t kImageTypeUInt16 = 6;
+constexpr std::uint32_t kImageTypeUInt32 = 7;
+constexpr std::uint32_t kImageTypeInt64 = 8;
+constexpr std::uint32_t kImageTypeUInt64 = 9;
+
+constexpr std::uint32_t kImageBytesMetadataVersion = 1;
+constexpr std::size_t kImageBytesMetadataSize = 11 * sizeof(std::uint32_t);
+
+struct ImageBytesFormat {
+    std::uint32_t image_element_type = kImageTypeInt32;
+    std::uint32_t transmission_element_type = kImageTypeUInt16;
+    std::size_t bytes_per_element = sizeof(std::uint16_t);
+};
+
+bool accepts_imagebytes(const alpacahttp::Request& request) {
+    if (!request.has_header("accept")) {
+        return false;
+    }
+    std::string accept = to_lower_copy(request.get_header("accept"));
+    return accept.find("application/imagebytes") != std::string::npos;
+}
+
+std::uint32_t image_element_type_from_variant(const std::string& variant, std::uint32_t fallback) {
+    if (variant.empty()) {
+        return fallback;
+    }
+    std::string lowered = to_lower_copy(variant);
+    if (lowered == "int16" || lowered == "short") {
+        return kImageTypeInt16;
+    }
+    if (lowered == "uint16" || lowered == "ushort") {
+        return kImageTypeUInt16;
+    }
+    if (lowered == "byte" || lowered == "uint8") {
+        return kImageTypeByte;
+    }
+    if (lowered == "double") {
+        return kImageTypeDouble;
+    }
+    if (lowered == "single" || lowered == "float") {
+        return kImageTypeSingle;
+    }
+    if (lowered == "uint32") {
+        return kImageTypeUInt32;
+    }
+    if (lowered == "int64") {
+        return kImageTypeInt64;
+    }
+    if (lowered == "uint64") {
+        return kImageTypeUInt64;
+    }
+    if (lowered == "int32") {
+        return kImageTypeInt32;
+    }
+    return fallback;
+}
+
+ImageBytesFormat choose_image_bytes_format(const alpacacore::ImageArray& image,
+                                           std::uint32_t image_element_type) {
+    ImageBytesFormat format;
+    format.image_element_type = image_element_type;
+
+    if (image_element_type == kImageTypeByte) {
+        format.transmission_element_type = kImageTypeByte;
+        format.bytes_per_element = sizeof(std::uint8_t);
+        return format;
+    }
+    if (image_element_type == kImageTypeUInt16) {
+        format.transmission_element_type = kImageTypeUInt16;
+        format.bytes_per_element = sizeof(std::uint16_t);
+        return format;
+    }
+    if (image_element_type == kImageTypeInt16) {
+        format.transmission_element_type = kImageTypeInt16;
+        format.bytes_per_element = sizeof(std::int16_t);
+        return format;
+    }
+
+    if (image.data.empty()) {
+        format.transmission_element_type = kImageTypeUInt16;
+        format.bytes_per_element = sizeof(std::uint16_t);
+        return format;
+    }
+
+    auto minmax = std::minmax_element(image.data.begin(), image.data.end());
+    std::int64_t min_val = static_cast<std::int64_t>(*minmax.first);
+    std::int64_t max_val = static_cast<std::int64_t>(*minmax.second);
+
+    if (min_val >= 0 && max_val <= std::numeric_limits<std::uint8_t>::max()) {
+        format.transmission_element_type = kImageTypeByte;
+        format.bytes_per_element = sizeof(std::uint8_t);
+    } else if (min_val >= 0 && max_val <= std::numeric_limits<std::uint16_t>::max()) {
+        format.transmission_element_type = kImageTypeUInt16;
+        format.bytes_per_element = sizeof(std::uint16_t);
+    } else if (min_val >= std::numeric_limits<std::int16_t>::min() &&
+               max_val <= std::numeric_limits<std::int16_t>::max()) {
+        format.transmission_element_type = kImageTypeInt16;
+        format.bytes_per_element = sizeof(std::int16_t);
+    } else {
+        format.transmission_element_type = kImageTypeInt32;
+        format.bytes_per_element = sizeof(std::int32_t);
+    }
+
+    return format;
+}
+
+void append_uint32_le(std::string& out, std::uint32_t value) {
+    char bytes[4];
+    bytes[0] = static_cast<char>(value & 0xFF);
+    bytes[1] = static_cast<char>((value >> 8) & 0xFF);
+    bytes[2] = static_cast<char>((value >> 16) & 0xFF);
+    bytes[3] = static_cast<char>((value >> 24) & 0xFF);
+    out.append(bytes, sizeof(bytes));
+}
+
+void append_uint16_le(std::string& out, std::uint16_t value) {
+    char bytes[2];
+    bytes[0] = static_cast<char>(value & 0xFF);
+    bytes[1] = static_cast<char>((value >> 8) & 0xFF);
+    out.append(bytes, sizeof(bytes));
+}
+
+void append_int16_le(std::string& out, std::int16_t value) {
+    append_uint16_le(out, static_cast<std::uint16_t>(value));
+}
+
+void append_uint8(std::string& out, std::uint8_t value) {
+    out.push_back(static_cast<char>(value));
+}
+
+void append_int32_le(std::string& out, std::int32_t value) {
+    append_uint32_le(out, static_cast<std::uint32_t>(value));
+}
+
+std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
+                                      const ImageBytesFormat& format,
+                                      std::uint32_t client_tx_id,
+                                      std::uint32_t server_tx_id) {
+    std::uint32_t width = image.width > 0 ? static_cast<std::uint32_t>(image.width) : 0;
+    std::uint32_t height = image.height > 0 ? static_cast<std::uint32_t>(image.height) : 0;
+    std::uint32_t rank = image.rank > 0 ? static_cast<std::uint32_t>(image.rank) : 0;
+    std::uint32_t planes = 0;
+    if (rank == 3) {
+        planes = 3;
+        if (width > 0 && height > 0) {
+            auto expected = static_cast<std::uint64_t>(width) * height * planes;
+            if (expected == 0 || expected > image.data.size()) {
+                planes = 3;
+            }
+        }
+    }
+
+    std::uint64_t pixel_count = 0;
+    if (width > 0 && height > 0) {
+        std::uint64_t base = static_cast<std::uint64_t>(width) * height;
+        if (rank == 3) {
+            base *= (planes == 0 ? 3 : planes);
+        }
+        pixel_count = base;
+    }
+
+    std::uint64_t data_bytes = pixel_count * format.bytes_per_element;
+    if (data_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        data_bytes = 0;
+    }
+
+    std::string body;
+    body.reserve(kImageBytesMetadataSize + static_cast<std::size_t>(data_bytes));
+
+    append_uint32_le(body, kImageBytesMetadataVersion);
+    append_uint32_le(body, 0);
+    append_uint32_le(body, client_tx_id);
+    append_uint32_le(body, server_tx_id);
+    append_uint32_le(body, static_cast<std::uint32_t>(kImageBytesMetadataSize));
+    append_uint32_le(body, format.image_element_type);
+    append_uint32_le(body, format.transmission_element_type);
+    append_uint32_le(body, rank);
+    append_uint32_le(body, width);
+    append_uint32_le(body, height);
+    append_uint32_le(body, rank == 3 ? planes : 0);
+
+    if (pixel_count == 0) {
+        return body;
+    }
+
+    auto append_value = [&](std::int32_t value) {
+        switch (format.transmission_element_type) {
+            case kImageTypeByte: {
+                std::uint8_t out = 0;
+                if (value > 0) {
+                    out = static_cast<std::uint8_t>(std::min<std::int32_t>(
+                        value, std::numeric_limits<std::uint8_t>::max()));
+                }
+                append_uint8(body, out);
+                break;
+            }
+            case kImageTypeUInt16: {
+                std::uint16_t out = 0;
+                if (value > 0) {
+                    out = static_cast<std::uint16_t>(std::min<std::int32_t>(
+                        value, std::numeric_limits<std::uint16_t>::max()));
+                }
+                append_uint16_le(body, out);
+                break;
+            }
+            case kImageTypeInt16: {
+                std::int16_t out = 0;
+                if (value < std::numeric_limits<std::int16_t>::min()) {
+                    out = std::numeric_limits<std::int16_t>::min();
+                } else if (value > std::numeric_limits<std::int16_t>::max()) {
+                    out = std::numeric_limits<std::int16_t>::max();
+                } else {
+                    out = static_cast<std::int16_t>(value);
+                }
+                append_int16_le(body, out);
+                break;
+            }
+            case kImageTypeInt32:
+            default:
+                append_int32_le(body, value);
+                break;
+        }
+    };
+
+    if (rank == 2 && width > 0 && height > 0) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            for (std::uint32_t y = 0; y < height; ++y) {
+                std::size_t idx = static_cast<std::size_t>(y) *
+                                  static_cast<std::size_t>(width) +
+                                  static_cast<std::size_t>(x);
+                std::int32_t value = 0;
+                if (idx < image.data.size()) {
+                    value = image.data[idx];
+                }
+                append_value(value);
+            }
+        }
+    } else if (rank == 3 && width > 0 && height > 0) {
+        std::uint32_t channels = planes == 0 ? 3 : planes;
+        for (std::uint32_t x = 0; x < width; ++x) {
+            for (std::uint32_t y = 0; y < height; ++y) {
+                std::size_t base = (static_cast<std::size_t>(y) *
+                                    static_cast<std::size_t>(width) +
+                                    static_cast<std::size_t>(x)) * channels;
+                for (std::uint32_t c = 0; c < channels; ++c) {
+                    std::size_t idx = base + static_cast<std::size_t>(c);
+                    std::int32_t value = 0;
+                    if (idx < image.data.size()) {
+                        value = image.data[idx];
+                    }
+                    append_value(value);
+                }
+            }
+        }
+    }
+
+    return body;
+}
+
+std::string build_image_bytes_error_payload(std::uint32_t error_number,
+                                            const std::string& message,
+                                            std::uint32_t client_tx_id,
+                                            std::uint32_t server_tx_id) {
+    std::string body;
+    body.reserve(kImageBytesMetadataSize + message.size());
+
+    append_uint32_le(body, kImageBytesMetadataVersion);
+    append_uint32_le(body, error_number);
+    append_uint32_le(body, client_tx_id);
+    append_uint32_le(body, server_tx_id);
+    append_uint32_le(body, static_cast<std::uint32_t>(kImageBytesMetadataSize));
+    append_uint32_le(body, 0);
+    append_uint32_le(body, 0);
+    append_uint32_le(body, 0);
+    append_uint32_le(body, 0);
+    append_uint32_le(body, 0);
+    append_uint32_le(body, 0);
+    body.append(message);
+    return body;
+}
+
 } // namespace
 
 namespace alpacahttp {
@@ -3041,11 +3327,69 @@ Response Router::dispatch_camera_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "imagearray") {
+                if (accepts_imagebytes(request)) {
+                    try {
+                        auto image = camera->get_image_array();
+                        auto format = choose_image_bytes_format(image, kImageTypeInt32);
+                        response.set_content_type("application/imagebytes");
+                        response.set_body(build_image_bytes_payload(image, format, client_tx_id, server_tx_id));
+                        return response;
+                    } catch (const alpacacore::AlpacaException& e) {
+                        auto error_code = util::map_error_code(e.error_code());
+                        response.set_content_type("application/imagebytes");
+                        response.set_body(build_image_bytes_error_payload(
+                            static_cast<std::uint32_t>(error_code),
+                            std::string(e.what()),
+                            client_tx_id,
+                            server_tx_id));
+                        return response;
+                    } catch (const std::exception& e) {
+                        auto error_code = util::exception_to_error_code(e);
+                        response.set_content_type("application/imagebytes");
+                        response.set_body(build_image_bytes_error_payload(
+                            static_cast<std::uint32_t>(error_code),
+                            util::exception_to_error_message(e),
+                            client_tx_id,
+                            server_tx_id));
+                        return response;
+                    }
+                }
+
                 auto image = camera->get_image_array();
                 response.set_content_type("application/json");
                 response.set_body(build_image_array_payload(image, 2, client_tx_id, server_tx_id));
                 return response;
             } else if (method_name == "imagearrayvariant") {
+                if (accepts_imagebytes(request)) {
+                    try {
+                        auto image = camera->get_image_array();
+                        auto variant = camera->get_image_array_variant();
+                        auto element_type = image_element_type_from_variant(variant, kImageTypeInt32);
+                        auto format = choose_image_bytes_format(image, element_type);
+                        response.set_content_type("application/imagebytes");
+                        response.set_body(build_image_bytes_payload(image, format, client_tx_id, server_tx_id));
+                        return response;
+                    } catch (const alpacacore::AlpacaException& e) {
+                        auto error_code = util::map_error_code(e.error_code());
+                        response.set_content_type("application/imagebytes");
+                        response.set_body(build_image_bytes_error_payload(
+                            static_cast<std::uint32_t>(error_code),
+                            std::string(e.what()),
+                            client_tx_id,
+                            server_tx_id));
+                        return response;
+                    } catch (const std::exception& e) {
+                        auto error_code = util::exception_to_error_code(e);
+                        response.set_content_type("application/imagebytes");
+                        response.set_body(build_image_bytes_error_payload(
+                            static_cast<std::uint32_t>(error_code),
+                            util::exception_to_error_message(e),
+                            client_tx_id,
+                            server_tx_id));
+                        return response;
+                    }
+                }
+
                 auto image = camera->get_image_array();
                 auto variant = camera->get_image_array_variant();
                 int type = 2;

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.8.4] - 2026-01-17
+
+### Added
+- **ImageBytes Streaming** (AlpacaHTTP)
+  - Added `application/imagebytes` handling so `camera.imagearray` can stream compact binary payloads instead of JSON when clients request it.
+  - Honored `camera.imagearrayvariant` metadata, inferred transmission element widths, and included numeric metadata plus transaction IDs alongside the pixel data.
+  - Streamed structured error payloads with the same metadata layout so Alpaca exceptions can still be parsed when image bytes responses fail.
+
 ## [0.8.3] - 2026-01-13
 
 ### Changed
