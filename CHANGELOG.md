@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.8.6] - 2026-01-20
+
+### Changed
+- **HTTP Request Handling** (AlpacaHTTP)
+  - Merge multiple `Accept` headers into a single comma-delimited value.
+- **ImageBytes Mapping** (AlpacaHTTP)
+  - Standardized image-bytes element type codes for 64-bit variants and accepted `long`/`ulong` aliases.
+  - Added visibility logging when `imagearray`/`imagearrayvariant` evaluate image-bytes negotiation.
+
 ## [0.8.5] - 2026-01-19
 
 ### Changed

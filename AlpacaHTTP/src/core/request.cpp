@@ -101,7 +101,17 @@ bool Request::parse(std::string_view raw_request) {
 
             // Convert key to lowercase for case-insensitive lookup
             std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-            headers_[key] = value;
+            if (key == "accept") {
+                auto existing = headers_.find(key);
+                if (existing != headers_.end() && !existing->second.empty()) {
+                    existing->second.append(", ");
+                    existing->second.append(value);
+                } else {
+                    headers_[key] = value;
+                }
+            } else {
+                headers_[key] = value;
+            }
         }
     }
 

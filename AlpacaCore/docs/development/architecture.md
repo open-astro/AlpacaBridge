@@ -44,7 +44,6 @@ AlpacaCore/
 ├─ LICENSE
 ├─ README.md
 ├─ CHANGELOG.md
-├─ VERSION
 ├─ CONTRIBUTING.md
 │
 ├─ external/                         # Vendor SDKs and vendor docs
