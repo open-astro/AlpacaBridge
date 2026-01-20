@@ -147,6 +147,10 @@ public:
         
         return success;
     }
+
+    bool is_network_connection() const {
+        return connection_type_ == ConnectionType::Network;
+    }
     
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -438,6 +442,8 @@ private:
             socket_handle_ = INVALID_SOCKET;
             return false;
         }
+
+        configure_network_timeouts();
         
         // Set socket to blocking mode
         u_long mode = 0;
@@ -470,6 +476,8 @@ private:
             socket_fd_ = -1;
             return false;
         }
+
+        configure_network_timeouts();
         
         return true;
 #endif
@@ -564,6 +572,9 @@ private:
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
             if (elapsed.count() > timeout_ms) {
+                if (!require_hash_terminator) {
+                    return response;
+                }
                 throw AlpacaException("Timeout waiting for mount response");
             }
 
@@ -603,6 +614,24 @@ private:
         return bytes_received == 1;
 #endif
     }
+
+    void configure_network_timeouts() {
+        constexpr int kSocketTimeoutMs = 200;
+#ifdef _WIN32
+        DWORD timeout = kSocketTimeoutMs;
+        setsockopt(socket_handle_, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+        setsockopt(socket_handle_, SOL_SOCKET, SO_SNDTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+        timeval timeout{};
+        timeout.tv_sec = 0;
+        timeout.tv_usec = kSocketTimeoutMs * 1000;
+        setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
+    }
+
     
 public:
     // Helper: Convert RA hours to iOptron format (0.01 arc-seconds)
@@ -982,25 +1011,47 @@ void iOptronProtocolWrapper::set_target_dec(double dec_degrees) {
 
 bool iOptronProtocolWrapper::slew_to_ra_dec() {
     // :MS1 returns "1" (accepted) or "0" (rejected). Read the response to keep the stream aligned.
-    std::string response = send_command(":MS1", false);
-    if (response == "0") {
-        return false;
+    try {
+        std::string response = send_command(":MS1", false);
+        if (response == "0") {
+            return false;
+        }
+        if (!response.empty() && response != "1") {
+            ALPACA_LOG_WARN("iOptron", "Unexpected :MS1 response: " + response);
+        }
+        return true;
+    } catch (const AlpacaException& e) {
+        const std::string message = e.what();
+        if (pimpl_->is_network_connection() &&
+            message.find("Timeout waiting for mount response") != std::string::npos) {
+            // TODO: Confirm HAE29C WiFi behavior for :MS1 responses.
+            ALPACA_LOG_WARN("iOptron", "No :MS1 response over network; assuming slew accepted");
+            return true;
+        }
+        throw;
     }
-    if (!response.empty() && response != "1") {
-        ALPACA_LOG_WARN("iOptron", "Unexpected :MS1 response: " + response);
-    }
-    return true;
 }
 
 bool iOptronProtocolWrapper::slew_to_ra_dec_cw_up() {
-    std::string response = send_command(":MS2", false);
-    if (response == "0") {
-        return false;
+    try {
+        std::string response = send_command(":MS2", false);
+        if (response == "0") {
+            return false;
+        }
+        if (!response.empty() && response != "1") {
+            ALPACA_LOG_WARN("iOptron", "Unexpected :MS2 response: " + response);
+        }
+        return true;
+    } catch (const AlpacaException& e) {
+        const std::string message = e.what();
+        if (pimpl_->is_network_connection() &&
+            message.find("Timeout waiting for mount response") != std::string::npos) {
+            // TODO: Confirm HAE29C WiFi behavior for :MS2 responses.
+            ALPACA_LOG_WARN("iOptron", "No :MS2 response over network; assuming slew accepted");
+            return true;
+        }
+        throw;
     }
-    if (!response.empty() && response != "1") {
-        ALPACA_LOG_WARN("iOptron", "Unexpected :MS2 response: " + response);
-    }
-    return true;
 }
 
 void iOptronProtocolWrapper::stop_slewing() {

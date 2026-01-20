@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.8.5] - 2026-01-19
+
+### Changed
+- **iOptron Network Reliability** (AlpacaCore)
+  - Added socket send/receive timeouts for TCP connections.
+  - Allow partial responses when a terminator is not required to avoid unnecessary timeouts.
+  - Treat missing :MS1/:MS2 replies over network as accepted slews with a warning, matching WiFi bridge behavior.
+
 ## [0.8.4] - 2026-01-17
 
 ### Added
