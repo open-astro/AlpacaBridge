@@ -6,12 +6,20 @@ AlpacaBridge is a unified workspace for building, testing, and running a complet
 
 **Intrested? Want to help?** Join our [Discord Support Channel](https://discord.com/channels/1092619106282393610/1092619106282393613)
 
+## Project Overview
+
+
+
+This video walks through building, testing, and running a complete ASCOM Alpaca server, including
+AI-assisted driver development and ConformU validation.
+
 **Key Features:**
 - **Complete Alpaca Server** - Build and run a full-featured ASCOM Alpaca server with web UI
 - **Comprehensive Driver Support** - Pre-built drivers for ZWO cameras, switches, and focusers, plus iOptron telescopes (all ConformU validated)
 - **AI-Assisted Development** - Build custom drivers for any vendor device using AI guidance (see [AGENTS.md](AGENTS.md))
 - **Convenience Scripts** - One-command build, test, and run workflows
 - **Production Ready** - All drivers are ConformU validated for ASCOM Alpaca specification compliance
+- **Video:** End-to-end Alpaca server build, AI-assisted driver creation, and ASCOM ConformU certification walkthrough. [Alpaca Server Overview](https://youtu.be/7yPSW0KXQzM)
 
 ## Quick Start
 
