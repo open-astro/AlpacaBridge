@@ -8,10 +8,8 @@ AlpacaBridge is a unified workspace for building, testing, and running a complet
 
 ## Project Overview
 
-
-
 This video walks through building, testing, and running a complete ASCOM Alpaca server, including
-AI-assisted driver development and ConformU validation.
+AI-assisted driver development and ConformU validation [Alpaca Server Overview](https://youtu.be/7yPSW0KXQzM)
 
 **Key Features:**
 - **Complete Alpaca Server** - Build and run a full-featured ASCOM Alpaca server with web UI
@@ -19,7 +17,7 @@ AI-assisted driver development and ConformU validation.
 - **AI-Assisted Development** - Build custom drivers for any vendor device using AI guidance (see [AGENTS.md](AGENTS.md))
 - **Convenience Scripts** - One-command build, test, and run workflows
 - **Production Ready** - All drivers are ConformU validated for ASCOM Alpaca specification compliance
-- **Video:** End-to-end Alpaca server build, AI-assisted driver creation, and ASCOM ConformU certification walkthrough. [Alpaca Server Overview](https://youtu.be/7yPSW0KXQzM)
+
 
 ## Quick Start
 
