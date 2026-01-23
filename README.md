@@ -6,10 +6,15 @@ AlpacaBridge is a unified workspace for building, testing, and running a complet
 
 **Intrested? Want to help?** Join our [Discord Support Channel](https://discord.com/channels/1092619106282393610/1092619106282393613)
 
-## Project Overview
+## AlpacaBridge Explained
 
-This video walks through building, testing, and running a complete ASCOM Alpaca server, including
-AI-assisted driver development and ConformU validation [Alpaca Server Overview](https://youtu.be/7yPSW0KXQzM)
+- Write about AlpacaBridge [Openastro AlpacaBridge Launches and Why it Matters - ScopeTrader ](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/)
+
+- This video walks through building, testing, and running a complete ASCOM Alpaca server, including
+AI-assisted driver development and ConformU validation [
+Building the Future of Astrophotography & EAA with AlpacaBridge, an ASCOM Alpaca Solution!](https://youtu.be/7yPSW0KXQzM)
+
+## Project Overview
 
 **Key Features:**
 - **Complete Alpaca Server** - Build and run a full-featured ASCOM Alpaca server with web UI
