@@ -47,6 +47,9 @@
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+#include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
@@ -860,6 +863,23 @@ struct ImageBytesFormat {
     std::uint32_t transmission_element_type = kImageTypeUInt16;
     std::size_t bytes_per_element = sizeof(std::uint16_t);
 };
+
+bool is_expected_not_implemented(const alpacacore::AlpacaException& e) {
+    const int error_code = e.error_code();
+    return error_code == alpacacore::AlpacaError::NotImplemented ||
+        error_code == alpacacore::AlpacaError::PropertyNotImplemented ||
+        error_code == alpacacore::AlpacaError::MethodNotImplemented ||
+        error_code == alpacacore::AlpacaError::ActionNotImplemented;
+}
+
+void log_alpaca_exception(const std::string& context, const alpacacore::AlpacaException& e) {
+    std::string message = context + ": " + std::string(e.what());
+    if (is_expected_not_implemented(e)) {
+        alpacahttp::util::log_debug(message);
+    } else {
+        alpacahttp::util::log_error(message);
+    }
+}
 
 bool accepts_imagebytes(const alpacahttp::Request& request) {
     if (!request.has_header("accept")) {
@@ -2034,7 +2054,7 @@ Response Router::dispatch_device_method(
         return response;
         
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in device method: " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in device method", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -2978,7 +2998,7 @@ Response Router::dispatch_telescope_method(
         return response;
         
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in telescope method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in telescope method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -3305,7 +3325,7 @@ Response Router::dispatch_camera_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "imagearray") {
-                util::log_error("Camera imagearray Accept: " +
+                util::log_debug("Camera imagearray Accept: " +
                     (request.has_header("accept") ? request.get_header("accept") : "<none>") +
                     ", imagebytes=" + std::string(accepts_imagebytes(request) ? "true" : "false"));
                 if (accepts_imagebytes(request)) {
@@ -3321,7 +3341,7 @@ Response Router::dispatch_camera_method(
                 response.set_body(build_image_array_payload(image, 2, client_tx_id, server_tx_id));
                 return response;
             } else if (method_name == "imagearrayvariant") {
-                util::log_error("Camera imagearrayvariant Accept: " +
+                util::log_debug("Camera imagearrayvariant Accept: " +
                     (request.has_header("accept") ? request.get_header("accept") : "<none>") +
                     ", imagebytes=" + std::string(accepts_imagebytes(request) ? "true" : "false"));
                 if (accepts_imagebytes(request)) {
@@ -3592,7 +3612,7 @@ Response Router::dispatch_camera_method(
         response.set_body(alpaca_response);
         return response;
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in camera method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in camera method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -3900,7 +3920,7 @@ Response Router::dispatch_switch_method(
         response.set_body(alpaca_response);
         return response;
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in switch method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in switch method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -4041,7 +4061,7 @@ Response Router::dispatch_filterwheel_method(
         response.set_body(alpaca_response);
         return response;
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in filter wheel method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in filter wheel method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -4227,7 +4247,7 @@ Response Router::dispatch_focuser_method(
         response.set_body(alpaca_response);
         return response;
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in focuser method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in focuser method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -4421,7 +4441,7 @@ Response Router::dispatch_rotator_method(
         response.set_body(alpaca_response);
         return response;
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in rotator method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in rotator method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -4673,7 +4693,7 @@ Response Router::dispatch_dome_method(
         response.set_body(alpaca_response);
         return response;
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in dome method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in dome method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -4738,7 +4758,7 @@ Response Router::dispatch_shutter_method(
         response.set_body(alpaca_response);
         return response;
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in shutter method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in shutter method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -4884,7 +4904,7 @@ Response Router::dispatch_covercalibrator_method(
         response.set_body(alpaca_response);
         return response;
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in cover calibrator method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in cover calibrator method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -5094,7 +5114,7 @@ Response Router::dispatch_observingconditions_method(
         response.set_body(alpaca_response);
         return response;
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in observing conditions method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in observing conditions method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -5145,7 +5165,7 @@ Response Router::dispatch_safetymonitor_method(
         response.set_body(alpaca_response);
         return response;
     } catch (const alpacacore::AlpacaException& e) {
-        util::log_error("AlpacaException in safety monitor method '" + method_name + "': " + std::string(e.what()));
+        log_alpaca_exception("AlpacaException in safety monitor method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -5989,6 +6009,89 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "synscan" && device_type_str == "telescope") {
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+        alpacacore::vendor::synscan::ConnectionInfo conn_info;
+        std::string conn_type = config.value("connectionType", "serial");
+
+        if (conn_type == "serial") {
+            conn_info.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+            conn_info.port_path = config.value("portPath", "");
+            conn_info.baud_rate = config.value("baudRate", 9600);
+
+            if (conn_info.port_path.empty()) {
+                error_message = "Serial port path is required";
+                return false;
+            }
+        } else if (conn_type == "network") {
+            conn_info.type = alpacacore::vendor::synscan::ConnectionType::Network;
+            conn_info.host = config.value("host", "");
+            conn_info.tcp_port = config.value("tcpPort", conn_info.tcp_port);
+
+            if (conn_info.host.empty()) {
+                error_message = "Host IP address is required";
+                return false;
+            }
+        } else {
+            error_message = "Invalid connection type. Use 'serial' or 'network'";
+            return false;
+        }
+
+        conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+
+        std::string version_value = config.value("synscanVersion", "auto");
+        std::string version_normalized = to_lower_copy(version_value);
+        alpacacore::vendor::synscan::SynScanVersion version = alpacacore::vendor::synscan::SynScanVersion::Auto;
+        if (version_normalized == "v3" || version_normalized == "3") {
+            version = alpacacore::vendor::synscan::SynScanVersion::V3;
+        } else if (version_normalized == "v4" || version_normalized == "4") {
+            version = alpacacore::vendor::synscan::SynScanVersion::V4;
+        }
+
+        std::optional<double> site_latitude;
+        std::optional<double> site_longitude;
+        std::optional<double> site_elevation;
+        std::optional<bool> sync_time_on_connect;
+
+        if (config.contains("siteLatitude")) {
+            site_latitude = config.value("siteLatitude", 0.0);
+        }
+        if (config.contains("siteLongitude")) {
+            site_longitude = config.value("siteLongitude", 0.0);
+        }
+        if (config.contains("siteElevation")) {
+            site_elevation = config.value("siteElevation", 0.0);
+        }
+        if (config.contains("syncTimeOnConnect")) {
+            sync_time_on_connect = config.value("syncTimeOnConnect", false);
+        }
+
+        auto telescope = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+            device_number, conn_info, version, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
+
+        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+            telescope->set_aperture_diameter(aperture);
+        }
+        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+            telescope->set_focal_length(focal);
+        }
+        if (site_elevation.has_value()) {
+            telescope->set_site_elevation(site_elevation.value());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(telescope.release()))) {
+            util::log_info("Registered SynScan telescope");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "SynScan support not enabled. Rebuild with -DALPACACORE_ENABLE_SYNSCAN=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "zwo" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_ZWO
         int camera_id = config.value("cameraId", -1);
@@ -6164,6 +6267,17 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
 
     std::string vendor = config.value("vendor", "");
     if (vendor == "ioptron") {
+        copy_if_present("connectionType");
+        std::string connection_type = config.value("connectionType", "");
+        if (connection_type == "serial") {
+            copy_if_present("portPath");
+            copy_if_present("baudRate");
+        } else if (connection_type == "network") {
+            copy_if_present("host");
+            copy_if_present("tcpPort");
+        }
+    } else if (vendor == "synscan") {
+        copy_if_present("synscanVersion");
         copy_if_present("connectionType");
         std::string connection_type = config.value("connectionType", "");
         if (connection_type == "serial") {

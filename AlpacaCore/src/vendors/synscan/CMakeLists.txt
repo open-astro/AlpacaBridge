@@ -1,0 +1,28 @@
+# SynScan vendor support
+# SynScan mounts use serial RS-232 protocol (and optional TCP bridges)
+# No SDK required - uses standard platform serial/socket APIs
+
+if(ALPACACORE_ENABLE_SYNSCAN)
+    message(STATUS "Building SynScan mount driver support")
+
+    set(SYNSCAN_SOURCES
+        synscan_protocol_wrapper.cpp
+        synscan_telescope_driver.cpp
+    )
+
+    add_library(alpacacore_synscan STATIC ${SYNSCAN_SOURCES})
+
+    target_include_directories(alpacacore_synscan PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+    )
+
+    if(WIN32)
+        target_link_libraries(alpacacore_synscan PRIVATE ws2_32)
+    endif()
+
+    if(MSVC)
+        target_compile_options(alpacacore_synscan PRIVATE /wd4996)
+    endif()
+
+    message(STATUS "SynScan driver: Serial and TCP connection support enabled")
+endif()
