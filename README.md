@@ -8,7 +8,7 @@ AlpacaBridge is a unified workspace for building, testing, and running a complet
 
 ## AlpacaBridge Explained
 
-- Write about AlpacaBridge [Openastro AlpacaBridge Launches and Why it Matters - ScopeTrader ](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/)
+- ScopeTrader:[Openastro AlpacaBridge Launches and Why it Matters](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/)
 
 - This video walks through building, testing, and running a complete ASCOM Alpaca server, including
 AI-assisted driver development and ConformU validation [
