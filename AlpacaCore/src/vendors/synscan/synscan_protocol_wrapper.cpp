@@ -22,6 +22,8 @@
 #include <limits>
 #include <cctype>
 #include <cmath>
+#include <algorithm>
+#include <optional>
 
 #ifdef _WIN32
     #ifndef WIN32_LEAN_AND_MEAN
@@ -74,6 +76,59 @@ std::string build_hex(uint32_t value, std::size_t width) {
     std::ostringstream oss;
     oss << std::uppercase << std::setw(static_cast<int>(width)) << std::setfill('0') << std::hex << value;
     return oss.str();
+}
+
+std::string trailing_hex(const std::string& value) {
+    std::size_t end = value.size();
+    while (end > 0 && !std::isxdigit(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+    std::size_t start = end;
+    while (start > 0 && std::isxdigit(static_cast<unsigned char>(value[start - 1]))) {
+        --start;
+    }
+    return value.substr(start, end - start);
+}
+
+std::string leading_hex(const std::string& value) {
+    std::size_t start = 0;
+    while (start < value.size() && !std::isxdigit(static_cast<unsigned char>(value[start]))) {
+        ++start;
+    }
+    std::size_t end = start;
+    while (end < value.size() && std::isxdigit(static_cast<unsigned char>(value[end]))) {
+        ++end;
+    }
+    return value.substr(start, end - start);
+}
+
+std::optional<std::pair<uint32_t, uint32_t>> parse_axis_pair_response(const std::string& response,
+                                                                       bool precise) {
+    const std::size_t expected_digits = precise ? 6 : 4;
+    auto comma = response.find(',');
+    if (comma == std::string::npos) {
+        return std::nullopt;
+    }
+
+    std::string left = trailing_hex(response.substr(0, comma));
+    std::string right = leading_hex(response.substr(comma + 1));
+    if (left.size() < expected_digits || right.size() < expected_digits) {
+        return std::nullopt;
+    }
+
+    left = left.substr(left.size() - expected_digits);
+    right = right.substr(0, expected_digits);
+
+    uint32_t first_raw = 0;
+    uint32_t second_raw = 0;
+    std::istringstream first_iss(left);
+    std::istringstream second_iss(right);
+    first_iss >> std::hex >> first_raw;
+    second_iss >> std::hex >> second_raw;
+    if (first_iss.fail() || second_iss.fail()) {
+        return std::nullopt;
+    }
+    return std::make_pair(first_raw, second_raw);
 }
 
 } // namespace
@@ -174,6 +229,13 @@ public:
         if (!write_data(command)) {
             throw AlpacaException("Failed to send command to mount");
         }
+        // Some firmware responds to binary motion commands while others do not.
+        // Drain any immediate bytes so they don't corrupt the next request/response cycle.
+        try {
+            (void)read_response(false, 40);
+        } catch (...) {
+            // Ignore optional response drain errors for fire-and-forget commands.
+        }
     }
 
     std::string get_handset_firmware_version() {
@@ -216,7 +278,8 @@ public:
     }
 
     void cancel_goto() {
-        (void)send_command("M", true, 0);
+        // Some handsets do not acknowledge cancel reliably; fire-and-forget avoids timeout stalls.
+        send_command_blind("M");
     }
 
     char get_pointing_state() {
@@ -243,64 +306,104 @@ public:
         (void)send_command(cmd, true, 0);
     }
 
+    void move_axis_fixed_rate(int axis, int rate) {
+        if (axis < 0 || axis > 1) {
+            throw AlpacaException("Invalid SynScan axis index");
+        }
+
+        const int dev = (axis == 0) ? 16 : 17;
+        const int magnitude = std::clamp(std::abs(rate), 0, 9);
+
+        auto send_fixed = [&](int direction_code, int slew_rate) {
+            std::string cmd;
+            cmd.reserve(8);
+            cmd.push_back('P');
+            cmd.push_back(static_cast<char>(2));
+            cmd.push_back(static_cast<char>(dev));
+            cmd.push_back(static_cast<char>(direction_code));
+            cmd.push_back(static_cast<char>(slew_rate));
+            cmd.push_back(static_cast<char>(0));
+            cmd.push_back(static_cast<char>(0));
+            cmd.push_back(static_cast<char>(0));
+            // Some handsets/firmware do not acknowledge this low-level slew command.
+            // Fire-and-forget avoids false timeout failures while keeping motion responsive.
+            send_command_blind(cmd);
+        };
+
+        if (magnitude == 0) {
+            // Issue both stop directions for robustness across handset/firmware variants.
+            send_fixed(36, 0);
+            send_fixed(37, 0);
+            return;
+        }
+
+        const int direction_code = (rate > 0) ? 36 : 37;
+        send_fixed(direction_code, magnitude);
+    }
+
+    void move_axis_variable_rate(int axis, double rate_deg_per_sec) {
+        if (axis < 0 || axis > 1) {
+            throw AlpacaException("Invalid SynScan axis index");
+        }
+
+        const int dev = (axis == 0) ? 16 : 17;
+        const double abs_deg_per_sec = std::abs(rate_deg_per_sec);
+
+        auto send_variable = [&](int direction_code, uint16_t scaled_rate) {
+            std::string cmd;
+            cmd.reserve(8);
+            cmd.push_back('P');
+            cmd.push_back(static_cast<char>(3));
+            cmd.push_back(static_cast<char>(dev));
+            cmd.push_back(static_cast<char>(direction_code));
+            cmd.push_back(static_cast<char>((scaled_rate >> 8) & 0xFF));
+            cmd.push_back(static_cast<char>(scaled_rate & 0xFF));
+            cmd.push_back(static_cast<char>(0));
+            cmd.push_back(static_cast<char>(0));
+            send_command_blind(cmd);
+        };
+
+        if (abs_deg_per_sec < 1e-6) {
+            send_variable(6, 0);
+            send_variable(7, 0);
+            // Also send fixed-mode stop to cover handset firmware differences.
+            move_axis_fixed_rate(axis, 0);
+            return;
+        }
+
+        const double rate_arcsec_per_sec = abs_deg_per_sec * 3600.0;
+        double scaled = std::round(rate_arcsec_per_sec * 4.0);
+        if (scaled < 1.0) {
+            scaled = 1.0;
+        }
+        if (scaled > 65535.0) {
+            scaled = 65535.0;
+        }
+        const auto scaled_rate = static_cast<uint16_t>(scaled);
+        const int direction_code = (rate_deg_per_sec > 0.0) ? 6 : 7;
+        send_variable(direction_code, scaled_rate);
+    }
+
     std::pair<uint32_t, uint32_t> get_ra_dec_raw(bool precise) {
-        std::string response = send_command(precise ? "e" : "E", true, 0);
-        auto comma = response.find(',');
-        if (comma == std::string::npos) {
-            throw AlpacaException("Invalid SynScan RA/Dec response");
+        const char* cmd = precise ? "e" : "E";
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            std::string response = send_command(cmd, true, 0);
+            if (auto parsed = parse_axis_pair_response(response, precise); parsed.has_value()) {
+                return parsed.value();
+            }
         }
-        std::string ra_str = response.substr(0, comma);
-        std::string dec_str = response.substr(comma + 1);
-
-        if (precise && ra_str.size() >= 6) {
-            ra_str = ra_str.substr(0, 6);
-        } else if (!precise && ra_str.size() > 4) {
-            ra_str = ra_str.substr(0, 4);
-        }
-
-        if (precise && dec_str.size() >= 6) {
-            dec_str = dec_str.substr(0, 6);
-        } else if (!precise && dec_str.size() > 4) {
-            dec_str = dec_str.substr(0, 4);
-        }
-
-        uint32_t ra_raw = 0;
-        uint32_t dec_raw = 0;
-        std::istringstream ra_iss(ra_str);
-        std::istringstream dec_iss(dec_str);
-        ra_iss >> std::hex >> ra_raw;
-        dec_iss >> std::hex >> dec_raw;
-        return {ra_raw, dec_raw};
+        throw AlpacaException("Invalid SynScan RA/Dec response");
     }
 
     std::pair<uint32_t, uint32_t> get_alt_az_raw(bool precise) {
-        std::string response = send_command(precise ? "z" : "Z", true, 0);
-        auto comma = response.find(',');
-        if (comma == std::string::npos) {
-            throw AlpacaException("Invalid SynScan Alt/Az response");
+        const char* cmd = precise ? "z" : "Z";
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            std::string response = send_command(cmd, true, 0);
+            if (auto parsed = parse_axis_pair_response(response, precise); parsed.has_value()) {
+                return parsed.value();
+            }
         }
-        std::string az_str = response.substr(0, comma);
-        std::string alt_str = response.substr(comma + 1);
-
-        if (precise && az_str.size() >= 6) {
-            az_str = az_str.substr(0, 6);
-        } else if (!precise && az_str.size() > 4) {
-            az_str = az_str.substr(0, 4);
-        }
-
-        if (precise && alt_str.size() >= 6) {
-            alt_str = alt_str.substr(0, 6);
-        } else if (!precise && alt_str.size() > 4) {
-            alt_str = alt_str.substr(0, 4);
-        }
-
-        uint32_t az_raw = 0;
-        uint32_t alt_raw = 0;
-        std::istringstream az_iss(az_str);
-        std::istringstream alt_iss(alt_str);
-        az_iss >> std::hex >> az_raw;
-        alt_iss >> std::hex >> alt_raw;
-        return {az_raw, alt_raw};
+        throw AlpacaException("Invalid SynScan Alt/Az response");
     }
 
     void goto_ra_dec_raw(uint32_t ra_raw, uint32_t dec_raw, bool precise) {
@@ -813,6 +916,14 @@ int SynScanProtocolWrapper::get_tracking_mode() {
 
 void SynScanProtocolWrapper::set_tracking_mode(int mode) {
     pimpl_->set_tracking_mode(mode);
+}
+
+void SynScanProtocolWrapper::move_axis_fixed_rate(int axis, int rate) {
+    pimpl_->move_axis_fixed_rate(axis, rate);
+}
+
+void SynScanProtocolWrapper::move_axis_variable_rate(int axis, double rate_deg_per_sec) {
+    pimpl_->move_axis_variable_rate(axis, rate_deg_per_sec);
 }
 
 std::pair<uint32_t, uint32_t> SynScanProtocolWrapper::get_ra_dec_raw(bool precise) {

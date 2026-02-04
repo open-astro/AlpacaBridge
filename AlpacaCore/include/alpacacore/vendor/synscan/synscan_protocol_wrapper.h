@@ -80,6 +80,8 @@ public:
     char get_pointing_state();
     int get_tracking_mode();
     void set_tracking_mode(int mode);
+    void move_axis_fixed_rate(int axis, int rate);
+    void move_axis_variable_rate(int axis, double rate_deg_per_sec);
 
     std::pair<uint32_t, uint32_t> get_ra_dec_raw(bool precise);
     std::pair<uint32_t, uint32_t> get_alt_az_raw(bool precise);

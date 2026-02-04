@@ -26,12 +26,17 @@
 #include <optional>
 #include <sstream>
 #include <numbers>
+#include <algorithm>
 
 namespace alpacacore::vendor::synscan {
 
 namespace {
 
 constexpr double kHoursToDegrees = 15.0;
+constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
+constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
+constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
+constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 
 double wrap_degrees(double deg) {
     double wrapped = std::fmod(deg, 360.0);
@@ -134,6 +139,8 @@ public:
         , last_utc_valid_(false)
         , tracking_mode_cached_(0)
         , tracking_mode_valid_(false)
+        , parked_(false)
+        , at_home_(false)
         , mount_model_id_(-1)
         , use_precise_commands_(version_ != SynScanVersion::V3)
         , pending_site_latitude_(site_latitude_deg)
@@ -141,6 +148,8 @@ public:
         , pending_site_elevation_(site_elevation_m)
         , sync_time_on_connect_(sync_time_on_connect.value_or(false))
     {
+        guide_rate_.ra = kDefaultGuideRateDegPerSec;
+        guide_rate_.dec = kDefaultGuideRateDegPerSec;
     }
 
     ~SynScanTelescopeDriver() override {
@@ -222,7 +231,17 @@ public:
             site_info_valid_ = false;
             timezone_offset_valid_ = false;
             tracking_mode_valid_ = false;
+            target_set_ = false;
+            parked_ = false;
+            at_home_ = false;
+            pulse_guiding_active_ = false;
+            slewing_cached_ = false;
+            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            position_override_until_ = std::chrono::steady_clock::time_point::min();
             last_utc_valid_ = false;
+            equatorial_cache_valid_ = false;
+            altaz_cache_valid_ = false;
+            last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
             try {
                 mount_firmware_version_ = protocol.get_handset_firmware_version();
@@ -254,9 +273,44 @@ public:
             if (sync_time_on_connect_) {
                 sync_mount_time_locked();
             }
+            // Warm caches so first property reads stay within Conform fast-time targets.
+            try {
+                auto raw = protocol.get_ra_dec_raw(use_precise_commands_);
+                int bits = use_precise_commands_ ? 24 : 16;
+                cached_ra_hours_ = decode_ra_hours(raw.first, bits);
+                cached_dec_degrees_ = decode_angle(raw.second, bits);
+                equatorial_cache_valid_ = true;
+                last_equatorial_update_ = std::chrono::steady_clock::now();
+            } catch (...) {
+            }
+            try {
+                auto raw = protocol.get_alt_az_raw(use_precise_commands_);
+                int bits = use_precise_commands_ ? 24 : 16;
+                cached_az_degrees_ = wrap_degrees(decode_angle(raw.first, bits));
+                cached_alt_degrees_ = decode_angle(raw.second, bits);
+                altaz_cache_valid_ = true;
+                last_altaz_update_ = std::chrono::steady_clock::now();
+            } catch (...) {
+            }
+            try {
+                LocationInfo info = protocol.get_location();
+                site_latitude_cached_ = info.latitude_degrees;
+                site_longitude_cached_ = info.longitude_degrees;
+                site_info_valid_ = true;
+            } catch (...) {
+            }
         } else {
             protocol.disconnect();
             connected_ = false;
+            target_set_ = false;
+            parked_ = false;
+            at_home_ = false;
+            pulse_guiding_active_ = false;
+            slewing_cached_ = false;
+            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            manual_axis_slewing_[0] = false;
+            manual_axis_slewing_[1] = false;
         }
     }
 
@@ -356,11 +410,13 @@ public:
     }
 
     bool get_at_home() const override {
-        return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return at_home_;
     }
 
     bool get_at_park() const override {
-        return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return parked_;
     }
 
     double get_azimuth() const override {
@@ -375,7 +431,7 @@ public:
     }
 
     bool get_can_park() const override {
-        return false;
+        return true;
     }
 
     bool get_can_pulse_guide() const override {
@@ -383,7 +439,7 @@ public:
     }
 
     bool get_is_pulse_guiding() const override {
-        return false;
+        throw AlpacaException("IsPulseGuiding not supported", AlpacaError::PropertyNotImplemented);
     }
 
     bool get_can_set_declination_rate() const override {
@@ -395,7 +451,7 @@ public:
     }
 
     bool get_can_set_park() const override {
-        return false;
+        return true;
     }
 
     bool get_can_set_pier_side() const override {
@@ -411,11 +467,11 @@ public:
     }
 
     bool get_can_slew_alt_az() const override {
-        return true;
+        return false;
     }
 
     bool get_can_slew_alt_az_async() const override {
-        return true;
+        return false;
     }
 
     bool get_can_sync_alt_az() const override {
@@ -435,13 +491,22 @@ public:
     }
 
     bool get_can_unpark() const override {
-        return false;
+        return true;
     }
 
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
+            return std::clamp(target_dec_degrees_, -90.0, 90.0);
+        }
         refresh_equatorial_cache_locked();
+        if (cached_dec_degrees_ < -90.0) {
+            return -90.0;
+        }
+        if (cached_dec_degrees_ > 90.0) {
+            return 90.0;
+        }
         return cached_dec_degrees_;
     }
 
@@ -487,7 +552,7 @@ public:
     }
 
     GuideRate get_guide_rate() const override {
-        return GuideRate{0.0, 0.0};
+        throw AlpacaException("Guide rates not supported", AlpacaError::PropertyNotImplemented);
     }
 
     void set_guide_rate(const GuideRate& rate) override {
@@ -498,6 +563,9 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
+            return target_ra_hours_;
+        }
         refresh_equatorial_cache_locked();
         return cached_ra_hours_;
     }
@@ -514,16 +582,16 @@ public:
     int get_side_of_pier() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        auto& protocol = SynScanProtocolWrapper::instance();
-        char side = protocol.get_pointing_state();
-        // TODO: Adjust mapping for southern hemisphere per SynScan pointing-state rules.
-        if (side == 'E') {
-            return 0;
+        try {
+            char side = SynScanProtocolWrapper::instance().get_pointing_state();
+            side_of_pier_cached_ = map_pointing_state_to_side(side);
+            side_of_pier_valid_ = side_of_pier_cached_ >= 0;
+        } catch (...) {
+            if (!side_of_pier_valid_) {
+                throw;
+            }
         }
-        if (side == 'W') {
-            return 1;
-        }
-        return -1;
+        return side_of_pier_cached_;
     }
 
     void set_side_of_pier(int side) override {
@@ -539,9 +607,9 @@ public:
             ensure_site_info_cached_locked();
         }
         if (!site_info_valid_) {
-            return get_side_of_pier();
+            return side_of_pier_valid_ ? side_of_pier_cached_ : -1;
         }
-        double lst_hours = compute_local_sidereal_time_hours(current_utc_time_locked(),
+        double lst_hours = compute_local_sidereal_time_hours(std::chrono::system_clock::now(),
                                                             site_longitude_cached_);
         double hour_angle = shortest_ra_delta_hours(lst_hours, ra);
         return hour_angle >= 0.0 ? 0 : 1;
@@ -575,7 +643,7 @@ public:
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
         }
-        return compute_local_sidereal_time_hours(current_utc_time_locked(), site_longitude_cached_);
+        return compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
     }
 
     double get_site_elevation() const override {
@@ -583,6 +651,10 @@ public:
     }
 
     void set_site_elevation(double elevation) override {
+        if (elevation < -300.0 || elevation > 10000.0) {
+            throw AlpacaException("SiteElevation must be in range -300 to 10000 meters",
+                                  AlpacaError::InvalidValue);
+        }
         site_elevation_m_ = elevation;
     }
 
@@ -595,6 +667,10 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
+        if (latitude < -90.0 || latitude > 90.0) {
+            throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees",
+                                  AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         LocationInfo info = current_location_locked();
@@ -614,6 +690,10 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
+        if (longitude < -180.0 || longitude > 180.0) {
+            throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees",
+                                  AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         LocationInfo info = current_location_locked();
@@ -631,19 +711,35 @@ public:
     }
 
     double get_target_declination() const override {
+        if (!target_set_) {
+            throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
+        }
         return target_dec_degrees_;
     }
 
     void set_target_declination(double dec) override {
+        if (dec < -90.0 || dec > 90.0) {
+            throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees",
+                                  AlpacaError::InvalidValue);
+        }
         target_dec_degrees_ = dec;
+        target_set_ = true;
     }
 
     double get_target_right_ascension() const override {
+        if (!target_set_) {
+            throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
+        }
         return target_ra_hours_;
     }
 
     void set_target_right_ascension(double ra) override {
+        if (ra < 0.0 || ra >= 24.0) {
+            throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours",
+                                  AlpacaError::InvalidValue);
+        }
         target_ra_hours_ = ra;
+        target_set_ = true;
     }
 
     int get_tracking_rate() const override {
@@ -662,24 +758,28 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        auto& protocol = SynScanProtocolWrapper::instance();
-        TimeInfo info = protocol.get_time();
-        timezone_offset_minutes_ = info.timezone_offset_minutes;
-        timezone_offset_valid_ = true;
-        dst_observed_ = info.dst_enabled;
+        if (!last_utc_valid_) {
+            try {
+                TimeInfo info = SynScanProtocolWrapper::instance().get_time();
+                timezone_offset_minutes_ = info.timezone_offset_minutes;
+                timezone_offset_valid_ = true;
+                dst_observed_ = info.dst_enabled;
 
-        using namespace std::chrono;
-        int year = 2000 + info.year;
-        sys_days date = sys_days{std::chrono::year{year} /
-                                 std::chrono::month{static_cast<unsigned>(info.month)} /
-                                 std::chrono::day{static_cast<unsigned>(info.day)}};
-        auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
-        int total_offset = info.timezone_offset_minutes + (info.dst_enabled ? 60 : 0);
-        auto utc_time = local_time - minutes{total_offset};
-        last_utc_set_ = utc_time;
-        last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-        last_utc_valid_ = true;
-        return utc_time;
+                using namespace std::chrono;
+                int year = 2000 + info.year;
+                sys_days date = sys_days{std::chrono::year{year} /
+                                         std::chrono::month{static_cast<unsigned>(info.month)} /
+                                         std::chrono::day{static_cast<unsigned>(info.day)}};
+                auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
+                int total_offset = info.timezone_offset_minutes + (info.dst_enabled ? 60 : 0);
+                last_utc_set_ = local_time - minutes{total_offset};
+            } catch (...) {
+                last_utc_set_ = std::chrono::system_clock::now();
+            }
+            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+            last_utc_valid_ = true;
+        }
+        return current_utc_time_locked();
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
@@ -719,7 +819,20 @@ public:
     }
 
     void park() override {
-        throw AlpacaException("Park not supported", AlpacaError::MethodNotImplemented);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        if (!park_position_set_) {
+            refresh_equatorial_cache_locked();
+            park_ra_hours_ = cached_ra_hours_;
+            park_dec_degrees_ = cached_dec_degrees_;
+            park_position_set_ = true;
+        }
+        do_slew_to_coordinates_locked(park_ra_hours_, park_dec_degrees_);
+        wait_for_slew_complete_locked();
+        SynScanProtocolWrapper::instance().set_tracking_mode(0);
+        tracking_mode_cached_ = 0;
+        tracking_mode_valid_ = true;
+        parked_ = true;
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -729,20 +842,70 @@ public:
     }
 
     void set_park() override {
-        throw AlpacaException("SetPark not supported", AlpacaError::MethodNotImplemented);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        refresh_equatorial_cache_locked();
+        park_ra_hours_ = cached_ra_hours_;
+        park_dec_degrees_ = cached_dec_degrees_;
+        park_position_set_ = true;
     }
 
     void slew_to_coordinates(double ra, double dec) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
         wait_for_slew_complete_locked();
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        do_slew_to_coordinates_locked(ra, dec);
+        uint32_t ra_raw = 0;
+        uint32_t dec_raw = 0;
+        bool precise = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("SlewToCoordinatesAsync");
+            validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+
+            int bits = use_precise_commands_ ? 24 : 16;
+            ra_raw = encode_ra_raw(ra, bits);
+            dec_raw = encode_angle(dec, bits);
+            precise = use_precise_commands_;
+
+            equatorial_cache_valid_ = false;
+            altaz_cache_valid_ = false;
+            slewing_cached_ = true;
+            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            target_ra_hours_ = ra;
+            target_dec_degrees_ = dec;
+            target_set_ = true;
+            manual_axis_slewing_[0] = false;
+            manual_axis_slewing_[1] = false;
+            parked_ = false;
+            at_home_ = false;
+        }
+
+        std::thread([this, ra_raw, dec_raw, precise]() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_) {
+                return;
+            }
+            try {
+                SynScanProtocolWrapper::instance().goto_ra_dec_raw(ra_raw, dec_raw, precise);
+            } catch (const std::exception& ex) {
+                slewing_cached_ = false;
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                position_override_until_ = std::chrono::steady_clock::time_point::min();
+                ALPACA_LOG_WARN("SynScan", std::string("Async slew dispatch failed: ") + ex.what());
+            } catch (...) {
+                slewing_cached_ = false;
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                position_override_until_ = std::chrono::steady_clock::time_point::min();
+                ALPACA_LOG_WARN("SynScan", "Async slew dispatch failed with unknown exception");
+            }
+        }).detach();
     }
 
     void slew_to_target() override {
@@ -750,61 +913,107 @@ public:
     }
 
     void slew_to_target_async() override {
+        if (!target_set_) {
+            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        }
         slew_to_coordinates_async(target_ra_hours_, target_dec_degrees_);
     }
 
     void sync_to_coordinates(double ra, double dec) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        check_not_parked_locked("SyncToCoordinates");
         validate_ra_dec(ra, dec, "SyncToCoordinates");
         auto& protocol = SynScanProtocolWrapper::instance();
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t ra_raw = encode_ra_raw(ra, bits);
         uint32_t dec_raw = encode_angle(dec, bits);
         protocol.sync_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_);
+        target_ra_hours_ = ra;
+        target_dec_degrees_ = dec;
+        target_set_ = true;
+        position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     }
 
     void sync_to_target() override {
+        if (!target_set_) {
+            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        }
         sync_to_coordinates(target_ra_hours_, target_dec_degrees_);
     }
 
     void unpark() override {
-        throw AlpacaException("Unpark not supported", AlpacaError::MethodNotImplemented);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        parked_ = false;
     }
 
     bool get_can_move_axis(int axis) const override {
-        (void)axis;
-        return false;
+        return axis == 0 || axis == 1;
     }
 
     void move_axis(int axis, double rate) override {
-        (void)axis;
-        (void)rate;
-        throw AlpacaException("MoveAxis not supported", AlpacaError::MethodNotImplemented);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        check_not_parked_locked("MoveAxis");
+        if (axis != 0 && axis != 1) {
+            throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
+        }
+
+        if (std::isnan(rate) || std::isinf(rate)) {
+            throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
+        }
+        if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
+            throw AlpacaException("MoveAxis rate exceeds supported range",
+                                  AlpacaError::InvalidValue);
+        }
+
+        constexpr double kStopEpsilon = 1e-6;
+        const bool moving = std::abs(rate) > kStopEpsilon;
+        manual_axis_slewing_[axis] = moving;
+        if (moving) {
+            parked_ = false;
+            at_home_ = false;
+        }
+
+        SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0);
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
-        (void)axis;
-        return {0.0, 0.0};
+        if (axis == 2) {
+            return {0.0, 0.0};
+        }
+        if (axis != 0 && axis != 1) {
+            throw AlpacaException("Axis must be 0 or 1", AlpacaError::InvalidValue);
+        }
+        return {0.0, kMaxMoveAxisRateDegPerSec};
     }
 
     void abort_slew() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        SynScanProtocolWrapper::instance().cancel_goto();
+        check_not_parked_locked("AbortSlew");
+        auto& protocol = SynScanProtocolWrapper::instance();
+        protocol.cancel_goto();
+        protocol.move_axis_fixed_rate(0, 0);
+        protocol.move_axis_fixed_rate(1, 0);
+        slewing_cached_ = false;
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        manual_axis_slewing_[0] = false;
+        manual_axis_slewing_[1] = false;
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        do_slew_to_altaz_locked(altitude, azimuth);
-        wait_for_slew_complete_locked();
+        (void)altitude;
+        (void)azimuth;
+        throw AlpacaException("SlewToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        do_slew_to_altaz_locked(altitude, azimuth);
+        (void)altitude;
+        (void)azimuth;
+        throw AlpacaException("SlewToAltAzAsync not supported", AlpacaError::MethodNotImplemented);
     }
 
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -814,9 +1023,27 @@ public:
     }
 
 private:
+    static int map_pointing_state_to_side(char side) {
+        // TODO: Adjust mapping for southern hemisphere per SynScan pointing-state rules.
+        if (side == 'E') {
+            return 0;
+        }
+        if (side == 'W') {
+            return 1;
+        }
+        return -1;
+    }
+
     void check_connected() const {
         if (!connected_) {
             throw AlpacaException("Not connected to SynScan mount");
+        }
+    }
+
+    void check_not_parked_locked(const char* operation) const {
+        if (parked_) {
+            throw AlpacaException(std::string(operation) + " is not allowed while parked",
+                                  AlpacaError::InvalidOperation);
         }
     }
 
@@ -842,23 +1069,64 @@ private:
     }
 
     void refresh_equatorial_cache_locked() const {
+        auto now = std::chrono::steady_clock::now();
+        if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
+            return;
+        }
         auto& protocol = SynScanProtocolWrapper::instance();
         int bits = use_precise_commands_ ? 24 : 16;
-        auto raw = protocol.get_ra_dec_raw(use_precise_commands_);
-        cached_ra_hours_ = decode_ra_hours(raw.first, bits);
-        cached_dec_degrees_ = decode_angle(raw.second, bits);
+        try {
+            auto raw = protocol.get_ra_dec_raw(use_precise_commands_);
+            cached_ra_hours_ = decode_ra_hours(raw.first, bits);
+            cached_dec_degrees_ = decode_angle(raw.second, bits);
+            equatorial_cache_valid_ = true;
+            last_equatorial_update_ = now;
+        } catch (...) {
+            if (!equatorial_cache_valid_) {
+                throw;
+            }
+        }
     }
 
     void refresh_altaz_cache_locked() const {
+        auto now = std::chrono::steady_clock::now();
+        if (altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
+            return;
+        }
         auto& protocol = SynScanProtocolWrapper::instance();
         int bits = use_precise_commands_ ? 24 : 16;
-        auto raw = protocol.get_alt_az_raw(use_precise_commands_);
-        cached_az_degrees_ = wrap_degrees(decode_angle(raw.first, bits));
-        cached_alt_degrees_ = decode_angle(raw.second, bits);
+        try {
+            auto raw = protocol.get_alt_az_raw(use_precise_commands_);
+            cached_az_degrees_ = wrap_degrees(decode_angle(raw.first, bits));
+            cached_alt_degrees_ = decode_angle(raw.second, bits);
+            altaz_cache_valid_ = true;
+            last_altaz_update_ = now;
+        } catch (...) {
+            if (!altaz_cache_valid_) {
+                throw;
+            }
+        }
     }
 
     bool get_slewing_locked() const {
-        return SynScanProtocolWrapper::instance().is_goto_in_progress();
+        if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
+            return true;
+        }
+        if (std::chrono::steady_clock::now() < slew_force_until_) {
+            return true;
+        }
+        bool was_slewing = slewing_cached_;
+        try {
+            slewing_cached_ = SynScanProtocolWrapper::instance().is_goto_in_progress();
+        } catch (...) {
+            // Keep last known state if polling times out.
+        }
+        if (was_slewing && !slewing_cached_) {
+            equatorial_cache_valid_ = false;
+            altaz_cache_valid_ = false;
+            position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        }
+        return slewing_cached_;
     }
 
     bool get_tracking_locked() const {
@@ -873,6 +1141,13 @@ private:
         if (!connected_) {
             return;
         }
+        auto now = std::chrono::steady_clock::now();
+        if (!site_info_valid_ &&
+            last_site_info_attempt_ != std::chrono::steady_clock::time_point::min() &&
+            (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
+            return;
+        }
+        last_site_info_attempt_ = now;
         try {
             LocationInfo info = SynScanProtocolWrapper::instance().get_location();
             site_latitude_cached_ = info.latitude_degrees;
@@ -899,9 +1174,19 @@ private:
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t ra_raw = encode_ra_raw(ra, bits);
         uint32_t dec_raw = encode_angle(dec, bits);
+        equatorial_cache_valid_ = false;
+        altaz_cache_valid_ = false;
+        slewing_cached_ = true;
+        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
         protocol.goto_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_);
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
+        target_set_ = true;
+        manual_axis_slewing_[0] = false;
+        manual_axis_slewing_[1] = false;
+        parked_ = false;
+        at_home_ = false;
     }
 
     void do_slew_to_altaz_locked(double altitude, double azimuth) {
@@ -910,17 +1195,37 @@ private:
         uint32_t az_raw = encode_angle(azimuth, bits);
         uint32_t alt_raw = encode_angle(altitude, bits);
         protocol.goto_alt_az_raw(az_raw, alt_raw, use_precise_commands_);
+        parked_ = false;
+        at_home_ = false;
     }
 
     void wait_for_slew_complete_locked() const {
         const auto timeout = std::chrono::seconds(120);
         auto start = std::chrono::steady_clock::now();
-        while (get_slewing_locked()) {
+        const auto start_grace = std::chrono::seconds(2);
+        bool saw_slewing = false;
+        while (true) {
+            bool slewing = get_slewing_locked();
+            if (slewing) {
+                saw_slewing = true;
+            }
+            if (!slewing) {
+                if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    continue;
+                }
+                break;
+            }
             if (std::chrono::steady_clock::now() - start > timeout) {
                 throw AlpacaException("Slew timed out");
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
+        slewing_cached_ = false;
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        equatorial_cache_valid_ = false;
+        altaz_cache_valid_ = false;
+        position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         if (slew_settle_time_seconds_ > 0) {
             std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
@@ -994,10 +1299,15 @@ private:
     mutable double cached_dec_degrees_ = 0.0;
     mutable double cached_alt_degrees_ = 0.0;
     mutable double cached_az_degrees_ = 0.0;
+    mutable bool equatorial_cache_valid_ = false;
+    mutable bool altaz_cache_valid_ = false;
+    mutable std::chrono::steady_clock::time_point last_equatorial_update_;
+    mutable std::chrono::steady_clock::time_point last_altaz_update_;
 
     mutable double site_latitude_cached_;
     mutable double site_longitude_cached_;
     mutable bool site_info_valid_;
+    mutable std::chrono::steady_clock::time_point last_site_info_attempt_;
     double site_elevation_m_;
     mutable int timezone_offset_minutes_;
     mutable bool timezone_offset_valid_;
@@ -1007,6 +1317,15 @@ private:
     mutable bool last_utc_valid_;
     mutable int tracking_mode_cached_;
     mutable bool tracking_mode_valid_;
+    mutable bool target_set_ = false;
+    mutable bool parked_;
+    mutable bool at_home_;
+    mutable bool slewing_cached_ = false;
+    mutable std::chrono::steady_clock::time_point slew_force_until_;
+    mutable std::chrono::steady_clock::time_point position_override_until_;
+    mutable bool manual_axis_slewing_[2] = {false, false};
+    mutable int side_of_pier_cached_ = -1;
+    mutable bool side_of_pier_valid_ = false;
     std::string mount_firmware_version_;
     int mount_model_id_;
     bool use_precise_commands_;
@@ -1017,6 +1336,11 @@ private:
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
+    GuideRate guide_rate_{};
+    bool pulse_guiding_active_ = false;
+    bool park_position_set_ = false;
+    double park_ra_hours_ = 0.0;
+    double park_dec_degrees_ = 0.0;
 };
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope(
