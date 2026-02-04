@@ -156,3 +156,16 @@ This document lists all hardware vendors and device types that are verified to w
 - **USB Driver Requirement**: The PL2303HXD USB driver is required for USB/serial connections on macOS. Driver downloads are available from [Prolific Technology](https://www.prolific.com.tw/en/products/smart-i-o-solution-en/usb-1-1-to-uart-serial-printer/). This is not needed when connecting via Wi-Fi. On Windows, USB-to-serial drivers are typically included with the OS or automatically installed.
 - **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated)
 - **Linux ARM Testing**: Linux ARMv8 (e.g., Raspberry Pi 5) has been tested and verified. ARMv6 and ARMv7 are not tested.
+
+### SynScan
+
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|------------------|----------------|------------------|---------------|-----------------|--------|
+| SynScan V3/V4 | USB/Serial (hand controller) | | | ✓ | | | [ConformU Validation 2026-02-04](conformu/SynScan/) |
+
+### SynScan Driver Notes
+
+- **Protocol**: Sky-Watcher SynScan V3/V4 protocol
+- **Connection**: USB/Serial via hand controller (tested)
+- **Tested Mount**: Orion Atlas EQ-G
+- **Verified OS/Arch**: macOS (arm64) only (ConformU validated)

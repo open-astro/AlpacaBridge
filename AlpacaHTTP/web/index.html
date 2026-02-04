@@ -56,6 +56,7 @@
                     <select id="vendor" name="vendor" required>
                         <option value="">Select vendor...</option>
                         <option value="ioptron">iOptron</option>
+                        <option value="synscan">SynScan</option>
                         <option value="zwo">ZWO</option>
                     </select>
                 </div>
@@ -115,6 +116,72 @@
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
 
+                </div>
+
+                <!-- SynScan Telescope Configuration -->
+                <div id="synscan-config" class="vendor-config" style="display: none;">
+                    <h3>SynScan Telescope Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="synscan-version">Handset Version:</label>
+                        <select id="synscan-version" name="synscanVersion">
+                            <option value="auto">Auto (Recommended)</option>
+                            <option value="v3">V3</option>
+                            <option value="v4">V4</option>
+                        </select>
+                        <small>Select the SynScan hand control generation.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="synscan-connection-type">Connection Type:</label>
+                        <select id="synscan-connection-type" name="synscanConnectionType" required>
+                            <option value="serial">Serial/USB</option>
+                            <option value="network">Network/WiFi</option>
+                        </select>
+                    </div>
+
+                    <!-- Serial Connection -->
+                    <div id="synscan-serial-config" class="connection-config">
+                        <div class="form-group">
+                            <label for="synscan-port-path">Serial Port:</label>
+                            <input type="text" id="synscan-port-path" name="synscanPortPath" placeholder="/dev/ttyUSB0">
+                            <small>Linux: /dev/ttyUSB0, macOS: /dev/cu.usbserial-*, Windows: COM3</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="synscan-baud-rate">Baud Rate:</label>
+                            <input type="number" id="synscan-baud-rate" name="synscanBaudRate" value="9600" min="1200" max="115200">
+                        </div>
+                    </div>
+
+                    <!-- Network Connection -->
+                    <div id="synscan-network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="synscan-host">IP Address:</label>
+                            <input type="text" id="synscan-host" name="synscanHost" placeholder="192.168.1.100">
+                        </div>
+                        <div class="form-group">
+                            <label for="synscan-tcp-port">TCP Port:</label>
+                            <input type="number" id="synscan-tcp-port" name="synscanTcpPort" value="11880" min="1" max="65535">
+                            <small>Common WiFi adapters use port 11880.</small>
+                        </div>
+                    </div>
+
+                    <h4>Optics</h4>
+                    <div class="form-group">
+                        <label for="synscan-aperture-diameter">Aperture Diameter (m):</label>
+                        <input type="number" id="synscan-aperture-diameter" name="synscanApertureDiameter" min="0" step="0.001" placeholder="0.100">
+                        <small>Optional. Some clients may ignore this value.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="synscan-aperture-area">Aperture Area (m^2):</label>
+                        <input type="number" id="synscan-aperture-area" name="apertureArea" min="0" step="0.000001" placeholder="0.007854" readonly>
+                        <small>Optional. Derived from the aperture diameter.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="synscan-focal-length">Focal Length (m):</label>
+                        <input type="number" id="synscan-focal-length" name="synscanFocalLength" min="0" step="0.001" placeholder="0.800">
+                        <small>Optional. Some clients may ignore this value.</small>
+                    </div>
                 </div>
 
                 <!-- ZWO Configuration -->

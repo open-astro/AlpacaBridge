@@ -17,6 +17,7 @@ option(ALPACACORE_ENABLE_ALL_VENDORS "Enable all vendor drivers" ON)
 option(ALPACACORE_ENABLE_ZWO "Enable ZWO vendor support" OFF)
 option(ALPACACORE_ENABLE_QHY "Enable QHY vendor support" OFF)
 option(ALPACACORE_ENABLE_IOPTRON "Enable iOptron vendor support" OFF)
+option(ALPACACORE_ENABLE_SYNSCAN "Enable SynScan vendor support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
@@ -25,6 +26,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     # QHY is not yet implemented, so don't enable it
     # set(ALPACACORE_ENABLE_QHY ON)
     set(ALPACACORE_ENABLE_IOPTRON ON)
+    set(ALPACACORE_ENABLE_SYNSCAN ON)
 endif()
 
 # Compiler warnings
@@ -113,6 +115,13 @@ if(ALPACACORE_ENABLE_IOPTRON)
     endif()
 endif()
 
+if(ALPACACORE_ENABLE_SYNSCAN)
+    add_subdirectory(src/vendors/synscan)
+    if(TARGET alpacacore_synscan)
+        target_link_libraries(alpacacore PRIVATE alpacacore_synscan)
+    endif()
+endif()
+
 # Custom target to clean everything including CMake cache
 # Usage: cmake --build . --target alpacacore-clean-all
 # Note: Named with project prefix to avoid conflicts when used as subdirectory
@@ -172,6 +181,15 @@ endif()
 
 if(ALPACACORE_ENABLE_IOPTRON AND TARGET alpacacore_ioptron)
     install(TARGETS alpacacore_ioptron
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_SYNSCAN AND TARGET alpacacore_synscan)
+    install(TARGETS alpacacore_synscan
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

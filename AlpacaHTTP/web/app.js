@@ -600,9 +600,9 @@ function setFormValue(elementId, value) {
     element.value = value !== undefined && value !== null ? value : '';
 }
 
-function updateApertureAreaFromDiameter() {
-    const diameterEl = document.getElementById('aperture-diameter');
-    const areaEl = document.getElementById('aperture-area');
+function updateApertureAreaFromDiameter(diameterId, areaId) {
+    const diameterEl = document.getElementById(diameterId);
+    const areaEl = document.getElementById(areaId);
     if (!diameterEl || !areaEl) {
         return;
     }
@@ -631,19 +631,39 @@ function startEditDevice(device) {
 
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
-    const connectionTypeEl = document.getElementById('connection-type');
-    if (connectionTypeEl) {
-        const connectionType = config.connectionType || 'serial';
-        setFormValue('connection-type', connectionType);
-        connectionTypeEl.dispatchEvent(new Event('change'));
+    if (vendor === 'ioptron') {
+        const connectionTypeEl = document.getElementById('connection-type');
+        if (connectionTypeEl) {
+            const connectionType = config.connectionType || 'serial';
+            setFormValue('connection-type', connectionType);
+            connectionTypeEl.dispatchEvent(new Event('change'));
+        }
+        setFormValue('port-path', config.portPath);
+        setFormValue('baud-rate', config.baudRate);
+        setFormValue('host', config.host);
+        setFormValue('tcp-port', config.tcpPort);
+        setFormValue('aperture-diameter', config.apertureDiameter);
+        setFormValue('focal-length', config.focalLength);
+        updateApertureAreaFromDiameter('aperture-diameter', 'aperture-area');
+    } else if (vendor === 'synscan') {
+        setFormValue('synscan-version', config.synscanVersion || 'auto');
+        const synscanConnectionType = config.connectionType || 'serial';
+        setFormValue('synscan-connection-type', synscanConnectionType);
+        if (synscanConnectionType === 'serial') {
+            setFormValue('synscan-port-path', config.portPath);
+            setFormValue('synscan-baud-rate', config.baudRate);
+        } else {
+            setFormValue('synscan-host', config.host);
+            setFormValue('synscan-tcp-port', config.tcpPort);
+        }
+        setFormValue('synscan-aperture-diameter', config.apertureDiameter);
+        setFormValue('synscan-focal-length', config.focalLength);
+        updateApertureAreaFromDiameter('synscan-aperture-diameter', 'synscan-aperture-area');
+        const synscanConnectionTypeEl = document.getElementById('synscan-connection-type');
+        if (synscanConnectionTypeEl) {
+            synscanConnectionTypeEl.dispatchEvent(new Event('change'));
+        }
     }
-
-    setFormValue('port-path', config.portPath);
-    setFormValue('baud-rate', config.baudRate);
-    setFormValue('host', config.host);
-    setFormValue('tcp-port', config.tcpPort);
-    setFormValue('aperture-diameter', config.apertureDiameter);
-    setFormValue('focal-length', config.focalLength);
     setFormValue('camera-index', config.cameraIndex);
     setFormValue('camera-id', config.cameraId);
     setFormValue('filterwheel-index', config.filterwheelIndex);
@@ -663,7 +683,6 @@ function startEditDevice(device) {
     setFormValue('rotator-index', config.rotatorIndex);
     setFormValue('rotator-id', config.rotatorId);
     setFormValue('zwo-switch-type', config.switchType);
-    updateApertureAreaFromDiameter();
 
     const messageDiv = document.getElementById('form-message');
     if (messageDiv) {
@@ -1149,6 +1168,11 @@ function updateVendorOptions() {
         ioptronOption.disabled = !isTelescope;
         ioptronOption.hidden = !isTelescope;
     }
+    const synscanOption = vendorSelect.querySelector('option[value="synscan"]');
+    if (synscanOption) {
+        synscanOption.disabled = !isTelescope;
+        synscanOption.hidden = !isTelescope;
+    }
     const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
     if (zwoOption) {
         const zwoAllowed = isCamera || isSwitch || isFilterWheel || isFocuser || isRotator;
@@ -1157,6 +1181,9 @@ function updateVendorOptions() {
     }
 
     if (!isTelescope && vendorSelect.value === 'ioptron') {
+        vendorSelect.value = '';
+    }
+    if (!isTelescope && vendorSelect.value === 'synscan') {
         vendorSelect.value = '';
     }
     if (!isCamera && !isSwitch && !isFilterWheel && !isFocuser && !isRotator && vendorSelect.value === 'zwo') {
@@ -1175,6 +1202,8 @@ document.getElementById('vendor').addEventListener('change', function() {
     
     if (vendor === 'ioptron') {
         document.getElementById('ioptron-config').style.display = 'block';
+    } else if (vendor === 'synscan') {
+        document.getElementById('synscan-config').style.display = 'block';
     } else if (vendor === 'zwo') {
         document.getElementById('zwo-config').style.display = 'block';
     }
@@ -1188,6 +1217,15 @@ document.getElementById('connection-type').addEventListener('change', function()
     document.getElementById('serial-config').style.display = type === 'serial' ? 'block' : 'none';
     document.getElementById('network-config').style.display = type === 'network' ? 'block' : 'none';
 });
+
+const synscanConnectionType = document.getElementById('synscan-connection-type');
+if (synscanConnectionType) {
+    synscanConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('synscan-serial-config').style.display = type === 'serial' ? 'block' : 'none';
+        document.getElementById('synscan-network-config').style.display = type === 'network' ? 'block' : 'none';
+    });
+}
 
 const deviceNumberInput = document.getElementById('device-number');
 if (deviceNumberInput) {
@@ -1265,7 +1303,13 @@ if (rotatorIndexInput) {
 
 const apertureDiameterInput = document.getElementById('aperture-diameter');
 if (apertureDiameterInput) {
-    apertureDiameterInput.addEventListener('input', updateApertureAreaFromDiameter);
+    apertureDiameterInput.addEventListener('input', () =>
+        updateApertureAreaFromDiameter('aperture-diameter', 'aperture-area'));
+}
+const synscanApertureDiameterInput = document.getElementById('synscan-aperture-diameter');
+if (synscanApertureDiameterInput) {
+    synscanApertureDiameterInput.addEventListener('input', () =>
+        updateApertureAreaFromDiameter('synscan-aperture-diameter', 'synscan-aperture-area'));
 }
 
 function readOptionalNumber(formData, name) {
@@ -1573,6 +1617,7 @@ document.getElementById('device-form').addEventListener('submit', async function
     };
 
     if (deviceData.vendor === 'ioptron') {
+        deviceData.connectionType = formData.get('connectionType') || 'serial';
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('portPath');
             // Default to 115200 for modern iOptron mounts if the field is empty/invalid
@@ -1588,6 +1633,26 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
 
         const focalLength = readOptionalNumber(formData, 'focalLength');
+        if (focalLength !== null) {
+            deviceData.focalLength = focalLength;
+        }
+    } else if (deviceData.vendor === 'synscan') {
+        deviceData.connectionType = formData.get('synscanConnectionType') || 'serial';
+        deviceData.synscanVersion = formData.get('synscanVersion') || 'auto';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('synscanPortPath');
+            deviceData.baudRate = parseInt(formData.get('synscanBaudRate')) || 9600;
+        } else {
+            deviceData.host = formData.get('synscanHost');
+            deviceData.tcpPort = parseInt(formData.get('synscanTcpPort')) || 11880;
+        }
+
+        const apertureDiameter = readOptionalNumber(formData, 'synscanApertureDiameter');
+        if (apertureDiameter !== null) {
+            deviceData.apertureDiameter = apertureDiameter;
+        }
+
+        const focalLength = readOptionalNumber(formData, 'synscanFocalLength');
         if (focalLength !== null) {
             deviceData.focalLength = focalLength;
         }
@@ -1756,6 +1821,7 @@ function renderDeviceSettings(config) {
         ['baudRate', 'Baud Rate'],
         ['host', 'Host'],
         ['tcpPort', 'TCP Port'],
+        ['synscanVersion', 'SynScan Version'],
         ['cameraIndex', 'Camera Index'],
         ['cameraId', 'Camera ID'],
         ['filterwheelIndex', 'Filter Wheel Index'],

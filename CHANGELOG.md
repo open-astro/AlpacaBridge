@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.9.0] - 2026-02-03
+
+### Added
+- **SynScan Telescope Driver** (AlpacaCore)
+  - Added Sky-Watcher SynScan telescope driver implementation and tests.
+  - Added SynScan ConformU validation logs.
+- **Protocol Reference Docs** (AlpacaCore)
+  - Added SynScan and mount command set reference notes under `external/`.
+- **SynScan Device Support** (AlpacaHTTP)
+  - Added routing and configuration support for SynScan mounts.
+  - Added web UI configuration fields for SynScan devices.
+
+### Changed
+- **Supported Drivers Documentation** (AlpacaCore)
+  - Documented SynScan V3/V4 mount support, tested connection path, and validated platform.
+- **Project Documentation** (Workspace)
+  - Updated README with SynScan driver availability and setup notes.
+
+### Removed
+- **Build Artifacts** (AlpacaCore)
+  - Removed stray `build-synscan` build outputs from the repo root.
+
 ## [0.8.6] - 2026-01-20
 
 ### Changed
