@@ -57,6 +57,9 @@
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_WEEWX
+#include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
+#endif
 
 namespace {
 
@@ -3142,6 +3145,9 @@ Response Router::dispatch_camera_method(
         if (request.has_query_param(param_name)) {
             return request.get_query_param(param_name);
         }
+        if (auto query_value = get_query_param_case_insensitive(request, param_name)) {
+            return *query_value;
+        }
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
@@ -4999,6 +5005,37 @@ Response Router::dispatch_observingconditions_method(
         throw std::runtime_error("Missing parameter: " + param_name);
     };
 
+    auto parse_property_name = [&]() -> std::string {
+        if (auto value = get_query_param_case_insensitive(request, "PropertyName")) {
+            return *value;
+        }
+        if (auto value = get_query_param_case_insensitive(request, "SensorName")) {
+            return *value;
+        }
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value(*json_opt, "PropertyName")) {
+                if (!val->is_string()) {
+                    throw std::runtime_error("Invalid JSON value for parameter: PropertyName");
+                }
+                return val->get<std::string>();
+            }
+            if (const auto* val = find_json_value(*json_opt, "SensorName")) {
+                if (!val->is_string()) {
+                    throw std::runtime_error("Invalid JSON value for parameter: SensorName");
+                }
+                return val->get<std::string>();
+            }
+        }
+        if (auto value = get_form_value(request.body(), "PropertyName")) {
+            return *value;
+        }
+        if (auto value = get_form_value(request.body(), "SensorName")) {
+            return *value;
+        }
+        throw std::runtime_error("Missing parameter: PropertyName");
+    };
+
     try {
         if (request.method() == HttpMethod::GET) {
             if (method_name == "averageperiod") {
@@ -5077,13 +5114,13 @@ Response Router::dispatch_observingconditions_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "timesincelastupdate") {
-                std::string property_name = parse_string("PropertyName");
+                std::string property_name = parse_property_name();
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, observingconditions->get_time_since_last_update(property_name));
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "sensordescription") {
-                std::string property_name = parse_string("PropertyName");
+                std::string property_name = parse_property_name();
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, observingconditions->get_sensor_description(property_name));
                 response.set_body(alpaca_response);
@@ -6248,6 +6285,42 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "weewx" && device_type_str == "observingconditions") {
+#ifdef ALPACACORE_ENABLE_WEEWX
+        alpacacore::vendor::weewx::WeeWxHttpConfig weewx_config;
+        weewx_config.url = config.value("weewxUrl", "");
+        int poll_interval = config.value("pollIntervalSeconds", 900);
+        int timeout_ms = config.value("timeoutMs", 5000);
+        if (weewx_config.url.empty()) {
+            error_message = "WeeWX observing conditions requires weewxUrl";
+            return false;
+        }
+        if (poll_interval <= 0) {
+            error_message = "pollIntervalSeconds must be greater than 0";
+            return false;
+        }
+        if (timeout_ms <= 0) {
+            error_message = "timeoutMs must be greater than 0";
+            return false;
+        }
+        weewx_config.poll_interval = std::chrono::seconds(poll_interval);
+        weewx_config.timeout = std::chrono::milliseconds(timeout_ms);
+
+        auto observing = alpacacore::vendor::weewx::create_weewx_observingconditions(
+            device_number, weewx_config);
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(observing.release()))) {
+            util::log_info("Registered WeeWX observing conditions");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "WeeWX support not enabled. Rebuild with -DALPACACORE_ENABLE_WEEWX=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -6298,6 +6371,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("focuserId");
         copy_if_present("rotatorIndex");
         copy_if_present("rotatorId");
+    } else if (vendor == "weewx") {
+        copy_if_present("weewxUrl");
+        copy_if_present("pollIntervalSeconds");
+        copy_if_present("timeoutMs");
     }
 
     copy_if_present("responseTimeoutMs");

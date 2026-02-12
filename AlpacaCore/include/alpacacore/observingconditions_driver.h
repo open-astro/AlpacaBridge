@@ -34,12 +34,12 @@ public:
     // ObservingConditions-specific properties
 
     /**
-     * @brief Get the average period in seconds.
+     * @brief Get the average period in hours.
      */
     virtual double get_average_period() const = 0;
 
     /**
-     * @brief Set the average period in seconds.
+     * @brief Set the average period in hours.
      */
     virtual void set_average_period(double period) = 0;
 
@@ -130,4 +130,3 @@ public:
 };
 
 } // namespace alpacacore
-
