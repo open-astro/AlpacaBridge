@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.10.0] - 2026-02-03
+
+### Added
+- **WeeWX ObservingConditions Driver** (AlpacaCore)
+  - Added WeeWX-based ObservingConditions driver and vendor wrapper (HTTP JSON feed via libcurl).
+  - Added unit tests for WeeWX observing conditions.
+  - Added WeeWX ConformU validation logs under `conformu/ObservingConditions/WeeWX/`.
+- **WeeWX Device Support** (AlpacaHTTP)
+  - Added routing and configuration support for WeeWX observing conditions devices.
+  - Added web UI configuration fields for WeeWX devices.
+
+### Changed
+- **Supported Drivers Documentation** (AlpacaCore)
+  - ObservingConditions section updated with WeeWX table, ConformU link, and driver notes.
+- **Build & Router** (AlpacaCore, AlpacaHTTP)
+  - CMake option `ALPACACORE_ENABLE_WEEWX` and router/config updates for ObservingConditions.
+
 ## [0.9.0] - 2026-02-03
 
 ### Added
@@ -21,9 +38,11 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ### Changed
 - **Supported Drivers Documentation** (AlpacaCore)
-  - Documented SynScan V3/V4 mount support, tested connection path, and validated platform.
+  - Documented SynScan V3/V4 mount support, tested connection path (USB/Serial hand controller, Orion Atlas EQ-G), and validated platform (macOS arm64 only).
 - **Project Documentation** (Workspace)
   - Updated README with SynScan driver availability and setup notes.
+- **Agent Instructions** (Workspace)
+  - Updated AGENTS.md for SynScan and release workflow.
 
 ### Removed
 - **Build Artifacts** (AlpacaCore)

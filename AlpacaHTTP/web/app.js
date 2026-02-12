@@ -663,6 +663,10 @@ function startEditDevice(device) {
         if (synscanConnectionTypeEl) {
             synscanConnectionTypeEl.dispatchEvent(new Event('change'));
         }
+    } else if (vendor === 'weewx') {
+        setFormValue('weewx-url', config.weewxUrl);
+        setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
+        setFormValue('weewx-timeout', config.timeoutMs);
     }
     setFormValue('camera-index', config.cameraIndex);
     setFormValue('camera-id', config.cameraId);
@@ -1163,6 +1167,7 @@ function updateVendorOptions() {
     const isFilterWheel = deviceType === 'filterwheel';
     const isFocuser = deviceType === 'focuser';
     const isRotator = deviceType === 'rotator';
+    const isObservingConditions = deviceType === 'observingconditions';
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
         ioptronOption.disabled = !isTelescope;
@@ -1179,6 +1184,11 @@ function updateVendorOptions() {
         zwoOption.disabled = !zwoAllowed;
         zwoOption.hidden = !zwoAllowed;
     }
+    const weewxOption = vendorSelect.querySelector('option[value="weewx"]');
+    if (weewxOption) {
+        weewxOption.disabled = !isObservingConditions;
+        weewxOption.hidden = !isObservingConditions;
+    }
 
     if (!isTelescope && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
@@ -1187,6 +1197,9 @@ function updateVendorOptions() {
         vendorSelect.value = '';
     }
     if (!isCamera && !isSwitch && !isFilterWheel && !isFocuser && !isRotator && vendorSelect.value === 'zwo') {
+        vendorSelect.value = '';
+    }
+    if (!isObservingConditions && vendorSelect.value === 'weewx') {
         vendorSelect.value = '';
     }
 
@@ -1206,6 +1219,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('synscan-config').style.display = 'block';
     } else if (vendor === 'zwo') {
         document.getElementById('zwo-config').style.display = 'block';
+    } else if (vendor === 'weewx') {
+        document.getElementById('weewx-config').style.display = 'block';
     }
 
     updateZwoConfigFields();
@@ -1720,6 +1735,16 @@ document.getElementById('device-form').addEventListener('submit', async function
                     deviceData.rotatorId = rotatorId;
                 }
             }
+        }
+    } else if (deviceData.vendor === 'weewx') {
+        deviceData.weewxUrl = formData.get('weewxUrl');
+        const pollInterval = readOptionalNumber(formData, 'pollIntervalSeconds');
+        if (pollInterval !== null) {
+            deviceData.pollIntervalSeconds = pollInterval;
+        }
+        const timeoutMs = readOptionalNumber(formData, 'timeoutMs');
+        if (timeoutMs !== null) {
+            deviceData.timeoutMs = timeoutMs;
         }
     }
 

@@ -18,6 +18,7 @@ option(ALPACACORE_ENABLE_ZWO "Enable ZWO vendor support" OFF)
 option(ALPACACORE_ENABLE_QHY "Enable QHY vendor support" OFF)
 option(ALPACACORE_ENABLE_IOPTRON "Enable iOptron vendor support" OFF)
 option(ALPACACORE_ENABLE_SYNSCAN "Enable SynScan vendor support" OFF)
+option(ALPACACORE_ENABLE_WEEWX "Enable WeeWX vendor support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
@@ -27,6 +28,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     # set(ALPACACORE_ENABLE_QHY ON)
     set(ALPACACORE_ENABLE_IOPTRON ON)
     set(ALPACACORE_ENABLE_SYNSCAN ON)
+    set(ALPACACORE_ENABLE_WEEWX ON)
 endif()
 
 # Compiler warnings
@@ -122,6 +124,13 @@ if(ALPACACORE_ENABLE_SYNSCAN)
     endif()
 endif()
 
+if(ALPACACORE_ENABLE_WEEWX)
+    add_subdirectory(src/vendors/weewx)
+    if(TARGET alpacacore_weewx)
+        target_link_libraries(alpacacore PRIVATE alpacacore_weewx)
+    endif()
+endif()
+
 # Custom target to clean everything including CMake cache
 # Usage: cmake --build . --target alpacacore-clean-all
 # Note: Named with project prefix to avoid conflicts when used as subdirectory
@@ -190,6 +199,15 @@ endif()
 
 if(ALPACACORE_ENABLE_SYNSCAN AND TARGET alpacacore_synscan)
     install(TARGETS alpacacore_synscan
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_WEEWX AND TARGET alpacacore_weewx)
+    install(TARGETS alpacacore_weewx
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

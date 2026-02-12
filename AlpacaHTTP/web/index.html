@@ -42,6 +42,7 @@
                         <option value="focuser">Focuser</option>
                         <option value="rotator">Rotator</option>
                         <option value="dome">Dome</option>
+                        <option value="observingconditions">Observing Conditions</option>
                         <option value="switch">Switch</option>
                     </select>
                 </div>
@@ -58,6 +59,7 @@
                         <option value="ioptron">iOptron</option>
                         <option value="synscan">SynScan</option>
                         <option value="zwo">ZWO</option>
+                        <option value="weewx">WeeWX</option>
                     </select>
                 </div>
 
@@ -269,6 +271,26 @@
                             <input type="number" id="rotator-id" name="rotatorId" min="0">
                             <small>If set, overrides the rotator index.</small>
                         </div>
+                    </div>
+                </div>
+
+                <!-- WeeWX ObservingConditions Configuration -->
+                <div id="weewx-config" class="vendor-config" style="display: none;">
+                    <h3>WeeWX Observing Conditions</h3>
+
+                    <div class="form-group">
+                        <label for="weewx-url">WeeWX JSON URL:</label>
+                        <input type="text" id="weewx-url" name="weewxUrl" placeholder="https://example.com/conditions_dataset.json">
+                        <small>Must be a JSON feed containing lcd_datasheet.current values.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="weewx-poll-interval">Poll Interval (seconds):</label>
+                        <input type="number" id="weewx-poll-interval" name="pollIntervalSeconds" value="900" min="5">
+                        <small>WeeWX updates every 15 minutes by default (900 seconds).</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="weewx-timeout">HTTP Timeout (ms):</label>
+                        <input type="number" id="weewx-timeout" name="timeoutMs" value="5000" min="1000">
                     </div>
                 </div>
 

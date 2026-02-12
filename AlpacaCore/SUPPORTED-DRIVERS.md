@@ -96,7 +96,18 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## ObservingConditions Drivers
 
-*No drivers currently available.*
+### WeeWX
+
+| Source | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------|------------|------------------|----------------|------------------|---------------|-----------------|--------|
+| WeeWX HTTP JSON | HTTP(S) | | | ✓ | | | [ConformU Validation 2026-01-28](conformu/ObservingConditions/WeeWX/) |
+
+### WeeWX ObservingConditions Driver Notes
+
+- **Source**: WeeWX HTTP JSON feed (`lcd_datasheet.current`); missing sensors return NaN.
+- **Connection**: HTTP(S) to WeeWX REST/JSON endpoint.
+- **Configuration**: `weewxUrl` (required), optional `pollIntervalSeconds`, `timeoutMs`.
+- **Verified OS/Arch**: macOS (arm64) (ConformU validated).
 
 ## Rotator Drivers
 
