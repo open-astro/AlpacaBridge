@@ -2,8 +2,6 @@
 
 This document lists all hardware vendors and device types that are verified to work with AlpacaCore.
 
-**All drivers listed in this document have been verified using the ConformU tool to ensure compliance with the ASCOM Alpaca specification.**
-
 ## General Notes
 
 - **ConformU Verification**: All drivers listed below have been tested and verified using the ConformU tool to ensure full compliance with the ASCOM Alpaca API specification.
