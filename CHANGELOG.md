@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.11.1] - 2026-02-19
+
+### Changed
+- **AlpacaCore tests** (AlpacaCore)
+  - Tests now require Catch2 only (doctest fallback removed). CMake supports both `Catch2::Catch2WithMain` and `Catch2::Catch2Main` for Catch2 v2/v3 compatibility.
+  - SynScan tests use `catch2_compat.h` for Catch2 include compatibility.
+
 ## [0.11.0] - 2026-02-19
 
 ### Added

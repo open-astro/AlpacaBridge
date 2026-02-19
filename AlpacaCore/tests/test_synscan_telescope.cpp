@@ -11,7 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <catch2/catch_all.hpp>
+#include "catch2_compat.h"
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
