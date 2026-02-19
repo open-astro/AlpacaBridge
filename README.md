@@ -4,8 +4,6 @@
 
 AlpacaBridge is a unified workspace for building, testing, and running a complete ASCOM Alpaca server. It combines AlpacaCore (driver library) and AlpacaHTTP (HTTP server) with AI-assisted development tools and ConformU-validated drivers.
 
-**Intrested? Want to help?** Join our [Discord Support Channel](https://discord.com/channels/1092619106282393610/1092619106282393613)
-
 ## AlpacaBridge Explained
 
 - ScopeTrader: [Openastro AlpacaBridge Launches and Why it Matters](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/)
