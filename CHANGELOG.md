@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.11.2] - 2026-02-20
+
+### Fixed
+- **Discovery service** (AlpacaHTTP)
+  - Discovery loop now uses `select()` with a 200 ms timeout so `stop()` can terminate promptly on all platforms instead of blocking on `recvfrom()`. Removed socket close from `stop()` so the discovery thread exits cleanly; added error handling for `select()` and `recvfrom()` (interrupted / would-block continue; other errors logged and break).
+
 ## [0.11.1] - 2026-02-19
 
 ### Changed
