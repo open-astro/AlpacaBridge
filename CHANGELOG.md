@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.11.0] - 2026-01-25
+
+### Added
+- **vcpkg support** (Workspace)
+  - Optional vcpkg integration for dependencies (e.g. curl for WeeWX). Controlled by `ALPACABRIDGE_ENABLE_VCPKG` (default ON on Windows). Scripts bootstrap vcpkg under user home if missing.
+  - Root `vcpkg.json` manifest (e.g. curl dependency) for manifest mode.
+- **Editor and repo hygiene**
+  - `.editorconfig` for charset, line endings (LF; CRLF for `.bat`/`.cmd`/`.ps1`), final newline, trim trailing whitespace.
+  - `.gitattributes` for normalized line endings (`* text=auto eol=lf`, CRLF for Windows scripts, LF for shell/CMake).
+
+### Changed
+- **SynScan Telescope Driver** (AlpacaCore)
+  - Implemented `get_axis_rate_ranges` (vector of rate ranges per ASCOM). Tertiary axis returns empty set; primary/secondary return single range. Axis validation in `get_axis_rate_range` for invalid axis.
+  - Added unit tests for axis rate range behavior.
+- **Build and test scripts** (AlpacaBridge)
+  - `build_and_run.cmd`: vcpkg toolchain and manifest dir when vcpkg enabled; robust `ROOT_DIR` resolution; delayed expansion for vcpkg paths.
+  - `run_all_tests.cmd` / `run_all_tests.sh`: aligned with vcpkg-aware build when enabled.
+- **.gitignore**
+  - Ignore `build-curl-check/` (build/check artifact).
+
 ## [0.10.0] - 2026-02-03
 
 ### Added

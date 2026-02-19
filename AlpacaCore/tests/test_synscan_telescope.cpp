@@ -67,3 +67,25 @@ TEST_CASE("SynScan Telescope Driver - Target Range Validation", "[synscan][teles
     REQUIRE_THROWS(driver->set_target_declination(90.1));
     REQUIRE_NOTHROW(driver->set_target_declination(45.0));
 }
+
+TEST_CASE("SynScan Telescope Driver - Axis Rate Ranges", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    auto primary = driver->get_axis_rate_range(0);
+    REQUIRE(primary.first == 0.0);
+    REQUIRE(primary.second > primary.first);
+
+    auto secondary = driver->get_axis_rate_range(1);
+    REQUIRE(secondary.first == 0.0);
+    REQUIRE(secondary.second > secondary.first);
+
+    auto tertiary_ranges = driver->get_axis_rate_ranges(2);
+    REQUIRE(tertiary_ranges.empty());
+
+    REQUIRE_THROWS(driver->get_axis_rate_range(2));
+}

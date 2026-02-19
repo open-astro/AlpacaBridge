@@ -980,13 +980,21 @@ public:
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
-        if (axis == 2) {
-            return {0.0, 0.0};
-        }
         if (axis != 0 && axis != 1) {
             throw AlpacaException("Axis must be 0 or 1", AlpacaError::InvalidValue);
         }
         return {0.0, kMaxMoveAxisRateDegPerSec};
+    }
+
+    std::vector<std::pair<double, double>> get_axis_rate_ranges(int axis) const override {
+        if (axis == 2) {
+            // Tertiary axis is not supported; return an empty range set per ASCOM semantics.
+            return {};
+        }
+        if (axis != 0 && axis != 1) {
+            throw AlpacaException("Axis must be 0 or 1", AlpacaError::InvalidValue);
+        }
+        return {{0.0, kMaxMoveAxisRateDegPerSec}};
     }
 
     void abort_slew() override {
