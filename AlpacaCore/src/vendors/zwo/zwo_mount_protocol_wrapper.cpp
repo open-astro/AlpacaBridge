@@ -1117,12 +1117,12 @@ void ZWOMountProtocolWrapper::pulse_guide(int direction, int duration_ms) {
         throw AlpacaException("Pulse guide duration must be >= 0 ms", AlpacaError::InvalidValue);
     }
 
-    const int effective_duration_ms = std::clamp(duration_ms, 0, 3000);
+    const int effective_duration_ms = std::clamp(duration_ms, 0, 9999);
     if (effective_duration_ms != duration_ms) {
         ALPACA_LOG_WARN(
             "ZWO",
             "Pulse guide duration " + std::to_string(duration_ms) +
-                "ms exceeds protocol maximum 3000ms; clamping to 3000ms");
+                "ms exceeds protocol maximum 9999ms; clamping to 9999ms");
     }
 
     char dir = '\0';

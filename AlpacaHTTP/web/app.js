@@ -663,6 +663,30 @@ function startEditDevice(device) {
         if (synscanConnectionTypeEl) {
             synscanConnectionTypeEl.dispatchEvent(new Event('change'));
         }
+    } else if (vendor === 'zwo' && deviceType === 'telescope') {
+        const zwoMountConnectionType = config.connectionType || 'serial';
+        setFormValue('zwo-mount-connection-type', zwoMountConnectionType);
+        if (zwoMountConnectionType === 'serial') {
+            setFormValue('zwo-mount-port-path', config.portPath);
+            setFormValue('zwo-mount-baud-rate', config.baudRate);
+        } else {
+            setFormValue('zwo-mount-host', config.host);
+            setFormValue('zwo-mount-tcp-port', config.tcpPort);
+        }
+        setFormValue('zwo-mount-aperture-diameter', config.apertureDiameter);
+        setFormValue('zwo-mount-focal-length', config.focalLength);
+        setFormValue('zwo-mount-site-latitude', config.siteLatitude);
+        setFormValue('zwo-mount-site-longitude', config.siteLongitude);
+        setFormValue('zwo-mount-site-elevation', config.siteElevation);
+        const zwoMountSyncTimeCheckbox = document.getElementById('zwo-mount-sync-time-on-connect');
+        if (zwoMountSyncTimeCheckbox) {
+            zwoMountSyncTimeCheckbox.checked = config.syncTimeOnConnect !== false;
+        }
+        updateApertureAreaFromDiameter('zwo-mount-aperture-diameter', 'zwo-mount-aperture-area');
+        const zwoMountConnectionTypeEl = document.getElementById('zwo-mount-connection-type');
+        if (zwoMountConnectionTypeEl) {
+            zwoMountConnectionTypeEl.dispatchEvent(new Event('change'));
+        }
     } else if (vendor === 'weewx') {
         setFormValue('weewx-url', config.weewxUrl);
         setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
@@ -1180,7 +1204,7 @@ function updateVendorOptions() {
     }
     const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
     if (zwoOption) {
-        const zwoAllowed = isCamera || isSwitch || isFilterWheel || isFocuser || isRotator;
+        const zwoAllowed = isTelescope || isCamera || isSwitch || isFilterWheel || isFocuser || isRotator;
         zwoOption.disabled = !zwoAllowed;
         zwoOption.hidden = !zwoAllowed;
     }
@@ -1196,7 +1220,8 @@ function updateVendorOptions() {
     if (!isTelescope && vendorSelect.value === 'synscan') {
         vendorSelect.value = '';
     }
-    if (!isCamera && !isSwitch && !isFilterWheel && !isFocuser && !isRotator && vendorSelect.value === 'zwo') {
+    if (!isTelescope && !isCamera && !isSwitch && !isFilterWheel && !isFocuser && !isRotator &&
+        vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
     }
     if (!isObservingConditions && vendorSelect.value === 'weewx') {
@@ -1239,6 +1264,15 @@ if (synscanConnectionType) {
         const type = this.value;
         document.getElementById('synscan-serial-config').style.display = type === 'serial' ? 'block' : 'none';
         document.getElementById('synscan-network-config').style.display = type === 'network' ? 'block' : 'none';
+    });
+}
+
+const zwoMountConnectionType = document.getElementById('zwo-mount-connection-type');
+if (zwoMountConnectionType) {
+    zwoMountConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('zwo-mount-serial-config').style.display = type === 'serial' ? 'block' : 'none';
+        document.getElementById('zwo-mount-network-config').style.display = type === 'network' ? 'block' : 'none';
     });
 }
 
@@ -1325,6 +1359,11 @@ const synscanApertureDiameterInput = document.getElementById('synscan-aperture-d
 if (synscanApertureDiameterInput) {
     synscanApertureDiameterInput.addEventListener('input', () =>
         updateApertureAreaFromDiameter('synscan-aperture-diameter', 'synscan-aperture-area'));
+}
+const zwoMountApertureDiameterInput = document.getElementById('zwo-mount-aperture-diameter');
+if (zwoMountApertureDiameterInput) {
+    zwoMountApertureDiameterInput.addEventListener('input', () =>
+        updateApertureAreaFromDiameter('zwo-mount-aperture-diameter', 'zwo-mount-aperture-area'));
 }
 
 function readOptionalNumber(formData, name) {
@@ -1585,6 +1624,7 @@ function setFieldGroupEnabled(groupEl, enabled) {
 
 function updateZwoConfigFields() {
     const deviceTypeSelect = document.getElementById('device-type');
+    const telescopeFields = document.getElementById('zwo-telescope-fields');
     const switchTypeGroup = document.getElementById('zwo-switch-type-group');
     const cameraFields = document.getElementById('zwo-camera-fields');
     const filterwheelFields = document.getElementById('zwo-filterwheel-fields');
@@ -1594,11 +1634,17 @@ function updateZwoConfigFields() {
         return;
     }
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
+    const isTelescope = deviceType === 'telescope';
     const isCamera = deviceType === 'camera';
     const isSwitch = deviceType === 'switch';
     const isFilterWheel = deviceType === 'filterwheel';
     const isFocuser = deviceType === 'focuser';
     const isRotator = deviceType === 'rotator';
+
+    if (telescopeFields) {
+        telescopeFields.style.display = isTelescope ? 'block' : 'none';
+        setFieldGroupEnabled(telescopeFields, isTelescope);
+    }
     switchTypeGroup.style.display = isSwitch ? 'block' : 'none';
 
     const showCameraFields = isCamera || isSwitch;
@@ -1673,6 +1719,46 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
     } else if (deviceData.vendor === 'zwo') {
         const normalizedType = normalizeDeviceType(deviceData.deviceType);
+        if (normalizedType === 'telescope') {
+            deviceData.connectionType = formData.get('zwoMountConnectionType') || 'serial';
+            if (deviceData.connectionType === 'serial') {
+                deviceData.portPath = formData.get('zwoMountPortPath');
+                deviceData.baudRate = parseInt(formData.get('zwoMountBaudRate')) || 9600;
+            } else {
+                deviceData.host = formData.get('zwoMountHost');
+                deviceData.tcpPort = parseInt(formData.get('zwoMountTcpPort')) || 4030;
+            }
+
+            const apertureDiameter = readOptionalNumber(formData, 'zwoMountApertureDiameter');
+            if (apertureDiameter !== null) {
+                deviceData.apertureDiameter = apertureDiameter;
+            }
+
+            const focalLength = readOptionalNumber(formData, 'zwoMountFocalLength');
+            if (focalLength !== null) {
+                deviceData.focalLength = focalLength;
+            }
+
+            const siteLatitude = readOptionalNumber(formData, 'zwoMountSiteLatitude');
+            if (siteLatitude !== null) {
+                deviceData.siteLatitude = siteLatitude;
+            }
+
+            const siteLongitude = readOptionalNumber(formData, 'zwoMountSiteLongitude');
+            if (siteLongitude !== null) {
+                deviceData.siteLongitude = siteLongitude;
+            }
+
+            const siteElevation = readOptionalNumber(formData, 'zwoMountSiteElevation');
+            if (siteElevation !== null) {
+                deviceData.siteElevation = siteElevation;
+            }
+
+            const zwoMountSyncTimeCheckbox = document.getElementById('zwo-mount-sync-time-on-connect');
+            if (zwoMountSyncTimeCheckbox) {
+                deviceData.syncTimeOnConnect = zwoMountSyncTimeCheckbox.checked;
+            }
+        }
         if (normalizedType === 'switch') {
             const switchType = formData.get('switchType');
             if (switchType) {

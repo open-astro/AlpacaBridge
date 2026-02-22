@@ -190,6 +190,81 @@
                 <div id="zwo-config" class="vendor-config" style="display: none;">
                     <h3>ZWO Configuration</h3>
 
+                    <div id="zwo-telescope-fields" style="display: none;">
+                        <h4>ZWO Mount (Telescope)</h4>
+                        <div class="form-group">
+                            <label for="zwo-mount-connection-type">Connection Type:</label>
+                            <select id="zwo-mount-connection-type" name="zwoMountConnectionType">
+                                <option value="serial">Serial/USB</option>
+                                <option value="network">Network/WiFi</option>
+                            </select>
+                        </div>
+
+                        <div id="zwo-mount-serial-config" class="connection-config">
+                            <div class="form-group">
+                                <label for="zwo-mount-port-path">Serial Port:</label>
+                                <input type="text" id="zwo-mount-port-path" name="zwoMountPortPath" placeholder="/dev/ttyUSB0">
+                                <small>Linux: /dev/ttyUSB0, macOS: /dev/cu.usbserial-*, Windows: COM3</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="zwo-mount-baud-rate">Baud Rate:</label>
+                                <input type="number" id="zwo-mount-baud-rate" name="zwoMountBaudRate" value="9600" min="1200" max="115200">
+                            </div>
+                        </div>
+
+                        <div id="zwo-mount-network-config" class="connection-config" style="display: none;">
+                            <div class="form-group">
+                                <label for="zwo-mount-host">IP Address:</label>
+                                <input type="text" id="zwo-mount-host" name="zwoMountHost" placeholder="192.168.4.1">
+                            </div>
+                            <div class="form-group">
+                                <label for="zwo-mount-tcp-port">TCP Port:</label>
+                                <input type="number" id="zwo-mount-tcp-port" name="zwoMountTcpPort" value="4030" min="1" max="65535">
+                                <small>Default hand-controller WiFi endpoint: 192.168.4.1:4030.</small>
+                            </div>
+                        </div>
+
+                        <h4>Optics</h4>
+                        <div class="form-group">
+                            <label for="zwo-mount-aperture-diameter">Aperture Diameter (m):</label>
+                            <input type="number" id="zwo-mount-aperture-diameter" name="zwoMountApertureDiameter" min="0" step="0.001" placeholder="0.100">
+                            <small>Optional. Some clients may ignore this value.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="zwo-mount-aperture-area">Aperture Area (m^2):</label>
+                            <input type="number" id="zwo-mount-aperture-area" name="zwoMountApertureArea" min="0" step="0.000001" placeholder="0.007854" readonly>
+                            <small>Optional. Derived from the aperture diameter.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="zwo-mount-focal-length">Focal Length (m):</label>
+                            <input type="number" id="zwo-mount-focal-length" name="zwoMountFocalLength" min="0" step="0.001" placeholder="0.800">
+                            <small>Optional. Some clients may ignore this value.</small>
+                        </div>
+
+                        <h4>Site and Time</h4>
+                        <div class="form-group">
+                            <label for="zwo-mount-site-latitude">Site Latitude (deg):</label>
+                            <input type="number" id="zwo-mount-site-latitude" name="zwoMountSiteLatitude" min="-90" max="90" step="0.000001" placeholder="39.739200">
+                            <small>Recommended. Set your observing latitude to avoid horizon test failures in Conform.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="zwo-mount-site-longitude">Site Longitude (deg):</label>
+                            <input type="number" id="zwo-mount-site-longitude" name="zwoMountSiteLongitude" min="-180" max="180" step="0.000001" placeholder="-104.990300">
+                            <small>Use Alpaca convention: west negative, east positive.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="zwo-mount-site-elevation">Site Elevation (m):</label>
+                            <input type="number" id="zwo-mount-site-elevation" name="zwoMountSiteElevation" min="-300" max="10000" step="1" placeholder="1609">
+                            <small>Optional.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="zwo-mount-sync-time-on-connect">
+                                <input type="checkbox" id="zwo-mount-sync-time-on-connect" name="zwoMountSyncTimeOnConnect" checked>
+                                Sync mount time on connect
+                            </label>
+                        </div>
+                    </div>
+
                     <div id="zwo-switch-type-group" class="form-group" style="display: none;">
                         <label for="zwo-switch-type">Switch Type:</label>
                         <select id="zwo-switch-type" name="switchType">

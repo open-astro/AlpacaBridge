@@ -54,6 +54,7 @@
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
+#include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #endif
@@ -6157,6 +6158,84 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "zwo" && device_type_str == "telescope") {
+#ifdef ALPACACORE_ENABLE_ZWO
+        alpacacore::vendor::zwo::ConnectionInfo conn_info;
+        std::string conn_type = config.value("connectionType", "");
+
+        if (conn_type == "serial") {
+            conn_info.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+            conn_info.port_path = config.value("portPath", "");
+            conn_info.baud_rate = config.value("baudRate", 9600);
+
+            if (conn_info.port_path.empty()) {
+                error_message = "Serial port path is required";
+                return false;
+            }
+        } else if (conn_type == "network") {
+            conn_info.type = alpacacore::vendor::zwo::ConnectionType::Network;
+            conn_info.host = config.value("host", "");
+            conn_info.tcp_port = config.value("tcpPort", 4030);
+
+            if (conn_info.host.empty()) {
+                error_message = "Host IP address is required";
+                return false;
+            }
+        } else {
+            error_message = "Invalid connection type. Use 'serial' or 'network'";
+            return false;
+        }
+
+        conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+
+        std::optional<double> site_latitude;
+        std::optional<double> site_longitude;
+        std::optional<double> site_elevation;
+        std::optional<bool> sync_time_on_connect;
+
+        if (config.contains("siteLatitude")) {
+            site_latitude = config.value("siteLatitude", 0.0);
+        }
+        if (config.contains("siteLongitude")) {
+            site_longitude = config.value("siteLongitude", 0.0);
+        }
+        if (config.contains("siteElevation")) {
+            site_elevation = config.value("siteElevation", 0.0);
+        }
+        if (config.contains("syncTimeOnConnect")) {
+            sync_time_on_connect = config.value("syncTimeOnConnect", false);
+        }
+        auto telescope = alpacacore::vendor::zwo::create_zwo_telescope_with_site(
+            device_number,
+            conn_info,
+            site_latitude,
+            site_longitude,
+            site_elevation,
+            sync_time_on_connect);
+
+        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+            telescope->set_aperture_diameter(aperture);
+        }
+        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+            telescope->set_focal_length(focal);
+        }
+        if (site_elevation.has_value()) {
+            telescope->set_site_elevation(site_elevation.value());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(telescope.release()))) {
+            util::log_info("Registered ZWO telescope");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "zwo" && device_type_str == "filterwheel") {
 #ifdef ALPACACORE_ENABLE_ZWO
         int wheel_id = config.value("filterwheelId", -1);
@@ -6339,6 +6418,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     copy_if_present("deviceNumber");
 
     std::string vendor = config.value("vendor", "");
+    std::string device_type = config.value("deviceType", "");
     if (vendor == "ioptron") {
         copy_if_present("connectionType");
         std::string connection_type = config.value("connectionType", "");
@@ -6361,6 +6441,17 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("tcpPort");
         }
     } else if (vendor == "zwo") {
+        if (device_type == "telescope") {
+            copy_if_present("connectionType");
+            std::string connection_type = config.value("connectionType", "");
+            if (connection_type == "serial") {
+                copy_if_present("portPath");
+                copy_if_present("baudRate");
+            } else if (connection_type == "network") {
+                copy_if_present("host");
+                copy_if_present("tcpPort");
+            }
+        }
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
         copy_if_present("switchType");

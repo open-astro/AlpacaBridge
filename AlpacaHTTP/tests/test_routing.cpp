@@ -12,8 +12,34 @@
 
 #include <alpacahttp/router.h>
 #include <alpacahttp/request.h>
+#include <nlohmann/json.hpp>
 #include <cassert>
+#include <cmath>
 #include <iostream>
+#include <sstream>
+
+namespace {
+
+alpacahttp::Response route_request(alpacahttp::Router& router,
+                                   const std::string& method,
+                                   const std::string& path,
+                                   const std::string& body = std::string()) {
+    alpacahttp::Request request;
+    std::ostringstream raw;
+    raw << method << " " << path << " HTTP/1.1\r\n";
+    raw << "Host: localhost\r\n";
+    if (!body.empty()) {
+        raw << "Content-Type: application/json\r\n";
+        raw << "Content-Length: " << body.size() << "\r\n";
+    }
+    raw << "\r\n";
+    raw << body;
+
+    assert(request.parse(raw.str()));
+    return router.route(request, 1);
+}
+
+} // namespace
 
 int main() {
     std::cout << "Testing routing...\n";
@@ -38,7 +64,92 @@ int main() {
     assert(request.has_query_param("RightAscension"));
     assert(request.has_query_param("Declination"));
 
+#ifdef ALPACACORE_ENABLE_ZWO
+    // Ensure idempotent behavior across repeated test runs.
+    {
+        nlohmann::json remove_body = {
+            {"vendor", "zwo"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9101}
+        };
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        nlohmann::json configure_body = {
+            {"vendor", "zwo"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9101},
+            {"connectionType", "serial"},
+            {"portPath", "/dev/null"},
+            {"baudRate", 9600},
+            {"responseTimeoutMs", 2500},
+            {"apertureDiameter", 0.1},
+            {"focalLength", 0.8},
+            {"siteLatitude", 34.5},
+            {"siteLongitude", -117.2},
+            {"siteElevation", 450.0},
+            {"syncTimeOnConnect", false}
+        };
+
+        const auto configure_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_ZWO
+        assert(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        assert(configured_json.value("ErrorNumber", -1) == 0);
+        assert(configured_json.contains("Value"));
+        assert(configured_json["Value"].is_array());
+
+        bool found_device = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Telescope" &&
+                entry.value("DeviceNumber", -1) == 9101) {
+                assert(entry.value("Vendor", "") == "zwo");
+                assert(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                assert(cfg.value("vendor", "") == "zwo");
+                assert(cfg.value("deviceType", "") == "telescope");
+                assert(cfg.value("connectionType", "") == "serial");
+                assert(cfg.value("portPath", "") == "/dev/null");
+                assert(cfg.value("responseTimeoutMs", -1) == 2500);
+                assert(std::abs(cfg.value("apertureDiameter", 0.0) - 0.1) < 1e-12);
+                assert(std::abs(cfg.value("focalLength", 0.0) - 0.8) < 1e-12);
+                assert(std::abs(cfg.value("siteLatitude", 0.0) - 34.5) < 1e-12);
+                assert(std::abs(cfg.value("siteLongitude", 0.0) - (-117.2)) < 1e-12);
+                assert(std::abs(cfg.value("siteElevation", 0.0) - 450.0) < 1e-12);
+                assert(cfg.value("syncTimeOnConnect", true) == false);
+                found_device = true;
+                break;
+            }
+        }
+        assert(found_device);
+
+        nlohmann::json remove_body = {
+            {"vendor", "zwo"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9101}
+        };
+        const auto remove_response = route_request(
+            router,
+            "POST",
+            "/management/v1/removedevice",
+            remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        assert(remove_json.value("ErrorNumber", -1) == 0);
+#else
+        assert(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }
-

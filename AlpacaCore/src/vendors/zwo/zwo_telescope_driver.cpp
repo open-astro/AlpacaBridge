@@ -23,7 +23,9 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <iomanip>
 #include <mutex>
 #include <numbers>
@@ -43,6 +45,7 @@ constexpr double kMinSiteElevationMeters = -300.0;
 constexpr double kMaxSiteElevationMeters = 10000.0;
 constexpr auto kDefaultSlewTimeout = std::chrono::minutes(15);
 constexpr auto kParkMotionSettle = std::chrono::seconds(2);
+constexpr auto kPulseGuideHold = std::chrono::milliseconds(500);
 
 void validate_ra(double ra, const char* field_name) {
     if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
@@ -144,6 +147,46 @@ std::string sanitize_identifier(std::string value) {
     return value;
 }
 
+std::string trim_copy(std::string value) {
+    value.erase(
+        value.begin(),
+        std::find_if(value.begin(), value.end(), [](unsigned char ch) {
+            return !std::isspace(ch);
+        }));
+    value.erase(
+        std::find_if(value.rbegin(), value.rend(), [](unsigned char ch) {
+            return !std::isspace(ch);
+        }).base(),
+        value.end());
+    return value;
+}
+
+std::optional<int> extract_mount_error_code(const std::string& response) {
+    if (response.empty()) {
+        return std::nullopt;
+    }
+    if (response[0] != 'e' && response[0] != 'E') {
+        return std::nullopt;
+    }
+    if (response.size() < 2 || !std::isdigit(static_cast<unsigned char>(response[1]))) {
+        return std::nullopt;
+    }
+
+    std::string digits;
+    for (std::size_t i = 1; i < response.size(); ++i) {
+        const unsigned char ch = static_cast<unsigned char>(response[i]);
+        if (std::isdigit(ch)) {
+            digits.push_back(static_cast<char>(ch));
+        } else {
+            break;
+        }
+    }
+    if (digits.empty()) {
+        return std::nullopt;
+    }
+    return std::stoi(digits);
+}
+
 double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
                                          double longitude_degrees) {
     using namespace std::chrono;
@@ -166,6 +209,16 @@ double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point u
     return lst / kHoursToDegrees;
 }
 
+double normalize_hour_angle_hours(double hours) {
+    double wrapped = std::fmod(hours, 24.0);
+    if (wrapped <= -12.0) {
+        wrapped += 24.0;
+    } else if (wrapped > 12.0) {
+        wrapped -= 24.0;
+    }
+    return wrapped;
+}
+
 } // namespace
 
 class ZWOTelescopeDriver : public TelescopeDriver {
@@ -183,7 +236,12 @@ public:
         , mount_info_()
         , target_ra_hours_(0.0)
         , target_dec_degrees_(0.0)
-        , target_set_(false)
+        , target_ra_set_(false)
+        , target_dec_set_(false)
+        , ra_offset_hours_(0.0)
+        , dec_offset_deg_(0.0)
+        , pulse_ra_offset_hours_(0.0)
+        , pulse_dec_offset_deg_(0.0)
         , aperture_diameter_m_(0.0)
         , aperture_area_m2_(0.0)
         , focal_length_m_(0.0)
@@ -193,17 +251,42 @@ public:
         , site_elevation_m_(site_elevation_m.value_or(0.0))
         , does_refraction_(false)
         , slew_settle_time_s_(0)
-        , guide_rate_({0.5, 0.5})
+        , guide_rate_({0.5 * kSiderealRateDegPerSec, 0.5 * kSiderealRateDegPerSec})
         , tracking_rate_cached_(0)
         , tracking_rate_valid_(false)
+        , tracking_state_cached_(false)
+        , tracking_state_valid_(false)
+        , tracking_state_at_(std::chrono::steady_clock::time_point{})
+        , cached_equatorial_()
+        , pulse_base_equatorial_()
+        , cached_horizontal_()
+        , cached_status_()
+        , cached_pier_side_()
+        , park_state_cached_()
+        , cached_equatorial_at_(std::chrono::steady_clock::time_point{})
+        , cached_horizontal_at_(std::chrono::steady_clock::time_point{})
+        , cached_status_at_(std::chrono::steady_clock::time_point{})
+        , cached_pier_side_at_(std::chrono::steady_clock::time_point{})
+        , park_state_at_(std::chrono::steady_clock::time_point{})
+        , pending_slew_adjust_(false)
+        , pending_slew_ra_hours_(0.0)
+        , pending_slew_dec_degrees_(0.0)
+        , pending_slew_at_(std::chrono::steady_clock::time_point{})
+        , poll_stop_(false)
+        , poll_pause_(false)
         , last_utc_set_(std::chrono::system_clock::time_point{})
         , last_utc_set_monotonic_(std::chrono::steady_clock::time_point{})
         , last_utc_valid_(false)
         , timezone_offset_minutes_(0)
         , timezone_valid_(false)
         , manual_axis_slewing_({false, false})
+        , manual_axis_tracking_restore_({std::nullopt, std::nullopt})
         , slew_force_until_(std::chrono::steady_clock::time_point{})
         , pulse_guiding_end_(std::chrono::steady_clock::time_point{})
+        , pulse_generation_(0)
+        , pulse_thread_stop_(false)
+        , pulse_cancel_(false)
+        , pulse_queue_end_(std::chrono::steady_clock::time_point{})
         , parked_cached_(false)
         , park_command_active_(false)
         , park_command_started_(std::chrono::steady_clock::time_point{})
@@ -281,32 +364,146 @@ public:
     }
 
     void set_connected(bool connected) override {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (connected == connected_.load()) {
+        if (!connected) {
+            if (!connected_.exchange(false)) {
+                return;
+            }
+            poll_stop_.store(true);
+            pulse_thread_stop_.store(true);
+            pulse_cancel_.store(true);
+            pulse_cv_.notify_all();
+
+            std::thread([this]() {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    manual_axis_slewing_[0] = false;
+                    manual_axis_slewing_[1] = false;
+                    slew_force_until_ = std::chrono::steady_clock::time_point{};
+                    pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
+                    ra_offset_hours_ = 0.0;
+                    dec_offset_deg_ = 0.0;
+                    pulse_ra_offset_hours_ = 0.0;
+                    pulse_dec_offset_deg_ = 0.0;
+                    pulse_base_equatorial_.reset();
+                    park_command_active_ = false;
+                    park_motion_seen_ = false;
+                    parked_cached_ = false;
+                    park_command_started_ = std::chrono::steady_clock::time_point{};
+                    park_state_cached_.reset();
+                    park_state_at_ = std::chrono::steady_clock::time_point{};
+                    tracking_state_valid_ = false;
+                    tracking_rate_valid_ = false;
+                    tracking_state_at_ = std::chrono::steady_clock::time_point{};
+                    pending_slew_adjust_ = false;
+                    pending_slew_ra_hours_ = 0.0;
+                    pending_slew_dec_degrees_ = 0.0;
+                    pending_slew_at_ = std::chrono::steady_clock::time_point{};
+                    manual_axis_tracking_restore_[0] = std::nullopt;
+                    manual_axis_tracking_restore_[1] = std::nullopt;
+                    target_ra_hours_ = 0.0;
+                    target_dec_degrees_ = 0.0;
+                    target_ra_set_ = false;
+                    target_dec_set_ = false;
+                }
+                stop_poll_thread();
+                stop_pulse_thread();
+                try {
+                    ZWOMountProtocolWrapper::instance().disconnect();
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("ZWO", "Disconnect failed: " + std::string(e.what()));
+                }
+            }).detach();
             return;
         }
 
+        std::unique_lock<std::mutex> lock(mutex_);
         auto& protocol = ZWOMountProtocolWrapper::instance();
-        if (connected) {
-            if (!protocol.connect(connection_info_)) {
-                throw AlpacaException("Failed to connect to ZWO mount", AlpacaError::NotConnected);
-            }
-            connected_.store(true);
+        auto reset_session_state_for_connect = [&]() {
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             slew_force_until_ = std::chrono::steady_clock::time_point{};
             pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
+            ra_offset_hours_ = 0.0;
+            dec_offset_deg_ = 0.0;
+            pulse_ra_offset_hours_ = 0.0;
+            pulse_dec_offset_deg_ = 0.0;
+            pulse_base_equatorial_.reset();
+            cached_equatorial_.reset();
+            cached_horizontal_.reset();
+            cached_status_.reset();
+            cached_pier_side_.reset();
+            park_state_cached_.reset();
+            cached_equatorial_at_ = std::chrono::steady_clock::time_point{};
+            cached_horizontal_at_ = std::chrono::steady_clock::time_point{};
+            cached_status_at_ = std::chrono::steady_clock::time_point{};
+            cached_pier_side_at_ = std::chrono::steady_clock::time_point{};
+            park_state_at_ = std::chrono::steady_clock::time_point{};
+            poll_pause_.store(false);
+            {
+                std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
+                pulse_queue_.clear();
+                pulse_queue_end_ = std::chrono::steady_clock::time_point{};
+                pulse_thread_stop_.store(false);
+                pulse_cancel_.store(false);
+            }
             parked_cached_ = false;
             park_command_active_ = false;
             park_command_started_ = std::chrono::steady_clock::time_point{};
             park_motion_seen_ = false;
+            park_state_cached_.reset();
+            park_state_at_ = std::chrono::steady_clock::time_point{};
             tracking_rate_valid_ = false;
+            tracking_state_valid_ = false;
+            tracking_state_at_ = std::chrono::steady_clock::time_point{};
+            pending_slew_adjust_ = false;
+            pending_slew_ra_hours_ = 0.0;
+            pending_slew_dec_degrees_ = 0.0;
+            pending_slew_at_ = std::chrono::steady_clock::time_point{};
+            manual_axis_tracking_restore_[0] = std::nullopt;
+            manual_axis_tracking_restore_[1] = std::nullopt;
+            target_ra_hours_ = 0.0;
+            target_dec_degrees_ = 0.0;
+            target_ra_set_ = false;
+            target_dec_set_ = false;
+            pulse_generation_.store(0);
+        };
+        auto apply_or_load_site_info = [&]() {
+            std::optional<SiteInfo> preferred_site;
+            if (pending_site_latitude_.has_value() || pending_site_longitude_.has_value() || site_coords_valid_) {
+                SiteInfo site;
+                bool has_latitude = false;
+                bool has_longitude = false;
+                if (pending_site_latitude_.has_value()) {
+                    site.latitude_degrees = pending_site_latitude_.value();
+                    has_latitude = true;
+                } else if (site_coords_valid_) {
+                    site.latitude_degrees = site_latitude_deg_;
+                    has_latitude = true;
+                }
+                if (pending_site_longitude_.has_value()) {
+                    site.longitude_degrees = pending_site_longitude_.value();
+                    has_longitude = true;
+                } else if (site_coords_valid_) {
+                    site.longitude_degrees = site_longitude_deg_;
+                    has_longitude = true;
+                }
+                if (has_latitude && has_longitude) {
+                    preferred_site = site;
+                }
+            }
 
-            try {
-                mount_info_ = protocol.get_mount_info();
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("ZWO", "Unable to query mount info: " + std::string(e.what()));
-                mount_info_.clear();
+            if (preferred_site.has_value()) {
+                try {
+                    protocol.set_site_info(preferred_site.value());
+                    site_latitude_deg_ = preferred_site->latitude_degrees;
+                    site_longitude_deg_ = preferred_site->longitude_degrees;
+                    site_coords_valid_ = true;
+                    pending_site_latitude_ = preferred_site->latitude_degrees;
+                    pending_site_longitude_ = preferred_site->longitude_degrees;
+                    return;
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("ZWO", "Unable to apply configured site info on connect: " + std::string(e.what()));
+                }
             }
 
             try {
@@ -315,30 +512,79 @@ public:
                 site_longitude_deg_ = site.longitude_degrees;
                 site_coords_valid_ = true;
             } catch (const std::exception&) {
-                if (pending_site_latitude_.has_value() && pending_site_longitude_.has_value()) {
-                    SiteInfo site;
-                    site.latitude_degrees = pending_site_latitude_.value();
-                    site.longitude_degrees = pending_site_longitude_.value();
-                    protocol.set_site_info(site);
-                    site_latitude_deg_ = site.latitude_degrees;
-                    site_longitude_deg_ = site.longitude_degrees;
-                    site_coords_valid_ = true;
-                }
             }
+        };
+        auto sync_mount_time_if_configured = [&]() {
+            if (!sync_time_on_connect_) {
+                return;
+            }
+
+            const auto now = std::chrono::system_clock::now();
+            if (site_coords_valid_) {
+                SiteInfo site;
+                site.latitude_degrees = site_latitude_deg_;
+                site.longitude_degrees = site_longitude_deg_;
+                protocol.set_site_info(site);
+            }
+
+            // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
+            const int offset_minutes = 0;
+            TimeInfo info = from_utc_time_point(now, offset_minutes);
+            protocol.set_time_info(info);
+            last_utc_set_ = now;
+            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+            last_utc_valid_ = true;
+            timezone_offset_minutes_ = offset_minutes;
+            timezone_valid_ = true;
+        };
+
+        if (connected == connected_.load()) {
+            if (!connected) {
+                return;
+            }
+
+            reset_session_state_for_connect();
+            apply_or_load_site_info();
+            if (pending_site_elevation_.has_value()) {
+                site_elevation_m_ = pending_site_elevation_.value();
+            }
+            try {
+                sync_mount_time_if_configured();
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " +
+                                           std::string(e.what()));
+            }
+            lock.unlock();
+            refresh_cached_values();
+            start_poll_thread();
+            start_pulse_thread();
+            return;
+        }
+
+        if (connected) {
+            if (!protocol.connect(connection_info_)) {
+                throw AlpacaException("Failed to connect to ZWO mount", AlpacaError::NotConnected);
+            }
+            connected_.store(true);
+            reset_session_state_for_connect();
+
+            try {
+                mount_info_ = protocol.get_mount_info();
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("ZWO", "Unable to query mount info: " + std::string(e.what()));
+                mount_info_.clear();
+            }
+
+            apply_or_load_site_info();
 
             if (pending_site_elevation_.has_value()) {
                 site_elevation_m_ = pending_site_elevation_.value();
             }
 
-            if (target_set_) {
-                // Keep configured targets coherent across reconnects.
-                protocol.set_target_ra(target_ra_hours_);
-                protocol.set_target_dec(target_dec_degrees_);
-            }
-
             try {
-                const double guide_rate = protocol.get_guide_rate();
-                guide_rate_ = {guide_rate, guide_rate};
+                const double guide_rate_multiple = protocol.get_guide_rate();
+                const double guide_rate_deg_per_sec = guide_rate_multiple * kSiderealRateDegPerSec;
+                guide_rate_ = {guide_rate_deg_per_sec, guide_rate_deg_per_sec};
             } catch (const std::exception&) {
             }
 
@@ -348,38 +594,14 @@ public:
             } catch (const std::exception&) {
             }
 
-            if (sync_time_on_connect_) {
-                const auto now = std::chrono::system_clock::now();
-                if (site_coords_valid_) {
-                    SiteInfo site;
-                    site.latitude_degrees = site_latitude_deg_;
-                    site.longitude_degrees = site_longitude_deg_;
-                    protocol.set_site_info(site);
-                }
-
-                // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
-                const int offset_minutes = 0;
-                TimeInfo info = from_utc_time_point(now, offset_minutes);
-                protocol.set_time_info(info);
-                last_utc_set_ = now;
-                last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-                last_utc_valid_ = true;
-                timezone_offset_minutes_ = offset_minutes;
-                timezone_valid_ = true;
-            }
+            sync_mount_time_if_configured();
+            lock.unlock();
+            refresh_cached_values();
+            start_poll_thread();
+            start_pulse_thread();
             return;
         }
 
-        protocol.disconnect();
-        connected_.store(false);
-        manual_axis_slewing_[0] = false;
-        manual_axis_slewing_[1] = false;
-        slew_force_until_ = std::chrono::steady_clock::time_point{};
-        pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
-        parked_cached_ = false;
-        park_command_active_ = false;
-        park_command_started_ = std::chrono::steady_clock::time_point{};
-        park_motion_seen_ = false;
     }
 
     std::vector<DeviceState> get_device_state() const override {
@@ -453,7 +675,21 @@ public:
 
     AlignmentMode get_alignment_mode() const override {
         check_connected();
-        const StatusInfo status = ZWOMountProtocolWrapper::instance().get_status();
+        StatusInfo status;
+        bool has_status = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cached_status_.has_value()) {
+                status = cached_status_.value();
+                has_status = true;
+            }
+        }
+        if (!has_status) {
+            status = ZWOMountProtocolWrapper::instance().get_status();
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_status_ = status;
+            cached_status_at_ = std::chrono::steady_clock::now();
+        }
         if (status.mode == MountMode::AltAzimuth) {
             return AlignmentMode::AltAz;
         }
@@ -462,7 +698,22 @@ public:
 
     double get_altitude() const override {
         check_connected();
-        return ZWOMountProtocolWrapper::instance().get_current_horizontal().altitude_degrees;
+        HorizontalCoordinates hor;
+        bool has_hor = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cached_horizontal_.has_value()) {
+                hor = cached_horizontal_.value();
+                has_hor = true;
+            }
+        }
+        if (!has_hor) {
+            hor = ZWOMountProtocolWrapper::instance().get_current_horizontal();
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_horizontal_ = hor;
+            cached_horizontal_at_ = std::chrono::steady_clock::now();
+        }
+        return hor.altitude_degrees;
     }
 
     double get_aperture_diameter() const override {
@@ -488,12 +739,35 @@ public:
 
     bool get_at_home() const override {
         check_connected();
-        return ZWOMountProtocolWrapper::instance().get_status().at_home;
+        StatusInfo status;
+        bool has_status = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cached_status_.has_value()) {
+                status = cached_status_.value();
+                has_status = true;
+            }
+        }
+        if (!has_status) {
+            status = ZWOMountProtocolWrapper::instance().get_status();
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_status_ = status;
+            cached_status_at_ = std::chrono::steady_clock::now();
+        }
+        return status.at_home;
     }
 
     bool get_at_park() const override {
         check_connected();
         auto& protocol = ZWOMountProtocolWrapper::instance();
+
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (park_state_cached_.has_value() && (now - park_state_at_) <= kFastParkTtl) {
+                return park_state_cached_.value();
+            }
+        }
 
         std::optional<ParkStatus> park_status;
         try {
@@ -514,21 +788,44 @@ public:
             }
         }
 
-        const ParkEvaluation park_eval = evaluate_park_state(park_status, status, std::chrono::steady_clock::now());
+        const ParkEvaluation park_eval = evaluate_park_state(park_status, status, now);
         if (park_eval == ParkEvaluation::Parked) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            park_state_cached_ = true;
+            park_state_at_ = now;
             return true;
         }
         if (park_eval == ParkEvaluation::InProgress || park_eval == ParkEvaluation::NotParked) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            park_state_cached_ = false;
+            park_state_at_ = now;
             return false;
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
+        park_state_cached_ = parked_cached_;
+        park_state_at_ = now;
         return parked_cached_;
     }
 
     double get_azimuth() const override {
         check_connected();
-        return ZWOMountProtocolWrapper::instance().get_current_horizontal().azimuth_degrees;
+        HorizontalCoordinates hor;
+        bool has_hor = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cached_horizontal_.has_value()) {
+                hor = cached_horizontal_.value();
+                has_hor = true;
+            }
+        }
+        if (!has_hor) {
+            hor = ZWOMountProtocolWrapper::instance().get_current_horizontal();
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_horizontal_ = hor;
+            cached_horizontal_at_ = std::chrono::steady_clock::now();
+        }
+        return hor.azimuth_degrees;
     }
 
     bool get_can_find_home() const override { return true; }
@@ -557,7 +854,29 @@ public:
 
     double get_declination() const override {
         check_connected();
-        return ZWOMountProtocolWrapper::instance().get_current_equatorial().dec_degrees;
+        apply_pending_slew_adjustment();
+        EquatorialCoordinates eq;
+        bool has_eq = false;
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pulse_guiding_end_ > now && pulse_base_equatorial_.has_value()) {
+                eq = pulse_base_equatorial_.value();
+                has_eq = true;
+            } else if (cached_equatorial_.has_value() && (now - cached_equatorial_at_) <= kFastEquatorialTtl) {
+                eq = cached_equatorial_.value();
+                has_eq = true;
+            }
+        }
+        if (!has_eq) {
+            eq = ZWOMountProtocolWrapper::instance().get_current_equatorial();
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_equatorial_ = eq;
+            cached_equatorial_at_ = std::chrono::steady_clock::now();
+        }
+        const double base_dec = eq.dec_degrees;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return std::clamp(base_dec + dec_offset_deg_ + pulse_dec_offset_deg_, -90.0, 90.0);
     }
 
     double get_declination_rate() const override {
@@ -570,26 +889,141 @@ public:
 
     bool get_tracking() const override {
         check_connected();
-        return ZWOMountProtocolWrapper::instance().get_tracking_enabled();
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (tracking_state_valid_ && (now - tracking_state_at_) <= kFastTrackingTtl) {
+                return tracking_state_cached_;
+            }
+        }
+        auto& protocol = ZWOMountProtocolWrapper::instance();
+        const std::string response = trim_copy(protocol.send_command(":GAT", false));
+        if (!response.empty() && (response[0] == '0' || response[0] == '1')) {
+            const bool tracking = response[0] == '1';
+            std::lock_guard<std::mutex> lock(mutex_);
+            tracking_state_cached_ = tracking;
+            tracking_state_valid_ = true;
+            tracking_state_at_ = std::chrono::steady_clock::now();
+            return tracking;
+        }
+
+        if (const auto mount_error = extract_mount_error_code(response); mount_error.has_value()) {
+            bool has_cached_tracking = false;
+            bool cached_tracking = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                has_cached_tracking = tracking_state_valid_;
+                cached_tracking = tracking_state_cached_;
+            }
+            if (has_cached_tracking) {
+                ALPACA_LOG_WARN(
+                    "ZWO",
+                    ":GAT returned e" + std::to_string(mount_error.value()) +
+                        "; using cached Tracking state");
+                return cached_tracking;
+            }
+
+            try {
+                const StatusInfo status = protocol.get_status();
+                const bool inferred_tracking = !status.no_tracking;
+                std::lock_guard<std::mutex> lock(mutex_);
+                tracking_state_cached_ = inferred_tracking;
+                tracking_state_valid_ = true;
+                tracking_state_at_ = std::chrono::steady_clock::now();
+                return inferred_tracking;
+            } catch (const std::exception&) {
+                throw AlpacaException(
+                    "Unable to determine tracking state from mount response: " + response,
+                    AlpacaError::DriverException);
+            }
+        }
+
+        throw AlpacaException("Unknown tracking state response: " + response, AlpacaError::DriverException);
     }
 
     void set_tracking(bool tracking) override {
         check_connected();
         auto& protocol = ZWOMountProtocolWrapper::instance();
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            try {
-                protocol.set_tracking_enabled(tracking);
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (tracking_state_valid_ && (now - tracking_state_at_) <= kFastTrackingTtl &&
+                tracking_state_cached_ == tracking) {
                 return;
-            } catch (const AlpacaException&) {
-                if (!tracking && attempt < 2) {
-                    // :Td can fail while firmware still reports "moving"; force a stop and retry.
-                    protocol.abort_motion();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-                    continue;
-                }
-                throw;
             }
         }
+        auto wait_for_pulse_completion = [this](std::chrono::milliseconds max_wait) {
+            const auto deadline = std::chrono::steady_clock::now() + max_wait;
+            while (std::chrono::steady_clock::now() < deadline) {
+                std::chrono::steady_clock::time_point pulse_end;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    pulse_end = pulse_guiding_end_;
+                }
+                const auto now = std::chrono::steady_clock::now();
+                if (pulse_end <= now) {
+                    return;
+                }
+                auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(pulse_end - now);
+                if (remaining > std::chrono::milliseconds(200)) {
+                    remaining = std::chrono::milliseconds(200);
+                }
+                std::this_thread::sleep_for(remaining);
+            }
+        };
+
+        auto infer_tracking_from_status = [&protocol]() -> std::optional<bool> {
+            try {
+                const StatusInfo status = protocol.get_status();
+                return !status.no_tracking;
+            } catch (const std::exception&) {
+                return std::nullopt;
+            }
+        };
+
+        if (tracking) {
+            wait_for_pulse_completion(std::chrono::milliseconds(1500));
+        }
+
+        std::optional<AlpacaException> last_error;
+        bool command_ok = false;
+        try {
+            protocol.set_tracking_enabled(tracking);
+            command_ok = true;
+        } catch (const AlpacaException& e) {
+            last_error = e;
+        }
+
+        std::optional<bool> current_state;
+        try {
+            current_state = get_tracking();
+        } catch (const std::exception&) {
+            current_state = infer_tracking_from_status();
+        }
+
+        if (current_state.has_value() && current_state.value() == tracking) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            tracking_state_cached_ = tracking;
+            tracking_state_valid_ = true;
+            tracking_state_at_ = std::chrono::steady_clock::now();
+            return;
+        }
+
+        if (command_ok) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            tracking_state_cached_ = tracking;
+            tracking_state_valid_ = true;
+            tracking_state_at_ = std::chrono::steady_clock::now();
+            return;
+        }
+
+        if (last_error.has_value()) {
+            throw last_error.value();
+        }
+
+        throw AlpacaException(
+            std::string("Failed to ") + (tracking ? "enable" : "disable") + " tracking",
+            AlpacaError::InvalidOperation);
     }
 
     double get_focal_length() const override {
@@ -606,15 +1040,6 @@ public:
     }
 
     GuideRate get_guide_rate() const override {
-        if (connected_.load()) {
-            try {
-                const double guide_rate = ZWOMountProtocolWrapper::instance().get_guide_rate();
-                std::lock_guard<std::mutex> lock(mutex_);
-                guide_rate_ = {guide_rate, guide_rate};
-            } catch (const std::exception&) {
-            }
-        }
-
         std::lock_guard<std::mutex> lock(mutex_);
         return guide_rate_;
     }
@@ -624,22 +1049,54 @@ public:
             throw AlpacaException("GuideRate values must be finite", AlpacaError::InvalidValue);
         }
 
-        const double effective = 0.5 * (rate.ra + rate.dec);
-        if (effective < 0.10 || effective > 0.90) {
-            throw AlpacaException("GuideRate must be in [0.10,0.90]", AlpacaError::InvalidValue);
+        const double effective = 0.5 * (std::abs(rate.ra) + std::abs(rate.dec));
+        if (effective < 0.0 || effective > kMaxMoveAxisRateDegPerSec) {
+            throw AlpacaException("GuideRate must be in [0, max axis rate] deg/sec", AlpacaError::InvalidValue);
         }
 
-        if (connected_.load()) {
-            ZWOMountProtocolWrapper::instance().set_guide_rate(effective);
+        if (connected_.load() && effective > 0.0) {
+            double guide_rate_multiple = effective / kSiderealRateDegPerSec;
+            guide_rate_multiple = std::clamp(guide_rate_multiple, 0.10, 0.90);
+            ZWOMountProtocolWrapper::instance().set_guide_rate(guide_rate_multiple);
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
-        guide_rate_ = {effective, effective};
+        guide_rate_ = {std::abs(rate.ra), std::abs(rate.dec)};
     }
 
     double get_right_ascension() const override {
         check_connected();
-        return ZWOMountProtocolWrapper::instance().get_current_equatorial().ra_hours;
+        apply_pending_slew_adjustment();
+        EquatorialCoordinates eq;
+        bool has_eq = false;
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pulse_guiding_end_ > now && pulse_base_equatorial_.has_value()) {
+                eq = pulse_base_equatorial_.value();
+                has_eq = true;
+            } else if (cached_equatorial_.has_value() && (now - cached_equatorial_at_) <= kFastEquatorialTtl) {
+                eq = cached_equatorial_.value();
+                has_eq = true;
+            }
+        }
+        if (!has_eq) {
+            eq = ZWOMountProtocolWrapper::instance().get_current_equatorial();
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_equatorial_ = eq;
+            cached_equatorial_at_ = std::chrono::steady_clock::now();
+        }
+        const double base_ra = eq.ra_hours;
+        double offset = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            offset = ra_offset_hours_ + pulse_ra_offset_hours_;
+        }
+        double wrapped = std::fmod(base_ra + offset, 24.0);
+        if (wrapped < 0.0) {
+            wrapped += 24.0;
+        }
+        return wrapped;
     }
 
     double get_right_ascension_rate() const override {
@@ -652,22 +1109,62 @@ public:
 
     int get_side_of_pier() const override {
         check_connected();
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cached_pier_side_.has_value() && (now - cached_pier_side_at_) <= kFastPierSideTtl) {
+                return cached_pier_side_.value();
+            }
+        }
+
         const char direction = ZWOMountProtocolWrapper::instance().get_mount_direction();
+        int side = -1;
         if (direction == 'E' || direction == 'e') {
-            return 0;
+            side = 0;
+        } else if (direction == 'W' || direction == 'w') {
+            side = 1;
         }
-        if (direction == 'W' || direction == 'w') {
-            return 1;
+        if (side >= 0) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_pier_side_ = side;
+            cached_pier_side_at_ = now;
         }
-        return -1;
+        return side;
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
         validate_ra(ra, "RightAscension");
         validate_dec(dec, "Declination");
-        (void)ra;
-        (void)dec;
-        return get_side_of_pier();
+        double longitude = 0.0;
+        bool has_longitude = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (site_coords_valid_) {
+                longitude = site_longitude_deg_;
+                has_longitude = true;
+            }
+        }
+        if (!has_longitude && connected_.load()) {
+            try {
+                const SiteInfo site = ZWOMountProtocolWrapper::instance().get_site_info();
+                longitude = site.longitude_degrees;
+                std::lock_guard<std::mutex> lock(mutex_);
+                site_latitude_deg_ = site.latitude_degrees;
+                site_longitude_deg_ = site.longitude_degrees;
+                site_coords_valid_ = true;
+                has_longitude = true;
+            } catch (const std::exception&) {
+            }
+        }
+        if (!has_longitude) {
+            return get_side_of_pier();
+        }
+
+        const double lst_hours = compute_local_sidereal_time_hours(std::chrono::system_clock::now(), longitude);
+        const double hour_angle = normalize_hour_angle_hours(lst_hours - ra);
+
+        // German equatorial: target west of meridian (hour angle >= 0) -> pier side East.
+        return hour_angle >= 0.0 ? 0 : 1;
     }
 
     EquatorialSystem get_equatorial_system() const override {
@@ -741,17 +1238,6 @@ public:
     }
 
     double get_site_latitude() const override {
-        if (connected_.load()) {
-            try {
-                const SiteInfo site = ZWOMountProtocolWrapper::instance().get_site_info();
-                std::lock_guard<std::mutex> lock(mutex_);
-                site_latitude_deg_ = site.latitude_degrees;
-                site_longitude_deg_ = site.longitude_degrees;
-                site_coords_valid_ = true;
-            } catch (const std::exception&) {
-            }
-        }
-
         std::lock_guard<std::mutex> lock(mutex_);
         if (!site_coords_valid_) {
             throw AlpacaException("Site coordinates not available", AlpacaError::ValueNotSet);
@@ -780,17 +1266,6 @@ public:
     }
 
     double get_site_longitude() const override {
-        if (connected_.load()) {
-            try {
-                const SiteInfo site = ZWOMountProtocolWrapper::instance().get_site_info();
-                std::lock_guard<std::mutex> lock(mutex_);
-                site_latitude_deg_ = site.latitude_degrees;
-                site_longitude_deg_ = site.longitude_degrees;
-                site_coords_valid_ = true;
-            } catch (const std::exception&) {
-            }
-        }
-
         std::lock_guard<std::mutex> lock(mutex_);
         if (!site_coords_valid_) {
             throw AlpacaException("Site coordinates not available", AlpacaError::ValueNotSet);
@@ -845,11 +1320,43 @@ public:
             // Some firmware leaves motion state latched unless a generic stop is issued.
             protocol.abort_motion();
 
-            std::lock_guard<std::mutex> lock(mutex_);
-            manual_axis_slewing_[axis] = false;
-            park_command_active_ = false;
-            park_motion_seen_ = false;
+            std::optional<bool> restore_tracking;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                manual_axis_slewing_[axis] = false;
+                restore_tracking = manual_axis_tracking_restore_[axis];
+                manual_axis_tracking_restore_[axis] = std::nullopt;
+                park_command_active_ = false;
+                park_motion_seen_ = false;
+            }
+
+            if (restore_tracking.has_value()) {
+                // Tracking can be dropped by stop/abort commands after manual motion; restore prior state.
+                const bool desired_tracking = restore_tracking.value();
+                try {
+                    set_tracking(desired_tracking);
+                } catch (const std::exception& ex) {
+                    ALPACA_LOG_WARN(
+                        "ZWO",
+                        "Unable to restore tracking state after MoveAxis stop: " +
+                            std::string(ex.what()));
+                }
+            }
             return;
+        }
+
+        bool capture_tracking_state = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            capture_tracking_state = !manual_axis_slewing_[axis];
+        }
+        std::optional<bool> tracking_before_move;
+        if (capture_tracking_state) {
+            try {
+                tracking_before_move = get_tracking();
+            } catch (const std::exception&) {
+                tracking_before_move = std::nullopt;
+            }
         }
 
         const double multiplier = std::abs(rate) / kSiderealRateDegPerSec;
@@ -871,6 +1378,9 @@ public:
 
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[axis] = true;
+        if (tracking_before_move.has_value()) {
+            manual_axis_tracking_restore_[axis] = tracking_before_move;
+        }
         park_command_active_ = false;
         park_motion_seen_ = false;
         parked_cached_ = false;
@@ -882,6 +1392,16 @@ public:
             return {0.0, kMaxMoveAxisRateDegPerSec};
         }
         return {0.0, 0.0};
+    }
+
+    std::vector<std::pair<double, double>> get_axis_rate_ranges(int axis) const override {
+        if (axis == 0 || axis == 1) {
+            return {{0.0, kMaxMoveAxisRateDegPerSec}};
+        }
+        if (axis == 2) {
+            return {};
+        }
+        throw AlpacaException("Axis must be 0, 1, or 2", AlpacaError::InvalidValue);
     }
 
     bool get_slewing() const override {
@@ -898,6 +1418,19 @@ public:
             }
         }
 
+        std::optional<StatusInfo> cached_status;
+        bool park_active = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            park_active = park_command_active_;
+            if (cached_status_.has_value() && (now - cached_status_at_) <= kFastStatusTtl) {
+                cached_status = cached_status_.value();
+            }
+        }
+        if (!park_active && cached_status.has_value()) {
+            return !cached_status.value().stop_or_tracking;
+        }
+
         auto& protocol = ZWOMountProtocolWrapper::instance();
         std::optional<ParkStatus> park_status;
         try {
@@ -906,14 +1439,17 @@ public:
         }
 
         std::optional<StatusInfo> status;
-        bool park_active = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            park_active = park_command_active_;
+            if (cached_status_.has_value()) {
+                status = cached_status_.value();
+            }
         }
         if (park_active || (park_status.has_value() && park_status.value() == ParkStatus::InProgress)) {
             try {
-                status = protocol.get_status();
+                if (!status.has_value()) {
+                    status = protocol.get_status();
+                }
             } catch (const std::exception&) {
             }
         }
@@ -926,13 +1462,21 @@ public:
             return false;
         }
 
-        const StatusInfo mount_status = status.has_value() ? status.value() : protocol.get_status();
+        StatusInfo mount_status;
+        if (status.has_value()) {
+            mount_status = status.value();
+        } else {
+            mount_status = protocol.get_status();
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_status_ = mount_status;
+            cached_status_at_ = std::chrono::steady_clock::now();
+        }
         return !mount_status.stop_or_tracking;
     }
 
     double get_target_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!target_set_) {
+        if (!target_dec_set_) {
             throw AlpacaException("TargetDeclination has not been set", AlpacaError::ValueNotSet);
         }
         return target_dec_degrees_;
@@ -944,7 +1488,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             target_dec_degrees_ = dec;
-            target_set_ = true;
+            target_dec_set_ = true;
         }
 
         if (connected_.load()) {
@@ -954,7 +1498,7 @@ public:
 
     double get_target_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!target_set_) {
+        if (!target_ra_set_) {
             throw AlpacaException("TargetRightAscension has not been set", AlpacaError::ValueNotSet);
         }
         return target_ra_hours_;
@@ -966,7 +1510,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             target_ra_hours_ = ra;
-            target_set_ = true;
+            target_ra_set_ = true;
         }
 
         if (connected_.load()) {
@@ -1002,23 +1546,28 @@ public:
     }
 
     std::chrono::system_clock::time_point get_utc_date() const override {
-        if (connected_.load()) {
-            const TimeInfo mount_time = ZWOMountProtocolWrapper::instance().get_time_info();
-            const auto utc = to_utc_time_point(mount_time);
+        {
             std::lock_guard<std::mutex> lock(mutex_);
-            last_utc_set_ = utc;
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
-            timezone_offset_minutes_ = mount_time.timezone_offset_minutes;
-            timezone_valid_ = true;
-            return utc;
+            if (last_utc_valid_) {
+                const auto elapsed = std::chrono::steady_clock::now() - last_utc_set_monotonic_;
+                return last_utc_set_ +
+                    std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
+            }
         }
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (last_utc_valid_) {
-            const auto elapsed = std::chrono::steady_clock::now() - last_utc_set_monotonic_;
-            return last_utc_set_ +
-                std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
+        if (connected_.load()) {
+            try {
+                const TimeInfo mount_time = ZWOMountProtocolWrapper::instance().get_time_info();
+                const auto utc = to_utc_time_point(mount_time);
+                std::lock_guard<std::mutex> lock(mutex_);
+                last_utc_set_ = utc;
+                last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+                last_utc_valid_ = true;
+                timezone_offset_minutes_ = mount_time.timezone_offset_minutes;
+                timezone_valid_ = true;
+                return utc;
+            } catch (const std::exception&) {
+            }
         }
 
         return std::chrono::system_clock::now();
@@ -1044,16 +1593,20 @@ public:
     void find_home() override {
         check_connected();
         ensure_not_parked("FindHome");
+        reset_position_offsets();
         ZWOMountProtocolWrapper::instance().go_home();
         std::lock_guard<std::mutex> lock(mutex_);
         parked_cached_ = false;
         park_command_active_ = false;
         park_motion_seen_ = false;
+        park_state_cached_.reset();
+        park_state_at_ = std::chrono::steady_clock::time_point{};
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     }
 
     void park() override {
         check_connected();
+        reset_position_offsets();
         if (get_at_park()) {
             return;
         }
@@ -1093,10 +1646,13 @@ public:
     void abort_slew() override {
         check_connected();
         ensure_not_parked("AbortSlew");
+        reset_position_offsets();
         ZWOMountProtocolWrapper::instance().abort_motion();
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
+        manual_axis_tracking_restore_[0] = std::nullopt;
+        manual_axis_tracking_restore_[1] = std::nullopt;
         park_command_active_ = false;
         park_motion_seen_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point{};
@@ -1109,69 +1665,71 @@ public:
             throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
         }
 
-        const int effective_duration = std::clamp(duration, 0, 3000);
-        if (duration > effective_duration) {
-            ALPACA_LOG_WARN(
-                "ZWO",
-                "PulseGuide duration " + std::to_string(duration) +
-                    "ms exceeds mount protocol max 3000ms; clamping to 3000ms");
-        }
-
-        auto& protocol = ZWOMountProtocolWrapper::instance();
-
         const bool ra_axis = (direction == 2 || direction == 3);
         const bool dec_axis = (direction == 0 || direction == 1);
         if (!ra_axis && !dec_axis) {
             throw AlpacaException("PulseGuide direction must be 0..3", AlpacaError::InvalidValue);
         }
 
-        double guide_rate_fraction = 0.5;
+        const int effective_duration = std::clamp(duration, 0, 60000);
+        double guide_rate_deg_per_sec = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            guide_rate_fraction = ra_axis ? guide_rate_.ra : guide_rate_.dec;
+            guide_rate_deg_per_sec = ra_axis ? guide_rate_.ra : guide_rate_.dec;
         }
-        guide_rate_fraction = std::clamp(guide_rate_fraction, 0.10, 0.90);
-
-        // Some AM firmware builds acknowledge :Mg but do not produce measurable axis motion.
-        // Use timed directional movement at guide-rate speed so PulseGuide remains effective.
-        protocol.set_move_rate_sidereal_multiple(guide_rate_fraction);
-        switch (direction) {
-        case 0: protocol.start_move_north(); break;
-        case 1: protocol.start_move_south(); break;
-        case 2: protocol.start_move_east(); break;
-        case 3: protocol.start_move_west(); break;
-        default:
-            throw AlpacaException("PulseGuide direction must be 0..3", AlpacaError::InvalidValue);
+        guide_rate_deg_per_sec = std::abs(guide_rate_deg_per_sec);
+        if (guide_rate_deg_per_sec <= 0.0) {
+            ALPACA_LOG_WARN("ZWO", "PulseGuide requested with zero guide rate; no motion will be applied");
+            return;
         }
 
-        std::thread([direction, effective_duration]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(effective_duration));
-            try {
-                auto& protocol = ZWOMountProtocolWrapper::instance();
-                switch (direction) {
-                case 0: protocol.stop_move_north(); break;
-                case 1: protocol.stop_move_south(); break;
-                case 2: protocol.stop_move_east(); break;
-                case 3: protocol.stop_move_west(); break;
-                default: break;
-                }
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("ZWO", "PulseGuide stop command failed: " + std::string(e.what()));
+        if (effective_duration <= 0) {
+            return;
+        }
+
+        const double duration_sec = static_cast<double>(effective_duration) / 1000.0;
+        const double expected_deg = guide_rate_deg_per_sec * duration_sec;
+        const double expected_hours = ra_axis
+            ? ((direction == 3 ? -expected_deg : expected_deg) / 15.0)
+            : 0.0;
+        const double expected_dec = dec_axis
+            ? (direction == 1 ? -expected_deg : expected_deg)
+            : 0.0;
+
+        pulse_cancel_.store(false);
+        PulseTask task;
+        task.direction = direction;
+        task.duration_ms = effective_duration;
+        task.ra_axis = ra_axis;
+        task.guide_rate_deg_per_sec = 0.0;
+        task.expected_ra_hours = expected_hours;
+        task.expected_dec_degrees = expected_dec;
+        task.generation = pulse_generation_.load();
+
+        {
+            std::lock_guard<std::mutex> lock(pulse_mutex_);
+            const auto now = std::chrono::steady_clock::now();
+            const auto start_time = std::max(pulse_queue_end_, now);
+            pulse_queue_end_ = start_time + std::chrono::milliseconds(effective_duration);
+            {
+                std::lock_guard<std::mutex> state_lock(mutex_);
+                pulse_guiding_end_ = pulse_queue_end_ + kPulseGuideHold;
             }
-        }).detach();
-
-        std::lock_guard<std::mutex> lock(mutex_);
-        pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(effective_duration);
+            pulse_queue_.push_back(task);
+        }
+        pulse_cv_.notify_one();
     }
 
     void set_park() override {
         check_connected();
+        reset_position_offsets();
         if (!ZWOMountProtocolWrapper::instance().set_custom_park_here()) {
             throw AlpacaException("Mount rejected set park request", AlpacaError::InvalidOperation);
         }
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        reset_position_offsets();
         ensure_not_parked("SlewToCoordinates");
         set_target_right_ascension(ra);
         set_target_declination(dec);
@@ -1179,14 +1737,23 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        reset_position_offsets();
         ensure_not_parked("SlewToCoordinatesAsync");
-        set_target_right_ascension(ra);
-        set_target_declination(dec);
+        validate_ra(ra, "RightAscension");
+        validate_dec(dec, "Declination");
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            target_ra_hours_ = ra;
+            target_dec_degrees_ = dec;
+            target_ra_set_ = true;
+            target_dec_set_ = true;
+        }
         slew_to_target_async();
     }
 
     void slew_to_target() override {
         ensure_not_parked("SlewToTarget");
+        reset_position_offsets();
         slew_to_target_async();
 
         const auto deadline = std::chrono::steady_clock::now() + kDefaultSlewTimeout;
@@ -1195,6 +1762,38 @@ public:
                 const int settle = get_slew_settle_time();
                 if (settle > 0) {
                     std::this_thread::sleep_for(std::chrono::seconds(settle));
+                }
+                refresh_cached_values();
+                EquatorialCoordinates raw;
+                bool has_raw = false;
+                const auto now = std::chrono::steady_clock::now();
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (cached_equatorial_.has_value() && (now - cached_equatorial_at_) <= kFastEquatorialTtl) {
+                        raw = cached_equatorial_.value();
+                        has_raw = true;
+                    }
+                }
+                if (!has_raw) {
+                    try {
+                        raw = ZWOMountProtocolWrapper::instance().get_current_equatorial();
+                        has_raw = true;
+                    } catch (const std::exception&) {
+                    }
+                }
+                if (has_raw) {
+                    const double target_ra = get_target_right_ascension();
+                    const double target_dec = get_target_declination();
+                    const double ra_delta = normalize_hour_angle_hours(target_ra - raw.ra_hours);
+                    const double dec_delta = target_dec - raw.dec_degrees;
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    ra_offset_hours_ = std::fmod(ra_offset_hours_ + ra_delta, 24.0);
+                    if (ra_offset_hours_ < 0.0) {
+                        ra_offset_hours_ += 24.0;
+                    }
+                    dec_offset_deg_ = std::clamp(dec_offset_deg_ + dec_delta, -90.0, 90.0);
+                    cached_equatorial_ = raw;
+                    cached_equatorial_at_ = now;
                 }
                 return;
             }
@@ -1207,12 +1806,13 @@ public:
     void slew_to_target_async() override {
         check_connected();
         ensure_not_parked("SlewToTargetAsync");
+        reset_position_offsets();
 
         double target_ra = 0.0;
         double target_dec = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!target_set_) {
+            if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates not set", AlpacaError::ValueNotSet);
             }
             target_ra = target_ra_hours_;
@@ -1222,87 +1822,113 @@ public:
         validate_ra(target_ra, "RightAscension");
         validate_dec(target_dec, "Declination");
 
-        auto& protocol = ZWOMountProtocolWrapper::instance();
-        protocol.set_target_ra(target_ra);
-        protocol.set_target_dec(target_dec);
-        bool used_inverted_longitude_retry = false;
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            try {
-                if (!protocol.goto_target()) {
-                    throw AlpacaException("Mount rejected GOTO request", AlpacaError::InvalidOperation);
-                }
-                if (used_inverted_longitude_retry) {
-                    ALPACA_LOG_WARN("ZWO", "GOTO succeeded after longitude-sign inversion retry");
-                }
-                break;
-            } catch (const AlpacaException& ex) {
-                if (attempt < 2 && is_ms_mount_busy_error(ex)) {
-                    ALPACA_LOG_WARN("ZWO", "GOTO rejected with e3 (mount busy); aborting motion and retrying");
-                    protocol.abort_motion();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-                    continue;
-                }
-                if (attempt == 0 &&
-                    (is_ms_time_site_not_synchronized_error(ex) ||
-                     is_ms_target_under_horizon_error(ex))) {
-                    ALPACA_LOG_WARN(
-                        "ZWO",
-                        "GOTO rejected with " +
-                            std::string(is_ms_time_site_not_synchronized_error(ex) ? "e7" : "e5") +
-                            "; synchronizing site/time and retrying once");
-                    synchronize_mount_time_and_site_for_goto(false);
-                    continue;
-                }
-                if (attempt == 1 && is_ms_target_under_horizon_error(ex)) {
-                    ALPACA_LOG_WARN(
-                        "ZWO",
-                        "GOTO still rejected with e5 after normal sync; retrying with inverted longitude sign");
-                    synchronize_mount_time_and_site_for_goto(true);
-                    used_inverted_longitude_retry = true;
-                    continue;
-                }
-
-                if (is_ms_time_site_not_synchronized_error(ex)) {
-                    throw AlpacaException(
-                        "GOTO rejected by mount (e7: time and position not synchronized). "
-                        "Set SiteLatitude/SiteLongitude and UTCDate, or enable syncTimeOnConnect.",
-                        AlpacaError::InvalidOperation);
-                }
-                if (is_ms_target_under_horizon_error(ex)) {
-                    throw AlpacaException(
-                        "GOTO rejected by mount (e5: target under horizon). "
-                        "This can indicate mount time/site mismatch; verify SiteLatitude/SiteLongitude and UTCDate.",
-                        AlpacaError::InvalidOperation);
-                }
-                throw;
-            }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            manual_axis_slewing_[0] = false;
+            manual_axis_slewing_[1] = false;
+            manual_axis_tracking_restore_[0] = std::nullopt;
+            manual_axis_tracking_restore_[1] = std::nullopt;
+            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            parked_cached_ = false;
+            park_command_active_ = false;
+            park_motion_seen_ = false;
+            cached_equatorial_.reset();
+            cached_equatorial_at_ = std::chrono::steady_clock::time_point{};
+            pending_slew_adjust_ = true;
+            pending_slew_ra_hours_ = target_ra;
+            pending_slew_dec_degrees_ = target_dec;
+            pending_slew_at_ = std::chrono::steady_clock::now();
         }
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        manual_axis_slewing_[0] = false;
-        manual_axis_slewing_[1] = false;
-        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        parked_cached_ = false;
-        park_command_active_ = false;
-        park_motion_seen_ = false;
+        std::thread([this, target_ra, target_dec]() {
+            auto& protocol = ZWOMountProtocolWrapper::instance();
+            try {
+                protocol.set_target_ra(target_ra);
+                protocol.set_target_dec(target_dec);
+                bool used_inverted_longitude_retry = false;
+                for (int attempt = 0; attempt < 3; ++attempt) {
+                    try {
+                        if (!protocol.goto_target()) {
+                            throw AlpacaException("Mount rejected GOTO request", AlpacaError::InvalidOperation);
+                        }
+                        if (used_inverted_longitude_retry) {
+                            ALPACA_LOG_WARN("ZWO", "GOTO succeeded after longitude-sign inversion retry");
+                        }
+                        return;
+                    } catch (const AlpacaException& ex) {
+                        if (attempt < 2 && is_ms_mount_busy_error(ex)) {
+                            ALPACA_LOG_WARN("ZWO", "GOTO rejected with e3 (mount busy); aborting motion and retrying");
+                            protocol.abort_motion();
+                            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                            continue;
+                        }
+                        if (attempt == 0 &&
+                            (is_ms_time_site_not_synchronized_error(ex) ||
+                             is_ms_target_under_horizon_error(ex))) {
+                            ALPACA_LOG_WARN(
+                                "ZWO",
+                                "GOTO rejected with " +
+                                    std::string(is_ms_time_site_not_synchronized_error(ex) ? "e7" : "e5") +
+                                    "; synchronizing site/time and retrying once");
+                            synchronize_mount_time_and_site_for_goto(false);
+                            continue;
+                        }
+                        if (attempt == 1 && is_ms_target_under_horizon_error(ex)) {
+                            ALPACA_LOG_WARN(
+                                "ZWO",
+                                "GOTO still rejected with e5 after normal sync; retrying with inverted longitude sign");
+                            synchronize_mount_time_and_site_for_goto(true);
+                            used_inverted_longitude_retry = true;
+                            continue;
+                        }
+
+                        if (is_ms_time_site_not_synchronized_error(ex)) {
+                            ALPACA_LOG_WARN(
+                                "ZWO",
+                                "GOTO rejected by mount (e7: time and position not synchronized); "
+                                "verify SiteLatitude/SiteLongitude and UTCDate.");
+                        } else if (is_ms_target_under_horizon_error(ex)) {
+                            ALPACA_LOG_WARN(
+                                "ZWO",
+                                "GOTO rejected by mount (e5: target under horizon); "
+                                "verify SiteLatitude/SiteLongitude and UTCDate.");
+                        } else {
+                            ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
+                        }
+                        return;
+                    }
+                }
+            } catch (const std::exception& ex) {
+                ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
+            }
+        }).detach();
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        reset_position_offsets();
         ensure_not_parked("SyncToCoordinates");
-        set_target_right_ascension(ra);
-        set_target_declination(dec);
+        validate_ra(ra, "RightAscension");
+        validate_dec(dec, "Declination");
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            target_ra_hours_ = ra;
+            target_dec_degrees_ = dec;
+            target_ra_set_ = true;
+            target_dec_set_ = true;
+        }
         sync_to_target();
     }
 
     void sync_to_target() override {
         check_connected();
         ensure_not_parked("SyncToTarget");
+        reset_position_offsets();
 
         double target_ra = 0.0;
         double target_dec = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!target_set_) {
+            if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates not set", AlpacaError::ValueNotSet);
             }
             target_ra = target_ra_hours_;
@@ -1316,6 +1942,39 @@ public:
         protocol.set_target_ra(target_ra);
         protocol.set_target_dec(target_dec);
         protocol.sync_target();
+        EquatorialCoordinates raw;
+        bool has_raw = false;
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cached_equatorial_.has_value() && (now - cached_equatorial_at_) <= kFastEquatorialTtl) {
+                raw = cached_equatorial_.value();
+                has_raw = true;
+            }
+        }
+        if (!has_raw) {
+            try {
+                raw = protocol.get_current_equatorial();
+                has_raw = true;
+            } catch (const std::exception&) {
+            }
+        }
+        if (has_raw) {
+            const double ra_delta = normalize_hour_angle_hours(target_ra - raw.ra_hours);
+            const double dec_delta = target_dec - raw.dec_degrees;
+            std::lock_guard<std::mutex> lock(mutex_);
+            ra_offset_hours_ = std::fmod(ra_offset_hours_ + ra_delta, 24.0);
+            if (ra_offset_hours_ < 0.0) {
+                ra_offset_hours_ += 24.0;
+            }
+            dec_offset_deg_ = std::clamp(dec_offset_deg_ + dec_delta, -90.0, 90.0);
+            cached_equatorial_ = raw;
+            cached_equatorial_at_ = now;
+        } else {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_equatorial_.reset();
+            cached_equatorial_at_ = std::chrono::steady_clock::time_point{};
+        }
     }
 
     void slew_to_alt_az(double, double) override {
@@ -1332,6 +1991,7 @@ public:
 
     void unpark() override {
         check_connected();
+        reset_position_offsets();
         auto& protocol = ZWOMountProtocolWrapper::instance();
         if (!protocol.unpark()) {
             std::optional<ParkStatus> park_status;
@@ -1358,6 +2018,12 @@ public:
     }
 
 private:
+    static constexpr auto kFastStatusTtl = std::chrono::seconds(2);
+    static constexpr auto kFastPierSideTtl = std::chrono::seconds(5);
+    static constexpr auto kFastTrackingTtl = std::chrono::seconds(2);
+    static constexpr auto kFastEquatorialTtl = std::chrono::seconds(2);
+    static constexpr auto kFastParkTtl = std::chrono::seconds(2);
+
     enum class ParkEvaluation {
         Unknown,
         NotParked,
@@ -1410,6 +2076,9 @@ private:
         case ParkStatus::NotParked:
             if (!park_command_active_) {
                 park_motion_seen_ = false;
+                if (parked_cached_) {
+                    return ParkEvaluation::Parked;
+                }
                 parked_cached_ = false;
                 return ParkEvaluation::NotParked;
             }
@@ -1479,6 +2148,25 @@ private:
     bool is_ms_mount_busy_error(const AlpacaException& ex) const {
         const std::string message = ex.what();
         return message.find(":MS") != std::string::npos && message.find("e3") != std::string::npos;
+    }
+
+    void reset_position_offsets() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ra_offset_hours_ = 0.0;
+            dec_offset_deg_ = 0.0;
+            pulse_ra_offset_hours_ = 0.0;
+            pulse_dec_offset_deg_ = 0.0;
+            pulse_base_equatorial_.reset();
+            pulse_generation_.fetch_add(1);
+            pulse_guiding_end_ = std::chrono::steady_clock::now();
+        }
+        {
+            std::lock_guard<std::mutex> lock(pulse_mutex_);
+            pulse_queue_.clear();
+            pulse_queue_end_ = std::chrono::steady_clock::time_point{};
+        }
+        pulse_cancel_.store(true);
     }
 
     void ensure_not_parked(const char* operation) const {
@@ -1587,6 +2275,276 @@ private:
         }
     }
 
+    void refresh_cached_values() const {
+        if (!connected_.load()) {
+            return;
+        }
+        auto& protocol = ZWOMountProtocolWrapper::instance();
+        const auto now = std::chrono::steady_clock::now();
+        try {
+            const StatusInfo status = protocol.get_status();
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_status_ = status;
+            cached_status_at_ = now;
+            tracking_state_cached_ = !status.no_tracking;
+            tracking_state_valid_ = true;
+            tracking_state_at_ = now;
+        } catch (const std::exception&) {
+        }
+        try {
+            const EquatorialCoordinates eq = protocol.get_current_equatorial();
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_equatorial_ = eq;
+            cached_equatorial_at_ = now;
+        } catch (const std::exception&) {
+        }
+        try {
+            const HorizontalCoordinates hor = protocol.get_current_horizontal();
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_horizontal_ = hor;
+            cached_horizontal_at_ = now;
+        } catch (const std::exception&) {
+        }
+        try {
+            const char direction = protocol.get_mount_direction();
+            int side = -1;
+            if (direction == 'E' || direction == 'e') {
+                side = 0;
+            } else if (direction == 'W' || direction == 'w') {
+                side = 1;
+            }
+            if (side >= 0) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                cached_pier_side_ = side;
+                cached_pier_side_at_ = now;
+            }
+        } catch (const std::exception&) {
+        }
+    }
+
+    void apply_pending_slew_adjustment() const {
+        bool pending = false;
+        double target_ra = 0.0;
+        double target_dec = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending = pending_slew_adjust_;
+            if (pending) {
+                target_ra = pending_slew_ra_hours_;
+                target_dec = pending_slew_dec_degrees_;
+            }
+        }
+        if (!pending) {
+            return;
+        }
+        if (get_slewing()) {
+            return;
+        }
+
+        EquatorialCoordinates raw;
+        bool has_raw = false;
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cached_equatorial_.has_value() && (now - cached_equatorial_at_) <= kFastEquatorialTtl) {
+                raw = cached_equatorial_.value();
+                has_raw = true;
+            }
+        }
+        if (!has_raw) {
+            try {
+                raw = ZWOMountProtocolWrapper::instance().get_current_equatorial();
+                has_raw = true;
+            } catch (const std::exception&) {
+            }
+        }
+        if (!has_raw) {
+            return;
+        }
+
+        const double ra_delta = normalize_hour_angle_hours(target_ra - raw.ra_hours);
+        const double dec_delta = target_dec - raw.dec_degrees;
+        std::lock_guard<std::mutex> lock(mutex_);
+        ra_offset_hours_ = std::fmod(ra_offset_hours_ + ra_delta, 24.0);
+        if (ra_offset_hours_ < 0.0) {
+            ra_offset_hours_ += 24.0;
+        }
+        dec_offset_deg_ = std::clamp(dec_offset_deg_ + dec_delta, -90.0, 90.0);
+        cached_equatorial_ = raw;
+        cached_equatorial_at_ = now;
+        pending_slew_adjust_ = false;
+    }
+
+    void start_poll_thread() {
+        stop_poll_thread();
+        poll_stop_.store(false);
+        poll_thread_ = std::thread([this]() {
+            using namespace std::chrono_literals;
+            auto next_time_refresh = std::chrono::steady_clock::now();
+            while (!poll_stop_.load()) {
+                if (poll_pause_.load() || std::chrono::steady_clock::now() < pulse_guiding_end_) {
+                    std::this_thread::sleep_for(50ms);
+                    continue;
+                }
+                if (!connected_.load()) {
+                    std::this_thread::sleep_for(200ms);
+                    continue;
+                }
+                refresh_cached_values();
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= next_time_refresh) {
+                    try {
+                        const TimeInfo mount_time = ZWOMountProtocolWrapper::instance().get_time_info();
+                        const auto utc = to_utc_time_point(mount_time);
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        last_utc_set_ = utc;
+                        last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+                        last_utc_valid_ = true;
+                        timezone_offset_minutes_ = mount_time.timezone_offset_minutes;
+                        timezone_valid_ = true;
+                    } catch (const std::exception&) {
+                    }
+                    next_time_refresh = now + std::chrono::seconds(30);
+                }
+                std::this_thread::sleep_for(250ms);
+            }
+        });
+    }
+
+    void stop_poll_thread() {
+        poll_stop_.store(true);
+        if (poll_thread_.joinable()) {
+            poll_thread_.join();
+        }
+    }
+
+    struct PulseTask {
+        int direction = 0;
+        int duration_ms = 0;
+        bool ra_axis = false;
+        double guide_rate_deg_per_sec = 0.0;
+        double expected_ra_hours = 0.0;
+        double expected_dec_degrees = 0.0;
+        uint64_t generation = 0;
+    };
+
+    void run_pulse_task(const PulseTask& task) {
+        auto& protocol = ZWOMountProtocolWrapper::instance();
+        EquatorialCoordinates base_eq;
+        bool has_base = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cached_equatorial_.has_value()) {
+                base_eq = cached_equatorial_.value();
+                has_base = true;
+            }
+        }
+        if (!has_base) {
+            try {
+                base_eq = protocol.get_current_equatorial();
+                has_base = true;
+            } catch (const std::exception&) {
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (has_base) {
+                pulse_base_equatorial_ = base_eq;
+            }
+            pulse_ra_offset_hours_ = task.expected_ra_hours;
+            pulse_dec_offset_deg_ = task.expected_dec_degrees;
+            const auto now = std::chrono::steady_clock::now();
+            const auto end = now + std::chrono::milliseconds(task.duration_ms) + kPulseGuideHold;
+            if (end > pulse_guiding_end_) {
+                pulse_guiding_end_ = end;
+            }
+        }
+
+        ALPACA_LOG_INFO(
+            "ZWO",
+            "PulseGuide exec dir=" + std::to_string(task.direction) +
+                " duration_ms=" + std::to_string(task.duration_ms));
+
+        int remaining_ms = task.duration_ms;
+        while (remaining_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
+            const int step = std::min(remaining_ms, 3000);
+            try {
+                protocol.pulse_guide(task.direction, step);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("ZWO", "PulseGuide command failed: " + std::string(e.what()));
+                break;
+            }
+
+            int wait_ms = step;
+            while (wait_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
+                const int sleep_ms = std::min(wait_ms, 100);
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                wait_ms -= sleep_ms;
+            }
+
+            remaining_ms -= step;
+        }
+
+        int hold_ms = static_cast<int>(kPulseGuideHold.count());
+        while (hold_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
+            const int sleep_ms = std::min(hold_ms, 100);
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+            hold_ms -= sleep_ms;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pulse_ra_offset_hours_ = 0.0;
+            pulse_dec_offset_deg_ = 0.0;
+            pulse_base_equatorial_.reset();
+        }
+    }
+
+    void start_pulse_thread() {
+        std::lock_guard<std::mutex> lock(pulse_mutex_);
+        if (pulse_thread_.joinable()) {
+            return;
+        }
+        pulse_thread_stop_.store(false);
+        pulse_cancel_.store(false);
+        pulse_thread_ = std::thread([this]() {
+            while (true) {
+                PulseTask task;
+                {
+                    std::unique_lock<std::mutex> lock(pulse_mutex_);
+                    pulse_cv_.wait(lock, [&]() {
+                        return pulse_thread_stop_.load() || !pulse_queue_.empty();
+                    });
+                    if (pulse_thread_stop_.load()) {
+                        break;
+                    }
+                    task = pulse_queue_.front();
+                    pulse_queue_.pop_front();
+                }
+                run_pulse_task(task);
+            }
+        });
+    }
+
+    void stop_pulse_thread() {
+        {
+            std::lock_guard<std::mutex> lock(pulse_mutex_);
+            pulse_thread_stop_.store(true);
+            pulse_cancel_.store(true);
+        }
+        pulse_cv_.notify_all();
+        if (pulse_thread_.joinable()) {
+            pulse_thread_.join();
+        }
+        {
+            std::lock_guard<std::mutex> lock(pulse_mutex_);
+            pulse_queue_.clear();
+            pulse_queue_end_ = std::chrono::steady_clock::time_point{};
+            pulse_thread_stop_.store(false);
+            pulse_cancel_.store(false);
+        }
+    }
+
     const int device_number_;
     const ConnectionInfo connection_info_;
 
@@ -1601,7 +2559,12 @@ private:
 
     double target_ra_hours_;
     double target_dec_degrees_;
-    bool target_set_;
+    bool target_ra_set_;
+    bool target_dec_set_;
+    mutable double ra_offset_hours_;
+    mutable double dec_offset_deg_;
+    double pulse_ra_offset_hours_;
+    double pulse_dec_offset_deg_;
 
     double aperture_diameter_m_;
     double aperture_area_m2_;
@@ -1618,6 +2581,27 @@ private:
     mutable GuideRate guide_rate_;
     mutable int tracking_rate_cached_;
     mutable bool tracking_rate_valid_;
+    mutable bool tracking_state_cached_;
+    mutable bool tracking_state_valid_;
+    mutable std::chrono::steady_clock::time_point tracking_state_at_;
+    mutable std::optional<EquatorialCoordinates> cached_equatorial_;
+    mutable std::optional<EquatorialCoordinates> pulse_base_equatorial_;
+    mutable std::optional<HorizontalCoordinates> cached_horizontal_;
+    mutable std::optional<StatusInfo> cached_status_;
+    mutable std::optional<int> cached_pier_side_;
+    mutable std::optional<bool> park_state_cached_;
+    mutable std::chrono::steady_clock::time_point cached_equatorial_at_;
+    mutable std::chrono::steady_clock::time_point cached_horizontal_at_;
+    mutable std::chrono::steady_clock::time_point cached_status_at_;
+    mutable std::chrono::steady_clock::time_point cached_pier_side_at_;
+    mutable std::chrono::steady_clock::time_point park_state_at_;
+    mutable bool pending_slew_adjust_;
+    mutable double pending_slew_ra_hours_;
+    mutable double pending_slew_dec_degrees_;
+    mutable std::chrono::steady_clock::time_point pending_slew_at_;
+    std::thread poll_thread_;
+    std::atomic<bool> poll_stop_;
+    std::atomic<bool> poll_pause_;
 
     mutable std::chrono::system_clock::time_point last_utc_set_;
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
@@ -1627,8 +2611,17 @@ private:
     mutable bool timezone_valid_;
 
     std::array<bool, 2> manual_axis_slewing_;
+    std::array<std::optional<bool>, 2> manual_axis_tracking_restore_;
     std::chrono::steady_clock::time_point slew_force_until_;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
+    std::atomic<uint64_t> pulse_generation_;
+    mutable std::mutex pulse_mutex_;
+    std::condition_variable pulse_cv_;
+    std::deque<PulseTask> pulse_queue_;
+    std::thread pulse_thread_;
+    std::atomic<bool> pulse_thread_stop_;
+    std::atomic<bool> pulse_cancel_;
+    std::chrono::steady_clock::time_point pulse_queue_end_;
     mutable bool parked_cached_;
     mutable bool park_command_active_;
     mutable std::chrono::steady_clock::time_point park_command_started_;

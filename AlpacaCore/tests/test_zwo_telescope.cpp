@@ -83,6 +83,21 @@ TEST_CASE("ZWO Mount Telescope Driver - Target Validation", "[zwo][telescope][un
     REQUIRE(driver->get_target_declination() == Catch::Approx(45.0));
 }
 
+TEST_CASE("ZWO Mount Telescope Driver - Target Coordinate Set Tracking", "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(4, conn);
+
+    REQUIRE_NOTHROW(driver->set_target_right_ascension(3.0));
+    REQUIRE(driver->get_target_right_ascension() == Catch::Approx(3.0));
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    REQUIRE_NOTHROW(driver->set_target_declination(-20.0));
+    REQUIRE(driver->get_target_declination() == Catch::Approx(-20.0));
+}
+
 TEST_CASE("ZWO Mount Telescope Driver - Disconnected Behavior", "[zwo][telescope][unit]") {
     alpacacore::vendor::zwo::ConnectionInfo conn;
     conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
@@ -118,4 +133,20 @@ TEST_CASE("ZWO Mount Telescope Driver - Site Elevation Validation", "[zwo][teles
     REQUIRE_NOTHROW(driver->set_site_elevation(-300.0));
     REQUIRE_NOTHROW(driver->set_site_elevation(10000.0));
     REQUIRE(driver->get_site_elevation() == Catch::Approx(10000.0));
+}
+
+TEST_CASE("ZWO Mount Telescope Driver - Axis Rate Ranges", "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(5, conn);
+
+    const auto primary_ranges = driver->get_axis_rate_ranges(0);
+    REQUIRE(primary_ranges.size() == 1);
+    REQUIRE(primary_ranges.front().first == Catch::Approx(0.0));
+    REQUIRE(primary_ranges.front().second > 0.0);
+
+    const auto tertiary_ranges = driver->get_axis_rate_ranges(2);
+    REQUIRE(tertiary_ranges.empty());
 }
