@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.10.1] - 2026-02-21
+
+### Added
+- **ZWO Telescope (ASI Mount) Driver** (AlpacaCore)
+  - ZWO mount telescope driver using ZWO Mount Serial Communication Protocol.
+  - Protocol wrapper (`zwo_mount_protocol_wrapper`) and driver implementation for serial (USB/Bluetooth) and optional network connection.
+  - Protocol reference under `external/ZWO/AM/ZWO_Mount_Protocol.md`.
+  - Unit tests for ZWO telescope driver; ZWO mount build integrated in vendor CMakeLists and tests CMakeLists.
+- **ZWO Telescope Device Support** (AlpacaHTTP)
+  - Router registration and configuration support for ZWO telescope (mount) devices.
+  - Web UI: ZWO Mount (Telescope) configuration (connection type, serial port/path, baud rate, network host/port, aperture diameter).
+  - Routing tests updated for telescope/mount device type and ZWO telescope registration.
+
+### Changed
+- **Supported Drivers Documentation** (AlpacaCore)
+  - Documented ZWO AM5N in Telescope drivers table; added driver notes (protocol, connection, tested firmware 1.8.8).
+  - ZWO AM5N known issue: firmware issue—guiding on its own can be sporadic; guiding via ST4 cable to the guide camera should still be fine.
+
 ## [0.10.0] - 2026-02-03
 
 ### Added
