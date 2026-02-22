@@ -1,0 +1,7 @@
+{
+  "name": "alpacabridge-deps",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "curl"
+  ]
+}

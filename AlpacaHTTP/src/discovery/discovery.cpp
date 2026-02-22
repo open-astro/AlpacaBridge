@@ -38,10 +38,6 @@ void Discovery::start() {
 
 void Discovery::stop() {
     running_ = false;
-    if (socket_fd_ != util::kInvalidSocket) {
-        util::socket_close(socket_fd_);
-        socket_fd_ = util::kInvalidSocket;
-    }
     if (discovery_thread_.joinable()) {
         discovery_thread_.join();
     }
@@ -91,9 +87,34 @@ void Discovery::run_discovery() {
 
     util::log_info("Discovery service started on port " + std::to_string(ALPACA_DISCOVERY_PORT));
 
-    // Listen for probes
+    // Listen for probes.
+    // Use a periodic select timeout so stop() can terminate quickly on all platforms.
     char buffer[1024];
     while (running_) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(socket_fd_, &read_fds);
+
+        timeval timeout{};
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 200000; // 200 ms
+
+        int select_result = util::socket_select(socket_fd_, &read_fds, nullptr, nullptr, &timeout);
+        if (!running_) {
+            break;
+        }
+        if (select_result == 0) {
+            continue;
+        }
+        if (select_result < 0) {
+            int err = util::socket_get_last_error();
+            if (util::socket_interrupted(err)) {
+                continue;
+            }
+            util::log_error("Discovery select failed: " + util::socket_error_message(err));
+            break;
+        }
+
         struct sockaddr_in sender_addr;
         util::SocketLen sender_len = sizeof(sender_addr);
         
@@ -109,6 +130,13 @@ void Discovery::run_discovery() {
             std::uint16_t sender_port = ntohs(sender_addr.sin_port);
             
             handle_probe(probe_data, sender_address, sender_port);
+        } else if (bytes_received < 0) {
+            int err = util::socket_get_last_error();
+            if (util::socket_interrupted(err) || util::socket_would_block(err)) {
+                continue;
+            }
+            util::log_error("Discovery recvfrom failed: " + util::socket_error_message(err));
+            break;
         }
     }
 

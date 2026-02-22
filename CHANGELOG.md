@@ -7,13 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [0.10.1] - 2026-02-21
+## [Unreleased]
 
 ### Added
 - **ZWO Telescope (ASI Mount) Driver** (AlpacaCore)
   - ZWO mount telescope driver using ZWO Mount Serial Communication Protocol.
   - Protocol wrapper (`zwo_mount_protocol_wrapper`) and driver implementation for serial (USB/Bluetooth) and optional network connection.
-  - Protocol reference under `external/ZWO/AM/ZWO_Mount_Protocol.md`.
+  - Protocol reference docs under `external/ZWO/AM/` (v1.8, v2.0, v2.1, final, extended, undocumented).
   - Unit tests for ZWO telescope driver; ZWO mount build integrated in vendor CMakeLists and tests CMakeLists.
 - **ZWO Telescope Device Support** (AlpacaHTTP)
   - Router registration and configuration support for ZWO telescope (mount) devices.
@@ -22,8 +22,41 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ### Changed
 - **Supported Drivers Documentation** (AlpacaCore)
-  - Documented ZWO AM5N in Telescope drivers table; added driver notes (protocol, connection, tested firmware 1.8.8).
+  - Documented ZWO AM5N in Telescope drivers table; ConformU validation (macOS arm64); driver notes (protocol, connection, tested firmware 1.8.8, USB/serial only—Bluetooth not tested).
   - ZWO AM5N known issue: firmware issue—guiding on its own can be sporadic; guiding via ST4 cable to the guide camera should still be fine.
+
+## [0.11.2] - 2026-02-20
+
+### Fixed
+- **Discovery service** (AlpacaHTTP)
+  - Discovery loop now uses `select()` with a 200 ms timeout so `stop()` can terminate promptly on all platforms instead of blocking on `recvfrom()`. Removed socket close from `stop()` so the discovery thread exits cleanly; added error handling for `select()` and `recvfrom()` (interrupted / would-block continue; other errors logged and break).
+
+## [0.11.1] - 2026-02-19
+
+### Changed
+- **AlpacaCore tests** (AlpacaCore)
+  - Tests now require Catch2 only (doctest fallback removed). CMake supports both `Catch2::Catch2WithMain` and `Catch2::Catch2Main` for Catch2 v2/v3 compatibility.
+  - SynScan tests use `catch2_compat.h` for Catch2 include compatibility.
+
+## [0.11.0] - 2026-02-19
+
+### Added
+- **vcpkg support** (Workspace)
+  - Optional vcpkg integration for dependencies (e.g. curl for WeeWX). Controlled by `ALPACABRIDGE_ENABLE_VCPKG` (default ON on Windows). Scripts bootstrap vcpkg under user home if missing.
+  - Root `vcpkg.json` manifest (e.g. curl dependency) for manifest mode.
+- **Editor and repo hygiene**
+  - `.editorconfig` for charset, line endings (LF; CRLF for `.bat`/`.cmd`/`.ps1`), final newline, trim trailing whitespace.
+  - `.gitattributes` for normalized line endings (`* text=auto eol=lf`, CRLF for Windows scripts, LF for shell/CMake).
+
+### Changed
+- **SynScan Telescope Driver** (AlpacaCore)
+  - Implemented `get_axis_rate_ranges` (vector of rate ranges per ASCOM). Tertiary axis returns empty set; primary/secondary return single range. Axis validation in `get_axis_rate_range` for invalid axis.
+  - Added unit tests for axis rate range behavior.
+- **Build and test scripts** (AlpacaBridge)
+  - `build_and_run.cmd`: vcpkg toolchain and manifest dir when vcpkg enabled; robust `ROOT_DIR` resolution; delayed expansion for vcpkg paths.
+  - `run_all_tests.cmd` / `run_all_tests.sh`: aligned with vcpkg-aware build when enabled.
+- **.gitignore**
+  - Ignore `build-curl-check/` (build/check artifact).
 
 ## [0.10.0] - 2026-02-03
 

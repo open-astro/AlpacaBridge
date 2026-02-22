@@ -4,8 +4,6 @@
 
 AlpacaBridge is a unified workspace for building, testing, and running a complete ASCOM Alpaca server. It combines AlpacaCore (driver library) and AlpacaHTTP (HTTP server) with AI-assisted development tools and ConformU-validated drivers.
 
-**Intrested? Want to help?** Join our [Discord Support Channel](https://discord.com/channels/1092619106282393610/1092619106282393613)
-
 ## AlpacaBridge Explained
 
 - ScopeTrader: [Openastro AlpacaBridge Launches and Why it Matters](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/)
@@ -23,6 +21,14 @@ Building the Future of Astrophotography & EAA with AlpacaBridge, an ASCOM Alpaca
 - **Convenience Scripts** - One-command build, test, and run workflows
 - **Production Ready** - All drivers are ConformU validated for ASCOM Alpaca specification compliance
 
+## Learn more
+
+For deeper details, see the project READMEs:
+
+- [AlpacaCore/README.md](AlpacaCore/README.md) - Core library and driver development
+- [AlpacaHTTP/README.md](AlpacaHTTP/README.md) - HTTP server implementation
+- [AGENTS.md](AGENTS.md) - AI-assisted development workflow and rules
+- [AlpacaCore/SUPPORTED-DRIVERS.md](AlpacaCore/SUPPORTED-DRIVERS.md) - List of validated drivers
 
 ## Quick Start
 
@@ -90,12 +96,3 @@ AlpacaBridge supports AI-assisted driver development, making it easy to build dr
 **Note:** [AGENTS.md](AGENTS.md) is designed for AI agents to read when building drivers, though users can also reference it to understand the development workflow.
 
 See [AlpacaCore/README.md](AlpacaCore/README.md) for detailed driver development guidance.
-
-## Learn more
-
-For deeper details, see the project READMEs:
-
-- [AlpacaCore/README.md](AlpacaCore/README.md) - Core library and driver development
-- [AlpacaHTTP/README.md](AlpacaHTTP/README.md) - HTTP server implementation
-- [AGENTS.md](AGENTS.md) - AI-assisted development workflow and rules
-- [AlpacaCore/SUPPORTED-DRIVERS.md](AlpacaCore/SUPPORTED-DRIVERS.md) - List of validated drivers
