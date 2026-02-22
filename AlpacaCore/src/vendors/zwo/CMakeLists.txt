@@ -127,6 +127,8 @@ if(ALPACACORE_ENABLE_ZWO)
         zwo_filterwheel_driver.cpp
         zwo_caa_wrapper.cpp
         zwo_rotator_driver.cpp
+        zwo_mount_protocol_wrapper.cpp
+        zwo_telescope_driver.cpp
     )
 
     add_library(alpacacore_zwo STATIC ${ZWO_SOURCES})
@@ -140,6 +142,9 @@ if(ALPACACORE_ENABLE_ZWO)
     )
 
     target_link_libraries(alpacacore_zwo PRIVATE ${ZWO_LIB_PATH} ${ZWO_EAF_LIB_PATH} ${ZWO_EFW_LIB_PATH} ${ZWO_CAA_LIB_PATH})
+    if(WIN32)
+        target_link_libraries(alpacacore_zwo PRIVATE ws2_32)
+    endif()
 
     if(UNIX)
         find_package(PkgConfig)

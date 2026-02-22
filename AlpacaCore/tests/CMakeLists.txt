@@ -32,6 +32,7 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_focuser.cpp)
     list(APPEND TEST_SOURCES test_zwo_filterwheel.cpp)
     list(APPEND TEST_SOURCES test_zwo_rotator.cpp)
+    list(APPEND TEST_SOURCES test_zwo_telescope.cpp)
 endif()
 
 if(TARGET alpacacore_synscan)

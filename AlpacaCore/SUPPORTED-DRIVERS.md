@@ -9,16 +9,17 @@ This document lists all hardware vendors and device types that are verified to w
 - **Adding New Drivers**: New driver support can be added by implementing the appropriate driver interface. See the [Driver Build Guide](https://github.com/open-astro/AlpacaBridge/blob/main/AlpacaCore/docs/development/driver-development.md) for details. All drivers must pass ConformU verification before being added to this list.
 
 - **Connection Types**:
-  - **USB/Serial**: USB-to-serial adapter or direct serial connection
   - **Ethernet**: Network-based connection (TCP/IP)
+  - **USB/Serial**: USB-to-serial adapter or direct serial connection
 
 - **Windows Notes**:
   - **Windows 11 x64**: Tested and verified on Windows 11 x64. USB devices typically work without additional drivers as Windows includes native USB support. For serial connections, ensure appropriate USB-to-serial drivers are installed if needed.
 
 - **ZWO SDK Versions** (for reference):
   - **ASI Camera SDK**: Version 1.40 (build target)
-  - **EAF Focuser SDK**: Version 1.7.7 (build target)
+  - **ASI Mount**: Serial protocol (ZWO Mount Communication Protocol); no separate SDK
   - **CAA Rotator SDK**: Version 1.5.9 (build target)
+  - **EAF Focuser SDK**: Version 1.7.7 (build target)
   - **EFW FilterWheel SDK**: Version 1.8.4 (build target)
 
 
@@ -26,21 +27,21 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### ZWO
 
-| Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|------------------|----------------|------------------|---------------|-----------------|--------|
-| ASI120MM Mini | USB | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-06](conformu/ZWO/ASI/ASI120MM%20Mini/) |
-| ASI174MM Mini | USB | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI174MM%20Mini/) |
-| ASI290MM Mini | USB | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI290MM%20Mini/) |
-| ASI462MM | USB | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI462MM/) |
-| ASI662MC | USB | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI662MC/) |
-| ASI2600MC Pro | USB | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MC%20Pro/) |
-| ASI2600MM Pro | USB | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MM%20Pro/) |
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|------------------|------------------|---------------|-----------------|--------|
+| ASI120MM Mini | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-06](conformu/ZWO/ASI/ASI120MM%20Mini/) |
+| ASI174MM Mini | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI174MM%20Mini/) |
+| ASI2600MC Pro | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MC%20Pro/) |
+| ASI2600MM Pro | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MM%20Pro/) |
+| ASI290MM Mini | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI290MM%20Mini/) |
+| ASI462MM | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI462MM/) |
+| ASI662MC | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI662MC/) |
 
 ### ZWO Driver Notes
 
 - **SDK**: ZWO ASI Camera SDK Version 1.40 (build target)
 - **Connection**: USB (requires libusb-1.0 on macOS and Linux)
-- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (x64, arm64), Linux (x64, x86, armv6, armv7, armv8)
+- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (arm64), Linux (x64, x86, armv6, armv7, armv8)
 - **Windows Driver Requirement**: The ZWO ASI Camera driver must be installed from ZWO for Windows systems. Download the driver from the [ZWO website](https://www.zwoastro.com/software/).
 - **Linux USB Permissions**: Install `lib/linux/asi.rules` udev rules for USB device access
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
@@ -59,15 +60,15 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### ZWO
 
-| Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|------------------|----------------|------------------|---------------|-----------------|--------|
-| EFW | USB | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-10](conformu/ZWO/EFW/) |
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|------------------|------------------|---------------|-----------------|--------|
+| EFW | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-10](conformu/ZWO/EFW/) |
 
 ### ZWO FilterWheel Driver Notes
 
 - **SDK**: ZWO EFW SDK Version 1.8.4 (build target)
 - **Connection**: USB (requires libusb-1.0 on macOS and Linux)
-- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (x64, arm64), Linux (x64, x86, armv6, armv7, armv8)
+- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (arm64), Linux (x64, x86, armv6, armv7, armv8)
 - **Linux USB Permissions**: Install `lib/efw.rules` udev rules for USB device access
 - **Binding**: Use `filterwheelId` or `filterwheelIndex` to bind to the target filter wheel
 - **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated)
@@ -77,15 +78,15 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### ZWO
 
-| Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|------------------|----------------|------------------|---------------|-----------------|--------|
-| EAF | USB | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-06](conformu/ZWO/EAF/) |
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|------------------|------------------|---------------|-----------------|--------|
+| EAF | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-06](conformu/ZWO/EAF/) |
 
 ### ZWO Focuser Driver Notes
 
 - **SDK**: ZWO EAF Focuser SDK Version 1.7.7 (build target)
 - **Connection**: USB (requires libusb-1.0 on macOS and Linux)
-- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (x64, arm64), Linux (x64, x86, armv6, armv7, armv8)
+- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (arm64), Linux (x64, x86, armv6, armv7, armv8)
 - **Linux USB Permissions**: Install `lib/eaf.rules` udev rules for USB device access
 - **EAF Pro Bluetooth**: The ZWO EAF Pro Bluetooth version will only currently work with USB connection. Bluetooth support is not yet implemented.
 - **Binding**: Use `focuserId` or `focuserIndex` to bind to the target focuser
@@ -96,30 +97,30 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### WeeWX
 
-| Source | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------|------------|------------------|----------------|------------------|---------------|-----------------|--------|
-| WeeWX HTTP JSON | HTTP(S) | | | ✓ | | | [ConformU Validation 2026-01-28](conformu/ObservingConditions/WeeWX/) |
+| Source | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------|------------|------------------|------------------|---------------|-----------------|--------|
+| WeeWX HTTP JSON | HTTP(S) | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-28](conformu/ObservingConditions/WeeWX/) |
 
 ### WeeWX ObservingConditions Driver Notes
 
 - **Source**: WeeWX HTTP JSON feed (`lcd_datasheet.current`); missing sensors return NaN.
 - **Connection**: HTTP(S) to WeeWX REST/JSON endpoint.
 - **Configuration**: `weewxUrl` (required), optional `pollIntervalSeconds`, `timeoutMs`.
-- **Verified OS/Arch**: macOS (arm64) (ConformU validated).
+- **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated).
 
 ## Rotator Drivers
 
 ### ZWO
 
-| Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|------------------|----------------|------------------|---------------|-----------------|--------|
-| CAA | USB | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-09](conformu/ZWO/CAA/) |
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|------------------|------------------|---------------|-----------------|--------|
+| CAA | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-09](conformu/ZWO/CAA/) |
 
 ### ZWO Rotator Driver Notes
 
 - **SDK**: ZWO CAA SDK Version 1.5.9 (build target)
 - **Connection**: USB (requires libusb-1.0 on macOS and Linux)
-- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (x64, arm64), Linux (x64, x86, armv6, armv7, armv8)
+- **Supported Platforms (SDK)**: Windows (x64, x86), macOS (arm64), Linux (x64, x86, armv6, armv7, armv8)
 - **Linux USB Permissions**: Install `lib/linux/caa.rules` udev rules for USB device access
 - **Binding**: Use `rotatorId` or `rotatorIndex` to bind to the target rotator
 - **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated)
@@ -133,10 +134,10 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### ZWO
 
-| Device Type | Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|-------------|--------------|------------|------------------|----------------|------------------|---------------|-----------------|--------|
-| Dew Heater | ASI2600MC Pro | USB (via Camera) | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MC%20Pro/switch-dew%20heater/) |
-| Dew Heater | ASI2600MM Pro | USB (via Camera) | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MM%20Pro/switch-dew%20heater/) |
+| Device Type | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|-------------|--------------|------------|------------------|------------------|---------------|-----------------|--------|
+| Dew Heater | ASI2600MC Pro | USB (via Camera) | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MC%20Pro/switch-dew%20heater/) |
+| Dew Heater | ASI2600MM Pro | USB (via Camera) | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MM%20Pro/switch-dew%20heater/) |
 
 ### ZWO Switch Driver Notes
 
@@ -149,14 +150,14 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### iOptron
 
-| Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|------------------|----------------|------------------|---------------|-----------------|--------|
-| CEM series | USB/Serial, Wi-Fi | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
-| GEM series | USB/Serial, Wi-Fi | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
-| HEM series | USB/Serial, Wi-Fi | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
-| HAE series | USB/Serial, Wi-Fi | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
-| HAZ series | USB/Serial, Wi-Fi | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
-| SkyHunter | USB/Serial, Wi-Fi | ✓ | | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|------------------|------------------|---------------|-----------------|--------|
+| CEM series | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| GEM series | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| HAE series | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| HAZ series | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| HEM series | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| SkyHunter | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
 
 ### iOptron Driver Notes
 
@@ -168,13 +169,27 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### SynScan
 
-| Model Series | Connection | Windows<br>(x64) | macOS<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|------------------|----------------|------------------|---------------|-----------------|--------|
-| SynScan V3/V4 | USB/Serial (hand controller) | | | ✓ | | | [ConformU Validation 2026-02-04](conformu/SynScan/) |
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|------------------|------------------|---------------|-----------------|--------|
+| SynScan V3/V4 | USB/Serial (hand controller) | ✓ | ✓ | | ✓ | [ConformU Validation 2026-02-04](conformu/SynScan/) |
 
 ### SynScan Driver Notes
 
 - **Protocol**: Sky-Watcher SynScan V3/V4 protocol
 - **Connection**: USB/Serial via hand controller (tested)
 - **Tested Mount**: Orion Atlas EQ-G
-- **Verified OS/Arch**: macOS (arm64) only (ConformU validated)
+- **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated)
+
+### ZWO
+
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|------------------|------------------|---------------|-----------------|--------|
+| AM5N | Serial (USB; Bluetooth not tested) | | ✓ | | | [ConformU Validation 2026-02-21](conformu/ZWO/AM5N/) |
+
+### ZWO Telescope (ASI Mount) Driver Notes
+
+- **Protocol**: ZWO Mount Serial Communication Protocol (see `external/ZWO/AM/ZWO_Mount_Protocol.md`)
+- **Connection**: Serial over USB or Bluetooth (mount-dependent). **Tested with USB/serial only; Bluetooth not tested.**
+- **Tested firmware**: ASI Mount driver was tested on **firmware 1.8.8** for the **AM5N**. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
+- **AM5N known issue**: The ZWO AM5N works with this driver, but there is a **firmware issue**: **guiding on its own** (e.g. pulse guiding via the mount) **can be sporadic**. Guiding via **ST4 cable to the guide camera** should still be fine.
+- **Verified OS/Arch**: macOS (arm64) (ConformU validated). Windows and Linux not yet verified.
