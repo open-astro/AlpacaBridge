@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [Unreleased]
+## [0.12.0] - 2026-02-21
 
 ### Added
 - **ZWO Telescope (ASI Mount) Driver** (AlpacaCore)
