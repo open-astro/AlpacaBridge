@@ -184,12 +184,12 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| AM5N | Serial (USB/Bluetooth) | | ✓ | | | [ConformU Validation 2026-02-21](conformu/ZWO/AM5N/) |
+| AM5N | Serial (USB; Bluetooth not tested) | | ✓ | | | [ConformU Validation 2026-02-21](conformu/ZWO/AM5N/) |
 
 ### ZWO Telescope (ASI Mount) Driver Notes
 
 - **Protocol**: ZWO Mount Serial Communication Protocol (see `external/ZWO/AM/ZWO_Mount_Protocol.md`)
-- **Connection**: Serial over USB or Bluetooth (mount-dependent)
+- **Connection**: Serial over USB or Bluetooth (mount-dependent). **Tested with USB/serial only; Bluetooth not tested.**
 - **Tested firmware**: ASI Mount driver was tested on **firmware 1.8.8** for the **AM5N**. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
 - **AM5N known issue**: The ZWO AM5N works with this driver, but there is a **firmware issue**: **guiding on its own** (e.g. pulse guiding via the mount) **can be sporadic**. Guiding via **ST4 cable to the guide camera** should still be fine.
 - **Verified OS/Arch**: macOS (arm64) (ConformU validated). Windows and Linux not yet verified.
