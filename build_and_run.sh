@@ -51,10 +51,12 @@ build_make() {
   if [[ "${name}" == "AlpacaHTTP" ]]; then
     cmake -S "${project_dir}" -B "${project_dir}/build" \
       -DALPACAHTTP_USE_BOOST_BEAST="${HTTP_BEAST}" \
-      -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}"
+      -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}" \
+      -DALPACAHTTP_BUILD_TESTS=OFF
   else
     cmake -S "${project_dir}" -B "${project_dir}/build" \
-      -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}"
+      -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}" \
+      -DALPACACORE_BUILD_TESTS=OFF
   fi
   if [[ -f "${project_dir}/build/Makefile" ]]; then
     make -C "${project_dir}/build" clean 2>&1

@@ -876,9 +876,15 @@ bool is_expected_not_implemented(const alpacacore::AlpacaException& e) {
         error_code == alpacacore::AlpacaError::ActionNotImplemented;
 }
 
+bool is_expected_validation_error(const alpacacore::AlpacaException& e) {
+    const int error_code = e.error_code();
+    return error_code == alpacacore::AlpacaError::InvalidValue ||
+        error_code == alpacacore::AlpacaError::ValueNotSet;
+}
+
 void log_alpaca_exception(const std::string& context, const alpacacore::AlpacaException& e) {
     std::string message = context + ": " + std::string(e.what());
-    if (is_expected_not_implemented(e)) {
+    if (is_expected_not_implemented(e) || is_expected_validation_error(e)) {
         alpacahttp::util::log_debug(message);
     } else {
         alpacahttp::util::log_error(message);
@@ -6007,7 +6013,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::optional<double> site_longitude;
         std::optional<double> site_elevation;
         std::optional<bool> sync_time_on_connect;
-
         if (config.contains("siteLatitude")) {
             site_latitude = config.value("siteLatitude", 0.0);
         }
@@ -6192,7 +6197,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::optional<double> site_longitude;
         std::optional<double> site_elevation;
         std::optional<bool> sync_time_on_connect;
-
         if (config.contains("siteLatitude")) {
             site_latitude = config.value("siteLatitude", 0.0);
         }
