@@ -112,6 +112,7 @@ public:
     EquatorialCoordinates get_target_equatorial();
     void set_target_ra(double ra_hours);
     void set_target_dec(double dec_degrees);
+    void sync_target_equatorial(double ra_hours, double dec_degrees);
 
     bool goto_target();
     void sync_target();

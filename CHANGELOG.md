@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.12.1] - 2026-02-25
+
+### Changed
+- **ZWO Telescope (AM5N) Driver** (AlpacaCore)
+  - AM5N driver is working and tested with **USB** and **WiFi** connections; ConformU passes with 0 issues/0 errors.
+  - PulseGuide and slew-adjustment fixes: pending slew adjustment now uses a fresh mount query (no stale cache); longitude no longer restored mid-slew after GOTO retry; sync slew path clears pending flag to avoid double adjustment.
+  - WiFi timing: extended equatorial cache TTL for RA/Dec reads (5 s) so FAST response target is met over high-latency links; PulseGuide no longer performs a mount query for debug logging before returning, improving STANDARD timing.
+- **Supported Drivers Documentation** (AlpacaCore)
+  - SUPPORTED-DRIVERS.md updated: ZWO AM5N tested and working over USB and WiFi (macOS arm64).
+
 ## [0.12.0] - 2026-02-21
 
 ### Added

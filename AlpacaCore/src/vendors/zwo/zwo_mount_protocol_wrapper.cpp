@@ -269,6 +269,26 @@ std::string format_angle_colon(double degrees, int width_degrees) {
     return oss.str();
 }
 
+std::string format_angle_star_colon(double degrees, int width_degrees) {
+    if (!std::isfinite(degrees)) {
+        degrees = 0.0;
+    }
+
+    const char sign = degrees < 0.0 ? '-' : '+';
+    const double abs_deg = std::abs(degrees);
+    int total_seconds = static_cast<int>(std::round(abs_deg * 3600.0));
+    const int d = total_seconds / 3600;
+    const int m = (total_seconds % 3600) / 60;
+    const int s = total_seconds % 60;
+
+    std::ostringstream oss;
+    oss << sign
+        << std::setfill('0') << std::setw(width_degrees) << d << '*'
+        << std::setfill('0') << std::setw(2) << m << ':'
+        << std::setfill('0') << std::setw(2) << s;
+    return oss.str();
+}
+
 std::string format_angle_star(double degrees, int width_degrees) {
     if (!std::isfinite(degrees)) {
         degrees = 0.0;
@@ -930,6 +950,24 @@ void ZWOMountProtocolWrapper::set_target_dec(double dec_degrees) {
     }
 }
 
+void ZWOMountProtocolWrapper::sync_target_equatorial(double ra_hours, double dec_degrees) {
+    if (!std::isfinite(ra_hours) || ra_hours < 0.0 || ra_hours >= 24.0) {
+        throw AlpacaException("RA must be in [0,24) hours", AlpacaError::InvalidValue);
+    }
+    if (!std::isfinite(dec_degrees) || dec_degrees < -90.0 || dec_degrees > 90.0) {
+        throw AlpacaException("Dec must be in [-90,+90] degrees", AlpacaError::InvalidValue);
+    }
+
+    const std::string command = ":SMMC" + format_hms(ra_hours) + "&" +
+                                format_angle_star_colon(dec_degrees, 2);
+    const std::string response = trim_copy(send_command(command, false));
+    throw_if_mount_error(response, ":SMMC");
+    if (response.empty() || response == "N/A") {
+        return;
+    }
+    throw AlpacaException("ZWO mount rejected sync request", AlpacaError::InvalidOperation);
+}
+
 bool ZWOMountProtocolWrapper::goto_target() {
     const std::string response = trim_copy(send_command(":MS", false));
     throw_if_mount_error(response, ":MS");
@@ -1146,7 +1184,12 @@ double ZWOMountProtocolWrapper::get_guide_rate() {
     if (response.empty()) {
         throw AlpacaException("Invalid guide rate response", AlpacaError::DriverException);
     }
-    return std::stod(response);
+    double value = std::stod(response);
+    // Some firmware revisions return the 0.1-0.9 rate, others return a value scaled by 15.
+    if (value > 1.0 && value <= 15.0) {
+        value /= 15.0;
+    }
+    return value;
 }
 
 void ZWOMountProtocolWrapper::set_guide_rate(double guide_rate) {
@@ -1154,9 +1197,26 @@ void ZWOMountProtocolWrapper::set_guide_rate(double guide_rate) {
         throw AlpacaException("Guide rate must be in [0.10,0.90]", AlpacaError::InvalidValue);
     }
 
-    std::ostringstream value;
-    value << std::fixed << std::setprecision(2) << guide_rate;
-    send_command_blind(":Rg" + value.str());
+    auto send_rate = [this](double value, int precision) {
+        std::ostringstream payload;
+        payload << std::fixed << std::setprecision(precision) << value;
+        send_command_blind(":Rg" + payload.str());
+    };
+
+    // Preferred format per v2.x docs: :Rg0.nn (0.10-0.90).
+    send_rate(guide_rate, 2);
+
+    // Some firmware expects the rate scaled by 15 (e.g., 0.1x -> 1.5).
+    try {
+        const double readback = get_guide_rate();
+        if (std::abs(readback - guide_rate) <= 0.02) {
+            return;
+        }
+    } catch (const std::exception&) {
+    }
+
+    const double scaled = guide_rate * 15.0;
+    send_rate(scaled, 1);
 }
 
 SiteInfo ZWOMountProtocolWrapper::get_site_info() {
