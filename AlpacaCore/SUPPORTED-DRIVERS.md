@@ -187,7 +187,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| AM5N | USB/Serial, Wi-Fi | | ✓ | ✓ | | [ConformU Validation 2026-02-25](conformu/ZWO/AM5N/) |
+| AM5N | USB/Serial, Wi-Fi | ✓ | ✓ | ✓ | | [ConformU Validation 2026-02-25](conformu/ZWO/AM5N/) |
 
 ### ZWO Telescope (ASI Mount) Driver Notes
 
@@ -195,4 +195,4 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: Serial over USB or network (TCP). **Tested and working with USB and WiFi** on AM5N.
 - **Tested firmware**: Driver tested on **firmware 1.8.8** for the **AM5N**. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
 - **AM5N status**: PulseGuide and slew behavior validated over both USB and WiFi; timing tuned for high-latency (WiFi) connections.
-- **Verified OS/Arch**: macOS (arm64), Linux x64 (ConformU validated). Windows not yet verified.
+- **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux x64 (ConformU validated).
