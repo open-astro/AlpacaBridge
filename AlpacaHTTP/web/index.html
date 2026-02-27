@@ -203,8 +203,8 @@
                         <div id="zwo-mount-serial-config" class="connection-config">
                             <div class="form-group">
                                 <label for="zwo-mount-port-path">Serial Port:</label>
-                                <input type="text" id="zwo-mount-port-path" name="zwoMountPortPath" placeholder="/dev/ttyUSB0">
-                                <small>Linux: /dev/ttyUSB0, macOS: /dev/cu.usbserial-*, Windows: COM3</small>
+                            <input type="text" id="zwo-mount-port-path" name="zwoMountPortPath" placeholder="/dev/ttyACM0">
+                            <small>Linux: /dev/ttyACM0, macOS: /dev/cu.usbserial-*, Windows: COM3</small>
                             </div>
                             <div class="form-group">
                                 <label for="zwo-mount-baud-rate">Baud Rate:</label>
@@ -263,6 +263,7 @@
                                 Sync mount time on connect
                             </label>
                         </div>
+
                     </div>
 
                     <div id="zwo-switch-type-group" class="form-group" style="display: none;">

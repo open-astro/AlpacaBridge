@@ -15,6 +15,9 @@ This document lists all hardware vendors and device types that are verified to w
 - **Windows Notes**:
   - **Windows 11 x64**: Tested and verified on Windows 11 x64. USB devices typically work without additional drivers as Windows includes native USB support. For serial connections, ensure appropriate USB-to-serial drivers are installed if needed.
 
+- **Linux Notes**:
+  - **Linux x64**: Tested and verified on Linux x64. For USB/serial devices (cameras, focusers, filter wheels, mounts), your user account must have access to the serial port. Run `sudo usermod -aG dialout $USER` to add your user to the `dialout` group, then log out and back in (or reboot) for the change to take effect. Without this, connections will fail with "Permission denied" (errno=13). Install the appropriate udev rules from `external/` for each ZWO device type.
+
 - **ZWO SDK Versions** (for reference):
   - **ASI Camera SDK**: Version 1.40 (build target)
   - **ASI Mount**: Serial protocol (ZWO Mount Communication Protocol); no separate SDK
@@ -45,8 +48,6 @@ This document lists all hardware vendors and device types that are verified to w
 - **Windows Driver Requirement**: The ZWO ASI Camera driver must be installed from ZWO for Windows systems. Download the driver from the [ZWO website](https://www.zwoastro.com/software/).
 - **Linux USB Permissions**: Install `lib/linux/asi.rules` udev rules for USB device access
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
-- **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated)
-- **Linux ARM Testing**: Linux ARMv8 (e.g., Raspberry Pi 5) has been tested and verified. ARMv6 and ARMv7 are not tested.
 
 ## CoverCalibrator Drivers
 
@@ -71,8 +72,6 @@ This document lists all hardware vendors and device types that are verified to w
 - **Supported Platforms (SDK)**: Windows (x64, x86), macOS (arm64), Linux (x64, x86, armv6, armv7, armv8)
 - **Linux USB Permissions**: Install `lib/efw.rules` udev rules for USB device access
 - **Binding**: Use `filterwheelId` or `filterwheelIndex` to bind to the target filter wheel
-- **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated)
-- **Linux ARM Testing**: Linux ARMv8 (e.g., Raspberry Pi 5) has been tested and verified. ARMv6 and ARMv7 are not tested.
 
 ## Focuser Drivers
 
@@ -106,7 +105,6 @@ This document lists all hardware vendors and device types that are verified to w
 - **Source**: WeeWX HTTP JSON feed (`lcd_datasheet.current`); missing sensors return NaN.
 - **Connection**: HTTP(S) to WeeWX REST/JSON endpoint.
 - **Configuration**: `weewxUrl` (required), optional `pollIntervalSeconds`, `timeoutMs`.
-- **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated).
 
 ## Rotator Drivers
 
@@ -123,8 +121,6 @@ This document lists all hardware vendors and device types that are verified to w
 - **Supported Platforms (SDK)**: Windows (x64, x86), macOS (arm64), Linux (x64, x86, armv6, armv7, armv8)
 - **Linux USB Permissions**: Install `lib/linux/caa.rules` udev rules for USB device access
 - **Binding**: Use `rotatorId` or `rotatorIndex` to bind to the target rotator
-- **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated)
-- **Linux ARM Testing**: Linux ARMv8 (e.g., Raspberry Pi 5) has been tested and verified. ARMv6 and ARMv7 are not tested.
 
 ## SafetyMonitor Drivers
 
@@ -144,7 +140,6 @@ This document lists all hardware vendors and device types that are verified to w
 - **Device Type**: Dew Heater (`switchType: dewheater`)
 - **Connection**: Exposed as a Switch device when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`
 - **Binding**: Use `cameraId` or `cameraIndex` to bind to the target camera
-- **Verified OS/Arch**: Windows 11 (x64), macOS (arm64) (ConformU validated)
 
 ## Telescope Drivers
 
@@ -164,8 +159,6 @@ This document lists all hardware vendors and device types that are verified to w
 - **Protocol**: iOptron Mount RS-232 Command Language Version 3.10 (January 4th, 2021)
 - **Connection**: USB/Serial or Wi-Fi
 - **USB Driver Requirement**: The PL2303HXD USB driver is required for USB/serial connections on macOS. Driver downloads are available from [Prolific Technology](https://www.prolific.com.tw/en/products/smart-i-o-solution-en/usb-1-1-to-uart-serial-printer/). This is not needed when connecting via Wi-Fi. On Windows, USB-to-serial drivers are typically included with the OS or automatically installed.
-- **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated)
-- **Linux ARM Testing**: Linux ARMv8 (e.g., Raspberry Pi 5) has been tested and verified. ARMv6 and ARMv7 are not tested.
 
 ### SynScan
 
@@ -178,18 +171,16 @@ This document lists all hardware vendors and device types that are verified to w
 - **Protocol**: Sky-Watcher SynScan V3/V4 protocol
 - **Connection**: USB/Serial via hand controller (tested)
 - **Tested Mount**: Orion Atlas EQ-G
-- **Verified OS/Arch**: Windows 11 (x64), macOS (arm64), Linux ARMv8 (e.g., Raspberry Pi 5) (ConformU validated)
 
 ### ZWO
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| AM5N | Serial (USB; Bluetooth not tested) | | ✓ | | | [ConformU Validation 2026-02-21](conformu/ZWO/AM5N/) |
+| AM5 / AM5N | USB/Serial, Wi-Fi | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-02-25](conformu/ZWO/AM5N/) |
 
 ### ZWO Telescope (ASI Mount) Driver Notes
 
 - **Protocol**: ZWO Mount Serial Communication Protocol (see `external/ZWO/AM/ZWO_Mount_Protocol.md`)
-- **Connection**: Serial over USB or Bluetooth (mount-dependent). **Tested with USB/serial only; Bluetooth not tested.**
-- **Tested firmware**: ASI Mount driver was tested on **firmware 1.8.8** for the **AM5N**. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
-- **AM5N known issue**: The ZWO AM5N works with this driver, but there is a **firmware issue**: **guiding on its own** (e.g. pulse guiding via the mount) **can be sporadic**. Guiding via **ST4 cable to the guide camera** should still be fine.
-- **Verified OS/Arch**: macOS (arm64) (ConformU validated). Windows and Linux not yet verified.
+- **Connection**: Serial over USB or network (TCP). **Tested and working with USB and WiFi** on AM5N.
+- **Tested firmware**: Driver tested on **firmware 1.8.8** for the **AM5N**. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
+- **AM5N status**: PulseGuide and slew behavior validated over both USB and WiFi; timing tuned for high-latency (WiFi) connections.

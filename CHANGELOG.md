@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.12.1] - 2026-02-25
+
+### Fixed
+- **Linux x64 Build** (AlpacaCore)
+  - Added ZWO CAA SDK Linux x64 library (`external/ZWO/CAA/lib/x64/libCAA.a`) so the ZWO vendor build completes on Linux x64. The vendored CAA SDK previously only included armv6/armv7/armv8, mac, and Windows; Linux x64 was missing and caused the build to fail.
+
+### Changed
+- **ZWO Telescope (AM5N) Driver** (AlpacaCore)
+  - AM5N driver is working and tested with **USB** and **WiFi** connections; ConformU passes with 0 issues/0 errors.
+  - PulseGuide and slew-adjustment fixes: pending slew adjustment now uses a fresh mount query (no stale cache); longitude no longer restored mid-slew after GOTO retry; sync slew path clears pending flag to avoid double adjustment.
+  - WiFi timing: extended equatorial cache TTL for RA/Dec reads (5 s) so FAST response target is met over high-latency links; PulseGuide no longer performs a mount query for debug logging before returning, improving STANDARD timing.
+  - Platform coverage: AM5 / AM5N driver has been exercised on Linux ARMv8 (e.g., Raspberry Pi 5) in addition to Windows 11 (x64), macOS (arm64), and Linux x64; behavior and ConformU results match desktop platforms.
+- **Supported Drivers Documentation** (AlpacaCore)
+  - SUPPORTED-DRIVERS.md updated: ZWO AM5N tested and working over USB and WiFi (macOS arm64).
+  - Added Linux x64 platform support: ZWO AM5N telescope verified on Linux x64; ZWO Telescope Driver Notes updated with Linux x64 in Verified OS/Arch.
+  - Added Linux Notes section with Linux x64 testing and serial port access: user must run `sudo usermod -aG dialout $USER` and log out/back in for USB/serial device access.
+  - Updated ZWO telescope entry to document AM5 / AM5N row and Linux ARMv8 (e.g., Raspberry Pi 5) verification, plus Linux ARM testing notes consistent with other ZWO drivers.
+
 ## [0.12.0] - 2026-02-21
 
 ### Added

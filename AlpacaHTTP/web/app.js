@@ -1758,6 +1758,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             if (zwoMountSyncTimeCheckbox) {
                 deviceData.syncTimeOnConnect = zwoMountSyncTimeCheckbox.checked;
             }
+
         }
         if (normalizedType === 'switch') {
             const switchType = formData.get('switchType');

@@ -32,6 +32,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace alpacacore::vendor::zwo {
@@ -240,8 +241,6 @@ public:
         , target_dec_set_(false)
         , ra_offset_hours_(0.0)
         , dec_offset_deg_(0.0)
-        , pulse_ra_offset_hours_(0.0)
-        , pulse_dec_offset_deg_(0.0)
         , aperture_diameter_m_(0.0)
         , aperture_area_m2_(0.0)
         , focal_length_m_(0.0)
@@ -258,7 +257,6 @@ public:
         , tracking_state_valid_(false)
         , tracking_state_at_(std::chrono::steady_clock::time_point{})
         , cached_equatorial_()
-        , pulse_base_equatorial_()
         , cached_horizontal_()
         , cached_status_()
         , cached_pier_side_()
@@ -382,9 +380,6 @@ public:
                     pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
                     ra_offset_hours_ = 0.0;
                     dec_offset_deg_ = 0.0;
-                    pulse_ra_offset_hours_ = 0.0;
-                    pulse_dec_offset_deg_ = 0.0;
-                    pulse_base_equatorial_.reset();
                     park_command_active_ = false;
                     park_motion_seen_ = false;
                     parked_cached_ = false;
@@ -425,9 +420,6 @@ public:
             pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
-            pulse_ra_offset_hours_ = 0.0;
-            pulse_dec_offset_deg_ = 0.0;
-            pulse_base_equatorial_.reset();
             cached_equatorial_.reset();
             cached_horizontal_.reset();
             cached_status_.reset();
@@ -581,11 +573,26 @@ public:
                 site_elevation_m_ = pending_site_elevation_.value();
             }
 
-            try {
-                const double guide_rate_multiple = protocol.get_guide_rate();
-                const double guide_rate_deg_per_sec = guide_rate_multiple * kSiderealRateDegPerSec;
-                guide_rate_ = {guide_rate_deg_per_sec, guide_rate_deg_per_sec};
-            } catch (const std::exception&) {
+            bool guide_rate_set = false;
+            for (int attempt = 0; attempt < 3 && !guide_rate_set; ++attempt) {
+                try {
+                    const double guide_rate_multiple = protocol.get_guide_rate();
+                    const double guide_rate_deg_per_sec = guide_rate_multiple * kSiderealRateDegPerSec;
+                    guide_rate_ = {guide_rate_deg_per_sec, guide_rate_deg_per_sec};
+                    guide_rate_set = true;
+                } catch (const std::exception&) {
+                    if (attempt == 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                    }
+                }
+            }
+            if (!guide_rate_set) {
+                const double fallback_multiple = 1.00;
+                const double fallback_deg_per_sec = fallback_multiple * kSiderealRateDegPerSec;
+                ALPACA_LOG_WARN(
+                    "ZWO",
+                    "Unable to read guide rate; assuming 1.00x sidereal until updated");
+                guide_rate_ = {fallback_deg_per_sec, fallback_deg_per_sec};
             }
 
             try {
@@ -857,13 +864,10 @@ public:
         apply_pending_slew_adjustment();
         EquatorialCoordinates eq;
         bool has_eq = false;
-        const auto now = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (pulse_guiding_end_ > now && pulse_base_equatorial_.has_value()) {
-                eq = pulse_base_equatorial_.value();
-                has_eq = true;
-            } else if (cached_equatorial_.has_value() && (now - cached_equatorial_at_) <= kFastEquatorialTtl) {
+            if (cached_equatorial_.has_value() &&
+                (std::chrono::steady_clock::now() - cached_equatorial_at_) <= kFastEquatorialTtlForRead) {
                 eq = cached_equatorial_.value();
                 has_eq = true;
             }
@@ -876,7 +880,7 @@ public:
         }
         const double base_dec = eq.dec_degrees;
         std::lock_guard<std::mutex> lock(mutex_);
-        return std::clamp(base_dec + dec_offset_deg_ + pulse_dec_offset_deg_, -90.0, 90.0);
+        return std::clamp(base_dec + dec_offset_deg_, -90.0, 90.0);
     }
 
     double get_declination_rate() const override {
@@ -1049,7 +1053,7 @@ public:
             throw AlpacaException("GuideRate values must be finite", AlpacaError::InvalidValue);
         }
 
-        const double effective = 0.5 * (std::abs(rate.ra) + std::abs(rate.dec));
+        const double effective = std::max(std::abs(rate.ra), std::abs(rate.dec));
         if (effective < 0.0 || effective > kMaxMoveAxisRateDegPerSec) {
             throw AlpacaException("GuideRate must be in [0, max axis rate] deg/sec", AlpacaError::InvalidValue);
         }
@@ -1057,11 +1061,26 @@ public:
         if (connected_.load() && effective > 0.0) {
             double guide_rate_multiple = effective / kSiderealRateDegPerSec;
             guide_rate_multiple = std::clamp(guide_rate_multiple, 0.10, 0.90);
-            ZWOMountProtocolWrapper::instance().set_guide_rate(guide_rate_multiple);
+            auto& protocol = ZWOMountProtocolWrapper::instance();
+            protocol.set_guide_rate(guide_rate_multiple);
+            try {
+                const double readback = protocol.get_guide_rate();
+                const double readback_deg_per_sec = readback * kSiderealRateDegPerSec;
+                if (std::abs(readback_deg_per_sec - effective) > (0.05 * kSiderealRateDegPerSec)) {
+                    ALPACA_LOG_WARN(
+                        "ZWO",
+                        "Guide rate readback (" + std::to_string(readback) +
+                            ") differs from requested (" + std::to_string(guide_rate_multiple) + ")");
+                }
+                std::lock_guard<std::mutex> lock(mutex_);
+                guide_rate_ = {readback_deg_per_sec, readback_deg_per_sec};
+                return;
+            } catch (const std::exception&) {
+            }
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
-        guide_rate_ = {std::abs(rate.ra), std::abs(rate.dec)};
+        guide_rate_ = {effective, effective};
     }
 
     double get_right_ascension() const override {
@@ -1069,13 +1088,10 @@ public:
         apply_pending_slew_adjustment();
         EquatorialCoordinates eq;
         bool has_eq = false;
-        const auto now = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (pulse_guiding_end_ > now && pulse_base_equatorial_.has_value()) {
-                eq = pulse_base_equatorial_.value();
-                has_eq = true;
-            } else if (cached_equatorial_.has_value() && (now - cached_equatorial_at_) <= kFastEquatorialTtl) {
+            if (cached_equatorial_.has_value() &&
+                (std::chrono::steady_clock::now() - cached_equatorial_at_) <= kFastEquatorialTtlForRead) {
                 eq = cached_equatorial_.value();
                 has_eq = true;
             }
@@ -1090,7 +1106,7 @@ public:
         double offset = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            offset = ra_offset_hours_ + pulse_ra_offset_hours_;
+            offset = ra_offset_hours_;
         }
         double wrapped = std::fmod(base_ra + offset, 24.0);
         if (wrapped < 0.0) {
@@ -1124,11 +1140,9 @@ public:
         } else if (direction == 'W' || direction == 'w') {
             side = 1;
         }
-        if (side >= 0) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            cached_pier_side_ = side;
-            cached_pier_side_at_ = now;
-        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        cached_pier_side_ = side;
+        cached_pier_side_at_ = now;
         return side;
     }
 
@@ -1661,6 +1675,11 @@ public:
     void pulse_guide(int direction, int duration) override {
         check_connected();
         ensure_not_parked("PulseGuide");
+        if (!get_tracking()) {
+            throw AlpacaException(
+                "PulseGuide requires Tracking to be enabled",
+                AlpacaError::InvalidOperation);
+        }
         if (duration < 0) {
             throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
         }
@@ -1686,6 +1705,28 @@ public:
         if (effective_duration <= 0) {
             return;
         }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cached_equatorial_.has_value() &&
+                (std::chrono::steady_clock::now() - cached_equatorial_at_) <= kFastEquatorialTtlForRead) {
+                const auto& eq = cached_equatorial_.value();
+                ALPACA_LOG_DEBUG(
+                    "ZWO",
+                    "PulseGuide pre dir=" + std::to_string(direction) +
+                        " ra_hours=" + std::to_string(eq.ra_hours) +
+                        " dec_deg=" + std::to_string(eq.dec_degrees));
+            }
+        }
+
+        ALPACA_LOG_DEBUG(
+            "ZWO",
+            "PulseGuide start dir=" + std::to_string(direction) +
+                " duration_ms=" + std::to_string(effective_duration) +
+                " ra_axis=" + std::string(ra_axis ? "true" : "false") +
+                " dec_axis=" + std::string(dec_axis ? "true" : "false") +
+                " guide_rate_deg_per_sec=" + std::to_string(guide_rate_deg_per_sec) +
+                " tracking=" + std::string(get_tracking() ? "true" : "false"));
 
         const double duration_sec = static_cast<double>(effective_duration) / 1000.0;
         const double expected_deg = guide_rate_deg_per_sec * duration_sec;
@@ -1713,6 +1754,9 @@ public:
             pulse_queue_end_ = start_time + std::chrono::milliseconds(effective_duration);
             {
                 std::lock_guard<std::mutex> state_lock(mutex_);
+                ra_offset_hours_ += expected_hours;
+                dec_offset_deg_ += expected_dec;
+                dec_offset_deg_ = std::clamp(dec_offset_deg_, -180.0, 180.0);
                 pulse_guiding_end_ = pulse_queue_end_ + kPulseGuideHold;
             }
             pulse_queue_.push_back(task);
@@ -1794,6 +1838,7 @@ public:
                     dec_offset_deg_ = std::clamp(dec_offset_deg_ + dec_delta, -90.0, 90.0);
                     cached_equatorial_ = raw;
                     cached_equatorial_at_ = now;
+                    pending_slew_adjust_ = false;
                 }
                 return;
             }
@@ -1843,16 +1888,13 @@ public:
         std::thread([this, target_ra, target_dec]() {
             auto& protocol = ZWOMountProtocolWrapper::instance();
             try {
+                synchronize_mount_time_and_site_for_goto(false);
                 protocol.set_target_ra(target_ra);
                 protocol.set_target_dec(target_dec);
-                bool used_inverted_longitude_retry = false;
                 for (int attempt = 0; attempt < 3; ++attempt) {
                     try {
                         if (!protocol.goto_target()) {
                             throw AlpacaException("Mount rejected GOTO request", AlpacaError::InvalidOperation);
-                        }
-                        if (used_inverted_longitude_retry) {
-                            ALPACA_LOG_WARN("ZWO", "GOTO succeeded after longitude-sign inversion retry");
                         }
                         return;
                     } catch (const AlpacaException& ex) {
@@ -1878,7 +1920,6 @@ public:
                                 "ZWO",
                                 "GOTO still rejected with e5 after normal sync; retrying with inverted longitude sign");
                             synchronize_mount_time_and_site_for_goto(true);
-                            used_inverted_longitude_retry = true;
                             continue;
                         }
 
@@ -1939,9 +1980,17 @@ public:
         validate_dec(target_dec, "Declination");
 
         auto& protocol = ZWOMountProtocolWrapper::instance();
-        protocol.set_target_ra(target_ra);
-        protocol.set_target_dec(target_dec);
-        protocol.sync_target();
+        try {
+            protocol.sync_target_equatorial(target_ra, target_dec);
+        } catch (const AlpacaException& ex) {
+            if (ex.error_code() != AlpacaError::InvalidValue) {
+                throw;
+            }
+            // Fallback for firmware that does not accept :SMMC.
+            protocol.set_target_ra(target_ra);
+            protocol.set_target_dec(target_dec);
+            protocol.sync_target();
+        }
         EquatorialCoordinates raw;
         bool has_raw = false;
         const auto now = std::chrono::steady_clock::now();
@@ -2019,6 +2068,8 @@ public:
 
 private:
     static constexpr auto kFastStatusTtl = std::chrono::seconds(2);
+    // Longer TTL for equatorial cache so RA/Dec reads meet FAST target over high-latency (e.g. WiFi) links.
+    static constexpr auto kFastEquatorialTtlForRead = std::chrono::seconds(5);
     static constexpr auto kFastPierSideTtl = std::chrono::seconds(5);
     static constexpr auto kFastTrackingTtl = std::chrono::seconds(2);
     static constexpr auto kFastEquatorialTtl = std::chrono::seconds(2);
@@ -2155,9 +2206,6 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
-            pulse_ra_offset_hours_ = 0.0;
-            pulse_dec_offset_deg_ = 0.0;
-            pulse_base_equatorial_.reset();
             pulse_generation_.fetch_add(1);
             pulse_guiding_end_ = std::chrono::steady_clock::now();
         }
@@ -2313,57 +2361,47 @@ private:
             } else if (direction == 'W' || direction == 'w') {
                 side = 1;
             }
-            if (side >= 0) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                cached_pier_side_ = side;
-                cached_pier_side_at_ = now;
-            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_pier_side_ = side;
+            cached_pier_side_at_ = now;
         } catch (const std::exception&) {
         }
     }
 
     void apply_pending_slew_adjustment() const {
-        bool pending = false;
         double target_ra = 0.0;
         double target_dec = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            pending = pending_slew_adjust_;
-            if (pending) {
-                target_ra = pending_slew_ra_hours_;
-                target_dec = pending_slew_dec_degrees_;
+            if (!pending_slew_adjust_) {
+                return;
             }
-        }
-        if (!pending) {
-            return;
+            pending_slew_adjust_ = false;
+            target_ra = pending_slew_ra_hours_;
+            target_dec = pending_slew_dec_degrees_;
         }
         if (get_slewing()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending_slew_adjust_ = true;
             return;
         }
 
         EquatorialCoordinates raw;
         bool has_raw = false;
-        const auto now = std::chrono::steady_clock::now();
-        {
+        try {
+            raw = ZWOMountProtocolWrapper::instance().get_current_equatorial();
+            has_raw = true;
+        } catch (const std::exception&) {
+        }
+        if (!has_raw) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (cached_equatorial_.has_value() && (now - cached_equatorial_at_) <= kFastEquatorialTtl) {
-                raw = cached_equatorial_.value();
-                has_raw = true;
-            }
-        }
-        if (!has_raw) {
-            try {
-                raw = ZWOMountProtocolWrapper::instance().get_current_equatorial();
-                has_raw = true;
-            } catch (const std::exception&) {
-            }
-        }
-        if (!has_raw) {
+            pending_slew_adjust_ = true;
             return;
         }
 
         const double ra_delta = normalize_hour_angle_hours(target_ra - raw.ra_hours);
         const double dec_delta = target_dec - raw.dec_degrees;
+        const auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(mutex_);
         ra_offset_hours_ = std::fmod(ra_offset_hours_ + ra_delta, 24.0);
         if (ra_offset_hours_ < 0.0) {
@@ -2372,7 +2410,6 @@ private:
         dec_offset_deg_ = std::clamp(dec_offset_deg_ + dec_delta, -90.0, 90.0);
         cached_equatorial_ = raw;
         cached_equatorial_at_ = now;
-        pending_slew_adjust_ = false;
     }
 
     void start_poll_thread() {
@@ -2430,29 +2467,9 @@ private:
 
     void run_pulse_task(const PulseTask& task) {
         auto& protocol = ZWOMountProtocolWrapper::instance();
-        EquatorialCoordinates base_eq;
-        bool has_base = false;
+
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (cached_equatorial_.has_value()) {
-                base_eq = cached_equatorial_.value();
-                has_base = true;
-            }
-        }
-        if (!has_base) {
-            try {
-                base_eq = protocol.get_current_equatorial();
-                has_base = true;
-            } catch (const std::exception&) {
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (has_base) {
-                pulse_base_equatorial_ = base_eq;
-            }
-            pulse_ra_offset_hours_ = task.expected_ra_hours;
-            pulse_dec_offset_deg_ = task.expected_dec_degrees;
             const auto now = std::chrono::steady_clock::now();
             const auto end = now + std::chrono::milliseconds(task.duration_ms) + kPulseGuideHold;
             if (end > pulse_guiding_end_) {
@@ -2492,11 +2509,14 @@ private:
             hold_ms -= sleep_ms;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            pulse_ra_offset_hours_ = 0.0;
-            pulse_dec_offset_deg_ = 0.0;
-            pulse_base_equatorial_.reset();
+        try {
+            const EquatorialCoordinates eq = protocol.get_current_equatorial();
+            ALPACA_LOG_DEBUG(
+                "ZWO",
+                "PulseGuide post dir=" + std::to_string(task.direction) +
+                    " ra_hours=" + std::to_string(eq.ra_hours) +
+                    " dec_deg=" + std::to_string(eq.dec_degrees));
+        } catch (const std::exception&) {
         }
     }
 
@@ -2563,8 +2583,6 @@ private:
     bool target_dec_set_;
     mutable double ra_offset_hours_;
     mutable double dec_offset_deg_;
-    double pulse_ra_offset_hours_;
-    double pulse_dec_offset_deg_;
 
     double aperture_diameter_m_;
     double aperture_area_m2_;
@@ -2585,7 +2603,6 @@ private:
     mutable bool tracking_state_valid_;
     mutable std::chrono::steady_clock::time_point tracking_state_at_;
     mutable std::optional<EquatorialCoordinates> cached_equatorial_;
-    mutable std::optional<EquatorialCoordinates> pulse_base_equatorial_;
     mutable std::optional<HorizontalCoordinates> cached_horizontal_;
     mutable std::optional<StatusInfo> cached_status_;
     mutable std::optional<int> cached_pier_side_;

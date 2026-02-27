@@ -19,3 +19,12 @@
 #else
 #error "Catch2 headers not found. Install Catch2 v2 or v3."
 #endif
+
+#include <cmath>
+
+#ifndef ALPACA_TEST_APPROX_MARGIN
+#define ALPACA_TEST_APPROX_MARGIN 1e-6
+#endif
+
+#define ALPACA_REQUIRE_APPROX(actual, expected)                                             \
+    REQUIRE(std::fabs((actual) - (expected)) <= ALPACA_TEST_APPROX_MARGIN)
