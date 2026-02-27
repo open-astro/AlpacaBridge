@@ -17,6 +17,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **Linux Notes**:
   - **Linux x64**: Tested and verified on Linux x64. For USB/serial devices (cameras, focusers, filter wheels, mounts), your user account must have access to the serial port. Run `sudo usermod -aG dialout $USER` to add your user to the `dialout` group, then log out and back in (or reboot) for the change to take effect. Without this, connections will fail with "Permission denied" (errno=13). Install the appropriate udev rules from `external/` for each ZWO device type.
+  - **Kernel 6.17.0-14-generic**: On this kernel version, ZWO EAF focusers and ZWO EFW filter wheels are not currently working; other devices listed in this document continue to operate normally.
 
 - **ZWO SDK Versions** (for reference):
   - **ASI Camera SDK**: Version 1.40 (build target)
@@ -32,13 +33,13 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| ASI120MM Mini | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-06](conformu/ZWO/ASI/ASI120MM%20Mini/) |
-| ASI174MM Mini | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI174MM%20Mini/) |
-| ASI2600MC Pro | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MC%20Pro/) |
-| ASI2600MM Pro | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MM%20Pro/) |
-| ASI290MM Mini | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI290MM%20Mini/) |
-| ASI462MM | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI462MM/) |
-| ASI662MC | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI662MC/) |
+| ASI120MM Mini | USB | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-06](conformu/ZWO/ASI/ASI120MM%20Mini/) |
+| ASI174MM Mini | USB | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI174MM%20Mini/) |
+| ASI2600MC Pro | USB | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MC%20Pro/) |
+| ASI2600MM Pro | USB | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MM%20Pro/) |
+| ASI290MM Mini | USB | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI290MM%20Mini/) |
+| ASI462MM | USB | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI462MM/) |
+| ASI662MC | USB | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI662MC/) |
 
 ### ZWO Driver Notes
 
@@ -112,7 +113,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| CAA | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-09](conformu/ZWO/CAA/) |
+| CAA | USB | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-09](conformu/ZWO/CAA/) |
 
 ### ZWO Rotator Driver Notes
 
@@ -132,8 +133,8 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Device Type | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |-------------|--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| Dew Heater | ASI2600MC Pro | USB (via Camera) | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MC%20Pro/switch-dew%20heater/) |
-| Dew Heater | ASI2600MM Pro | USB (via Camera) | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MM%20Pro/switch-dew%20heater/) |
+| Dew Heater | ASI2600MC Pro | USB (via Camera) | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MC%20Pro/switch-dew%20heater/) |
+| Dew Heater | ASI2600MM Pro | USB (via Camera) | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-05](conformu/ZWO/ASI/ASI2600MM%20Pro/switch-dew%20heater/) |
 
 ### ZWO Switch Driver Notes
 
