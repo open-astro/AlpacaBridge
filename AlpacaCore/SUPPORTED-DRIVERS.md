@@ -64,7 +64,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| EFW | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-10](conformu/ZWO/EFW/) |
+| EFW | USB | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-10](conformu/ZWO/EFW/) |
 
 ### ZWO FilterWheel Driver Notes
 
@@ -80,7 +80,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| EAF | USB | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-06](conformu/ZWO/EAF/) |
+| EAF | USB | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-06](conformu/ZWO/EAF/) |
 
 ### ZWO Focuser Driver Notes
 
@@ -99,7 +99,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Source | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------|------------|------------------|------------------|---------------|-----------------|--------|
-| WeeWX HTTP JSON | HTTP(S) | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-28](conformu/ObservingConditions/WeeWX/) |
+| WeeWX HTTP JSON | HTTP(S) | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-28](conformu/ObservingConditions/WeeWX/) |
 
 ### WeeWX ObservingConditions Driver Notes
 
@@ -148,12 +148,12 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| CEM series | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
-| GEM series | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
-| HAE series | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
-| HAZ series | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
-| HEM series | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
-| SkyHunter | USB/Serial, Wi-Fi | ✓ | ✓ | | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| CEM series | USB/Serial, Wi-Fi | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| GEM series | USB/Serial, Wi-Fi | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| HAE series | USB/Serial, Wi-Fi | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| HAZ series | USB/Serial, Wi-Fi | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| HEM series | USB/Serial, Wi-Fi | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
+| SkyHunter | USB/Serial, Wi-Fi | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-01-03](conformu/iOptron/) |
 
 ### iOptron Driver Notes
 
@@ -165,7 +165,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| SynScan V3/V4 | USB/Serial (hand controller) | ✓ | ✓ | | ✓ | [ConformU Validation 2026-02-04](conformu/SynScan/) |
+| SynScan V3/V4 | USB/Serial (hand controller) | ✓ | ✓ | ✓ | ✓ | [ConformU Validation 2026-02-04](conformu/SynScan/) |
 
 ### SynScan Driver Notes
 
