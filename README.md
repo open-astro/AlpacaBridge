@@ -2,7 +2,9 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-AlpacaBridge is a unified workspace for building, testing, and running a complete ASCOM Alpaca server. It combines AlpacaCore (driver library) and AlpacaHTTP (HTTP server) with AI-assisted development tools and ConformU-validated drivers.
+AlpacaBridge is a unified workspace for building, testing, and running a complete ASCOM Alpaca server. It combines AlpacaCore (driver library) and AlpacaHTTP (HTTP server) with a focus on clean, standards-compliant Alpaca implementations and ConformU-validated drivers.
+
+#### [0.12.1] - 2026-02-25 [CHANGELOG Information](CHANGELOG.md)
 
 ## AlpacaBridge Explained
 
@@ -17,18 +19,26 @@ Building the Future of Astrophotography & EAA with AlpacaBridge, an ASCOM Alpaca
 **Key Features:**
 - **Complete Alpaca Server** - Build and run a full-featured ASCOM Alpaca server with web UI
 - **Comprehensive Driver Support** - Pre-built drivers for ZWO cameras, switches, and focusers, plus iOptron telescopes (all ConformU validated)
-- **AI-Assisted Development** - Build custom drivers for any vendor device using AI guidance (see [AGENTS.md](AGENTS.md))
+- **AI-Accelerated Driver Development** - Leveraging modern AI workflows to implement and validate Alpaca-compliant drivers efficiently
 - **Convenience Scripts** - One-command build, test, and run workflows
-- **Production Ready** - All drivers are ConformU validated for ASCOM Alpaca specification compliance
+- **ConformU Validated** – Drivers are tested against the ASCOM Alpaca specification
 
 ## Learn more
 
 For deeper details, see the project READMEs:
 
+- [AlpacaCore/SUPPORTED-DRIVERS.md](AlpacaCore/SUPPORTED-DRIVERS.md) - List of validated drivers
 - [AlpacaCore/README.md](AlpacaCore/README.md) - Core library and driver development
 - [AlpacaHTTP/README.md](AlpacaHTTP/README.md) - HTTP server implementation
 - [AGENTS.md](AGENTS.md) - AI-assisted development workflow and rules
-- [AlpacaCore/SUPPORTED-DRIVERS.md](AlpacaCore/SUPPORTED-DRIVERS.md) - List of validated drivers
+
+## Support the Project
+
+AlpacaBridge is developed and maintained independently. Contributions help fund hardware access, testing, and ongoing standards compliance work.
+
+If you'd like to support the project:
+
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/paypalme/joeytroynm)
 
 ## Quick Start
 
