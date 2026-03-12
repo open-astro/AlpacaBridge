@@ -58,6 +58,9 @@
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_QHY
+#include <alpacacore/vendor/qhy/qhy_camera_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_WEEWX
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #endif
@@ -6404,6 +6407,34 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "qhy" && device_type_str == "camera") {
+#ifdef ALPACACORE_ENABLE_QHY
+        std::string camera_id = config.value("cameraId", "");
+        int camera_index = config.value("cameraIndex", -1);
+
+        std::unique_ptr<alpacacore::CameraDriver> camera;
+        if (!camera_id.empty()) {
+            camera = alpacacore::vendor::qhy::create_qhy_camera(device_number, camera_id);
+        } else if (camera_index >= 0) {
+            camera = alpacacore::vendor::qhy::create_qhy_camera_by_index(device_number, camera_index);
+        } else {
+            error_message = "QHY camera requires cameraIndex or cameraId";
+            return false;
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+            util::log_info("Registered QHY camera");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "QHY support not enabled. Rebuild with -DALPACACORE_ENABLE_QHY=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -6466,6 +6497,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("focuserId");
         copy_if_present("rotatorIndex");
         copy_if_present("rotatorId");
+    } else if (vendor == "qhy") {
+        copy_if_present("cameraIndex");
+        copy_if_present("cameraId");
     } else if (vendor == "weewx") {
         copy_if_present("weewxUrl");
         copy_if_present("pollIntervalSeconds");

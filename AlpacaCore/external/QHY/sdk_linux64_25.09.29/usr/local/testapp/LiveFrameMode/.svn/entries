@@ -1,0 +1,52 @@
+8
+
+dir
+10257
+svn://203.166.186.80:3691/QHYCCD/MiaoYongQiang/QHYCCD_SDK_CrossPlatform/testapp/LiveFrameMode
+svn://203.166.186.80:3691/QHYCCD
+
+
+
+2019-03-08T07:49:28.519911Z
+8093
+Miao
+
+
+svn:special svn:externals svn:needs-lock
+
+
+
+
+
+
+
+
+
+
+
+0f64807b-9594-1344-8768-ca8a50ccbc55
+
+LiveFrameSample.cpp
+file
+
+
+
+
+2020-05-11T06:46:10.358000Z
+31015bf2298b5f815e27425542a01e38
+2019-03-08T07:49:28.519911Z
+8093
+Miao
+
+Makefile
+file
+
+
+
+
+2020-05-11T06:46:10.358000Z
+7126c86af3607071d71bd715dddf3f3a
+2019-02-12T05:23:39.575716Z
+7839
+Miao
+
