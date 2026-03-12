@@ -61,6 +61,7 @@ This file is the single source of truth for agent behavior in this repository.
   3. conditional `add_subdirectory(src/vendors/<vendor>)` + link
   4. install rules for vendor target
 - If vendor libs are discovered by pkg-config, prefer imported targets (example: `PkgConfig::LIBUSB`) so dependent test binaries get correct link paths.
+- When adding a new vendor SDK under `AlpacaCore/external/<vendor>/`, add an allowlist entry to `AlpacaCore/.gitignore` so the SDK binaries (`.a`, `.so`, `.dll`, firmware files, etc.) are not blocked by the global compiled-file ignore rules. Follow the existing pattern: `!external/<VENDOR>/**`.
 
 ## AlpacaHTTP Integration Checklist (Required for New Vendor/Device Types)
 
