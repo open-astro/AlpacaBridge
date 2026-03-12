@@ -14,15 +14,19 @@ if(ALPACACORE_ENABLE_QHY)
         message(FATAL_ERROR "Unsupported architecture for QHY SDK: ${CMAKE_SYSTEM_PROCESSOR}")
     endif()
 
-    set(QHY_SDK_INCLUDE "${QHY_SDK_ROOT}/usr/local/include")
-    set(QHY_LIB_PATH    "${QHY_SDK_ROOT}/usr/local/lib/libqhyccd.a")
+    set(QHY_SDK_INCLUDE  "${QHY_SDK_ROOT}/usr/local/include")
+    set(QHY_SDK_LIB_DIR  "${QHY_SDK_ROOT}/usr/local/lib")
+    # Use the shared library to avoid embedding SDK global constructors in the
+    # server binary (which would run before main() and can crash if the camera
+    # is not yet firmware-loaded).
+    set(QHY_LIB_PATH     "${QHY_SDK_LIB_DIR}/libqhyccd.so")
 
     if(NOT EXISTS "${QHY_SDK_INCLUDE}/qhyccd.h")
         message(FATAL_ERROR "QHY SDK header not found at ${QHY_SDK_INCLUDE}/qhyccd.h")
     endif()
 
     if(NOT EXISTS "${QHY_LIB_PATH}")
-        message(FATAL_ERROR "QHY SDK library not found at ${QHY_LIB_PATH}")
+        message(FATAL_ERROR "QHY SDK shared library not found at ${QHY_LIB_PATH}")
     endif()
 
     set(QHY_SOURCES
@@ -37,7 +41,13 @@ if(ALPACACORE_ENABLE_QHY)
         ${QHY_SDK_INCLUDE}
     )
 
+    # Link the shared library; also add the SDK lib dir to the RPATH so the
+    # installed binary can find libqhyccd.so without LD_LIBRARY_PATH.
     target_link_libraries(alpacacore_qhy PRIVATE ${QHY_LIB_PATH})
+    set_target_properties(alpacacore_qhy PROPERTIES
+        BUILD_RPATH   "${QHY_SDK_LIB_DIR}"
+        INSTALL_RPATH "/usr/local/lib"
+    )
 
     if(UNIX)
         find_package(PkgConfig)

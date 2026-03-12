@@ -34,6 +34,7 @@ struct QHYCameraInfo {
     double pixel_size_y_um{};     //!< pixel height in microns
     uint32_t bpp{};               //!< bits per pixel (native depth)
     bool is_color{};              //!< true if Bayer color sensor
+    uint32_t bayer_pattern{};     //!< BAYER_ID from SDK: BAYER_GB=1, BAYER_GR=2, BAYER_BG=3, BAYER_RG=4 (0 = monochrome)
     bool has_cooler{};            //!< true if camera has TEC cooler
     bool has_st4_port{};          //!< true if camera has ST-4 guide port
     bool has_shutter{};           //!< true if camera has mechanical shutter

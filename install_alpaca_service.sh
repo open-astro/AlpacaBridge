@@ -92,6 +92,21 @@ install_udev_rules() {
     echo "Installing QHY firmware files from ${qhy_sdk_dir}/lib/firmware/qhy"
     sudo mkdir -p /lib/firmware/qhy
     sudo cp -a "${qhy_sdk_dir}/lib/firmware/qhy/." /lib/firmware/qhy/
+
+    # The system fxload (from apt) does not support -t fx3 (FX3-based cameras).
+    # The QHY SDK ships its own fxload binary that does. Install it so the
+    # udev rule RUN+="/sbin/fxload -t fx3 ..." works correctly.
+    if [[ -f "${qhy_sdk_dir}/sbin/fxload" ]]; then
+      echo "Installing QHY SDK fxload (FX3-capable) to /sbin/fxload"
+      sudo install -m 755 "${qhy_sdk_dir}/sbin/fxload" /sbin/fxload
+    fi
+
+    # Install the QHY shared library so the server can find it at runtime.
+    if [[ -d "${qhy_sdk_dir}/usr/local/lib" ]]; then
+      echo "Installing QHY shared libraries to /usr/local/lib"
+      sudo cp -a "${qhy_sdk_dir}/usr/local/lib/libqhyccd.so"* /usr/local/lib/
+      sudo ldconfig
+    fi
   fi
 
   sudo udevadm control --reload-rules

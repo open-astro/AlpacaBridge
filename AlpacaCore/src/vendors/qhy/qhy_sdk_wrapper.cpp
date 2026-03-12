@@ -113,6 +113,10 @@ std::vector<QHYCameraInfo> QHYSDKWrapper::enumerate_cameras() {
     pimpl_->ensure_resource();
 
     uint32_t count = ScanQHYCCD();
+    // ScanQHYCCD returns QHYCCD_ERROR (0xFFFFFFFF) on failure — treat as 0 cameras.
+    if (count == QHYCCD_ERROR || count > 64) {
+        return {};
+    }
     std::vector<QHYCameraInfo> cameras;
     cameras.reserve(count);
 
@@ -229,8 +233,14 @@ bool QHYSDKWrapper::get_chip_info(const std::string& camera_id, QHYCameraInfo& i
     info.pixel_size_y_um = pixelh;
     info.bpp             = bpp;
 
-    // Color detection
-    info.is_color = (IsQHYCCDControlAvailable(handle, CAM_IS_COLOR) == QHYCCD_SUCCESS);
+    // Color detection.
+    // IsQHYCCDControlAvailable(handle, CAM_IS_COLOR) returns the BAYER_ID enum
+    // (BAYER_GB=1, BAYER_GR=2, BAYER_BG=3, BAYER_RG=4) for color cameras, or
+    // QHYCCD_ERROR (0xFFFFFFFF) for monochrome cameras.  Comparing to
+    // QHYCCD_SUCCESS (0) would always yield false — check against QHYCCD_ERROR.
+    uint32_t bayer = IsQHYCCDControlAvailable(handle, CAM_IS_COLOR);
+    info.is_color      = (bayer != QHYCCD_ERROR);
+    info.bayer_pattern = info.is_color ? bayer : 0u;
 
     // Cooler detection
     info.has_cooler = (IsQHYCCDControlAvailable(handle, CONTROL_COOLER) == QHYCCD_SUCCESS);

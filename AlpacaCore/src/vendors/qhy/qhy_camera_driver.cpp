@@ -111,14 +111,15 @@ public:
         , pulse_guiding_(false)
         , pulse_guiding_end_{}
     {
-        try_preload_camera_info();
     }
 
     ~QHYCameraDriver() override {
         stop_all_threads();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                // Use the synchronous implementation during destruction so that
+                // teardown completes before the object is destroyed.
+                set_connected_impl(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Error during destruction: " + std::string(e.what()));
             }
@@ -184,79 +185,102 @@ public:
     }
 
     void set_connected(bool connected) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (connected == connected_.load()) {
+        // Alpaca semantics require set_connected to be synchronous so that
+        // a subsequent get_connected() immediately reflects the new state.
+        // Keep the heavy work here; the explicit connect()/disconnect()
+        // methods are the async entry points that use start_connection_task.
+        set_connected_impl(connected);
+    }
+
+private:
+    // Internal synchronous implementation used by the connection thread and
+    // destructor. Performs the actual SDK open/close and state changes.
+    void set_connected_impl(bool connected) {
+        // Disconnection path: the temp thread acquires mutex_ on each iteration,
+        // so we must join it BEFORE holding mutex_ to avoid deadlock.
+        if (!connected) {
+            std::thread temp_to_join;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_.load()) {
+                    return; // already disconnected
+                }
+                temp_thread_stop_.store(true);
+                temp_to_join = std::move(temp_thread_);
+            }
+            if (temp_to_join.joinable()) {
+                temp_to_join.join(); // outside mutex_
+            }
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto& sdk = QHYSDKWrapper::instance();
+            const std::string& id = camera_id_.value_or("");
+            if (!id.empty()) {
+                try { sdk.cancel_exposure(id); } catch (const std::exception&) {}
+                sdk.close_camera(id);
+            }
+            reset_exposure_state_locked();
+            connected_.store(false);
             return;
+        }
+
+        // Connection path
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (connected_.load()) {
+            return; // already connected
         }
 
         auto& sdk = QHYSDKWrapper::instance();
+        const std::string& id = resolve_camera_id_locked();
 
-        if (connected) {
-            const std::string& id = resolve_camera_id_locked();
+        sdk.open_camera(id);
+        sdk.init_camera(id);
 
-            sdk.open_camera(id);
-            sdk.init_camera(id);
-
-            // Populate full camera info
-            QHYCameraInfo info{};
-            info.camera_id = id;
-            if (!camera_info_valid_ || camera_info_.model.empty()) {
-                sdk.get_camera_model(id, info.model);
-            } else {
-                info.model = camera_info_.model;
-            }
-            if (sdk.get_chip_info(id, info)) {
-                camera_info_ = info;
-                camera_info_valid_ = true;
-            }
-
-            // Select bit depth (prefer 16-bit)
-            bits_ = 8;
-            if (sdk.is_control_available(id, control::BITS16)) {
-                bits_ = 16;
-            }
-            sdk.set_bits_mode(id, bits_);
-
-            // Default to full-frame 1x1 binning
-            bin_x_ = 1;
-            bin_y_ = 1;
-            start_x_ = 0;
-            start_y_ = 0;
-            num_x_ = static_cast<int>(camera_info_.max_width);
-            num_y_ = static_cast<int>(camera_info_.max_height);
-            sdk.set_bin_mode(id, 1, 1);
-            sdk.set_resolution(id, 0, 0,
-                               static_cast<uint32_t>(num_x_),
-                               static_cast<uint32_t>(num_y_));
-
-            // Enumerate readout modes
-            load_readout_modes_locked(id);
-
-            reset_exposure_state_locked();
-            connected_.store(true);
-
-            // Start temperature control thread if cooler is on
-            if (cooler_on_ && camera_info_.has_cooler) {
-                start_temp_control_thread_locked();
-            }
-            return;
+        // Populate full camera info
+        QHYCameraInfo info{};
+        info.camera_id = id;
+        if (!camera_info_valid_ || camera_info_.model.empty()) {
+            sdk.get_camera_model(id, info.model);
+        } else {
+            info.model = camera_info_.model;
+        }
+        if (sdk.get_chip_info(id, info)) {
+            camera_info_ = info;
+            camera_info_valid_ = true;
         }
 
-        // Disconnecting
-        stop_temp_control_thread_locked();
-
-        const std::string& id = camera_id_.value_or("");
-        if (!id.empty()) {
-            try {
-                sdk.cancel_exposure(id);
-            } catch (const std::exception&) {}
-            sdk.close_camera(id);
+        // Select bit depth (prefer 16-bit)
+        bits_ = 8;
+        if (sdk.is_control_available(id, control::BITS16)) {
+            bits_ = 16;
         }
+        sdk.set_bits_mode(id, bits_);
+
+        // Default to full-frame 1x1 binning
+        bin_x_ = 1;
+        bin_y_ = 1;
+        start_x_ = 0;
+        start_y_ = 0;
+        num_x_ = static_cast<int>(camera_info_.max_width);
+        num_y_ = static_cast<int>(camera_info_.max_height);
+        sdk.set_bin_mode(id, 1, 1);
+        sdk.set_resolution(id, 0, 0,
+                           static_cast<uint32_t>(num_x_),
+                           static_cast<uint32_t>(num_y_));
+
+        // Enumerate readout modes
+        load_readout_modes_locked(id);
 
         reset_exposure_state_locked();
-        connected_.store(false);
+        connected_.store(true);
+
+        // Start temperature control thread if cooler is on
+        if (cooler_on_ && camera_info_.has_cooler) {
+            start_temp_control_thread_locked();
+        }
     }
 
+public:
     std::vector<DeviceState> get_device_state() const override {
         std::vector<DeviceState> state;
         state.push_back({"Connected", connected_.load()});
@@ -305,8 +329,13 @@ public:
             throw AlpacaException("Bayer offsets not applicable to monochrome sensor",
                                   AlpacaError::PropertyNotImplemented);
         }
-        // QHY Bayer pattern is RGGB by default; offsets are (0, 0)
-        return 0;
+        // BayerOffsetX is the X offset of the Red pixel from (0,0).
+        // BAYER_GB=1: GBRG → R at (0,1) → X=0
+        // BAYER_GR=2: GRBG → R at (1,0) → X=1
+        // BAYER_BG=3: BGGR → R at (1,1) → X=1
+        // BAYER_RG=4: RGGB → R at (0,0) → X=0
+        uint32_t p = camera_info_.bayer_pattern;
+        return (p == 2 || p == 3) ? 1 : 0;
     }
 
     int get_bayer_offset_y() const override {
@@ -315,7 +344,13 @@ public:
             throw AlpacaException("Bayer offsets not applicable to monochrome sensor",
                                   AlpacaError::PropertyNotImplemented);
         }
-        return 0;
+        // BayerOffsetY is the Y offset of the Red pixel from (0,0).
+        // BAYER_GB=1: GBRG → R at (0,1) → Y=1
+        // BAYER_GR=2: GRBG → R at (1,0) → Y=0
+        // BAYER_BG=3: BGGR → R at (1,1) → Y=1
+        // BAYER_RG=4: RGGB → R at (0,0) → Y=0
+        uint32_t p = camera_info_.bayer_pattern;
+        return (p == 1 || p == 3) ? 1 : 0;
     }
 
     int get_bin_x() const override {
@@ -409,43 +444,55 @@ public:
     }
 
     void set_cooler_on(bool cooler_on) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_info_valid_ && !camera_info_.has_cooler) {
-            if (cooler_on) {
-                throw AlpacaException("Cooler not available on this camera",
-                                      AlpacaError::NotImplemented);
+        // When turning the cooler OFF we must join the temp thread outside
+        // mutex_ (same deadlock risk as set_connected).
+        std::thread temp_to_join;
+        std::string cam_id_for_pwm;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (camera_info_valid_ && !camera_info_.has_cooler) {
+                if (cooler_on) {
+                    throw AlpacaException("Cooler not available on this camera",
+                                          AlpacaError::NotImplemented);
+                }
+                return;
             }
-            return;
-        }
-        cooler_on_ = cooler_on;
-        if (!connected_.load()) {
-            return;
-        }
-        if (cooler_on_) {
-            start_temp_control_thread_locked();
-        } else {
-            stop_temp_control_thread_locked();
-            // Cut power to cooler
-            try {
-                QHYSDKWrapper::instance().set_param(camera_id_value(),
-                                                    control::MANULPWM, 0.0);
-            } catch (const std::exception&) {
-                // MANULPWM may not be writable on all cameras — ignore
+            cooler_on_ = cooler_on;
+            if (!connected_.load()) {
+                return;
             }
+            if (cooler_on_) {
+                start_temp_control_thread_locked();
+                return;
+            }
+            // Turning off: signal stop and hand off thread handle
+            temp_thread_stop_.store(true);
+            temp_to_join = std::move(temp_thread_);
+            cam_id_for_pwm = camera_id_value();
+        }
+        // Join outside the lock
+        if (temp_to_join.joinable()) {
+            temp_to_join.join();
+        }
+        // Cut power to cooler
+        try {
+            QHYSDKWrapper::instance().set_param(cam_id_for_pwm,
+                                                control::MANULPWM, 0.0);
+        } catch (const std::exception&) {
+            // MANULPWM may not be writable on all cameras — ignore
         }
     }
 
     double get_cooler_power() const override {
-        ensure_connected();
+        // Some QHY SDK / camera combinations have been observed to stall when
+        // querying CURPWM, which can block the HTTP thread and cause client
+        // timeouts. Until we have a robust, non-blocking polling strategy,
+        // report 0.0 here to avoid hanging higher-level clients like NINA.
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.has_cooler) {
             return 0.0;
         }
-        try {
-            return QHYSDKWrapper::instance().get_param(camera_id_value(), control::CURPWM);
-        } catch (const std::exception&) {
-            return 0.0;
-        }
+        return 0.0;
     }
 
     double get_electrons_per_adu() const override {
@@ -1135,7 +1182,7 @@ private:
         connecting_.store(true);
         connection_thread_ = std::thread([this, connect]() {
             try {
-                set_connected(connect);
+                set_connected_impl(connect);
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR("QHY", "Connection task failed: " + std::string(e.what()));
             }
