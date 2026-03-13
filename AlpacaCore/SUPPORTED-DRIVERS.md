@@ -33,7 +33,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|------------------|------------------|---------------|-----------------|--------|
-| QHY268C | USB | — | — | — | ✓ | [ConformU Validation 2026-03-12](conformu/QHY/QHY268C/) |
+| QHY268C | USB | — | — | ✓ | ✓ | [ConformU Validation 2026-03-12](conformu/QHY/QHY268C/) |
 
 ### QHY Driver Notes
 
