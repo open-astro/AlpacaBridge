@@ -1475,6 +1475,9 @@ private:
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
+        if (bin_x <= 0 || bin_y <= 0) {
+            throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
+        }
         std::string id;
         int max_w;
         int max_h;
