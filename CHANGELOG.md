@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [0.13.0] - 2026-03-12
+
+### Added
+- **QHY Camera Driver** (AlpacaCore)
+  - Complete QHY camera driver implementation with full ASCOM Alpaca Camera API (ICameraV3) support.
+  - SDK wrapper singleton (`qhy_sdk_wrapper`) managing camera enumeration lifecycle and shared SDK init/release.
+  - Full exposure control with background exposure thread, abort, and stop support.
+  - Temperature and cooler control with PID management (~1 s polling loop); `CanGetCoolerPower` disabled to avoid SDK stalls on CURPWM queries.
+  - Binning support (1×1, 2×2, 3×3, 4×4) with per-camera capability checks.
+  - ROI (Region of Interest) configuration.
+  - Readout mode enumeration (7 modes on QHY268C: Photographic DSO, High Gain, Extended Fullwell, etc.).
+  - ST-4 pulse guide support with Alpaca-to-QHY direction mapping.
+  - Gain (0–142) and offset (0–255) control.
+  - Color camera detection with correct Bayer pattern identification (RGGB, GRBG, BGRG, etc.); 16-bit image array retrieval.
+  - Camera binding via `cameraId` or `cameraIndex` configuration.
+  - Architecture-aware SDK selection at build time: `sdk_Arm64_25.09.29` (Linux ARM64) and `sdk_linux64_25.09.29` (Linux x86_64); links against `libqhyccd.so` (shared) to avoid pre-`main()` SDK constructor crashes.
+  - ConformU validated for **QHY268C** (6280×4210, 16-bit, RGGB) on Linux ARM64 with 0 errors and 0 issues.
+- **QHY Device Support** (AlpacaHTTP)
+  - Router registration and configuration support for QHY camera devices (`cameraId` / `cameraIndex` binding).
+  - Web UI: QHY vendor selection and camera index/ID configuration fields.
+- **QHY SDK & Firmware** (AlpacaBridge)
+  - QHY SDK libraries included in repository under `AlpacaCore/external/QHY/` (ARM64 and x86_64); `.gitignore` allowlist added.
+  - Build and install scripts deploy QHY firmware to `/lib/firmware/qhy/`, install QHY's `fxload` to `/sbin/fxload` (required for FX3-based cameras), install `libqhyccd.so*` to `/usr/local/lib/`, and run `ldconfig`.
+  - Udev rule deduplication: installs a single `85-qhyccd.rules` from the architecture-matched SDK (QHY ships 3 copies).
+
+### Fixed
+- **QHY Color Detection** (AlpacaCore)
+  - `IsQHYCCDControlAvailable(handle, CAM_IS_COLOR)` returns the Bayer ID (1–4) for color cameras, not `QHYCCD_SUCCESS` (0). The old check (`ret == QHYCCD_SUCCESS`) incorrectly flagged all cameras—including the QHY268C—as monochrome. Fixed by checking `ret != QHYCCD_ERROR` and storing the raw Bayer ID to derive accurate Alpaca `BayerOffsetX`/`BayerOffsetY` values.
+- **QHY Mutex Deadlocks** (AlpacaCore)
+  - Temperature-control thread held `mutex_` on each iteration; calling `join()` while `mutex_` was still locked caused an ABBA deadlock that froze NINA and blocked camera enumeration. Fixed by signaling stop, moving the thread handle under the lock, then joining outside the lock in both `set_connected_impl()` and `set_cooler_on()`.
+- **QHY SDK Scan Guard** (AlpacaCore)
+  - `ScanQHYCCD()` can return `QHYCCD_ERROR` (0xFFFFFFFF = 4294967295) on failure; calling `reserve()` with that value caused `std::bad_alloc`. Added a guard to treat this return value as zero cameras found.
+
+### Changed
+- **Supported Drivers Documentation** (AlpacaCore)
+  - Added QHY Camera Drivers section to SUPPORTED-DRIVERS.md with QHY268C entry, ConformU link, and driver notes (SDK version, color detection behavior, firmware/udev install requirements, Linux ARM64 and x86_64 platform support).
+
 ## [0.12.1] - 2026-02-25
 
 ### Fixed

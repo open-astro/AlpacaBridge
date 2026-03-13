@@ -394,8 +394,14 @@ void QHYSDKWrapper::guide(const std::string& camera_id,
 // ────────────────────────────────────────────────────────────────────────────
 
 void QHYSDKWrapper::control_temp(const std::string& camera_id, double target_temp_c) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    // NOTE: ControlQHYCCDTemp blocks for ~10s (PID loop). Do not hold pimpl_->mutex
+    // for the duration — every other SDK call takes the same mutex and would stall.
+    // Fetch the handle under the lock, release, then call the blocking function.
+    qhyccd_handle* handle = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(pimpl_->mutex);
+        handle = pimpl_->get_handle(camera_id);
+    }
     // ControlQHYCCDTemp implements PID cooler control — must be called ~every second
     ControlQHYCCDTemp(handle, target_temp_c);
 }

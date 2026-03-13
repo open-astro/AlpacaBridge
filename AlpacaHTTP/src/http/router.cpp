@@ -3041,7 +3041,21 @@ Response Router::dispatch_camera_method(
     const Request& request,
     std::uint32_t client_tx_id,
     std::uint32_t server_tx_id) {
-    
+
+    auto dispatch_start = std::chrono::steady_clock::now();
+    alpacacore::logging::log(alpacacore::logging::LogLevel::Trace, "AlpacaHTTP",
+        "dispatch_camera_method entry: method=" + method_name);
+    struct DispatchExitLog {
+        std::string method_name;
+        std::chrono::steady_clock::time_point start;
+        ~DispatchExitLog() {
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            alpacacore::logging::log(alpacacore::logging::LogLevel::Trace, "AlpacaHTTP",
+                "dispatch_camera_method exit: method=" + method_name + " duration_ms=" + std::to_string(ms));
+        }
+    } dispatch_exit_log{method_name, dispatch_start};
+
     Response response;
     auto parse_double = [&](const std::string& param_name) -> double {
         if (request.has_query_param(param_name)) {
