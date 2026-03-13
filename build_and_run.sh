@@ -21,14 +21,42 @@ fi
 rm -rf "${CORE_DIR}/build" "${HTTP_DIR}/build"
 
 if [[ "${INSTALL_UDEV_RULES}" == "ON" && "${OSTYPE:-}" == "linux"* ]]; then
+  declare -A seen_rules
   RULES_SRC=()
   while IFS= read -r -d '' rule; do
-    RULES_SRC+=("${rule}")
+    base="$(basename "${rule}")"
+    if [[ -z "${seen_rules[${base}]+_}" ]]; then
+      seen_rules["${base}"]=1
+      RULES_SRC+=("${rule}")
+    fi
   done < <(find "${CORE_DIR}/external" -name "*.rules" -type f -print0 | sort -z)
   for rule in "${RULES_SRC[@]}"; do
     echo "Installing udev rule: ${rule}"
     sudo install -m 644 "${rule}" /etc/udev/rules.d/
   done
+
+  arch="$(uname -m)"
+  qhy_sdk_dir=""
+  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
+    qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_Arm64_25.09.29"
+  elif [[ "${arch}" == "x86_64" ]]; then
+    qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux64_25.09.29"
+  fi
+  if [[ -n "${qhy_sdk_dir}" && -d "${qhy_sdk_dir}/lib/firmware/qhy" ]]; then
+    echo "Installing QHY firmware files from ${qhy_sdk_dir}/lib/firmware/qhy"
+    sudo mkdir -p /lib/firmware/qhy
+    sudo cp -a "${qhy_sdk_dir}/lib/firmware/qhy/." /lib/firmware/qhy/
+    if [[ -f "${qhy_sdk_dir}/sbin/fxload" ]]; then
+      echo "Installing QHY SDK fxload (FX3-capable) to /sbin/fxload"
+      sudo install -m 755 "${qhy_sdk_dir}/sbin/fxload" /sbin/fxload
+    fi
+    if [[ -d "${qhy_sdk_dir}/usr/local/lib" ]]; then
+      echo "Installing QHY shared libraries to /usr/local/lib"
+      sudo cp -a "${qhy_sdk_dir}/usr/local/lib/libqhyccd.so"* /usr/local/lib/
+      sudo ldconfig
+    fi
+  fi
+
   sudo udevadm control --reload-rules
   sudo udevadm trigger
 fi

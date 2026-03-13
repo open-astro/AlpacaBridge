@@ -44,6 +44,13 @@ This file is the single source of truth for agent behavior in this repository.
   - Useful `get_device_state()` telemetry.
   - Clean thread/task shutdown in destructors.
 - Add TODO comments where vendor protocol/SDK behavior is uncertain.
+- QHY-specific driver notes:
+  - Camera IDs are strings (`char[32]`), not integers — use `std::optional<std::string>` for camera_id and `std::optional<int>` for camera_index.
+  - `GetQHYCCDSingleFrame()` blocks until the frame is ready; run it in a background thread and use an exposure status enum (Idle/Working/Success/Failed) to communicate results.
+  - Temperature control requires `ControlQHYCCDTemp()` to be called approximately every second; use a dedicated background thread started/stopped with the cooler.
+  - Guide direction convention differs from Alpaca: QHY uses EAST=0, NORTH=1, SOUTH=2, WEST=3 vs Alpaca North=0, South=1, East=2, West=3 — map explicitly.
+  - After changing readout mode, refresh chip info and reset ROI — sensor dimensions can change per mode.
+  - QHY SDK global lifecycle (`InitQHYCCDResource` / `ReleaseQHYCCDResource`) is managed as a singleton in the wrapper; include `#define __CPP_MODE__ 1` before `#include <qhyccd.h>` in the wrapper `.cpp` only.
 
 ## CMake and Vendor Integration
 
@@ -54,6 +61,7 @@ This file is the single source of truth for agent behavior in this repository.
   3. conditional `add_subdirectory(src/vendors/<vendor>)` + link
   4. install rules for vendor target
 - If vendor libs are discovered by pkg-config, prefer imported targets (example: `PkgConfig::LIBUSB`) so dependent test binaries get correct link paths.
+- When adding a new vendor SDK under `AlpacaCore/external/<vendor>/`, add an allowlist entry to `AlpacaCore/.gitignore` so the SDK binaries (`.a`, `.so`, `.dll`, firmware files, etc.) are not blocked by the global compiled-file ignore rules. Follow the existing pattern: `!external/<VENDOR>/**`.
 
 ## AlpacaHTTP Integration Checklist (Required for New Vendor/Device Types)
 
@@ -103,7 +111,9 @@ Vendor registration alone is not enough for HTTP/UI visibility.
 - ST4 pulse guiding should be enabled only when the SDK reports `has_st4_port`.
 - ZWO PulseGuide: do not apply permanent RA/Dec offsets based on expected guide motion. If synthetic offsets are needed, keep them temporary and clear after the pulse completes to avoid double-counting mount motion.
 - On macOS, the ZWO SDK links against libusb even if the camera appears in System Report.
-- On Linux, ensure udev rules in `AlpacaCore/external/**/*.rules` are installed (update `build_and_run.sh` when adding new rule files).
+- On Linux, ensure udev rules in `AlpacaCore/external/**/*.rules` are installed. Some vendor SDKs (e.g. QHY) ship multiple copies of the same rules file under different subdirectories — deduplicate by basename when installing so only one copy lands in `/etc/udev/rules.d/`. Keep `build_and_run.sh` and `install_alpaca_service.sh` in sync; both contain the udev/firmware install logic.
+- QHY cameras require firmware files (`/lib/firmware/qhy/*.img` / `*.HEX`) in addition to udev rules. The udev rules call `fxload` to load firmware on plug-in, after which the device re-enumerates with a different USB product ID. Install firmware from `AlpacaCore/external/QHY/sdk_<arch>_*/lib/firmware/qhy/` to `/lib/firmware/qhy/` using the architecture-matching SDK directory. The system `fxload` from apt does **not** support `-t fx3` (FX3-based cameras) and will exit 255 silently — always install the QHY SDK's own `fxload` binary from `sdk_<arch>_*/sbin/fxload` to `/sbin/fxload` instead.
+- QHY re-enumeration in VMs: after `fxload` fires, the camera disconnects as `1618:c268` (Cypress WestBridge) and reconnects with its operational product ID. VMware and similar hypervisors will not automatically pass through the re-enumerated device unless the USB filter covers the entire QHYCCD vendor ID (`1618`). Test QHY cameras on bare metal or RPi rather than VMs where possible.
 - ConformU logs live under `AlpacaCore/conformu/`; Windows logs are prefixed with `W-` for comparison.
 - Filter wheel DeviceState should only include operational fields (e.g., `Position`); omit `Connected` for ConformU compatibility.
 - Filter wheel Names must be non-empty; default to `"Filter 1..N"` and allow setting names/offsets while disconnected.

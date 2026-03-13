@@ -58,6 +58,9 @@
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_QHY
+#include <alpacacore/vendor/qhy/qhy_camera_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_WEEWX
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #endif
@@ -3038,7 +3041,21 @@ Response Router::dispatch_camera_method(
     const Request& request,
     std::uint32_t client_tx_id,
     std::uint32_t server_tx_id) {
-    
+
+    auto dispatch_start = std::chrono::steady_clock::now();
+    alpacacore::logging::log(alpacacore::logging::LogLevel::Trace, "AlpacaHTTP",
+        "dispatch_camera_method entry: method=" + method_name);
+    struct DispatchExitLog {
+        std::string method_name;
+        std::chrono::steady_clock::time_point start;
+        ~DispatchExitLog() {
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            alpacacore::logging::log(alpacacore::logging::LogLevel::Trace, "AlpacaHTTP",
+                "dispatch_camera_method exit: method=" + method_name + " duration_ms=" + std::to_string(ms));
+        }
+    } dispatch_exit_log{method_name, dispatch_start};
+
     Response response;
     auto parse_double = [&](const std::string& param_name) -> double {
         if (request.has_query_param(param_name)) {
@@ -6404,6 +6421,34 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "qhy" && device_type_str == "camera") {
+#ifdef ALPACACORE_ENABLE_QHY
+        std::string camera_id = config.value("cameraId", "");
+        int camera_index = config.value("cameraIndex", -1);
+
+        std::unique_ptr<alpacacore::CameraDriver> camera;
+        if (!camera_id.empty()) {
+            camera = alpacacore::vendor::qhy::create_qhy_camera(device_number, camera_id);
+        } else if (camera_index >= 0) {
+            camera = alpacacore::vendor::qhy::create_qhy_camera_by_index(device_number, camera_index);
+        } else {
+            error_message = "QHY camera requires cameraIndex or cameraId";
+            return false;
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+            util::log_info("Registered QHY camera");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "QHY support not enabled. Rebuild with -DALPACACORE_ENABLE_QHY=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -6466,6 +6511,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("focuserId");
         copy_if_present("rotatorIndex");
         copy_if_present("rotatorId");
+    } else if (vendor == "qhy") {
+        copy_if_present("cameraIndex");
+        copy_if_present("cameraId");
     } else if (vendor == "weewx") {
         copy_if_present("weewxUrl");
         copy_if_present("pollIntervalSeconds");

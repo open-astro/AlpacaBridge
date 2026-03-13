@@ -55,20 +55,59 @@ install_udev_rules() {
     return
   fi
 
+  # Deduplicate rules by basename so multiple copies of the same file (e.g.
+  # the three copies of 85-qhyccd.rules inside the QHY SDK tree) only install
+  # once — matching the single-file-per-vendor pattern used by ZWO.
+  declare -A seen_rules
   RULES_SRC=()
   while IFS= read -r -d '' rule; do
-    RULES_SRC+=("${rule}")
+    base="$(basename "${rule}")"
+    if [[ -z "${seen_rules[${base}]+_}" ]]; then
+      seen_rules["${base}"]=1
+      RULES_SRC+=("${rule}")
+    fi
   done < <(find "${CORE_DIR}/external" -name "*.rules" -type f -print0 | sort -z)
 
   if [[ ${#RULES_SRC[@]} -eq 0 ]]; then
     echo "No udev rules found under ${CORE_DIR}/external"
-    return
+  else
+    for rule in "${RULES_SRC[@]}"; do
+      echo "Installing udev rule: ${rule}"
+      sudo install -m 644 "${rule}" /etc/udev/rules.d/
+    done
   fi
 
-  for rule in "${RULES_SRC[@]}"; do
-    echo "Installing udev rule: ${rule}"
-    sudo install -m 644 "${rule}" /etc/udev/rules.d/
-  done
+  # QHY cameras require firmware files that the udev rules load via fxload.
+  # Detect architecture and install from the matching SDK directory.
+  local arch
+  arch="$(uname -m)"
+  local qhy_sdk_dir=""
+  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
+    qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_Arm64_25.09.29"
+  elif [[ "${arch}" == "x86_64" ]]; then
+    qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux64_25.09.29"
+  fi
+
+  if [[ -n "${qhy_sdk_dir}" && -d "${qhy_sdk_dir}/lib/firmware/qhy" ]]; then
+    echo "Installing QHY firmware files from ${qhy_sdk_dir}/lib/firmware/qhy"
+    sudo mkdir -p /lib/firmware/qhy
+    sudo cp -a "${qhy_sdk_dir}/lib/firmware/qhy/." /lib/firmware/qhy/
+
+    # The system fxload (from apt) does not support -t fx3 (FX3-based cameras).
+    # The QHY SDK ships its own fxload binary that does. Install it so the
+    # udev rule RUN+="/sbin/fxload -t fx3 ..." works correctly.
+    if [[ -f "${qhy_sdk_dir}/sbin/fxload" ]]; then
+      echo "Installing QHY SDK fxload (FX3-capable) to /sbin/fxload"
+      sudo install -m 755 "${qhy_sdk_dir}/sbin/fxload" /sbin/fxload
+    fi
+
+    # Install the QHY shared library so the server can find it at runtime.
+    if [[ -d "${qhy_sdk_dir}/usr/local/lib" ]]; then
+      echo "Installing QHY shared libraries to /usr/local/lib"
+      sudo cp -a "${qhy_sdk_dir}/usr/local/lib/libqhyccd.so"* /usr/local/lib/
+      sudo ldconfig
+    fi
+  fi
 
   sudo udevadm control --reload-rules
   sudo udevadm trigger

@@ -44,6 +44,7 @@ Thumbs.db
 !external/ZWO/CAA/**
 !external/ZWO/EFW/**
 !external/ZWO/EAF/**
+!external/QHY/**
 
 # Vendor SDKs - exclude all files except documentation
 # Explicitly exclude .DS_Store files even in allowed directories

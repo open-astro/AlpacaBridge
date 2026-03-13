@@ -1,0 +1,52 @@
+8
+
+dir
+10257
+svn://203.166.186.80:3691/QHYCCD/MiaoYongQiang/QHYCCD_SDK_CrossPlatform/testapp/SingleFrameMode
+svn://203.166.186.80:3691/QHYCCD
+
+
+
+2019-10-16T00:03:52.779156Z
+8984
+Miao
+
+
+svn:special svn:externals svn:needs-lock
+
+
+
+
+
+
+
+
+
+
+
+0f64807b-9594-1344-8768-ca8a50ccbc55
+
+Makefile
+file
+
+
+
+
+2020-05-11T06:46:10.362000Z
+3ea1385bb75af5493e75437bc90acc6b
+2019-02-12T05:23:39.575716Z
+7839
+Miao
+
+SingleFrameMode.cpp
+file
+
+
+
+
+2020-05-11T06:46:10.362000Z
+ab45a0520bdf62e7983252d3d35223dc
+2019-03-08T07:49:28.519911Z
+8093
+Miao
+

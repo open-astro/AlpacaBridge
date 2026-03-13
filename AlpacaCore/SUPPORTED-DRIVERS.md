@@ -29,6 +29,22 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## Camera Drivers
 
+### QHY
+
+| Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|------------------|------------------|---------------|-----------------|--------|
+| QHY268C | USB | — | — | — | ✓ | [ConformU Validation 2026-03-12](conformu/QHY/QHY268C/) |
+
+### QHY Driver Notes
+
+- **SDK**: QHY CCD SDK 25.09.29 (build target)
+- **Connection**: USB (requires udev rules and firmware; see below)
+- **Supported Platforms (SDK)**: Windows (x64), Linux (x64, ARM64)
+- **Linux udev**: Install udev rules from `external/QHY/sdk_<arch>_*/lib/udev/rules.d/` (or equivalent path in the SDK). Only one copy of each rules file should be installed to `/etc/udev/rules.d/`.
+- **Linux firmware**: QHY cameras require firmware files in `/lib/firmware/qhy/`. Copy from `AlpacaCore/external/QHY/sdk_<arch>_*/lib/firmware/qhy/` to `/lib/firmware/qhy/`. Use the SDK’s own `fxload` from `sdk_<arch>_*/sbin/fxload` and install to `/sbin/fxload` (system `fxload` from apt does not support FX3-based cameras).
+- **Cooler power**: `CanGetCoolerPower` returns false; cooler power reporting is not implemented to avoid SDK timeouts.
+- **Binding**: Use `cameraId` or `cameraIndex` to bind to the target camera.
+
 ### ZWO
 
 | Model Series | Connection | Windows<br>(x64) | macOS<br>(arm64) | Linux<br>(x64) | Linux<br>(ARMv8) | Status |

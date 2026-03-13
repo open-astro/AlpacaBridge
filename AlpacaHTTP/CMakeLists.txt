@@ -130,6 +130,12 @@ target_link_libraries(alpacahttp
         AlpacaCore::alpacacore
 )
 
+# Both QHY and ZWO SDKs define isLeapYear() at file scope — silence the
+# duplicate-symbol error that arises when both vendor libs are linked together.
+if(UNIX AND TARGET alpacacore_qhy AND TARGET alpacacore_zwo)
+    target_link_options(alpacahttp PUBLIC "LINKER:--allow-multiple-definition")
+endif()
+
 if(ALPACAHTTP_USE_BOOST_BEAST)
     target_link_libraries(alpacahttp
         PUBLIC

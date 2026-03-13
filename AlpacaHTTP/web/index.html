@@ -59,6 +59,7 @@
                         <option value="ioptron">iOptron</option>
                         <option value="synscan">SynScan</option>
                         <option value="zwo">ZWO</option>
+                        <option value="qhy">QHY</option>
                         <option value="weewx">WeeWX</option>
                     </select>
                 </div>
@@ -348,6 +349,18 @@
                             <small>If set, overrides the rotator index.</small>
                         </div>
                     </div>
+                </div>
+
+                <!-- QHY Camera Configuration -->
+                <div id="qhy-config" class="vendor-config" style="display: none;">
+                    <h3>QHY Camera Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="qhy-camera-index">Camera Index:</label>
+                        <input type="number" id="qhy-camera-index" name="cameraIndex" value="0" min="0">
+                        <small>0-based index from the QHY SDK enumeration.</small>
+                    </div>
+
                 </div>
 
                 <!-- WeeWX ObservingConditions Configuration -->
