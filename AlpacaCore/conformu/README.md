@@ -1,10 +1,11 @@
 # ConformU Test Results
+<img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
 This folder contains ConformU test results for AlpacaCore drivers.
 
 ## Overview
 
-ConformU (ASCOM Universal Device Conformance Checker) is used to verify that AlpacaCore drivers comply with the ASCOM Alpaca API specification. All drivers listed in [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) have been tested and verified using ConformU.
+ConformU (ASCOM Universal Device Conformance Checker) is used to verify that AlpacaCore drivers comply with the ASCOM Alpaca API specification. All drivers listed in [SUPPORTED-DRIVERS.md](../../SUPPORTED-DRIVERS.md) have been tested and verified using ConformU.
 
 ## Structure
 

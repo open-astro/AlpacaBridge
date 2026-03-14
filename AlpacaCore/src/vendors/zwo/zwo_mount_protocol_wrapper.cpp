@@ -33,27 +33,14 @@
 #include <optional>
 #include <vector>
 
-#ifdef _WIN32
-    #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
-    #endif
-    #ifndef NOMINMAX
-    #define NOMINMAX
-    #endif
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-    #include <windows.h>
-    #pragma comment(lib, "ws2_32.lib")
-#else
-    #include <arpa/inet.h>
-    #include <cerrno>
-    #include <fcntl.h>
-    #include <netdb.h>
-    #include <netinet/in.h>
-    #include <sys/socket.h>
-    #include <termios.h>
-    #include <unistd.h>
-#endif
+#include <arpa/inet.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
 
 namespace alpacacore::vendor::zwo {
 

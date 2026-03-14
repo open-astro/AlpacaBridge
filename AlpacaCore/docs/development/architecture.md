@@ -47,7 +47,7 @@ AlpacaCore/
 ├─ CONTRIBUTING.md
 │
 ├─ external/                         # Vendor SDKs and vendor docs
-│   ├─ ASI_Camera_SDK/              # ZWO SDK subset (vendored)
+│   ├─ ZWO/ASI_Camera_SDK/          # ZWO SDK subset (vendored)
 │   ├─ qhy_sdk/                     # Vendor SDK folders (not in Git)
 │   └─ ioptron/                     # iOptron protocol docs
 │
@@ -211,11 +211,9 @@ Handles device discovery and enumeration.
 
 ### Platform Support
 
-- **Linux**: Primary target, full support
-- **macOS**: Full support
-- **Windows**: Full support
+- **Linux**: Supported on Debian 13 (Trixie) for NUC x64 and Raspberry Pi 4/5 ARM64.
 
-Platform-specific code is handled in CMake, not in C++ source.
+Platform-specific code is handled in CMake where needed.
 
 ## Testing Architecture
 

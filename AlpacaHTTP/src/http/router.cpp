@@ -2668,11 +2668,7 @@ Response Router::dispatch_telescope_method(
                 if (ss.fail()) {
                     throw std::runtime_error("Invalid UTC date format: " + date_str);
                 }
-#if defined(_WIN32)
-                auto utc_time = _mkgmtime(&tm);
-#else
                 auto utc_time = timegm(&tm);
-#endif
                 if (utc_time == static_cast<std::time_t>(-1)) {
                     throw std::runtime_error("Failed to convert UTC date: " + date_str);
                 }

@@ -30,12 +30,8 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_WEEWX ON)
 endif()
 
-# Compiler warnings
-if(MSVC)
-    add_compile_options(/W4 /WX)
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror)
-endif()
+# Compiler warnings (Linux)
+add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 
 # Include directories
 include_directories(include)

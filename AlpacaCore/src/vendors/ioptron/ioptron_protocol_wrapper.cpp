@@ -25,28 +25,14 @@
 #include <cstring>
 #include <ctime>
 
-// Platform-specific includes
-#ifdef _WIN32
-    #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
-    #endif
-    #ifndef NOMINMAX
-    #define NOMINMAX
-    #endif
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-    #include <windows.h>
-    #pragma comment(lib, "ws2_32.lib")
-#else
-    #include <unistd.h>
-    #include <fcntl.h>
-    #include <termios.h>
-    #include <sys/socket.h>
-    #include <netinet/in.h>
-    #include <arpa/inet.h>
-    #include <netdb.h>
-    #include <errno.h>
-#endif
+#include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <errno.h>
 
 namespace alpacacore::vendor::ioptron {
 
@@ -72,22 +58,12 @@ std::string strip_status_prefix(std::string response) {
 class iOptronProtocolWrapper::Impl {
 public:
     Impl() : connected_(false), connection_type_(ConnectionType::Serial) {
-#ifdef _WIN32
-        serial_handle_ = INVALID_HANDLE_VALUE;
-        socket_handle_ = INVALID_SOCKET;
-        WSADATA wsa_data;
-        WSAStartup(MAKEWORD(2, 2), &wsa_data);
-#else
         serial_fd_ = -1;
         socket_fd_ = -1;
-#endif
     }
-    
+
     ~Impl() {
         disconnect();
-#ifdef _WIN32
-        WSACleanup();
-#endif
     }
     
     bool connect(const ConnectionInfo& info) {

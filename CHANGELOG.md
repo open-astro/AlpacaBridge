@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [1.0.0] - 2026-03-14
+
+### Added
+- **Supported platforms** (README)
+  - Documented support for Debian 13 (Trixie) on NUC x64 and Raspberry Pi 4/5 ARM64.
+- **Unit tests**
+  - iOptron telescope driver tests (`test_ioptron_telescope.cpp`): Defaults, Target Range Validation, Axis Rate Ranges, Disconnected Behavior.
+  - ZWO Dew Heater Switch driver tests (`test_zwo_switch.cpp`): Defaults, Disconnected Behavior, Invalid Switch ID.
+
+### Changed
+- **Platform support: Linux only**
+  - Removed Windows and macOS support. Build, docs, and source now target Linux (Debian 13 Trixie, NUC x64, Raspberry Pi 4/5 ARM64) only.
+- **README**
+  - Quick Start: Linux-only (shell scripts); removed Windows CMD/PowerShell and macOS/Linux labels.
+  - Optional settings: removed `ALPACA_BUILD_CONFIG` (Windows only).
+  - Added "Supported platforms" section.
+- **SUPPORTED-DRIVERS.md**
+  - Moved from `AlpacaCore/SUPPORTED-DRIVERS.md` to repo root `SUPPORTED-DRIVERS.md`.
+  - Removed Windows and macOS columns from all driver tables; Linux (x64) and Linux (ARMv8) only.
+  - Removed Windows Notes; Linux Notes retained. Driver notes updated to Linux-only (SDK platforms, libudev/libusb, no Windows/macOS references).
+  - ConformU and path links updated for root location (`AlpacaCore/conformu/`, `AlpacaCore/external/`). References to SUPPORTED-DRIVERS.md updated in `AlpacaCore/conformu/README.md` and `AlpacaCore/docs/building/building.md`.
+- **Documentation** (AlpacaCore/docs)
+  - docs/README.md: Installation link now Linux-only (Debian 13 Trixie, NUC x64, RPi 4/5).
+  - Installation: Linux-only (Debian/Ubuntu, Fedora); removed macOS and Windows sections.
+  - Architecture: Platform support set to Linux (Debian 13, NUC x64, RPi 4/5).
+  - Testing and Troubleshooting: Catch2/compiler instructions Linux-only; removed "Build Errors on macOS" and "Build Errors on Windows".
+  - Building: ZWO SDK path references updated to `external/ZWO/ASI_Camera_SDK/`.
+- **AGENTS.md**
+  - Removed macOS ZWO libusb note and Windows ConformU log prefix note.
+- **CMake**
+  - AlpacaCore: Compiler warnings always GCC/Clang style (no MSVC branch).
+  - ZWO: Linux-only; library paths for x64 and ARM64 only; removed WIN32/APPLE branches, DLL copy, and macOS frameworks; libudev always used on UNIX.
+  - AlpacaHTTP: Removed Windows ZWO DLL copy block.
+  - SynScan, iOptron: Removed WIN32 (ws2_32) and MSVC blocks.
+  - QHY: Removed `if(NOT APPLE)` around libudev/Threads (Linux-only).
+- **Source (Linux-only)**
+  - AlpacaHTTP `socket_utils.h`: Removed `#ifdef _WIN32` Winsock branch; POSIX-only.
+  - AlpacaHTTP `router.cpp`: UTC date parsing uses `timegm()` only (removed `_mkgmtime` for Windows).
+  - ZWO, SynScan, iOptron protocol wrappers: Removed Windows includes and WSA init/cleanup; Linux includes and fd init only.
+- **External layout**
+  - ZWO ASI Camera SDK moved from `external/ASI_Camera_SDK` to `external/ZWO/ASI_Camera_SDK`. All CMake, docs, `.gitignore`, and Cursor rules updated to the new path.
+- **Vendor SDK / testapp docs** (external, untouched by build)
+  - QHY testapp `common/README`: Removed osxdownloadfirmware section (macOS).
+  - QHY testapp `test_live_multicam_opencv/README.md`: Linux-only build steps (Windows section removed).
+- **Version**
+  - Workspace version set to **1.0.0** (root `VERSION`; README version badge updated).
+
+### Removed
+- **Windows scripts**
+  - `run_all_tests.cmd` removed (Linux-only; use `run_all_tests.sh`).
+- **ConformU**
+  - Removed all Windows and macOS ConformU test reports from `AlpacaCore/conformu/` (Linux-only support; reports were from non-supported platforms).
+
 ## [0.13.0] - 2026-03-12
 
 ### Added

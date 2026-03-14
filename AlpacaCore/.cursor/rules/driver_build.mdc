@@ -52,8 +52,9 @@ AlpacaCore drivers follow a **three-layer architecture**:
 
 ```
 external/                       # Vendor SDK folders or vendored SDK assets (policy varies by repo/license)
-├─ ASI_Camera_SDK/              # ZWO SDK subset (vendored)
-│   └─ SDK files...
+├─ ZWO/
+│   └─ ASI_Camera_SDK/          # ZWO SDK subset (vendored)
+│       └─ SDK files...
 ├─ qhy_sdk/                     # Another vendor SDK
 │   └─ SDK files...
 
@@ -95,9 +96,10 @@ Use the iOptron telescope driver as a reference implementation for these behavio
 **Simply extract the vendor SDK folder directly into `external/`** - no subdirectories or reorganization needed:
 
 ```bash
-# Example: ZWO vendored subset in external/ASI_Camera_SDK/
+# Example: ZWO vendored subset in external/ZWO/ASI_Camera_SDK/
 external/
-└─ ASI_Camera_SDK/
+└─ ZWO/
+   └─ ASI_Camera_SDK/
    ├─ include/
    │   └─ ASICamera2.h
    ├─ lib/
@@ -133,9 +135,9 @@ In your driver's CMakeLists.txt, document the SDK folder name and which files ar
 
 ```cmake
 # ZWO SDK Structure (example - actual folder name may vary):
-# - external/ASI_Camera_SDK/include/ASICamera2.h (header)
-# - external/ASI_Camera_SDK/lib/linux/x64/libASICamera2.a (Linux static lib)
-# - external/ASI_Camera_SDK/lib/mac/x64/libASICamera2.a (macOS static lib)
+# - external/ZWO/ASI_Camera_SDK/include/ASICamera2.h (header)
+# - external/ZWO/ASI_Camera_SDK/lib/linux/x64/libASICamera2.a (Linux static lib)
+# - external/ZWO/ASI_Camera_SDK/lib/mac/x64/libASICamera2.a (macOS static lib)
 ```
 
 ---
@@ -333,11 +335,11 @@ See [CMake Configuration](#cmake-configuration) section below.
 
 ### Finding the SDK Folder
 
-For ZWO, the SDK subset is vendored in `external/ASI_Camera_SDK`, so use the
+For ZWO, the SDK subset is vendored in `external/ZWO/ASI_Camera_SDK`, so use the
 fixed path. For other vendors, you can still search for a known header file.
 
 ```cmake
-set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ASI_Camera_SDK")
+set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ZWO/ASI_Camera_SDK")
 if(NOT EXISTS "${ZWO_SDK_DIR}/include/ASICamera2.h")
     message(FATAL_ERROR "ZWO SDK not found at ${ZWO_SDK_DIR}")
 endif()
@@ -349,7 +351,7 @@ endif()
 # src/vendors/zwo/CMakeLists.txt
 
 if(ALPACACORE_ENABLE_ZWO)
-    set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ASI_Camera_SDK")
+    set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ZWO/ASI_Camera_SDK")
     if(NOT EXISTS "${ZWO_SDK_DIR}/include/ASICamera2.h")
         message(FATAL_ERROR "ZWO SDK not found at ${ZWO_SDK_DIR}")
     endif()
@@ -598,7 +600,7 @@ The testing guide covers:
 
 ### ZWO Camera Driver
 
-**SDK Location**: `external/ASI_Camera_SDK/` (vendored subset)
+**SDK Location**: `external/ZWO/ASI_Camera_SDK/` (vendored subset)
 
 **Required Files**:
 - `include/ASICamera2.h`

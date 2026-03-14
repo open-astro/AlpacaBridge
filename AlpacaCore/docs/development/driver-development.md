@@ -140,7 +140,7 @@ Use the iOptron telescope driver as the reference implementation for these behav
 
 ### Step 1: Place SDK in `external/`
 
-For ZWO, AlpacaCore uses a **vendored SDK subset** at `external/ASI_Camera_SDK/`,
+For ZWO, AlpacaCore uses a **vendored SDK subset** at `external/ZWO/ASI_Camera_SDK/`,
 so no manual extraction is required. For other vendors, extract the SDK folder
 directly into `external/`:
 ```bash
@@ -192,9 +192,9 @@ Create `src/vendors/zwo/CMakeLists.txt`:
 
 ```cmake
 if(ALPACACORE_ENABLE_ZWO)
-    set(ZWO_SDK_ROOT "${CMAKE_SOURCE_DIR}/external/ASI_Camera_SDK")
+    set(ZWO_SDK_ROOT "${CMAKE_SOURCE_DIR}/external/ZWO/ASI_Camera_SDK")
     if(NOT EXISTS "${ZWO_SDK_ROOT}/include/ASICamera2.h")
-        message(FATAL_ERROR "ZWO SDK header not found in external/ASI_Camera_SDK")
+        message(FATAL_ERROR "ZWO SDK header not found in external/ZWO/ASI_Camera_SDK")
     endif()
 
     # Select platform/arch library (x64, armv7, armv8, etc.)
@@ -294,9 +294,9 @@ After implementing your driver:
 
 ### ZWO Camera Driver
 
-- **SDK Location**: `external/ASI_Camera_SDK/` (vendored subset)
+- **SDK Location**: `external/ZWO/ASI_Camera_SDK/` (vendored subset)
 - **Wrapper API**: `ZWOSDKWrapper::enumerate_cameras()`, `ZWOSDKWrapper::open_camera()`, etc.
-- **CMake**: Use the fixed `external/ASI_Camera_SDK` path and select the library by OS/arch
+- **CMake**: Use the fixed `external/ZWO/ASI_Camera_SDK` path and select the library by OS/arch
 
 ### iOptron Telescope Driver
 
@@ -311,9 +311,9 @@ After implementing your driver:
 **Error**: `FATAL_ERROR: ZWO SDK not found`
 
 **Solution**: 
-1. Verify the vendored SDK subset exists in `external/ASI_Camera_SDK/`
+1. Verify the vendored SDK subset exists in `external/ZWO/ASI_Camera_SDK/`
 2. Check that the SDK folder contains the expected header file (`include/ASICamera2.h`)
-3. Verify CMake is pointing at `external/ASI_Camera_SDK/`
+3. Verify CMake is pointing at `external/ZWO/ASI_Camera_SDK/`
 
 ### Linker Errors
 
