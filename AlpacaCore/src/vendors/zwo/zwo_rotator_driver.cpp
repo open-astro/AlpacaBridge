@@ -233,7 +233,14 @@ public:
 
     double get_mechanical_position() const override {
         ensure_connected();
-        return normalize_angle(ZWOCAASDKWrapper::instance().get_degree(rotator_id_value()));
+        double degree = ZWOCAASDKWrapper::instance().get_degree(rotator_id_value());
+        // CAAGetDegree() returns the logical (reverse-applied) angle. When Reverse is
+        // enabled, the hardware inverts the angle: logical = 360 - physical. We must
+        // un-apply that inversion to return the true mechanical (physical) position.
+        if (ZWOCAASDKWrapper::instance().get_reverse(rotator_id_value())) {
+            return normalize_angle(360.0 - degree);
+        }
+        return normalize_angle(degree);
     }
 
     double get_position() const override {
@@ -293,8 +300,12 @@ public:
         validate_angle(position);
         double mechanical_target = normalize_angle(position);
         ZWOCAASDKWrapper::instance().move_mechanical(rotator_id_value(), mechanical_target);
+        // CAAGetDegree() returns the logical (reverse-applied) angle. When Reverse is
+        // enabled, the logical angle for a given mechanical angle is 360 - mechanical.
+        bool is_reversed = ZWOCAASDKWrapper::instance().get_reverse(rotator_id_value());
         std::lock_guard<std::mutex> lock(mutex_);
-        target_position_ = normalize_angle(mechanical_target + sync_offset_);
+        double logical = is_reversed ? normalize_angle(360.0 - mechanical_target) : mechanical_target;
+        target_position_ = normalize_angle(logical + sync_offset_);
         has_target_position_ = true;
     }
 

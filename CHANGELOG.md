@@ -12,6 +12,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 ## UNRELEASED
 
 ### Fixed
+- **ZWO CAA Rotator mechanical position when Reverse is enabled** (AlpacaCore)
+  - `get_mechanical_position()` now un-applies the SDK’s reverse inversion (returns `360 - degree` when Reverse is on) so MechanicalPosition always reflects the true physical angle. `move_mechanical()` target position is set using the same logical angle so Position and MechanicalPosition stay consistent with ConformU expectations.
 - **iOptron Telescope AxisRate (ConformU)** (AlpacaCore)
   - Tertiary axis (axis 2) now returns an empty axis rate range set instead of a single (0, 0) range, resolving ConformU issue: "Axis rate minimum and maximum values are both zero" for AxisRate:Tertiary.
 
@@ -28,6 +30,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Added FAQ: "Why do cameras work without a port but mounts need one?" explaining SDK vs serial port configuration.
 - **build_and_run.sh**
   - Optional env `ALPACA_ADD_DIALOUT=ON|OFF` (default ON): when installing udev rules on Linux, optionally add the current user to the `dialout` group for serial/USB device access, with a reminder to log out and back in. Env doc comment updated (ALPACA_INSTALL_UDEV_RULES, ALPACA_ADD_DIALOUT, ALPACACORE_ENABLE_ALL_VENDORS, ALPACAHTTP_USE_BOOST_BEAST).
+- **iOptron external path** (AlpacaCore)
+  - Protocol docs path corrected from `external/ioptron/` to `external/iOptron/` in `driver_build.mdc` and `docs/development/driver-development.md`. RS-232 command language and README moved from `external/ioptron/` to `external/iOptron/`.
+- **SUPPORTED-DRIVERS.md**
+  - ConformU validation links shortened (dates removed from link text). Dew Heater switch ConformU links point to `AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/`. ZWO Telescope (ASI Mount) table split into separate rows for AM3, AM5, and AM5N with ConformU links.
 
 ### Added
 - **Supported platforms** (README)
@@ -38,7 +44,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Troubleshooting** (AlpacaCore/docs/building/troubleshooting.md)
   - New section **Serial Port Connection Fails (Mounts, Focusers, etc.)**: port path in config, dialout permissions, device present and not in use, and server log hints; cross-reference to SUPPORTED-DRIVERS.md.
 - **ConformU test reports** (AlpacaCore/conformu/)
-  - ZWO (Linux x64): ASI cameras (ASI120MM Mini, ASI174MM Mini, ASI2600MC Pro, ASI2600MM Pro, ASI662MC), Dew Heater Switch, EAF, EFW.
+  - ZWO (Linux x64): ASI cameras (ASI120MM Mini, ASI174MM Mini, ASI2600MC Pro, ASI2600MM Pro, ASI662MC), CAA rotator, Dew Heater Switch, EAF, EFW.
   - iOptron telescope (Linux x64 USB).
 
 ### Changed

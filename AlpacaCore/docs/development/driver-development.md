@@ -300,7 +300,7 @@ After implementing your driver:
 
 ### iOptron Telescope Driver
 
-- **Protocol Docs**: `external/ioptron/` (command language markdown)
+- **Protocol Docs**: `external/iOptron/` (command language markdown)
 - **Wrapper API**: `iOptronProtocolWrapper::connect()`, `iOptronProtocolWrapper::get_position()`, etc.
 - **CMake**: No SDK discovery needed; just build the wrapper + driver sources
 

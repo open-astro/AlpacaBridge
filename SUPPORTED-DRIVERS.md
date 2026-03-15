@@ -35,7 +35,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| QHY268C | USB | ✓ | ✓ | [ConformU Validation 2026-03-12](AlpacaCore/conformu/QHY/QHY268C/) |
+| QHY268C | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/QHY268C/) |
 
 ### QHY Driver Notes
 
@@ -51,13 +51,13 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| ASI120MM Mini | USB | ✓ | ✓ | [ConformU Validation 2026-01-06](AlpacaCore/conformu/ZWO/ASI/ASI120MM%20Mini/) |
-| ASI174MM Mini | USB | ✓ | ✓ | [ConformU Validation 2026-01-05](AlpacaCore/conformu/ZWO/ASI/ASI174MM%20Mini/) |
-| ASI2600MC Pro | USB | ✓ | ✓ | [ConformU Validation 2026-01-05](AlpacaCore/conformu/ZWO/ASI/ASI2600MC%20Pro/) |
-| ASI2600MM Pro | USB | ✓ | ✓ | [ConformU Validation 2026-01-05](AlpacaCore/conformu/ZWO/ASI/ASI2600MM%20Pro/) |
-| ASI290MM Mini | USB | ✓ | ✓ | [ConformU Validation 2026-01-05](AlpacaCore/conformu/ZWO/ASI/ASI290MM%20Mini/) |
-| ASI462MM | USB | ✓ | ✓ | [ConformU Validation 2026-01-05](AlpacaCore/conformu/ZWO/ASI/ASI462MM/) |
-| ASI662MC | USB | ✓ | ✓ | [ConformU Validation 2026-01-05](AlpacaCore/conformu/ZWO/ASI/ASI662MC/) |
+| ASI120MM Mini | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI120MM%20Mini/) |
+| ASI174MM Mini | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI174MM%20Mini/) |
+| ASI2600MC Pro | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MC%20Pro/) |
+| ASI2600MM Pro | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MM%20Pro/) |
+| ASI290MM Mini | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI290MM%20Mini/) |
+| ASI462MM | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI462MM/) |
+| ASI662MC | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI662MC/) |
 
 ### ZWO Driver Notes
 
@@ -81,7 +81,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| EFW | USB | ✓ | ✓ | [ConformU Validation 2026-01-10](AlpacaCore/conformu/ZWO/EFW/) |
+| EFW | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EFW/) |
 
 ### ZWO FilterWheel Driver Notes
 
@@ -97,7 +97,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| EAF | USB | ✓ | ✓ | [ConformU Validation 2026-01-06](AlpacaCore/conformu/ZWO/EAF/) |
+| EAF | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAF/) |
 
 ### ZWO Focuser Driver Notes
 
@@ -116,7 +116,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Source | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------|------------|---------------|-----------------|--------|
-| WeeWX HTTP JSON | HTTP(S) | ✓ | ✓ | [ConformU Validation 2026-01-28](AlpacaCore/conformu/ObservingConditions/WeeWX/) |
+| WeeWX HTTP JSON | HTTP(S) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ObservingConditions/WeeWX/) |
 
 ### WeeWX ObservingConditions Driver Notes
 
@@ -130,7 +130,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| CAA | USB | ✓ | ✓ | [ConformU Validation 2026-01-09](AlpacaCore/conformu/ZWO/CAA/) |
+| CAA | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/CAA/) |
 
 ### ZWO Rotator Driver Notes
 
@@ -150,8 +150,8 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Device Type | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |-------------|--------------|------------|---------------|-----------------|--------|
-| Dew Heater | ASI2600MC Pro | USB (via Camera) | ✓ | ✓ | [ConformU Validation 2026-01-05](AlpacaCore/conformu/ZWO/ASI/ASI2600MC%20Pro/switch-dew%20heater/) |
-| Dew Heater | ASI2600MM Pro | USB (via Camera) | ✓ | ✓ | [ConformU Validation 2026-01-05](AlpacaCore/conformu/ZWO/ASI/ASI2600MM%20Pro/switch-dew%20heater/) |
+| Dew Heater | ASI2600MC Pro | USB (via Camera) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/) |
+| Dew Heater | ASI2600MM Pro | USB (via Camera) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/) |
 
 ### ZWO Switch Driver Notes
 
@@ -165,12 +165,12 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| CEM series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation 2026-01-03](AlpacaCore/conformu/iOptron/) |
-| GEM series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation 2026-01-03](AlpacaCore/conformu/iOptron/) |
-| HAE series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation 2026-01-03](AlpacaCore/conformu/iOptron/) |
-| HAZ series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation 2026-01-03](AlpacaCore/conformu/iOptron/) |
-| HEM series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation 2026-01-03](AlpacaCore/conformu/iOptron/) |
-| SkyHunter | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation 2026-01-03](AlpacaCore/conformu/iOptron/) |
+| CEM series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
+| GEM series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
+| HAE series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
+| HAZ series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
+| HEM series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
+| SkyHunter | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
 
 ### iOptron Driver Notes
 
@@ -182,7 +182,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| SynScan V3/V4 | USB/Serial (hand controller) | ✓ | ✓ | [ConformU Validation 2026-02-04](AlpacaCore/conformu/SynScan/) |
+| SynScan V3/V4 | USB/Serial (hand controller) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/) |
 
 ### SynScan Driver Notes
 
@@ -194,7 +194,9 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| AM5 / AM5N | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation 2026-02-25](AlpacaCore/conformu/ZWO/AM5N/) |
+| AM3 | USB/Serial, Wi-Fi |  |  | [ConformU](AlpacaCore/conformu/ZWO/AM3/) |
+| AM5 | USB/Serial, Wi-Fi |  |  | [ConformU](AlpacaCore/conformu/ZWO/AM5/) |
+| AM5N | USB/Serial, Wi-Fi |  |  | [ConformU](AlpacaCore/conformu/ZWO/AM5N/) |
 
 ### ZWO Telescope (ASI Mount) Driver Notes
 
@@ -202,3 +204,4 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: Serial over USB or network (TCP). **Tested and working with USB and WiFi** on AM5N.
 - **Tested firmware**: Driver tested on **firmware 1.8.8** for the **AM5N**. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
 - **AM5N status**: PulseGuide and slew behavior validated over both USB and WiFi; timing tuned for high-latency (WiFi) connections.
+- **ConformU on Trixie 13**: ConformU folders are in place per model (AM3, AM5, AM5N). Validation has not yet been rerun against physical mounts on Debian Trixie 13; rerun when hardware is available.

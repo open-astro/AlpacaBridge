@@ -628,7 +628,7 @@ The testing guide covers:
 
 ### iOptron Mount Driver
 
-**Protocol Docs**: `external/ioptron/` (command language markdown)
+**Protocol Docs**: `external/iOptron/` (command language markdown)
 
 **Required Files**:
 - No vendor SDK libraries are required; the driver implements the RS-232 protocol directly.
