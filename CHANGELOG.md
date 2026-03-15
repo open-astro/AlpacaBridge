@@ -37,6 +37,9 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - ZWO Dew Heater Switch driver tests (`test_zwo_switch.cpp`): Defaults, Disconnected Behavior, Invalid Switch ID.
 - **Troubleshooting** (AlpacaCore/docs/building/troubleshooting.md)
   - New section **Serial Port Connection Fails (Mounts, Focusers, etc.)**: port path in config, dialout permissions, device present and not in use, and server log hints; cross-reference to SUPPORTED-DRIVERS.md.
+- **ConformU test reports** (AlpacaCore/conformu/)
+  - ZWO (Linux x64): ASI cameras (ASI120MM Mini, ASI174MM Mini, ASI2600MC Pro, ASI2600MM Pro, ASI662MC), Dew Heater Switch, EAF, EFW.
+  - iOptron telescope (Linux x64 USB).
 
 ### Changed
 - **Platform support: Linux only**
