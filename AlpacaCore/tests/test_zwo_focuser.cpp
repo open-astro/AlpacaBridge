@@ -45,7 +45,7 @@ TEST_CASE("ZWO EAF Focuser Driver - Disconnected Behavior", "[zwo][focuser][unit
 
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_absolute() == true);
-    REQUIRE(driver->get_step_size() == 0.0);
+    require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::PropertyNotImplemented);
     REQUIRE(driver->get_temp_comp_available() == false);
     REQUIRE(driver->get_temp_comp() == false);
     REQUIRE(driver->get_supported_actions().empty());

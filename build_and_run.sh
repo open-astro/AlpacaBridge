@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Optional env: ALPACA_INSTALL_UDEV_RULES=ON|OFF, ALPACA_ADD_DIALOUT=ON|OFF, ALPACACORE_ENABLE_ALL_VENDORS, ALPACAHTTP_USE_BOOST_BEAST
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,6 +8,7 @@ HTTP_DIR="${ROOT_DIR}/AlpacaHTTP"
 HTTP_BEAST="${ALPACAHTTP_USE_BOOST_BEAST:-OFF}"
 CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
 INSTALL_UDEV_RULES="${ALPACA_INSTALL_UDEV_RULES:-ON}"
+ADD_DIALOUT="${ALPACA_ADD_DIALOUT:-ON}"
 
 if [[ ! -d "${CORE_DIR}" ]]; then
   echo "AlpacaCore not found at ${CORE_DIR}"
@@ -59,6 +61,16 @@ if [[ "${INSTALL_UDEV_RULES}" == "ON" && "${OSTYPE:-}" == "linux"* ]]; then
 
   sudo udevadm control --reload-rules
   sudo udevadm trigger
+
+  if [[ "${ADD_DIALOUT}" == "ON" ]]; then
+    if id -nG | tr ' ' '\n' | grep -q '^dialout$'; then
+      echo "User $USER is already in the dialout group."
+    else
+      echo "Adding $USER to the dialout group (required for serial/USB device access)."
+      sudo usermod -aG dialout "$USER"
+      echo "You must log out and back in (or run: newgrp dialout) for the change to take effect."
+    fi
+  fi
 fi
 
 if [[ "${OSTYPE:-}" == "darwin"* ]]; then

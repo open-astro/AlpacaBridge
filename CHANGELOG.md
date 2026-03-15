@@ -1,4 +1,6 @@
-# Changelog
+# AlpacaBridge Changelog
+
+<img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
 All notable changes to AlpacaBridge will be documented in this file.
 
@@ -7,14 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [1.0.0] - 2026-03-14
+## UNRELEASED
+
+### Fixed
+- **iOptron Telescope AxisRate (ConformU)** (AlpacaCore)
+  - Tertiary axis (axis 2) now returns an empty axis rate range set instead of a single (0, 0) range, resolving ConformU issue: "Axis rate minimum and maximum values are both zero" for AxisRate:Tertiary.
+
+### Changed
+- **iOptron Telescope name** (AlpacaCore)
+  - Driver name is now always **"iOptron Telescope"**. Removed all `:MountInfo#` querying at connect and in `get_name()`, and removed the per-model name mapping table from the iOptron protocol wrapper. This avoids connect timeouts and server instability when the mount is slow or unavailable; SideOfPier read remains supported per the RS-232 spec.
+- **ZWO EAF Focuser** (AlpacaCore)
+  - `get_step_size()` now throws `PropertyNotImplemented` instead of returning 0.0, for correct ASCOM/ConformU behavior when step size is not available. Unit test (`test_zwo_focuser.cpp`) updated to expect this exception.
+- **Driver versions** (AlpacaCore)
+  - SynScan telescope and ZWO telescope drivers report `get_driver_version()` **1.0.0** (was 0.1.0).
+- **Web UI** (AlpacaHTTP)
+  - Serial port field hints are Linux-only: `/dev/ttyUSB0` and `/dev/ttyACM0` (removed macOS/Windows examples).
+- **SUPPORTED-DRIVERS.md**
+  - Added FAQ: "Why do cameras work without a port but mounts need one?" explaining SDK vs serial port configuration.
+- **build_and_run.sh**
+  - Optional env `ALPACA_ADD_DIALOUT=ON|OFF` (default ON): when installing udev rules on Linux, optionally add the current user to the `dialout` group for serial/USB device access, with a reminder to log out and back in. Env doc comment updated (ALPACA_INSTALL_UDEV_RULES, ALPACA_ADD_DIALOUT, ALPACACORE_ENABLE_ALL_VENDORS, ALPACAHTTP_USE_BOOST_BEAST).
 
 ### Added
 - **Supported platforms** (README)
   - Documented support for Debian 13 (Trixie) on NUC x64 and Raspberry Pi 4/5 ARM64.
 - **Unit tests**
-  - iOptron telescope driver tests (`test_ioptron_telescope.cpp`): Defaults, Target Range Validation, Axis Rate Ranges, Disconnected Behavior.
+  - iOptron telescope driver tests (`test_ioptron_telescope.cpp`): Defaults, Target Range Validation, Axis Rate Ranges (including tertiary empty range), Disconnected Behavior.
   - ZWO Dew Heater Switch driver tests (`test_zwo_switch.cpp`): Defaults, Disconnected Behavior, Invalid Switch ID.
+- **Troubleshooting** (AlpacaCore/docs/building/troubleshooting.md)
+  - New section **Serial Port Connection Fails (Mounts, Focusers, etc.)**: port path in config, dialout permissions, device present and not in use, and server log hints; cross-reference to SUPPORTED-DRIVERS.md.
 
 ### Changed
 - **Platform support: Linux only**

@@ -22,6 +22,7 @@
 #include <iomanip>
 #include <cmath>
 #include <limits>
+#include <cctype>
 #include <cstring>
 #include <ctime>
 
@@ -284,7 +285,8 @@ private:
         int open_errno = errno;
         ALPACA_LOG_INFO("iOptron", "open() returned: " + std::to_string(serial_fd_) + ", errno: " + std::to_string(open_errno));
         if (serial_fd_ < 0) {
-            ALPACA_LOG_ERROR("iOptron", "Failed to open serial port, errno: " + std::to_string(errno));
+            const char* errmsg = (open_errno != 0) ? std::strerror(open_errno) : "unknown";
+            ALPACA_LOG_ERROR("iOptron", "Failed to open serial port [" + port_path + "]: " + std::string(errmsg) + " (errno " + std::to_string(open_errno) + "). Check port exists, permissions (e.g. user in dialout group), and that no other process has it open.");
             return false;
         }
         
@@ -292,7 +294,8 @@ private:
         // Configure serial port
         struct termios tty;
         if (tcgetattr(serial_fd_, &tty) != 0) {
-            ALPACA_LOG_ERROR("iOptron", "tcgetattr failed, errno: " + std::to_string(errno));
+            int tc_err = errno;
+            ALPACA_LOG_ERROR("iOptron", "tcgetattr failed: " + std::string(std::strerror(tc_err)) + " (errno " + std::to_string(tc_err) + ")");
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
@@ -337,7 +340,8 @@ private:
         
         ALPACA_LOG_INFO("iOptron", "Setting terminal attributes...");
         if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
-            ALPACA_LOG_ERROR("iOptron", "tcsetattr failed, errno: " + std::to_string(errno));
+            int tc_err = errno;
+            ALPACA_LOG_ERROR("iOptron", "tcsetattr failed: " + std::string(std::strerror(tc_err)) + " (errno " + std::to_string(tc_err) + ")");
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
@@ -348,13 +352,15 @@ private:
         ALPACA_LOG_INFO("iOptron", "Setting to blocking mode...");
         int flags = fcntl(serial_fd_, F_GETFL);
         if (flags < 0) {
-            ALPACA_LOG_ERROR("iOptron", "fcntl F_GETFL failed, errno: " + std::to_string(errno));
+            int fc_err = errno;
+            ALPACA_LOG_ERROR("iOptron", "fcntl F_GETFL failed: " + std::string(std::strerror(fc_err)) + " (errno " + std::to_string(fc_err) + ")");
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
         }
         if (fcntl(serial_fd_, F_SETFL, flags & ~O_NONBLOCK) != 0) {
-            ALPACA_LOG_ERROR("iOptron", "fcntl F_SETFL failed, errno: " + std::to_string(errno));
+            int fc_err = errno;
+            ALPACA_LOG_ERROR("iOptron", "fcntl F_SETFL failed: " + std::string(std::strerror(fc_err)) + " (errno " + std::to_string(fc_err) + ")");
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
@@ -711,60 +717,18 @@ void iOptronProtocolWrapper::send_command_blind(const std::string& command) {
 
 // Mount information queries
 MountInfo iOptronProtocolWrapper::get_mount_info() {
-    // Do not include the trailing '#' terminator here; send_command()
-    // will append it for us. Including it would result in sending '##'
-    // which some mounts reject, causing timeouts.
-    //
-    // Some mounts can be slow to respond directly after a fresh
-    // connection or power‑on. To be robust we retry the :MountInfo
-    // query a few times before giving up.
-    std::string response;
-    constexpr int max_attempts = 3;
-    
-    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
-        try {
-            response = send_command(":MountInfo");
-            break;
-        } catch (const AlpacaException& e) {
-            // Only retry on timeout; rethrow any other error immediately.
-            std::string msg = e.what();
-            if (msg.find("Timeout waiting for mount response") == std::string::npos ||
-                attempt == max_attempts) {
-                throw;
-            }
-            
-            ALPACA_LOG_WARN("iOptron",
-                            "Timeout in :MountInfo attempt " + std::to_string(attempt) +
-                            " – retrying...");
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-    }
-    
+    // Legacy helper retained for potential future use, but the current
+    // driver does not depend on mount-specific model information.
+    // We issue a single :MountInfo query (no retries) and return the
+    // raw response as the model_code; model_name and has_encoder are
+    // left at their defaults.
     MountInfo info;
-    info.model_code = response;
-    
-    // Map model codes to names (from RS-232 spec)
-    if (response == "0026") info.model_name = "CEM26";
-    else if (response == "0027") info.model_name = "CEM26-EC";
-    else if (response == "0028") info.model_name = "GEM28";
-    else if (response == "0029") info.model_name = "GEM28-EC";
-    else if (response == "0040") info.model_name = "CEM40(G)";
-    else if (response == "0041") info.model_name = "CEM40(G)-EC";
-    else if (response == "0043") info.model_name = "GEM45(G)";
-    else if (response == "0044") info.model_name = "GEM45(G)-EC";
-    else if (response == "0070") info.model_name = "CEM70(G)";
-    else if (response == "0071") info.model_name = "CEM70(G)-EC";
-    else if (response == "0120") info.model_name = "CEM120";
-    else if (response == "0121") info.model_name = "CEM120-EC";
-    else if (response == "0122") info.model_name = "CEM120-EC2";
-    else info.model_name = "Unknown";
-    
-    info.has_encoder = (response.find("EC") != std::string::npos || 
-                        response == "0027" || response == "0029" || 
-                        response == "0041" || response == "0044" || 
-                        response == "0071" || response == "0121" || 
-                        response == "0122");
-    
+    try {
+        std::string response = send_command(":MountInfo");
+        info.model_code = std::move(response);
+    } catch (const std::exception&) {
+        // Swallow errors; callers should treat missing model info as non-fatal.
+    }
     return info;
 }
 

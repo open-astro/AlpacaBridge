@@ -70,6 +70,29 @@ Common build issues and solutions for AlpacaCore.
 2. Don't build in system directories - use a local `build/` directory
 3. On Linux, avoid using `sudo` for builds
 
+## Serial Port Connection Fails (Mounts, Focusers, etc.)
+
+**Symptom**: Device (e.g. iOptron or SynScan mount) does not connect when using a serial port such as `/dev/ttyUSB0`; connection fails in the Alpaca server or Web UI.
+
+**Checks**:
+1. **Port path in config**  
+   For serial connection, the device must have **Connection type** set to **Serial/USB** and **Port path** set to the actual device (e.g. `/dev/ttyUSB0`). In the Web UI: add/edit the device, choose Serial/USB, and enter the port path. Stored config uses keys `connectionType: "serial"` and `portPath: "/dev/ttyUSB0"`.
+
+2. **Permissions**  
+   On Linux, your user must be able to open the serial device. Add your user to the `dialout` group, then log out and back in (or reboot):
+   ```bash
+   sudo usermod -aG dialout $USER
+   ```
+   Verify: `groups` should list `dialout`; `ls -la /dev/ttyUSB0` should show the device (e.g. `crw-rw---- ... dialout`). Without this, `open()` fails with **Permission denied** (errno 13).
+
+3. **Device present and not in use**  
+   Plug in the USB cable and check that the port exists: `ls /dev/ttyUSB*` or `ls /dev/ttyACM*`. Ensure no other process (e.g. another Alpaca server, serial terminal, or PHD2) has the port open.
+
+4. **Server logs**  
+   When connection fails, the server logs a clear error (e.g. "Failed to open serial port [...] Permission denied"). Run the server from a terminal or check its log output to see the exact reason.
+
+See also [SUPPORTED-DRIVERS.md](../../SUPPORTED-DRIVERS.md) for driver-specific notes (e.g. iOptron USB/Serial, SynScan).
+
 ## Still Having Issues?
 
 If you're still experiencing problems:

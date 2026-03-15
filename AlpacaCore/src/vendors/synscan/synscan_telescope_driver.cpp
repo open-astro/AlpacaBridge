@@ -190,7 +190,7 @@ public:
     }
 
     std::string get_driver_version() const override {
-        return "0.1.0";
+        return "1.0.0";
     }
 
     int get_interface_version() const override {

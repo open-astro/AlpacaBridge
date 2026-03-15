@@ -14,6 +14,9 @@ This document lists all hardware vendors and device types that are verified to w
   - **Ethernet**: Network-based connection (TCP/IP)
   - **USB/Serial**: USB-to-serial adapter or direct serial connection
 
+- **Why do cameras work without a port but mounts need one?**  
+  Cameras (ZWO, QHY, etc.) use **vendor SDKs** that talk to the device over USB using the vendor’s USB protocol and **enumerate devices by type** (e.g. “first ZWO camera”, “camera ID 0”). The SDK hides the actual port; you configure by **camera index** or **camera ID**. Mounts (iOptron, SynScan, ZWO AM5, etc.) connect over **generic serial** (RS-232 over a USB–serial adapter or hand controller). The OS exposes these as plain serial ports (`/dev/ttyUSB0`, etc.) with **no “mount” label**—the app can’t tell which port is the mount. So you must specify the **port path** (e.g. `/dev/ttyUSB0`). Auto-discovery (scanning serial ports and probing for a mount) could be added later but is not implemented today.
+
 - **Linux Notes**:
   - **Linux x64**: Tested and verified on Linux x64. For USB/serial devices (cameras, focusers, filter wheels, mounts), your user account must have access to the serial port. Run `sudo usermod -aG dialout $USER` to add your user to the `dialout` group, then log out and back in (or reboot) for the change to take effect. Without this, connections will fail with "Permission denied" (errno=13). Install the appropriate udev rules from `AlpacaCore/external/` for each ZWO device type.
   - **Kernel 6.17.0-14-generic**: On this kernel version, ZWO EAF focusers and ZWO EFW filter wheels are not currently working; other devices listed in this document continue to operate normally.

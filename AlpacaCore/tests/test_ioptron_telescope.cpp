@@ -79,10 +79,9 @@ TEST_CASE("iOptron Telescope Driver - Axis Rate Ranges", "[ioptron][telescope][u
     auto secondary = driver->get_axis_rate_range(1);
     REQUIRE(secondary.second >= secondary.first);
 
+    // Tertiary axis not supported; driver returns empty ranges (ConformU expects no 0..0 range).
     auto tertiary_ranges = driver->get_axis_rate_ranges(2);
-    REQUIRE(tertiary_ranges.size() == 1);
-    REQUIRE(tertiary_ranges[0].first == 0.0);
-    REQUIRE(tertiary_ranges[0].second == 0.0);
+    REQUIRE(tertiary_ranges.empty());
 
     // iOptron returns (0,0) for invalid axis rather than throwing
     auto invalid_axis_range = driver->get_axis_rate_range(2);
