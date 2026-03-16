@@ -1292,8 +1292,26 @@ public:
     }
     
     void slew_to_coordinates_async(double ra, double dec) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        start_slew_to_coordinates_locked(ra, dec, true);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            prepare_slew_state_locked(ra, dec, "SlewToCoordinatesAsync");
+        }
+        try {
+            std::thread([this, ra, dec]() {
+                std::lock_guard<std::mutex> lock(mutex_);
+                try {
+                    dispatch_slew_command_locked(ra, dec, true, "SlewToCoordinatesAsync");
+                } catch (const std::exception& e) {
+                    slew_in_progress_ = false;
+                    ALPACA_LOG_WARN("iOptron", std::string("Async slew failed: ") + e.what());
+                }
+            }).detach();
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            slew_in_progress_ = false;
+            throw AlpacaException(std::string("Failed to start async slew: ") + e.what(),
+                                  AlpacaError::DriverException);
+        }
     }
     
     void slew_to_target() override {

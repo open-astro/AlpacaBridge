@@ -309,6 +309,7 @@ public:
             {
                 std::lock_guard<std::mutex> lock(data_mutex_);
                 last_snapshot_ = snapshot;
+                rebuild_supported_properties_locked(snapshot);
                 update_property_timestamp_locked("temperature", snapshot.temperature_c);
                 update_property_timestamp_locked("humidity", snapshot.humidity);
                 update_property_timestamp_locked("dewpoint", snapshot.dewpoint_c);
@@ -465,6 +466,7 @@ public:
         SensorSnapshot snapshot = fetch_snapshot();
         std::lock_guard<std::mutex> lock(data_mutex_);
         last_snapshot_ = snapshot;
+        rebuild_supported_properties_locked(snapshot);
         update_property_timestamp_locked("temperature", snapshot.temperature_c);
         update_property_timestamp_locked("humidity", snapshot.humidity);
         update_property_timestamp_locked("dewpoint", snapshot.dewpoint_c);
@@ -480,12 +482,26 @@ private:
             throw AlpacaException("Device not connected", AlpacaError::NotConnected);
         }
         std::lock_guard<std::mutex> lock(data_mutex_);
+        if (!supported_properties_.count(normalize_property_name(property))) {
+            throw AlpacaException("Sensor not implemented", AlpacaError::PropertyNotImplemented);
+        }
         const double value = last_snapshot_.*member;
         if (!std::isfinite(value)) {
             throw AlpacaException("Value not set", AlpacaError::ValueNotSet);
         }
-        (void)property;
         return value;
+    }
+
+    void rebuild_supported_properties_locked(const SensorSnapshot& snapshot) {
+        // Only add sensors that have data — never remove, so sensors that gain
+        // data at runtime (e.g. SQM after sunset) become permanently supported.
+        if (std::isfinite(snapshot.temperature_c))     supported_properties_.insert("temperature");
+        if (std::isfinite(snapshot.humidity))          supported_properties_.insert("humidity");
+        if (std::isfinite(snapshot.dewpoint_c))        supported_properties_.insert("dewpoint");
+        if (std::isfinite(snapshot.wind_speed_ms))     supported_properties_.insert("windspeed");
+        if (std::isfinite(snapshot.pressure_hpa))      supported_properties_.insert("pressure");
+        if (std::isfinite(snapshot.sky_quality))       supported_properties_.insert("skyquality");
+        if (std::isfinite(snapshot.sky_temperature_c)) supported_properties_.insert("skytemperature");
     }
 
     void update_property_timestamp_locked(std::string_view property, double value) {
@@ -555,6 +571,7 @@ private:
                 SensorSnapshot snapshot = fetch_snapshot();
                 std::lock_guard<std::mutex> lock(data_mutex_);
                 last_snapshot_ = snapshot;
+                rebuild_supported_properties_locked(snapshot);
                 update_property_timestamp_locked("temperature", snapshot.temperature_c);
                 update_property_timestamp_locked("humidity", snapshot.humidity);
                 update_property_timestamp_locked("dewpoint", snapshot.dewpoint_c);
@@ -580,15 +597,7 @@ private:
     mutable std::mutex data_mutex_;
     SensorSnapshot last_snapshot_{};
     std::unordered_map<std::string, std::chrono::system_clock::time_point> property_last_update_;
-    const std::unordered_set<std::string> supported_properties_ = {
-        "temperature",
-        "humidity",
-        "dewpoint",
-        "windspeed",
-        "pressure",
-        "skyquality",
-        "skytemperature"
-    };
+    std::unordered_set<std::string> supported_properties_;
     const std::unordered_map<std::string, std::string> property_descriptions_ = {
         {"temperature", "Outdoor temperature (WeeWX outTemp)"},
         {"humidity", "Outdoor humidity (WeeWX outHumidity)"},
