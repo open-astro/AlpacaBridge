@@ -85,9 +85,10 @@ override_dh_auto_install:
 	  $(QHY_SDK_DIR)/lib/udev/rules.d/85-qhyccd.rules \
 	  $(STAGING)/lib/udev/rules.d/
 
-	# --- Default device configuration ---
-	install -D -m 644 $(CURDIR)/config/registered_devices.json \
-	  $(STAGING)/etc/alpacabridge/registered_devices.json
+	# --- Default device configuration (empty registry — populated at runtime) ---
+	install -d $(STAGING)/etc/alpacabridge
+	echo '[]' > $(STAGING)/etc/alpacabridge/registered_devices.json
+	chmod 644 $(STAGING)/etc/alpacabridge/registered_devices.json
 
 override_dh_auto_clean:
 	rm -rf $(BUILD_DIR)
