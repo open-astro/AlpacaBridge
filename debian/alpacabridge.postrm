@@ -1,0 +1,16 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge)
+        # Remove the system user created during install
+        if getent passwd alpacabridge > /dev/null 2>&1; then
+            deluser --system alpacabridge || true
+        fi
+        if getent group alpacabridge > /dev/null 2>&1; then
+            delgroup --system alpacabridge || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#

@@ -1,0 +1,26 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: AlpacaBridge
+Upstream-Contact: OpenAstro <support@openastro.net>
+Source: https://github.com/open-astro/AlpacaBridge
+
+Files: *
+Copyright: 2024-2026 OpenAstro Contributors
+License: SSPL-1.0
+
+License: SSPL-1.0
+ Server Side Public License, version 1, as published by MongoDB, Inc.
+ .
+ See the full license text at:
+ https://www.mongodb.com/licensing/server-side-public-license
+ .
+ Or in the file LICENSE in the source tree.
+
+Files: AlpacaCore/external/QHY/*
+Copyright: QHY CCD Technology Co., Ltd.
+License: Proprietary
+ QHY SDK — proprietary binary redistribution permitted for device support.
+
+Files: AlpacaCore/external/ZWO/*
+Copyright: ZWO Inc.
+License: Proprietary
+ ZWO SDK — proprietary binary redistribution permitted for device support.

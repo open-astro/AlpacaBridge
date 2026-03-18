@@ -1,0 +1,97 @@
+#!/usr/bin/make -f
+SHELL := /bin/bash
+DPKG_EXPORT_BUILDFLAGS = 1
+include /usr/share/dpkg/default.mk
+include /usr/share/dpkg/architecture.mk
+
+PARALLEL  ?= $(shell nproc)
+BUILD_DIR := $(CURDIR)/obj-$(DEB_HOST_MULTIARCH)
+STAGING   := $(CURDIR)/debian/alpacabridge
+
+# Architecture-specific vendor SDK paths
+ifeq ($(DEB_HOST_ARCH),arm64)
+  QHY_SDK_DIR     := $(CURDIR)/AlpacaCore/external/QHY/sdk_Arm64_25.09.29
+  ZWO_EAF_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/armv8
+else
+  QHY_SDK_DIR     := $(CURDIR)/AlpacaCore/external/QHY/sdk_linux64_25.09.29
+  ZWO_EAF_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/x64
+endif
+
+# Cross-compilation flags (no-op when building natively)
+CMAKE_CROSS_FLAGS :=
+ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
+  CMAKE_CROSS_FLAGS += \
+    -DCMAKE_SYSTEM_NAME=Linux \
+    -DCMAKE_SYSTEM_PROCESSOR=$(DEB_HOST_GNU_CPU) \
+    -DCMAKE_C_COMPILER=$(DEB_HOST_GNU_TYPE)-gcc \
+    -DCMAKE_CXX_COMPILER=$(DEB_HOST_GNU_TYPE)-g++
+endif
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	cmake -S $(CURDIR)/AlpacaHTTP -B $(BUILD_DIR) \
+	  -DCMAKE_BUILD_TYPE=Release \
+	  -DALPACACORE_ENABLE_ALL_VENDORS=ON \
+	  -DALPACAHTTP_BUILD_TESTS=OFF \
+	  -DALPACAHTTP_USE_BOOST_BEAST=OFF \
+	  -DALPACACORE_BUILD_TESTS=OFF \
+	  $(CMAKE_CROSS_FLAGS)
+
+override_dh_auto_build:
+	cmake --build $(BUILD_DIR) --parallel $(PARALLEL)
+
+override_dh_auto_install:
+	# --- Server binary ---
+	install -D -m 755 $(BUILD_DIR)/alpacahttp_server \
+	  $(STAGING)/usr/bin/alpacabridge
+
+	# --- Bundled vendor shared libraries ---
+	install -d $(STAGING)/usr/lib/alpacabridge
+	cp -a $(QHY_SDK_DIR)/usr/local/lib/libqhyccd.so* \
+	  $(STAGING)/usr/lib/alpacabridge/
+	# ZWO EAF sdbus wrappers (x64 only — absent on armv8, skip gracefully)
+	@for f in "$(ZWO_EAF_LIB_DIR)/libWrapperSdbus.so" \
+	           "$(ZWO_EAF_LIB_DIR)/libsdbus-c++.so.2"; do \
+	  if [ -f "$$f" ]; then \
+	    install -m 755 "$$f" $(STAGING)/usr/lib/alpacabridge/; \
+	  fi; \
+	done
+
+	# --- QHY firmware files ---
+	install -d $(STAGING)/lib/firmware/qhy
+	cp -a $(QHY_SDK_DIR)/lib/firmware/qhy/. $(STAGING)/lib/firmware/qhy/
+
+	# --- QHY fxload (FX3-capable, replaces system fxload) ---
+	install -D -m 755 $(QHY_SDK_DIR)/sbin/fxload \
+	  $(STAGING)/usr/sbin/fxload
+
+	# --- Udev rules (one copy per vendor) ---
+	install -d $(STAGING)/lib/udev/rules.d
+	install -m 644 \
+	  $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/asi.rules \
+	  $(STAGING)/lib/udev/rules.d/
+	install -m 644 \
+	  $(CURDIR)/AlpacaCore/external/ZWO/CAA/lib/caa.rules \
+	  $(STAGING)/lib/udev/rules.d/
+	install -m 644 \
+	  $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/eaf.rules \
+	  $(STAGING)/lib/udev/rules.d/
+	install -m 644 \
+	  $(CURDIR)/AlpacaCore/external/ZWO/EFW/lib/efw.rules \
+	  $(STAGING)/lib/udev/rules.d/
+	install -m 644 \
+	  $(QHY_SDK_DIR)/lib/udev/rules.d/85-qhyccd.rules \
+	  $(STAGING)/lib/udev/rules.d/
+
+	# --- Default device configuration ---
+	install -D -m 644 $(CURDIR)/config/registered_devices.json \
+	  $(STAGING)/etc/alpacabridge/registered_devices.json
+
+override_dh_auto_clean:
+	rm -rf $(BUILD_DIR)
+
+# Tell dh_shlibdeps where to find bundled proprietary shared libraries
+override_dh_shlibdeps:
+	dh_shlibdeps -l$(STAGING)/usr/lib/alpacabridge

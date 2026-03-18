@@ -1,0 +1,11 @@
+alpacabridge (1.0.0) stable; urgency=low
+
+  * Initial Debian package release.
+  * Installs AlpacaBridge ASCOM Alpaca HTTP server for astronomical devices.
+  * Includes ZWO (ASI cameras, EAF focuser, EFW filter wheel, CAA rotator),
+    QHY camera, iOptron mount, SynScan/Celestron mount, and WeeWX weather
+    support.
+  * Installs udev rules and QHY firmware for plug-and-play USB device access.
+  * Registers alpacabridge.service to start the server on each boot.
+
+ -- Joey Troy <joey.troy@gmail.com>  Mon, 16 Mar 2026 00:00:00 +0000
