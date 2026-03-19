@@ -1125,24 +1125,46 @@ public:
 
     int get_side_of_pier() const override {
         check_connected();
-        const auto now = std::chrono::steady_clock::now();
+
+        // Compute SideOfPier from the current hour angle rather than querying :Gm#.
+        // The :Gm# response from ZWO firmware does not reliably map to the ASCOM
+        // pierEast/pierWest convention, and get_destination_side_of_pier already uses
+        // this HA-based approach correctly.
+        double longitude = 0.0;
+        bool has_longitude = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (cached_pier_side_.has_value() && (now - cached_pier_side_at_) <= kFastPierSideTtl) {
-                return cached_pier_side_.value();
+            if (site_coords_valid_) {
+                longitude = site_longitude_deg_;
+                has_longitude = true;
             }
         }
 
+        if (has_longitude) {
+            const double current_ra = get_right_ascension();
+            const double lst_hours = compute_local_sidereal_time_hours(
+                std::chrono::system_clock::now(), longitude);
+            const double ha = normalize_hour_angle_hours(lst_hours - current_ra);
+            // HA >= 0 → target west of meridian → pierEast (0)
+            // HA <  0 → target east of meridian → pierWest (1)
+            const int side = ha >= 0.0 ? 0 : 1;
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_pier_side_ = side;
+            cached_pier_side_at_ = std::chrono::steady_clock::now();
+            return side;
+        }
+
+        // Fallback: site longitude not yet known, use :Gm# with ASCOM-correct mapping.
         const char direction = ZWOMountProtocolWrapper::instance().get_mount_direction();
         int side = -1;
         if (direction == 'E' || direction == 'e') {
-            side = 0;
+            side = 1;  // telescope pointing east → pierWest
         } else if (direction == 'W' || direction == 'w') {
-            side = 1;
+            side = 0;  // telescope pointing west → pierEast
         }
         std::lock_guard<std::mutex> lock(mutex_);
         cached_pier_side_ = side;
-        cached_pier_side_at_ = now;
+        cached_pier_side_at_ = std::chrono::steady_clock::now();
         return side;
     }
 
@@ -2353,18 +2375,34 @@ private:
             cached_horizontal_at_ = now;
         } catch (const std::exception&) {
         }
-        try {
-            const char direction = protocol.get_mount_direction();
-            int side = -1;
-            if (direction == 'E' || direction == 'e') {
-                side = 0;
-            } else if (direction == 'W' || direction == 'w') {
-                side = 1;
+        // Compute pier side from current hour angle (same logic as get_side_of_pier).
+        // :Gm# is not used because ZWO firmware's E/W response does not reliably map to the
+        // ASCOM pierEast/pierWest convention.
+        {
+            double longitude = 0.0;
+            double ra_hours = 0.0;
+            double ra_offset = 0.0;
+            bool has_all = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (site_coords_valid_ && cached_equatorial_.has_value()) {
+                    longitude = site_longitude_deg_;
+                    ra_hours = cached_equatorial_.value().ra_hours;
+                    ra_offset = ra_offset_hours_;
+                    has_all = true;
+                }
             }
-            std::lock_guard<std::mutex> lock(mutex_);
-            cached_pier_side_ = side;
-            cached_pier_side_at_ = now;
-        } catch (const std::exception&) {
+            if (has_all) {
+                double current_ra = std::fmod(ra_hours + ra_offset, 24.0);
+                if (current_ra < 0.0) current_ra += 24.0;
+                const double lst = compute_local_sidereal_time_hours(
+                    std::chrono::system_clock::now(), longitude);
+                const double ha = normalize_hour_angle_hours(lst - current_ra);
+                const int side = ha >= 0.0 ? 0 : 1;
+                std::lock_guard<std::mutex> lock(mutex_);
+                cached_pier_side_ = side;
+                cached_pier_side_at_ = now;
+            }
         }
     }
 
