@@ -38,6 +38,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
@@ -789,18 +790,22 @@ private:
 
     void configure_network_timeouts() {
         constexpr int kSocketTimeoutMs = 200;
+        constexpr int kTcpNoDelay = 1;
 #ifdef _WIN32
         const DWORD timeout = kSocketTimeoutMs;
         setsockopt(socket_handle_, SOL_SOCKET, SO_RCVTIMEO,
                    reinterpret_cast<const char*>(&timeout), sizeof(timeout));
         setsockopt(socket_handle_, SOL_SOCKET, SO_SNDTIMEO,
                    reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+        setsockopt(socket_handle_, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&kTcpNoDelay), sizeof(kTcpNoDelay));
 #else
         timeval timeout {};
         timeout.tv_sec = 0;
         timeout.tv_usec = kSocketTimeoutMs * 1000;
         setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, &kTcpNoDelay, sizeof(kTcpNoDelay));
 #endif
     }
 
