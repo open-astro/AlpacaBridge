@@ -12,6 +12,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 ## UNRELEASED
 
 ### Fixed
+- **iOptron Telescope `SiteLatitude` Write timing on x64 Wi-Fi** (AlpacaCore)
+  - `set_site_latitude()` was issuing two sequential round-trip commands (`:SLA` + `:SHE`) over Wi-Fi, totaling ~1.18s and exceeding the ConformU 1.0s response time target. Changed `set_hemisphere()` to use `send_command_blind` (fire-and-forget) so only the latitude command waits for a response, bringing the total well under 1.0s.
 - **ZWO CAA Rotator mechanical position when Reverse is enabled** (AlpacaCore)
   - `get_mechanical_position()` now un-applies the SDK’s reverse inversion (returns `360 - degree` when Reverse is on) so MechanicalPosition always reflects the true physical angle. `move_mechanical()` target position is set using the same logical angle so Position and MechanicalPosition stay consistent with ConformU expectations.
 - **iOptron Telescope AxisRate (ConformU)** (AlpacaCore)

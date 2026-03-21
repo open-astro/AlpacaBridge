@@ -1077,7 +1077,7 @@ void iOptronProtocolWrapper::set_latitude(double latitude_degrees) {
 }
 
 void iOptronProtocolWrapper::set_hemisphere(bool is_northern) {
-    send_command(is_northern ? ":SHE1#" : ":SHE0#", false);
+    send_command_blind(is_northern ? ":SHE1#" : ":SHE0#");
 }
 
 void iOptronProtocolWrapper::set_utc_time(std::chrono::system_clock::time_point utc_time) {
