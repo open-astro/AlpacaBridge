@@ -194,13 +194,14 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| AM3 | USB/Serial, Wi-Fi |  |  | [ConformU](AlpacaCore/conformu/ZWO/AM3/) |
+| AM3 | USB/Serial, Wi-Fi | ✓ |  | [ConformU](AlpacaCore/conformu/ZWO/AM3/) |
 | AM5 | USB/Serial, Wi-Fi |  |  | [ConformU](AlpacaCore/conformu/ZWO/AM5/) |
 | AM5N | USB/Serial, Wi-Fi |  |  | [ConformU](AlpacaCore/conformu/ZWO/AM5N/) |
 
 ### ZWO Telescope (ASI Mount) Driver Notes
 
 - **Protocol**: ZWO Mount Serial Communication Protocol (see `AlpacaCore/external/ZWO/AM/ZWO_Mount_Protocol.md`)
+- **AM3 (Linux x64)**: USB/serial and **Wi-Fi** supported. Recent fixes addressed `SyncToCoordinates` e4 recovery, timing-path round-trips, and PulseGuide accuracy/timeout behavior on network links.
 - **Connection**: Serial over USB or network (TCP). **Tested and working with USB and WiFi** on AM5N.
 - **Tested firmware**: Driver tested on **firmware 1.8.8** for the **AM5N**. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
 - **AM5N status**: PulseGuide and slew behavior validated over both USB and WiFi; timing tuned for high-latency (WiFi) connections.

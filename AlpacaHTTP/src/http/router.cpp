@@ -2959,15 +2959,10 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "slewtocoordinatesasync") {
-                // Debug logging
-                if (!request.body().empty()) {
-                    util::log_info("slewtocoordinatesasync body: " + request.body());
-                }
                 double ra = parse_double("RightAscension");
                 double dec = parse_double("Declination");
-                util::log_info("slewtocoordinatesasync parsed: RA=" + std::to_string(ra) + ", Dec=" + std::to_string(dec));
-                telescope->set_target_right_ascension(ra);
-                telescope->set_target_declination(dec);
+                // slew_to_coordinates_async sets targets internally; skip
+                // redundant set_target calls to avoid extra mutex round-trips.
                 telescope->slew_to_coordinates_async(ra, dec);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);

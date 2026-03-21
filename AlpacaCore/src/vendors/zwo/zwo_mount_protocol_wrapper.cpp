@@ -1179,7 +1179,7 @@ double ZWOMountProtocolWrapper::get_guide_rate() {
     return value;
 }
 
-void ZWOMountProtocolWrapper::set_guide_rate(double guide_rate) {
+double ZWOMountProtocolWrapper::set_guide_rate(double guide_rate) {
     if (!std::isfinite(guide_rate) || guide_rate < 0.10 || guide_rate > 0.90) {
         throw AlpacaException("Guide rate must be in [0.10,0.90]", AlpacaError::InvalidValue);
     }
@@ -1197,13 +1197,14 @@ void ZWOMountProtocolWrapper::set_guide_rate(double guide_rate) {
     try {
         const double readback = get_guide_rate();
         if (std::abs(readback - guide_rate) <= 0.02) {
-            return;
+            return readback;
         }
     } catch (const std::exception&) {
     }
 
     const double scaled = guide_rate * 15.0;
     send_rate(scaled, 1);
+    return guide_rate;
 }
 
 SiteInfo ZWOMountProtocolWrapper::get_site_info() {

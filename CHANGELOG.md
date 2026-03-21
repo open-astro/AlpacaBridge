@@ -16,6 +16,18 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - `get_mechanical_position()` now un-applies the SDK’s reverse inversion (returns `360 - degree` when Reverse is on) so MechanicalPosition always reflects the true physical angle. `move_mechanical()` target position is set using the same logical angle so Position and MechanicalPosition stay consistent with ConformU expectations.
 - **iOptron Telescope AxisRate (ConformU)** (AlpacaCore)
   - Tertiary axis (axis 2) now returns an empty axis rate range set instead of a single (0, 0) range, resolving ConformU issue: "Axis rate minimum and maximum values are both zero" for AxisRate:Tertiary.
+- **iOptron Telescope `SlewToCoordinatesAsync`** (AlpacaCore)
+  - Slew command is dispatched on a **background thread** so the method returns immediately, matching Alpaca async semantics.
+- **WeeWX ObservingConditions** (AlpacaCore)
+  - `supported_properties_` is built from actual snapshot data (and grows when sensors later gain finite values, e.g. SQM after dark). Missing sensors consistently raise **`PropertyNotImplemented`** for value, description, and time-since-update paths, fixing ConformU consistency issues; `ValueNotSet` is used only when the sensor is supported but data is not finite.
+- **ZWO Telescope (ASI Mount) `SideOfPier`** (AlpacaCore)
+  - When site longitude is known, pier side is derived from **hour angle** (aligned with destination pier logic) instead of relying on `:Gm#`. **`:Gm#` E/W fallback** mapping is corrected to ASCOM pierEast/pierWest. Improves ConformU behavior (including **AM3** USB validation).
+- **ZWO Telescope (AM3) Wi-Fi stability and timing** (AlpacaCore/AlpacaHTTP)
+  - `SyncToCoordinates` (error `e4`) now retries with abort+wait when the mount is moving.
+  - Timing-path violations addressed by pausing the poll thread, using cached state in critical sections, and removing redundant protocol round-trips.
+  - `PulseGuide` accuracy improved via offset reconciliation (instead of subtraction) and atomic base+offset reads to eliminate race conditions.
+  - `PulseGuide` timeout behavior improved by skipping hold delays between queued tasks for multi-axis pulses.
+  - HTTP timing-critical path cleaned up by removing debug logging and redundant calls.
 
 ### Changed
 - **iOptron Telescope name** (AlpacaCore)
@@ -34,6 +46,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Protocol docs path corrected from `external/ioptron/` to `external/iOptron/` in `driver_build.mdc` and `docs/development/driver-development.md`. RS-232 command language and README moved from `external/ioptron/` to `external/iOptron/`.
 - **SUPPORTED-DRIVERS.md**
   - ConformU validation links shortened (dates removed from link text). Dew Heater switch ConformU links point to `AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/`. ZWO Telescope (ASI Mount) table split into separate rows for AM3, AM5, and AM5N with ConformU links.
+- **SUPPORTED-DRIVERS.md**
+  - ZWO **AM3**: Wi-Fi status updated to reflect current support and timing-path fixes in the telescope driver/HTTP path.
+- **ConformU / QHY** (AlpacaCore)
+  - **QHY268C** Linux x64 report refreshed; redundant **`Linux-ARMv8.txt`** removed in favor of the **`Linux-arm64.txt`** report layout used elsewhere.
 
 ### Added
 - **Supported platforms** (README)
@@ -44,8 +60,11 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Troubleshooting** (AlpacaCore/docs/building/troubleshooting.md)
   - New section **Serial Port Connection Fails (Mounts, Focusers, etc.)**: port path in config, dialout permissions, device present and not in use, and server log hints; cross-reference to SUPPORTED-DRIVERS.md.
 - **ConformU test reports** (AlpacaCore/conformu/)
-  - ZWO (Linux x64): ASI cameras (ASI120MM Mini, ASI174MM Mini, ASI2600MC Pro, ASI2600MM Pro, ASI662MC), CAA rotator, Dew Heater Switch, EAF, EFW.
+  - ZWO (Linux x64): ASI cameras (ASI120MM Mini, ASI174MM Mini, ASI2600MC Pro, ASI2600MM Pro, ASI662MC), CAA rotator, Dew Heater Switch, EAF, EFW; **AM3** mount (USB).
   - iOptron telescope (Linux x64 USB).
+  - Linux **ARM64**: **QHY268C**; ZWO ASI cameras (same models as x64), Dew Heater Switch, CAA, EAF, EFW; **WeeWX** ObservingConditions; **iOptron** (USB and Wi‑Fi).
+- **Debian packaging** (repo root `debian/`)
+  - Source package layout: `control`, `copyright`, `rules`, `source/format`; **`alpacabridge.service`**; maintainer scripts **`alpacabridge.postinst`**, **`postrm`**, **`prerm`**. **`debian/rules`** adjusted for correct build/install behavior.
 
 ### Changed
 - **Platform support: Linux only**
