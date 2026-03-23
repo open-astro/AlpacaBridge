@@ -49,3 +49,12 @@ cmake_install.cmake
 *.gcov
 *.gcda
 *.gcno
+
+# Debian packaging build artifacts
+debian/.debhelper/
+debian/alpacabridge/
+debian/debhelper-build-stamp
+debian/files
+debian/*.debhelper
+debian/*.substvars
+obj-*/

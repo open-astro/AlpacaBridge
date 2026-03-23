@@ -85,10 +85,16 @@ override_dh_auto_install:
 	  $(QHY_SDK_DIR)/lib/udev/rules.d/85-qhyccd.rules \
 	  $(STAGING)/lib/udev/rules.d/
 
+	# --- Web UI assets ---
+	install -d $(STAGING)/usr/share/alpacabridge/web
+	cp -a $(CURDIR)/AlpacaHTTP/web/. $(STAGING)/usr/share/alpacabridge/web/
+
 	# --- Default device configuration (empty registry — populated at runtime) ---
 	install -d $(STAGING)/etc/alpacabridge
 	echo '[]' > $(STAGING)/etc/alpacabridge/registered_devices.json
 	chmod 644 $(STAGING)/etc/alpacabridge/registered_devices.json
+	# Symlink web UI into working directory so the server can find it
+	ln -sf /usr/share/alpacabridge/web $(STAGING)/etc/alpacabridge/web
 
 override_dh_auto_clean:
 	rm -rf $(BUILD_DIR)
