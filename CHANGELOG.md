@@ -11,106 +11,37 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ## UNRELEASED
 
-### Fixed
-- **iOptron Telescope `SiteLatitude` Write timing on x64 Wi-Fi** (AlpacaCore)
-  - `set_site_latitude()` was issuing two sequential round-trip commands (`:SLA` + `:SHE`) over Wi-Fi, totaling ~1.18s and exceeding the ConformU 1.0s response time target. Changed `set_hemisphere()` to use `send_command_blind` (fire-and-forget) so only the latitude command waits for a response, bringing the total well under 1.0s.
-- **ZWO CAA Rotator mechanical position when Reverse is enabled** (AlpacaCore)
-  - `get_mechanical_position()` now un-applies the SDK’s reverse inversion (returns `360 - degree` when Reverse is on) so MechanicalPosition always reflects the true physical angle. `move_mechanical()` target position is set using the same logical angle so Position and MechanicalPosition stay consistent with ConformU expectations.
-- **iOptron Telescope AxisRate (ConformU)** (AlpacaCore)
-  - Tertiary axis (axis 2) now returns an empty axis rate range set instead of a single (0, 0) range, resolving ConformU issue: "Axis rate minimum and maximum values are both zero" for AxisRate:Tertiary.
-- **iOptron Telescope `SlewToCoordinatesAsync`** (AlpacaCore)
-  - Slew command is dispatched on a **background thread** so the method returns immediately, matching Alpaca async semantics.
-- **WeeWX ObservingConditions** (AlpacaCore)
-  - `supported_properties_` is built from actual snapshot data (and grows when sensors later gain finite values, e.g. SQM after dark). Missing sensors consistently raise **`PropertyNotImplemented`** for value, description, and time-since-update paths, fixing ConformU consistency issues; `ValueNotSet` is used only when the sensor is supported but data is not finite.
-- **ZWO Telescope (ASI Mount) `SideOfPier`** (AlpacaCore)
-  - When site longitude is known, pier side is derived from **hour angle** (aligned with destination pier logic) instead of relying on `:Gm#`. **`:Gm#` E/W fallback** mapping is corrected to ASCOM pierEast/pierWest. Improves ConformU behavior (including **AM3** USB validation).
-- **ZWO Telescope (AM3) Wi-Fi stability and timing** (AlpacaCore/AlpacaHTTP)
-  - `SyncToCoordinates` (error `e4`) now retries with abort+wait when the mount is moving.
-  - Timing-path violations addressed by pausing the poll thread, using cached state in critical sections, and removing redundant protocol round-trips.
-  - `PulseGuide` accuracy improved via offset reconciliation (instead of subtraction) and atomic base+offset reads to eliminate race conditions.
-  - `PulseGuide` timeout behavior improved by skipping hold delays between queued tasks for multi-axis pulses.
-  - HTTP timing-critical path cleaned up by removing debug logging and redundant calls.
-
-### Changed
-- **iOptron Telescope name** (AlpacaCore)
-  - Driver name is now always **"iOptron Telescope"**. Removed all `:MountInfo#` querying at connect and in `get_name()`, and removed the per-model name mapping table from the iOptron protocol wrapper. This avoids connect timeouts and server instability when the mount is slow or unavailable; SideOfPier read remains supported per the RS-232 spec.
-- **ZWO EAF Focuser** (AlpacaCore)
-  - `get_step_size()` now throws `PropertyNotImplemented` instead of returning 0.0, for correct ASCOM/ConformU behavior when step size is not available. Unit test (`test_zwo_focuser.cpp`) updated to expect this exception.
-- **Driver versions** (AlpacaCore)
-  - SynScan telescope and ZWO telescope drivers report `get_driver_version()` **1.0.0** (was 0.1.0).
-- **Web UI** (AlpacaHTTP)
-  - Serial port field hints are Linux-only: `/dev/ttyUSB0` and `/dev/ttyACM0` (removed macOS/Windows examples).
-- **SUPPORTED-DRIVERS.md**
-  - Added FAQ: "Why do cameras work without a port but mounts need one?" explaining SDK vs serial port configuration.
-- **build_and_run.sh**
-  - Optional env `ALPACA_ADD_DIALOUT=ON|OFF` (default ON): when installing udev rules on Linux, optionally add the current user to the `dialout` group for serial/USB device access, with a reminder to log out and back in. Env doc comment updated (ALPACA_INSTALL_UDEV_RULES, ALPACA_ADD_DIALOUT, ALPACACORE_ENABLE_ALL_VENDORS, ALPACAHTTP_USE_BOOST_BEAST).
-- **iOptron external path** (AlpacaCore)
-  - Protocol docs path corrected from `external/ioptron/` to `external/iOptron/` in `driver_build.mdc` and `docs/development/driver-development.md`. RS-232 command language and README moved from `external/ioptron/` to `external/iOptron/`.
-- **SUPPORTED-DRIVERS.md**
-  - ConformU validation links shortened (dates removed from link text). Dew Heater switch ConformU links point to `AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/`. ZWO Telescope (ASI Mount) table split into separate rows for AM3, AM5, and AM5N with ConformU links.
-- **SUPPORTED-DRIVERS.md**
-  - ZWO **AM3**: Wi-Fi status updated to reflect current support and timing-path fixes in the telescope driver/HTTP path.
-- **ConformU / QHY** (AlpacaCore)
-  - **QHY268C** Linux x64 report refreshed; redundant **`Linux-ARMv8.txt`** removed in favor of the **`Linux-arm64.txt`** report layout used elsewhere.
-
 ### Added
-- **Supported platforms** (README)
-  - Documented support for Debian 13 (Trixie) on NUC x64 and Raspberry Pi 4/5 ARM64.
-- **Unit tests**
-  - iOptron telescope driver tests (`test_ioptron_telescope.cpp`): Defaults, Target Range Validation, Axis Rate Ranges (including tertiary empty range), Disconnected Behavior.
-  - ZWO Dew Heater Switch driver tests (`test_zwo_switch.cpp`): Defaults, Disconnected Behavior, Invalid Switch ID.
-- **Troubleshooting** (AlpacaCore/docs/building/troubleshooting.md)
-  - New section **Serial Port Connection Fails (Mounts, Focusers, etc.)**: port path in config, dialout permissions, device present and not in use, and server log hints; cross-reference to SUPPORTED-DRIVERS.md.
-- **ConformU test reports** (AlpacaCore/conformu/)
-  - ZWO (Linux x64): ASI cameras (ASI120MM Mini, ASI174MM Mini, ASI2600MC Pro, ASI2600MM Pro, ASI662MC), CAA rotator, Dew Heater Switch, EAF, EFW; **AM3** mount (USB).
-  - iOptron telescope (Linux x64 USB).
-  - Linux **ARM64**: **QHY268C**; ZWO ASI cameras (same models as x64), Dew Heater Switch, CAA, EAF, EFW; **WeeWX** ObservingConditions; **iOptron** (USB and Wi‑Fi).
-- **Debian packaging** (repo root `debian/`)
-  - Source package layout: `control`, `copyright`, `rules`, `source/format`; **`alpacabridge.service`**; maintainer scripts **`alpacabridge.postinst`**, **`postrm`**, **`prerm`**. **`debian/rules`** adjusted for correct build/install behavior.
+- Gemini Automatic Astro Focuser Pro driver (AlpacaCore/AlpacaHTTP)
+  - New vendor driver for Gemini/MyFocuserPro2-compatible focusers using the MyFP2 serial protocol. Supports serial (USB), TCP, and auto-detection of CH340/CH341 USB-serial adapters.
+  - Auto-detection scans `/dev/serial/by-id/` for CH340/CH341 devices and probes with firmware handshake. CH340 DTR reset handling clears HUPCL to prevent double MCU reset.
+  - Async connect with polling to avoid ASCOM Alpaca client timeouts (NINA compatibility).
+  - ConformU compliant: out-of-range moves clamp to 0/MaxStep; motor speed set to fast on connect.
+  - AlpacaHTTP web UI: vendor dropdown, connection type selector (Auto-detect/Serial/Network).
+  - Catch2 unit tests: 7 test cases, 42 assertions.
+- Unit tests for iOptron telescope and ZWO Dew Heater Switch drivers.
+- Troubleshooting docs: serial port connection failures.
+- Refreshed ConformU test reports for all drivers on Linux x64 and ARM64.
+- Debian packaging (`debian/`): service file, maintainer scripts.
+
+### Fixed
+- iOptron Telescope: `SiteLatitude` write timing on Wi-Fi, `SlewToCoordinatesAsync` async dispatch, tertiary AxisRate empty range.
+- ZWO CAA Rotator: mechanical position when Reverse is enabled.
+- ZWO Telescope (AM3): `SideOfPier` hour-angle derivation, `SyncToCoordinates` retry on moving mount, `PulseGuide` accuracy and timing, Wi-Fi stability.
+- WeeWX ObservingConditions: consistent `PropertyNotImplemented` for missing sensors.
 
 ### Changed
-- **Platform support: Linux only**
-  - Removed Windows and macOS support. Build, docs, and source now target Linux (Debian 13 Trixie, NUC x64, Raspberry Pi 4/5 ARM64) only.
-- **README**
-  - Quick Start: Linux-only (shell scripts); removed Windows CMD/PowerShell and macOS/Linux labels.
-  - Optional settings: removed `ALPACA_BUILD_CONFIG` (Windows only).
-  - Added "Supported platforms" section.
-- **SUPPORTED-DRIVERS.md**
-  - Moved from `AlpacaCore/SUPPORTED-DRIVERS.md` to repo root `SUPPORTED-DRIVERS.md`.
-  - Removed Windows and macOS columns from all driver tables; Linux (x64) and Linux (ARMv8) only.
-  - Removed Windows Notes; Linux Notes retained. Driver notes updated to Linux-only (SDK platforms, libudev/libusb, no Windows/macOS references).
-  - ConformU and path links updated for root location (`AlpacaCore/conformu/`, `AlpacaCore/external/`). References to SUPPORTED-DRIVERS.md updated in `AlpacaCore/conformu/README.md` and `AlpacaCore/docs/building/building.md`.
-- **Documentation** (AlpacaCore/docs)
-  - docs/README.md: Installation link now Linux-only (Debian 13 Trixie, NUC x64, RPi 4/5).
-  - Installation: Linux-only (Debian/Ubuntu, Fedora); removed macOS and Windows sections.
-  - Architecture: Platform support set to Linux (Debian 13, NUC x64, RPi 4/5).
-  - Testing and Troubleshooting: Catch2/compiler instructions Linux-only; removed "Build Errors on macOS" and "Build Errors on Windows".
-  - Building: ZWO SDK path references updated to `external/ZWO/ASI_Camera_SDK/`.
-- **AGENTS.md**
-  - Removed macOS ZWO libusb note and Windows ConformU log prefix note.
-- **CMake**
-  - AlpacaCore: Compiler warnings always GCC/Clang style (no MSVC branch).
-  - ZWO: Linux-only; library paths for x64 and ARM64 only; removed WIN32/APPLE branches, DLL copy, and macOS frameworks; libudev always used on UNIX.
-  - AlpacaHTTP: Removed Windows ZWO DLL copy block.
-  - SynScan, iOptron: Removed WIN32 (ws2_32) and MSVC blocks.
-  - QHY: Removed `if(NOT APPLE)` around libudev/Threads (Linux-only).
-- **Source (Linux-only)**
-  - AlpacaHTTP `socket_utils.h`: Removed `#ifdef _WIN32` Winsock branch; POSIX-only.
-  - AlpacaHTTP `router.cpp`: UTC date parsing uses `timegm()` only (removed `_mkgmtime` for Windows).
-  - ZWO, SynScan, iOptron protocol wrappers: Removed Windows includes and WSA init/cleanup; Linux includes and fd init only.
-- **External layout**
-  - ZWO ASI Camera SDK moved from `external/ASI_Camera_SDK` to `external/ZWO/ASI_Camera_SDK`. All CMake, docs, `.gitignore`, and Cursor rules updated to the new path.
-- **Vendor SDK / testapp docs** (external, untouched by build)
-  - QHY testapp `common/README`: Removed osxdownloadfirmware section (macOS).
-  - QHY testapp `test_live_multicam_opencv/README.md`: Linux-only build steps (Windows section removed).
-- **Version**
-  - Workspace version set to **1.0.0** (root `VERSION`; README version badge updated).
+- Platform support: Linux only (Debian 13 Trixie, NUC x64, Raspberry Pi 4/5 ARM64). Removed Windows and macOS from build, docs, CMake, and source.
+- iOptron Telescope name is now always "iOptron Telescope" (removed `:MountInfo#` querying).
+- ZWO EAF Focuser `get_step_size()` throws `PropertyNotImplemented` instead of returning 0.0.
+- Driver versions: SynScan and ZWO telescope drivers now report 1.0.0.
+- SUPPORTED-DRIVERS.md moved to repo root; tables and links updated for Linux-only.
+- ZWO ASI Camera SDK moved to `external/ZWO/ASI_Camera_SDK`.
+- `build_and_run.sh`: optional `ALPACA_ADD_DIALOUT` env for serial/USB group access.
+- Version set to 1.0.0.
 
 ### Removed
-- **Windows scripts**
-  - `run_all_tests.cmd` removed (Linux-only; use `run_all_tests.sh`).
-- **ConformU**
-  - Removed all Windows and macOS ConformU test reports from `AlpacaCore/conformu/` (Linux-only support; reports were from non-supported platforms).
+- Windows/macOS scripts, ConformU reports, and platform-specific code paths.
 
 ## [0.13.0] - 2026-03-12
 

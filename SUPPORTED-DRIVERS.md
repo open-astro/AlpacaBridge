@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-03-21 
+## Updated 2026-03-23
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -76,6 +76,18 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB (requires libusb-1.0)
 
 ## Focuser Drivers
+
+### Gemini
+
+| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|---------------|-----------------|--------|
+| Gemini Astro Focuser Pro | USB/Serial | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro Focuser Pro/) |
+
+### Gemini Focuser Driver Notes
+
+- **Protocol**: MyFocuserPro2 serial protocol (no SDK required)
+- **Connection**: USB/Serial (CH340/CH341 adapter) or TCP. Auto-detection supported.
+- **Auto-detection**: Scans `/dev/serial/by-id/` for CH340/CH341 USB-serial devices and probes with firmware handshake. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
 
 ### ZWO
 

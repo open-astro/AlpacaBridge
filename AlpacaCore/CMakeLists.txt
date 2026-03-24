@@ -19,6 +19,7 @@ option(ALPACACORE_ENABLE_QHY "Enable QHY vendor support" OFF)
 option(ALPACACORE_ENABLE_IOPTRON "Enable iOptron vendor support" OFF)
 option(ALPACACORE_ENABLE_SYNSCAN "Enable SynScan vendor support" OFF)
 option(ALPACACORE_ENABLE_WEEWX "Enable WeeWX vendor support" OFF)
+option(ALPACACORE_ENABLE_GEMINI "Enable Gemini focuser vendor support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
@@ -28,6 +29,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_IOPTRON ON)
     set(ALPACACORE_ENABLE_SYNSCAN ON)
     set(ALPACACORE_ENABLE_WEEWX ON)
+    set(ALPACACORE_ENABLE_GEMINI ON)
 endif()
 
 # Compiler warnings (Linux)
@@ -124,6 +126,13 @@ if(ALPACACORE_ENABLE_WEEWX)
     endif()
 endif()
 
+if(ALPACACORE_ENABLE_GEMINI)
+    add_subdirectory(src/vendors/gemini)
+    if(TARGET alpacacore_gemini)
+        target_link_libraries(alpacacore PRIVATE alpacacore_gemini)
+    endif()
+endif()
+
 # Custom target to clean everything including CMake cache
 # Usage: cmake --build . --target alpacacore-clean-all
 # Note: Named with project prefix to avoid conflicts when used as subdirectory
@@ -201,6 +210,15 @@ endif()
 
 if(ALPACACORE_ENABLE_WEEWX AND TARGET alpacacore_weewx)
     install(TARGETS alpacacore_weewx
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_GEMINI AND TARGET alpacacore_gemini)
+    install(TARGETS alpacacore_gemini
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib
