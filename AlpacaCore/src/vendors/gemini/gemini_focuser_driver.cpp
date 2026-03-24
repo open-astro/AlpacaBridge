@@ -84,7 +84,14 @@ public:
     }
 
     void disconnect() override {
-        start_connection_task(false);
+        // Disconnect synchronously — the operation is trivial (close fd + set flag)
+        // and ASCOM clients expect Connected to be false immediately after.
+        stop_connection_thread();
+        try {
+            set_connected(false);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("Gemini", "Focuser disconnect error: " + std::string(e.what()));
+        }
     }
 
     bool get_connecting() const override {

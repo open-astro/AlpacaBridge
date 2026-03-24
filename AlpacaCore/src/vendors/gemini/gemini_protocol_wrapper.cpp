@@ -271,9 +271,14 @@ public:
                                   AlpacaError::NotConnected);
         }
 
-        // Set temperature reporting to Celsius (after handshake succeeds)
+        // Set temperature reporting to Celsius (after handshake succeeds).
+        // This is a blind command (no response), so use send_command_blind_locked.
+        // Using send_command_locked here would block for the full serial timeout
+        // waiting for a response that never arrives, and any late MCU output can
+        // desynchronize subsequent reads.
         try {
-            send_command_locked(":16#");
+            send_command_blind_locked(":16#");
+            std::this_thread::sleep_for(std::chrono::milliseconds(COMMAND_DELAY_MS));
         } catch (const std::exception&) {
             // Non-fatal — some firmware versions may not support this
         }
