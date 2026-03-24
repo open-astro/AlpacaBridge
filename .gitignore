@@ -42,6 +42,7 @@ cmake_install.cmake
 .idea/
 *.swp
 *.swo
+*.kate-swp
 *~
 
 # Test results
