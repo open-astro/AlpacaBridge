@@ -17,7 +17,20 @@ case "$1" in
             usermod -aG plugdev alpacabridge || true
         fi
 
-        # Set ownership of the working / config directory
+        # Grant dialout membership for serial device access (focusers, mounts)
+        if getent group dialout > /dev/null 2>&1; then
+            usermod -aG dialout alpacabridge || true
+        fi
+
+        # Grant input membership for USB HID device access (ZWO focusers, filter wheels)
+        if getent group input > /dev/null 2>&1; then
+            usermod -aG input alpacabridge || true
+        fi
+
+        # Create and set ownership of the working / config directory
+        if [ ! -d /etc/alpacabridge ]; then
+            mkdir -p /etc/alpacabridge
+        fi
         chown -R alpacabridge:alpacabridge /etc/alpacabridge
 
         # Register the bundled QHY shared library with the dynamic linker
