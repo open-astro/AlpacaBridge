@@ -10,11 +10,13 @@ STAGING   := $(CURDIR)/debian/alpacabridge
 
 # Architecture-specific vendor SDK paths
 ifeq ($(DEB_HOST_ARCH),arm64)
-  QHY_SDK_DIR     := $(CURDIR)/AlpacaCore/external/QHY/sdk_Arm64_25.09.29
-  ZWO_EAF_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/armv8
+  QHY_SDK_DIR         := $(CURDIR)/AlpacaCore/external/QHY/sdk_Arm64_25.09.29
+  ZWO_EAF_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/armv8
+  ZWO_CAMERA_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/armv8
 else
-  QHY_SDK_DIR     := $(CURDIR)/AlpacaCore/external/QHY/sdk_linux64_25.09.29
-  ZWO_EAF_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/x64
+  QHY_SDK_DIR         := $(CURDIR)/AlpacaCore/external/QHY/sdk_linux64_25.09.29
+  ZWO_EAF_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/x64
+  ZWO_CAMERA_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/x64
 endif
 
 # Cross-compilation flags (no-op when building natively)
@@ -50,6 +52,9 @@ override_dh_auto_install:
 	# --- Bundled vendor shared libraries ---
 	install -d $(STAGING)/usr/lib/alpacabridge
 	cp -a $(QHY_SDK_DIR)/usr/local/lib/libqhyccd.so* \
+	  $(STAGING)/usr/lib/alpacabridge/
+	# ZWO ASI Camera shared library (used by SmartGuider via zwoasi)
+	cp -a $(ZWO_CAMERA_LIB_DIR)/libASICamera2.so* \
 	  $(STAGING)/usr/lib/alpacabridge/
 	# ZWO EAF sdbus wrappers (x64 only — absent on armv8, skip gracefully)
 	@for f in "$(ZWO_EAF_LIB_DIR)/libWrapperSdbus.so" \
