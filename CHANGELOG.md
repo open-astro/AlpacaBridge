@@ -13,11 +13,11 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ### Added
 - Gemini Automatic Astro Focuser Pro driver (AlpacaCore/AlpacaHTTP)
-  - New vendor driver for Gemini/MyFocuserPro2-compatible focusers using the MyFP2 serial protocol. Supports serial (USB), TCP, and auto-detection of CH340/CH341 USB-serial adapters.
+  - New vendor driver for Gemini/MyFocuserPro2-compatible focusers using the MyFP2 serial protocol. Supports serial (USB) and auto-detection of CH340/CH341 USB-serial adapters.
   - Auto-detection scans `/dev/serial/by-id/` for CH340/CH341 devices and probes with firmware handshake. CH340 DTR reset handling clears HUPCL to prevent double MCU reset.
   - Async connect with polling to avoid ASCOM Alpaca client timeouts (NINA compatibility).
   - ConformU compliant: out-of-range moves clamp to 0/MaxStep; motor speed set to fast on connect.
-  - AlpacaHTTP web UI: vendor dropdown, connection type selector (Auto-detect/Serial/Network).
+  - AlpacaHTTP web UI: vendor dropdown, connection type selector (Auto-detect/Serial).
   - Catch2 unit tests: 7 test cases, 42 assertions.
 - Unit tests for iOptron telescope and ZWO Dew Heater Switch drivers.
 - Troubleshooting docs: serial port connection failures.

@@ -11,7 +11,7 @@ target_include_directories(alpacacore_gemini PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 
-# Gemini uses the MyFocuserPro2 serial protocol over USB or TCP.
-# No external SDK is required — only standard POSIX/Winsock APIs.
+# Gemini uses the MyFocuserPro2 serial protocol over USB serial.
+# No external SDK is required — only standard POSIX/Win32 APIs.
 find_package(Threads REQUIRED)
 target_link_libraries(alpacacore_gemini PRIVATE Threads::Threads)

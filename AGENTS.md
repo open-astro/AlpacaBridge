@@ -33,6 +33,18 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 - Core/driver layers should avoid heavy framework dependencies.
 - License headers must remain SSPL v1 and unmodified in all source files.
 
+## Target Architectures
+
+- All drivers must build and run on both **arm64** (ARMv8, e.g. Raspberry Pi 4/5) and **amd64** (x86_64).
+- When writing driver code, account for architecture differences:
+  - **Endianness**: both targets are little-endian today, but do not assume byte order — use explicit serialization when packing/unpacking wire data.
+  - **Alignment**: arm64 is stricter — do not cast arbitrary byte buffers to struct pointers; use `memcpy` or per-field reads.
+  - **Data type sizes**: use fixed-width types (`int32_t`, `uint16_t`, etc.) for hardware registers, protocol fields, and SDK structs. Do not assume `int`, `long`, or pointer sizes.
+  - **Vendor SDK libraries**: must be provided for both architectures under `AlpacaCore/external/<VENDOR>/lib/linux/armv8/` and `lib/linux/x64/`. If a vendor only ships one architecture, document the gap and guard the build with an architecture check in CMake.
+  - **Floating-point**: avoid `long double` (80-bit on x64, 128-bit on arm64). Use `double` for all floating-point protocol values.
+- CMake, `debian/rules`, `build_and_run.sh`, and `install_alpaca_service.sh` all detect the host architecture at build/install time — keep them in sync when adding architecture-dependent paths.
+- Test on both architectures before declaring a driver ConformU-validated. ConformU results are stored per-architecture in `AlpacaCore/conformu/`.
+
 ## Driver Implementation Rules
 
 - Use 3-layer driver pattern:
@@ -169,16 +181,16 @@ Devices: Telescope.
 
 Protocol documentation: `AlpacaCore/external/iOptron/`. No external SDK required — uses RS-232 serial communication directly.
 
-### Gemini (Astro Focuser Pro)
+### Gemini (Automatic Astro Focuser Pro)
 
 Devices: Focuser.
 
-Protocol: MyFocuserPro2 serial protocol (Arduino/ESP32-based). Reference docs in `AlpacaCore/external/Losmandy/` (Gemini L4 command set). No external SDK required.
+Protocol: MyFocuserPro2 serial protocol (Arduino-based). Reference docs in `AlpacaCore/external/Losmandy/` (Gemini L4 command set). No external SDK required.
 
-Connection types: USB serial (CH340/CH341 adapters) or TCP/WiFi (default `192.168.4.1:2020` for ESP32 AP).
+Connection types: USB serial (CH340/CH341 adapters) only. No WiFi support.
 
 - **DTR/HUPCL quirk**: CH340 USB-serial adapters assert DTR on port open, which resets the Arduino/ESP32 MCU. During auto-detect probe, the driver clears HUPCL before closing the port so DTR stays high. On the subsequent connect, the MCU does not reset again. Do not remove this HUPCL handling — it prevents a ~4 second double-boot penalty and possible connection failure.
-- Auto-detection scans `/dev/serial/by-id/` for CH340/CH341 chips (USB vendor `1a86`), falls back to `/dev/ttyUSB0` through `/dev/ttyUSB9`. Network focusers are not auto-detected.
+- Auto-detection scans `/dev/serial/by-id/` for CH340/CH341 chips (USB vendor `1a86`), falls back to `/dev/ttyUSB0` through `/dev/ttyUSB9`.
 - Connection uses 3 retry attempts with staggered wait times (100ms, 2s, 1s) — worst case ~9.1 seconds, designed to stay under the ASCOM client 10-second timeout.
 - Motor speed is forced to fast (`:1502#`) on connect so moves complete within ConformU's 60-second timeout.
 - Temperature is forced to Celsius (`:16#`) on connect — do not assume the focuser's default unit.

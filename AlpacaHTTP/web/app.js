@@ -702,9 +702,6 @@ function startEditDevice(device) {
         } else if (connType === 'serial') {
             setFormValue('gemini-port-path', config.portPath);
             setFormValue('gemini-baud-rate', config.baudRate);
-        } else {
-            setFormValue('gemini-host', config.host);
-            setFormValue('gemini-tcp-port', config.tcpPort);
         }
         const geminiConnTypeEl = document.getElementById('gemini-connection-type');
         if (geminiConnTypeEl) {
@@ -1321,7 +1318,6 @@ if (geminiConnectionType) {
         const type = this.value;
         document.getElementById('gemini-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
         document.getElementById('gemini-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
-        document.getElementById('gemini-network-fields').style.display = type === 'network' ? 'block' : 'none';
     });
 }
 
@@ -1901,12 +1897,6 @@ document.getElementById('device-form').addEventListener('submit', async function
             const baudRate = readOptionalNumber(formData, 'baudRate');
             if (baudRate !== null) {
                 deviceData.baudRate = baudRate;
-            }
-        } else {
-            deviceData.host = formData.get('host') || '192.168.4.1';
-            const tcpPort = readOptionalNumber(formData, 'tcpPort');
-            if (tcpPort !== null) {
-                deviceData.tcpPort = tcpPort;
             }
         }
     }

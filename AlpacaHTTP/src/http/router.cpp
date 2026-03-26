@@ -6471,11 +6471,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::string conn_type = config.value("connectionType", "auto");
 
         std::unique_ptr<alpacacore::FocuserDriver> focuser;
-        if (conn_type == "network") {
-            std::string host = config.value("host", "192.168.4.1");
-            int tcp_port = config.value("tcpPort", 2020);
-            focuser = alpacacore::vendor::gemini::create_gemini_focuser_tcp(device_number, host, tcp_port);
-        } else if (conn_type == "serial") {
+        if (conn_type == "serial") {
             std::string port_path = config.value("portPath", "");
             if (port_path.empty()) {
                 // No port specified with serial mode — fall through to auto-detect
@@ -6580,9 +6576,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         if (connection_type == "serial") {
             copy_if_present("portPath");
             copy_if_present("baudRate");
-        } else if (connection_type == "network") {
-            copy_if_present("host");
-            copy_if_present("tcpPort");
         }
     }
 

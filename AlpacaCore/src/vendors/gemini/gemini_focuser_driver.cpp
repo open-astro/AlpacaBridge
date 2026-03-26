@@ -48,7 +48,7 @@ public:
     }
 
     std::string get_name() const override {
-        return "Gemini Astro Focuser Pro";
+        return "Gemini Automatic Astro Focuser Pro";
     }
 
     DeviceType get_device_type() const override {
@@ -283,16 +283,6 @@ std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
     config.type = ConnectionType::Serial;
     config.serial_port = serial_port;
     config.baud_rate = baud_rate;
-    return std::make_unique<GeminiFocuserDriver>(device_number, std::move(config));
-}
-
-std::unique_ptr<FocuserDriver> create_gemini_focuser_tcp(int device_number,
-                                                          const std::string& host,
-                                                          int port) {
-    ConnectionConfig config;
-    config.type = ConnectionType::Network;
-    config.host = host;
-    config.tcp_port = port;
     return std::make_unique<GeminiFocuserDriver>(device_number, std::move(config));
 }
 

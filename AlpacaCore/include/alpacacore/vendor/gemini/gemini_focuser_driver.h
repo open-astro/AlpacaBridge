@@ -20,7 +20,7 @@
 namespace alpacacore::vendor::gemini {
 
 /**
- * @brief Create a Gemini Astro Focuser Pro driver via serial port.
+ * @brief Create a Gemini Automatic Astro Focuser Pro driver via serial port.
  *
  * Uses the MyFocuserPro2 serial protocol over USB serial.
  *
@@ -34,31 +34,7 @@ std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
                                                       int baud_rate = 9600);
 
 /**
- * @brief Create a Gemini Astro Focuser Pro driver via TCP/WiFi.
- *
- * Uses the MyFocuserPro2 serial protocol over TCP socket.
- *
- * @param device_number Alpaca device number
- * @param host TCP hostname or IP address (default "192.168.4.1")
- * @param port TCP port (default 2020)
- * @return Unique pointer to focuser driver
- */
-/**
- * @brief Create a Gemini Astro Focuser Pro driver via TCP/WiFi.
- *
- * Uses the MyFocuserPro2 serial protocol over TCP socket.
- *
- * @param device_number Alpaca device number
- * @param host TCP hostname or IP address (default "192.168.4.1")
- * @param port TCP port (default 2020)
- * @return Unique pointer to focuser driver
- */
-std::unique_ptr<FocuserDriver> create_gemini_focuser_tcp(int device_number,
-                                                          const std::string& host = "192.168.4.1",
-                                                          int port = 2020);
-
-/**
- * @brief Create a Gemini Astro Focuser Pro driver by auto-detecting the serial port.
+ * @brief Create a Gemini Automatic Astro Focuser Pro driver by auto-detecting the serial port.
  *
  * Scans for CH340/CH341 USB-serial adapters and probes each with the
  * MyFocuserPro2 handshake. The focuser_index selects which detected

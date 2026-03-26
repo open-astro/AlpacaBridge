@@ -81,12 +81,12 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| Gemini Astro Focuser Pro | USB/Serial | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro%20Focuser%20Pro/) |
+| Gemini Automatic Astro Focuser Pro | USB/Serial | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro%20Focuser%20Pro/) |
 
 ### Gemini Focuser Driver Notes
 
 - **Protocol**: MyFocuserPro2 serial protocol (no SDK required)
-- **Connection**: USB/Serial (CH340/CH341 adapter) or TCP. Auto-detection supported.
+- **Connection**: USB/Serial (CH340/CH341 adapter). Auto-detection supported.
 - **Auto-detection**: Scans `/dev/serial/by-id/` for CH340/CH341 USB-serial devices and probes with firmware handshake. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
 
 ### ZWO

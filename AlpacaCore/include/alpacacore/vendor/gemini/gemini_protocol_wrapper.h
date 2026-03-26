@@ -24,8 +24,7 @@ namespace alpacacore::vendor::gemini {
  * @brief Connection type for the Gemini focuser.
  */
 enum class ConnectionType {
-    Serial,   // USB serial port
-    Network   // WiFi TCP socket
+    Serial   // USB serial port
 };
 
 /**
@@ -35,10 +34,7 @@ struct ConnectionConfig {
     ConnectionType type = ConnectionType::Serial;
     std::string serial_port;                // e.g., "/dev/ttyUSB0"
     int baud_rate = 9600;
-    std::string host = "192.168.4.1";       // TCP host
-    int tcp_port = 2020;                    // TCP port
     int serial_timeout_s = 5;
-    int tcp_timeout_s = 10;
 };
 
 /**
@@ -67,7 +63,7 @@ std::vector<GeminiPortInfo> enumerate_gemini_ports();
  * Implements the MyFocuserPro2 serial command protocol.
  * Commands are sent as ":XX#" and responses end with '#'.
  *
- * Supports both USB serial and TCP/WiFi connections.
+ * Supports USB serial connections.
  */
 class GeminiProtocolWrapper {
 public:

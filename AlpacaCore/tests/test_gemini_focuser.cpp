@@ -37,16 +37,7 @@ TEST_CASE("Gemini Focuser Driver - Defaults", "[gemini][focuser][unit]") {
     REQUIRE(driver->get_device_type() == alpacacore::DeviceType::Focuser);
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE(driver->get_connected() == false);
-    CHECK(driver->get_name() == "Gemini Astro Focuser Pro");
-}
-
-TEST_CASE("Gemini Focuser Driver - TCP Constructor", "[gemini][focuser][unit]") {
-    auto driver = alpacacore::vendor::gemini::create_gemini_focuser_tcp(0, "192.168.4.1", 2020);
-
-    REQUIRE(driver->get_device_type() == alpacacore::DeviceType::Focuser);
-    REQUIRE(driver->get_device_number() == 0);
-    REQUIRE(driver->get_connected() == false);
-    CHECK(driver->get_name() == "Gemini Astro Focuser Pro");
+    CHECK(driver->get_name() == "Gemini Automatic Astro Focuser Pro");
 }
 
 TEST_CASE("Gemini Focuser Driver - Metadata", "[gemini][focuser][unit]") {

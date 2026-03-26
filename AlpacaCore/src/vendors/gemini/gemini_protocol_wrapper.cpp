@@ -22,18 +22,11 @@
 #include <string>
 
 #ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <windows.h>
-#pragma comment(lib, "ws2_32.lib")
 #else
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 #include <errno.h>
 #endif
 
@@ -212,11 +205,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         config_ = config;
 
-        if (config_.type == ConnectionType::Serial) {
-            connect_serial();
-        } else {
-            connect_network();
-        }
+        connect_serial();
 
         // Handshake: request firmware version with retries.
         //
@@ -283,10 +272,19 @@ public:
             // Non-fatal — some firmware versions may not support this
         }
 
+        // Flush any stale data before sending the speed command so it
+        // arrives cleanly (the MCU may echo or ACK the temperature command).
+#ifndef _WIN32
+        tcflush(serial_fd_, TCIOFLUSH);
+#else
+        PurgeComm(serial_handle_, PURGE_RXCLEAR | PURGE_TXCLEAR);
+#endif
+
         // Set motor speed to fast so full-range moves complete within
         // ASCOM ConformU's 60-second timeout
         try {
             send_command_blind_locked(":1502#");
+            std::this_thread::sleep_for(std::chrono::milliseconds(COMMAND_DELAY_MS));
         } catch (const std::exception&) {
         }
 
@@ -639,61 +637,12 @@ private:
 
         tcflush(serial_fd_, TCIOFLUSH);
 #endif
-        connection_type_ = ConnectionType::Serial;
-    }
-
-    void connect_network() {
-#ifdef _WIN32
-        WSADATA wsa;
-        WSAStartup(MAKEWORD(2, 2), &wsa);
-        socket_fd_ = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
-#else
-        socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-#endif
-        if (socket_fd_ < 0) {
-            throw AlpacaException("Failed to create socket", AlpacaError::NotConnected);
-        }
-
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(config_.tcp_port));
-
-        struct hostent* he = gethostbyname(config_.host.c_str());
-        if (he == nullptr) {
-            // Try direct IP
-            if (inet_pton(AF_INET, config_.host.c_str(), &addr.sin_addr) <= 0) {
-                close_socket();
-                throw AlpacaException("Cannot resolve host: " + config_.host,
-                                      AlpacaError::NotConnected);
-            }
-        } else {
-            std::memcpy(&addr.sin_addr, he->h_addr_list[0], static_cast<size_t>(he->h_length));
-        }
-
-        if (::connect(socket_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-            close_socket();
-            throw AlpacaException("Failed to connect to " + config_.host + ":" +
-                                  std::to_string(config_.tcp_port),
-                                  AlpacaError::NotConnected);
-        }
-
-        // Set socket timeouts
-        struct timeval tv{};
-        tv.tv_sec = config_.tcp_timeout_s;
-        tv.tv_usec = 0;
-        setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-        connection_type_ = ConnectionType::Network;
+        // Serial connection established
     }
 
     void disconnect_locked() {
         connected_ = false;
-        if (connection_type_ == ConnectionType::Serial) {
-            close_serial();
-        } else {
-            close_socket();
-        }
+        close_serial();
     }
 
     void close_serial() {
@@ -710,42 +659,15 @@ private:
 #endif
     }
 
-    void close_socket() {
-#ifdef _WIN32
-        if (socket_fd_ >= 0) {
-            closesocket(static_cast<SOCKET>(socket_fd_));
-            socket_fd_ = -1;
-        }
-#else
-        if (socket_fd_ >= 0) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-        }
-#endif
-    }
-
     void write_data(const std::string& data) {
 #ifdef _WIN32
-        if (connection_type_ == ConnectionType::Serial) {
-            DWORD bytes_written = 0;
-            if (!WriteFile(serial_handle_, data.c_str(), static_cast<DWORD>(data.length()),
-                           &bytes_written, nullptr)) {
-                throw AlpacaException("Serial write failed", AlpacaError::DriverException);
-            }
-        } else {
-            int sent = send(static_cast<SOCKET>(socket_fd_), data.c_str(),
-                            static_cast<int>(data.length()), 0);
-            if (sent < 0) {
-                throw AlpacaException("Socket write failed", AlpacaError::DriverException);
-            }
+        DWORD bytes_written = 0;
+        if (!WriteFile(serial_handle_, data.c_str(), static_cast<DWORD>(data.length()),
+                       &bytes_written, nullptr)) {
+            throw AlpacaException("Serial write failed", AlpacaError::DriverException);
         }
 #else
-        ssize_t written = 0;
-        if (connection_type_ == ConnectionType::Serial) {
-            written = write(serial_fd_, data.c_str(), data.length());
-        } else {
-            written = send(socket_fd_, data.c_str(), data.length(), 0);
-        }
+        ssize_t written = write(serial_fd_, data.c_str(), data.length());
         if (written < 0) {
             throw AlpacaException("Write failed: " + std::string(std::strerror(errno)),
                                   AlpacaError::DriverException);
@@ -758,9 +680,7 @@ private:
         response.reserve(MAX_RESPONSE_LEN);
         char ch = 0;
 
-        int timeout_ms = (connection_type_ == ConnectionType::Serial)
-                             ? config_.serial_timeout_s * 1000
-                             : config_.tcp_timeout_s * 1000;
+        int timeout_ms = config_.serial_timeout_s * 1000;
 
         auto start = std::chrono::steady_clock::now();
 
@@ -773,31 +693,19 @@ private:
 
             bool got_char = false;
 #ifdef _WIN32
-            if (connection_type_ == ConnectionType::Serial) {
-                DWORD bytes_read = 0;
-                if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
-                    got_char = true;
-                }
-            } else {
-                int r = recv(static_cast<SOCKET>(socket_fd_), &ch, 1, 0);
-                if (r == 1) {
-                    got_char = true;
-                }
+            DWORD bytes_read = 0;
+            if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
+                got_char = true;
             }
 #else
-            ssize_t r = 0;
-            if (connection_type_ == ConnectionType::Serial) {
-                r = read(serial_fd_, &ch, 1);
-            } else {
-                r = recv(socket_fd_, &ch, 1, 0);
-            }
+            ssize_t r = read(serial_fd_, &ch, 1);
             if (r == 1) {
                 got_char = true;
             }
 #endif
 
             if (got_char) {
-                // Ignore CR/LF that TCP bridges may insert
+                // Ignore CR/LF
                 if (ch == '\r' || ch == '\n') {
                     continue;
                 }
@@ -831,7 +739,6 @@ private:
 
     mutable std::mutex mutex_;
     ConnectionConfig config_;
-    ConnectionType connection_type_ = ConnectionType::Serial;
     bool connected_ = false;
 
 #ifdef _WIN32
@@ -839,7 +746,6 @@ private:
 #else
     int serial_fd_ = -1;
 #endif
-    int socket_fd_ = -1;
 };
 
 // --- GeminiProtocolWrapper public interface forwarding ---
