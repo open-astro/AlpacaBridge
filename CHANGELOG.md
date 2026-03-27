@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [1.0.1] - 2026-03-27
+
+### Added
+- SynScan Telescope: Sky-Watcher HEQ5 PRO ConformU validation (x64 and ARM64).
+
+### Changed
+- SynScan Telescope: Device name changed from "SynScan Mount"/"SynScan Telescope" to "SynScan V3/V4 Telescope" across the driver and web portal to clarify hand controller compatibility.
+- SynScan `SideOfPier` mapping: swapped `pierEast`/`pierWest` values to match ASCOM convention.
+- SUPPORTED-DRIVERS.md: Added Sky-Watcher HEQ5 PRO to SynScan mount table.
+
 ## [1.0.0] - 2026-03-26
 
 ### Added

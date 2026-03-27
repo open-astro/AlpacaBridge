@@ -1999,7 +1999,7 @@ function renderDeviceSettings(config) {
         ['baudRate', 'Baud Rate'],
         ['host', 'Host'],
         ['tcpPort', 'TCP Port'],
-        ['synscanVersion', 'SynScan Version'],
+        ['synscanVersion', 'SynScan V3/V4 Version'],
         ['cameraIndex', 'Camera Index'],
         ['cameraId', 'Camera ID'],
         ['filterwheelIndex', 'Filter Wheel Index'],

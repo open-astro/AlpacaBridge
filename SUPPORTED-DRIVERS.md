@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-03-23
+## Updated 2026-03-27
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -165,17 +165,17 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB/Serial or Wi-Fi
 - **Tested firmware**: Drivers test on **firmware V241201**. Other firmware versions and models may work but have not been verified.
 
-### SynScan
+### SynScan V3/V4
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| SynScan V3/V4 | USB/Serial (hand controller) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/) |
+| Sky-Watcher HEQ5 PRO | USB/Serial (hand controller) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/Sky-Watcher%20HEQ5%20PRO/) |
 
 ### SynScan Driver Notes
 
 - **Protocol**: Sky-Watcher SynScan V3/V4 protocol
 - **Connection**: USB/Serial via hand controller (tested)
-- **Tested Mount**: Orion Atlas EQ-G
+- **Sky-Watcher HEQ5 PRO Firmware**: Hand controller firmware 4.42.00, motor controller firmware 3.46
 
 ### ZWO
 
