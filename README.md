@@ -4,7 +4,7 @@
 
 AlpacaBridge is a unified workspace for building, testing, and running a complete ASCOM Alpaca server. It combines AlpacaCore (driver library) and AlpacaHTTP (HTTP server) with a focus on clean, standards-compliant Alpaca implementations and ConformU-validated drivers.
 
-#### [1.0.0] - 2026-03-14 [CHANGELOG Information](CHANGELOG.md)
+#### [1.0.0] - 2026-03-26 [CHANGELOG Information](CHANGELOG.md)
 
 ## AlpacaBridge Explained
 

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## UNRELEASED
+## [1.0.0] - 2026-03-26
 
 ### Added
 - Gemini Automatic Astro Focuser Pro driver (AlpacaCore/AlpacaHTTP)
@@ -23,12 +23,17 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - Troubleshooting docs: serial port connection failures.
 - Refreshed ConformU test reports for all drivers on Linux x64 and ARM64.
 - Debian packaging (`debian/`): service file, maintainer scripts.
+- ZWO ASI Camera shared library packaging for Debian (`.deb` ships `libASICamera2.so`).
+- `ld.so.conf.d` registration so vendor shared libraries are discoverable system-wide.
+- Favicon using OpenAstro logo.
 
 ### Fixed
 - iOptron Telescope: `SiteLatitude` write timing on Wi-Fi, `SlewToCoordinatesAsync` async dispatch, tertiary AxisRate empty range.
 - ZWO CAA Rotator: mechanical position when Reverse is enabled.
-- ZWO Telescope (AM3): `SideOfPier` hour-angle derivation, `SyncToCoordinates` retry on moving mount, `PulseGuide` accuracy and timing, Wi-Fi stability.
+- ZWO Telescope (AM3): `SideOfPier` hour-angle derivation, `SyncToCoordinates` retry on moving mount, `PulseGuide` accuracy and timing, Wi-Fi stability, TCP_NODELAY for Nagle latency.
 - WeeWX ObservingConditions: consistent `PropertyNotImplemented` for missing sensors.
+- Gemini Focuser: amd64 move timeout and disconnect issues.
+- Missing web UI assets in Debian package.
 
 ### Changed
 - Platform support: Linux only (Debian 13 Trixie, NUC x64, Raspberry Pi 4/5 ARM64). Removed Windows and macOS from build, docs, CMake, and source.
@@ -38,6 +43,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - SUPPORTED-DRIVERS.md moved to repo root; tables and links updated for Linux-only.
 - ZWO ASI Camera SDK moved to `external/ZWO/ASI_Camera_SDK`.
 - `build_and_run.sh`: optional `ALPACA_ADD_DIALOUT` env for serial/USB group access.
+- Debian `postinst` adds `dialout` and `input` groups for USB device access.
 - Version set to 1.0.0.
 
 ### Removed
