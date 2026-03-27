@@ -1032,12 +1032,14 @@ public:
 
 private:
     static int map_pointing_state_to_side(char side) {
+        // SynScan 'E' = OTA on eastern side of meridian → observing east (HA < 0) → ASCOM pierWest.
+        // SynScan 'W' = OTA on western side of meridian → observing west (HA > 0) → ASCOM pierEast.
         // TODO: Adjust mapping for southern hemisphere per SynScan pointing-state rules.
         if (side == 'E') {
-            return 0;
+            return 1;
         }
         if (side == 'W') {
-            return 1;
+            return 0;
         }
         return -1;
     }
