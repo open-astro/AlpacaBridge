@@ -168,9 +168,9 @@ public:
 
     std::string get_name() const override {
         if (mount_model_id_ >= 0) {
-            return "SynScan Mount " + std::to_string(mount_model_id_);
+            return "SynScan V3/V4 Telescope " + std::to_string(mount_model_id_);
         }
-        return "SynScan Telescope";
+        return "SynScan V3/V4 Telescope";
     }
 
     DeviceType get_device_type() const override {
