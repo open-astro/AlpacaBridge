@@ -107,7 +107,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Source | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------|------------|---------------|-----------------|--------|
-| WeeWX HTTP JSON | HTTP(S) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ObservingConditions/WeeWX/) |
+| WeeWX HTTP JSON | HTTP(S) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/WeeWX/) |
 
 ### WeeWX ObservingConditions Driver Notes
 
