@@ -56,6 +56,11 @@ override_dh_auto_install:
 	# ZWO ASI Camera shared library (used by SmartGuider via zwoasi)
 	cp -a $(ZWO_CAMERA_LIB_DIR)/libASICamera2.so* \
 	  $(STAGING)/usr/lib/alpacabridge/
+
+	# --- Register vendor library path with the dynamic linker ---
+	install -d $(STAGING)/etc/ld.so.conf.d
+	echo '/usr/lib/alpacabridge' > $(STAGING)/etc/ld.so.conf.d/alpacabridge.conf
+	chmod 644 $(STAGING)/etc/ld.so.conf.d/alpacabridge.conf
 	# ZWO EAF sdbus wrappers (x64 only — absent on armv8, skip gracefully)
 	@for f in "$(ZWO_EAF_LIB_DIR)/libWrapperSdbus.so" \
 	           "$(ZWO_EAF_LIB_DIR)/libsdbus-c++.so.2"; do \

@@ -33,7 +33,7 @@ case "$1" in
         fi
         chown -R alpacabridge:alpacabridge /etc/alpacabridge
 
-        # Register the bundled QHY shared library with the dynamic linker
+        # Register bundled vendor shared libraries (QHY, ZWO) with the dynamic linker
         ldconfig
 
         # Reload udev rules so newly installed rules take effect immediately

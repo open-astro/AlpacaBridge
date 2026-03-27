@@ -81,6 +81,8 @@ When a vendor SDK provides shared libraries (`.so`) that are needed at runtime �
   1. **`debian/rules`** — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/` in `override_dh_auto_install`. This ensures the `.deb` package ships the shared library.
   2. **`build_and_run.sh`** — detect architecture, copy `.so*` to `/usr/local/lib/`, run `ldconfig`. Add inside the udev rules block alongside existing QHY/ZWO install logic.
   3. **`install_alpaca_service.sh`** — same as `build_and_run.sh`, inside the `install_udev_rules()` function.
+- **Dynamic linker registration**: the `.deb` ships `/etc/ld.so.conf.d/alpacabridge.conf` which adds `/usr/lib/alpacabridge` to the system library search path. The `postinst` script runs `ldconfig` so the libraries are discoverable immediately after install. This is critical — without it, companion projects like SmartGuider cannot load vendor shared libraries (e.g. `zwoasi` Python package needs `libASICamera2.so`).
+- **Camera drivers and SmartGuider**: when adding a new camera vendor, always ship the vendor's shared library in the `.deb`. SmartGuider (`/home/dev/Documents/GitHub/SmartGuider/`) uses camera vendor libraries directly for autoguiding (e.g. ZWO via `zwoasi`, QHY via `libqhyccd`). If the shared library is missing or not registered with `ldconfig`, guiding will fail at runtime.
 - Keep the install logic in `build_and_run.sh` and `install_alpaca_service.sh` in sync — they must install the same set of vendor libraries.
 - When a vendor releases a new SDK version, update the `.so` files in `external/` and bump symlink targets (e.g. `libASICamera2.so.1.41` → `libASICamera2.so.1.42`).
 
