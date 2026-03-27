@@ -138,7 +138,7 @@ public:
 
     void pulse_guide(int direction, int duration_ms);
     double get_guide_rate();
-    void set_guide_rate(double guide_rate);
+    double set_guide_rate(double guide_rate);
 
     SiteInfo get_site_info();
     void set_site_info(const SiteInfo& info);

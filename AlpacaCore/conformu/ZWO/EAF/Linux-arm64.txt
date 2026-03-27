@@ -1,0 +1,76 @@
+10:35:07.894 ASCOM Universal Device Conformance Checker Version 4.2.1.48140, Build time: Mon 09 February 2026 05:12:17          
+10:35:07.915                                              
+10:35:07.916 Operating system is Debian GNU/Linux 13 (trixie), Processor is ARM 64bit, Application is 64bit.          
+10:35:07.916                                              
+10:35:07.917 Alpaca device: ZWO EAF (127.0.0.1:6800 Focuser/0)          
+10:35:07.918                                              
+10:35:07.920 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 6800, Alpaca device number: 0
+10:35:07.931 CreateDevice                        INFO     Alpaca device created OK
+10:35:07.931 CreateDevice                        INFO     Successfully created driver
+10:35:09.004 CreateDevice                        OK       Found a valid interface version: 3
+10:35:09.005 CreateDevice                        OK       Driver instance created successfully
+10:35:09.005                                              
+10:35:09.006 Connect to device                            
+10:35:09.221 Connected                           OK       Connected to device successfully using Connected = True
+10:35:09.223                                              
+10:35:09.231 Common Driver Methods                        
+10:35:09.234 InterfaceVersion                    OK       3
+10:35:09.242 Connected                           OK       True
+10:35:09.251 Description                         OK       ZWO EAF Focuser Driver
+10:35:09.256 DriverInfo                          OK       AlpacaCore ZWO EAF Focuser Driver
+10:35:09.260 DriverVersion                       OK       1.0.0
+10:35:09.264 Name                                OK       EAF
+10:35:09.264                                              
+10:35:09.265 Action                              INFO     Conform cannot test the Action method
+10:35:09.280 SupportedActions                    OK       Driver returned an empty action list
+10:35:09.281                                              
+10:35:09.281 DeviceState                         INFO     DeviceState tests omitted - DeviceState is not a member of this interface version.
+10:35:09.282                                              
+10:35:09.282 Properties                                   
+10:35:09.300 Absolute                            OK       True
+10:35:09.306 IsMoving                            OK       False
+10:35:09.353 MaxStep                             OK       49782
+10:35:09.358 MaxIncrement                        OK       49782
+10:35:09.365 Position                            OK       35626
+10:35:09.400 StepSize                            OK       Optional member returned a NotImplementedException error.
+10:35:09.406 TempCompAvailable                   OK       False
+10:35:09.409 TempComp Read                       OK       False
+10:35:09.416 TempComp Write                      OK       Temperature compensation is not available and a NotImplementedException error was generated as expected
+10:35:09.438 Temperature                         OK       31.68000030517578
+10:35:09.439                                              
+10:35:09.441 Methods                                      
+10:35:09.455 Halt                                OK       Focuser halted OK
+10:35:28.708 Move - TempComp False               OK       Absolute move OK
+10:35:47.933                                              
+10:35:47.934 Disconnect from device                       
+10:35:47.951 Connected                           OK       False
+10:35:47.951                                              
+10:35:47.952 Conformance test has finished                
+10:35:47.952                                              
+10:35:47.954 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+10:35:47.954                                     
+10:35:47.955 Timing Summary                               See Help for further information.
+10:35:47.955 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+10:35:47.955 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+10:35:47.956 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+10:35:47.956 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+10:35:47.956                                              
+10:35:47.956 InterfaceVersion                             At 10:35:09.233 InterfaceVersion         0.000 seconds. ✓ (FAST)
+10:35:47.956 Connected                                    At 10:35:09.242 Connected                0.008 seconds. ✓ (FAST)
+10:35:47.957 Description                                  At 10:35:09.251 Description              0.007 seconds. ✓ (FAST)
+10:35:47.957 DriverInfo                                   At 10:35:09.255 DriverInfo               0.004 seconds. ✓ (FAST)
+10:35:47.957 DriverVersion                                At 10:35:09.260 DriverVersion            0.004 seconds. ✓ (FAST)
+10:35:47.957 Name                                         At 10:35:09.264 Name                     0.003 seconds. ✓ (FAST)
+10:35:47.957 SupportedActions                             At 10:35:09.280 SupportedActions         0.015 seconds. ✓ (FAST)
+10:35:47.957 Absolute                                     At 10:35:09.299 Absolute                 0.014 seconds. ✓ (FAST)
+10:35:47.957 IsMoving                                     At 10:35:09.306 IsMoving                 0.005 seconds. ✓ (FAST)
+10:35:47.957 MaxStep                                      At 10:35:09.352 MaxStep                  0.046 seconds. ✓ (FAST)
+10:35:47.957 MaxIncrement                                 At 10:35:09.358 MaxIncrement             0.005 seconds. ✓ (FAST)
+10:35:47.957 Position                                     At 10:35:09.364 Position                 0.006 seconds. ✓ (FAST)
+10:35:47.958 TempCompAvailable                            At 10:35:09.406 TempCompAvailable        0.005 seconds. ✓ (FAST)
+10:35:47.958 TempComp Read                                At 10:35:09.409 TempComp Read            0.002 seconds. ✓ (FAST)
+10:35:47.958 Temperature                                  At 10:35:09.438 Temperature              0.014 seconds. ✓ (FAST)
+10:35:47.958 Halt                                         At 10:35:09.454 Halt                     0.007 seconds. ✓ (STANDARD)
+10:35:47.958 Move to 40604                                At 10:35:09.679 Move to 40604            0.207 seconds. ✓ (STANDARD)
+10:35:47.958                                              
+10:35:47.959 Congratulations, all members returned within their target response times!!          

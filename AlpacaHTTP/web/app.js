@@ -694,6 +694,19 @@ function startEditDevice(device) {
         setFormValue('weewx-url', config.weewxUrl);
         setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
         setFormValue('weewx-timeout', config.timeoutMs);
+    } else if (vendor === 'gemini') {
+        const connType = config.connectionType || 'auto';
+        setFormValue('gemini-connection-type', connType);
+        if (connType === 'auto') {
+            setFormValue('gemini-focuser-index', config.focuserIndex);
+        } else if (connType === 'serial') {
+            setFormValue('gemini-port-path', config.portPath);
+            setFormValue('gemini-baud-rate', config.baudRate);
+        }
+        const geminiConnTypeEl = document.getElementById('gemini-connection-type');
+        if (geminiConnTypeEl) {
+            geminiConnTypeEl.dispatchEvent(new Event('change'));
+        }
     }
     setFormValue('camera-index', config.cameraIndex);
     setFormValue('camera-id', config.cameraId);
@@ -1221,6 +1234,11 @@ function updateVendorOptions() {
         weewxOption.disabled = !isObservingConditions;
         weewxOption.hidden = !isObservingConditions;
     }
+    const geminiOption = vendorSelect.querySelector('option[value="gemini"]');
+    if (geminiOption) {
+        geminiOption.disabled = !isFocuser;
+        geminiOption.hidden = !isFocuser;
+    }
 
     if (!isTelescope && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
@@ -1236,6 +1254,9 @@ function updateVendorOptions() {
         vendorSelect.value = '';
     }
     if (!isObservingConditions && vendorSelect.value === 'weewx') {
+        vendorSelect.value = '';
+    }
+    if (!isFocuser && vendorSelect.value === 'gemini') {
         vendorSelect.value = '';
     }
 
@@ -1259,6 +1280,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('qhy-config').style.display = 'block';
     } else if (vendor === 'weewx') {
         document.getElementById('weewx-config').style.display = 'block';
+    } else if (vendor === 'gemini') {
+        document.getElementById('gemini-config').style.display = 'block';
     }
 
     updateZwoConfigFields();
@@ -1286,6 +1309,15 @@ if (zwoMountConnectionType) {
         const type = this.value;
         document.getElementById('zwo-mount-serial-config').style.display = type === 'serial' ? 'block' : 'none';
         document.getElementById('zwo-mount-network-config').style.display = type === 'network' ? 'block' : 'none';
+    });
+}
+
+const geminiConnectionType = document.getElementById('gemini-connection-type');
+if (geminiConnectionType) {
+    geminiConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('gemini-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('gemini-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -1853,6 +1885,19 @@ document.getElementById('device-form').addEventListener('submit', async function
         const timeoutMs = readOptionalNumber(formData, 'timeoutMs');
         if (timeoutMs !== null) {
             deviceData.timeoutMs = timeoutMs;
+        }
+    } else if (deviceData.vendor === 'gemini') {
+        const geminiConnType = document.getElementById('gemini-connection-type');
+        deviceData.connectionType = geminiConnType ? geminiConnType.value : 'auto';
+        if (deviceData.connectionType === 'auto') {
+            const focuserIndex = readOptionalNumber(formData, 'focuserIndex');
+            deviceData.focuserIndex = focuserIndex !== null ? focuserIndex : 0;
+        } else if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('portPath') || '';
+            const baudRate = readOptionalNumber(formData, 'baudRate');
+            if (baudRate !== null) {
+                deviceData.baudRate = baudRate;
+            }
         }
     }
 

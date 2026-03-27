@@ -33,27 +33,15 @@
 #include <optional>
 #include <vector>
 
-#ifdef _WIN32
-    #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
-    #endif
-    #ifndef NOMINMAX
-    #define NOMINMAX
-    #endif
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-    #include <windows.h>
-    #pragma comment(lib, "ws2_32.lib")
-#else
-    #include <arpa/inet.h>
-    #include <cerrno>
-    #include <fcntl.h>
-    #include <netdb.h>
-    #include <netinet/in.h>
-    #include <sys/socket.h>
-    #include <termios.h>
-    #include <unistd.h>
-#endif
+#include <arpa/inet.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
 
 namespace alpacacore::vendor::zwo {
 
@@ -802,18 +790,22 @@ private:
 
     void configure_network_timeouts() {
         constexpr int kSocketTimeoutMs = 200;
+        constexpr int kTcpNoDelay = 1;
 #ifdef _WIN32
         const DWORD timeout = kSocketTimeoutMs;
         setsockopt(socket_handle_, SOL_SOCKET, SO_RCVTIMEO,
                    reinterpret_cast<const char*>(&timeout), sizeof(timeout));
         setsockopt(socket_handle_, SOL_SOCKET, SO_SNDTIMEO,
                    reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+        setsockopt(socket_handle_, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&kTcpNoDelay), sizeof(kTcpNoDelay));
 #else
         timeval timeout {};
         timeout.tv_sec = 0;
         timeout.tv_usec = kSocketTimeoutMs * 1000;
         setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, &kTcpNoDelay, sizeof(kTcpNoDelay));
 #endif
     }
 
@@ -1192,7 +1184,7 @@ double ZWOMountProtocolWrapper::get_guide_rate() {
     return value;
 }
 
-void ZWOMountProtocolWrapper::set_guide_rate(double guide_rate) {
+double ZWOMountProtocolWrapper::set_guide_rate(double guide_rate) {
     if (!std::isfinite(guide_rate) || guide_rate < 0.10 || guide_rate > 0.90) {
         throw AlpacaException("Guide rate must be in [0.10,0.90]", AlpacaError::InvalidValue);
     }
@@ -1210,13 +1202,14 @@ void ZWOMountProtocolWrapper::set_guide_rate(double guide_rate) {
     try {
         const double readback = get_guide_rate();
         if (std::abs(readback - guide_rate) <= 0.02) {
-            return;
+            return readback;
         }
     } catch (const std::exception&) {
     }
 
     const double scaled = guide_rate * 15.0;
     send_rate(scaled, 1);
+    return guide_rate;
 }
 
 SiteInfo ZWOMountProtocolWrapper::get_site_info() {

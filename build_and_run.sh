@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Optional env: ALPACA_INSTALL_UDEV_RULES=ON|OFF, ALPACA_ADD_DIALOUT=ON|OFF, ALPACACORE_ENABLE_ALL_VENDORS, ALPACAHTTP_USE_BOOST_BEAST
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,6 +8,7 @@ HTTP_DIR="${ROOT_DIR}/AlpacaHTTP"
 HTTP_BEAST="${ALPACAHTTP_USE_BOOST_BEAST:-OFF}"
 CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
 INSTALL_UDEV_RULES="${ALPACA_INSTALL_UDEV_RULES:-ON}"
+ADD_DIALOUT="${ALPACA_ADD_DIALOUT:-ON}"
 
 if [[ ! -d "${CORE_DIR}" ]]; then
   echo "AlpacaCore not found at ${CORE_DIR}"
@@ -57,8 +59,31 @@ if [[ "${INSTALL_UDEV_RULES}" == "ON" && "${OSTYPE:-}" == "linux"* ]]; then
     fi
   fi
 
+  # Install ZWO ASI Camera shared library (used by SmartGuider via zwoasi)
+  zwo_camera_lib_dir=""
+  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
+    zwo_camera_lib_dir="${CORE_DIR}/external/ZWO/ASI_Camera_SDK/lib/linux/armv8"
+  elif [[ "${arch}" == "x86_64" ]]; then
+    zwo_camera_lib_dir="${CORE_DIR}/external/ZWO/ASI_Camera_SDK/lib/linux/x64"
+  fi
+  if [[ -n "${zwo_camera_lib_dir}" && -f "${zwo_camera_lib_dir}/libASICamera2.so" ]]; then
+    echo "Installing ZWO ASI Camera shared library to /usr/local/lib"
+    sudo cp -a "${zwo_camera_lib_dir}/libASICamera2.so"* /usr/local/lib/
+    sudo ldconfig
+  fi
+
   sudo udevadm control --reload-rules
   sudo udevadm trigger
+
+  if [[ "${ADD_DIALOUT}" == "ON" ]]; then
+    if id -nG | tr ' ' '\n' | grep -q '^dialout$'; then
+      echo "User $USER is already in the dialout group."
+    else
+      echo "Adding $USER to the dialout group (required for serial/USB device access)."
+      sudo usermod -aG dialout "$USER"
+      echo "You must log out and back in (or run: newgrp dialout) for the change to take effect."
+    fi
+  fi
 fi
 
 if [[ "${OSTYPE:-}" == "darwin"* ]]; then

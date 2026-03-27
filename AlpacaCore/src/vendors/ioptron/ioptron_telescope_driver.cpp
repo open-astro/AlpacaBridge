@@ -117,10 +117,7 @@ public:
     }
     
     std::string get_name() const override {
-        if (mount_info_.model_name.empty()) {
-            return "iOptron Telescope";
-        }
-        return "iOptron " + mount_info_.model_name;
+        return "iOptron Telescope";
     }
     
     DeviceType get_device_type() const override {
@@ -188,15 +185,7 @@ public:
             ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
             if (protocol.connect(connection_info_)) {
                 ALPACA_LOG_INFO("iOptron", "protocol.connect() returned true");
-                // For connection semantics, consider the mount "connected" once the
-                // serial/TCP link is established, just like the legacy AlpacaPi
-                // driver. Model information (if needed) can be queried lazily by
-                // higher-level code using other commands.
                 connected_ = true;
-                if (mount_info_.model_name.empty()) {
-                    mount_info_.model_name = "iOptron";
-                }
-                mount_info_.model_name = "iOptron";
                 site_info_valid_ = false;
                 position_cache_valid_ = false;
                 altaz_cache_valid_ = false;
@@ -958,7 +947,8 @@ public:
 
     std::vector<std::pair<double, double>> get_axis_rate_ranges(int axis) const override {
         if (axis != 0 && axis != 1) {
-            return {{0.0, 0.0}};
+            // Tertiary axis not supported; empty range set per ASCOM/ConformU (avoids min=max=0 issue).
+            return {};
         }
         const auto& rates = axis_rate_steps_deg_per_sec();
         std::vector<std::pair<double, double>> ranges;
@@ -1302,8 +1292,26 @@ public:
     }
     
     void slew_to_coordinates_async(double ra, double dec) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        start_slew_to_coordinates_locked(ra, dec, true);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            prepare_slew_state_locked(ra, dec, "SlewToCoordinatesAsync");
+        }
+        try {
+            std::thread([this, ra, dec]() {
+                std::lock_guard<std::mutex> lock(mutex_);
+                try {
+                    dispatch_slew_command_locked(ra, dec, true, "SlewToCoordinatesAsync");
+                } catch (const std::exception& e) {
+                    slew_in_progress_ = false;
+                    ALPACA_LOG_WARN("iOptron", std::string("Async slew failed: ") + e.what());
+                }
+            }).detach();
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            slew_in_progress_ = false;
+            throw AlpacaException(std::string("Failed to start async slew: ") + e.what(),
+                                  AlpacaError::DriverException);
+        }
     }
     
     void slew_to_target() override {
@@ -2423,7 +2431,7 @@ private:
     int device_number_;
     ConnectionInfo connection_info_;
     bool connected_;
-    MountInfo mount_info_;
+    mutable MountInfo mount_info_;
     mutable std::mutex mutex_;
     
     // Target coordinates

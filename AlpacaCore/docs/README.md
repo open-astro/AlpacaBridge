@@ -6,7 +6,7 @@ Welcome to the AlpacaCore documentation. This directory contains comprehensive g
 
 ### Getting Started
 
-- **[Installation](getting-started/installation.md)** - Prerequisites and installation instructions for macOS, Linux, and Windows
+- **[Installation](getting-started/installation.md)** - Prerequisites and installation instructions for Linux (Debian 13 Trixie, NUC x64, Raspberry Pi 4/5)
 
 ### Building
 

@@ -6,10 +6,7 @@ This guide covers building, running, and writing tests for AlpacaCore.
 
 To build and run tests, you need a testing framework installed:
 
-- **Catch2** (recommended): 
-  - macOS: `brew install catch2`
-  - Linux: Use your package manager (e.g., `sudo apt-get install catch2`)
-  - Windows: Use vcpkg or download from https://github.com/catchorg/Catch2
+- **Catch2** (recommended): Use your package manager (e.g. `sudo apt-get install catch2` on Debian/Ubuntu), or build from source: https://github.com/catchorg/Catch2
 - **doctest** (fallback): Alternative testing framework
 
 The build system will automatically detect and use whichever is available.

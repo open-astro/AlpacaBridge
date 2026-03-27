@@ -44,7 +44,7 @@ This keeps the repository clean while allowing important documentation to be ver
 
 ## Example: ZWO SDK
 
-The ZWO SDK is vendored as a minimal subset in `external/ASI_Camera_SDK/`, so
+The ZWO SDK is vendored as a minimal subset in `external/ZWO/ASI_Camera_SDK/`, so
 no manual download is required for standard builds. If you need to update the
 SDK version, replace only the allowlisted files and keep the set minimal.
 

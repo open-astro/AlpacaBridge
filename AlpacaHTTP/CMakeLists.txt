@@ -50,6 +50,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/CMakeLists.txt")
     if(TARGET alpacacore_weewx)
         add_definitions(-DALPACACORE_ENABLE_WEEWX)
     endif()
+    if(TARGET alpacacore_gemini)
+        add_definitions(-DALPACACORE_ENABLE_GEMINI)
+    endif()
 else()
     # AlpacaCore is installed system-wide
     find_package(AlpacaCore REQUIRED)
@@ -69,6 +72,9 @@ else()
     endif()
     if(TARGET alpacacore_weewx)
         add_definitions(-DALPACACORE_ENABLE_WEEWX)
+    endif()
+    if(TARGET alpacacore_gemini)
+        add_definitions(-DALPACACORE_ENABLE_GEMINI)
     endif()
 endif()
 
@@ -158,42 +164,6 @@ install(DIRECTORY include/alpacahttp
 # Example application
 add_executable(alpacahttp_server examples/simple_server/main.cpp)
 target_link_libraries(alpacahttp_server alpacahttp)
-
-if(WIN32 AND TARGET alpacahttp_server)
-    set(ALPACACORE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore")
-    set(ZWO_SDK_ROOT "${ALPACACORE_ROOT}/external/ASI_Camera_SDK")
-    set(ZWO_EAF_ROOT "${ALPACACORE_ROOT}/external/ZWO/EAF")
-    set(ZWO_EFW_ROOT "${ALPACACORE_ROOT}/external/ZWO/EFW")
-    set(ZWO_CAA_ROOT "${ALPACACORE_ROOT}/external/ZWO/CAA")
-
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        set(ZWO_ASI_DLL "${ZWO_SDK_ROOT}/lib/windows/x64/ASICamera2.dll")
-        set(ZWO_EAF_DLL "${ZWO_EAF_ROOT}/EAF_Windows_SDK_V1.7.7/lib/Windows/x64/Release/EAF_focuser.dll")
-        set(ZWO_EFW_DLL "${ZWO_EFW_ROOT}/EFW_Windows_SDK_V1.8.4/lib/x64/Release/EFW_filter.dll")
-        set(ZWO_CAA_DLL "${ZWO_CAA_ROOT}/lib/windows/x64/CAA.dll")
-        if(EXISTS "${ZWO_CAA_ROOT}/lib/windows/x64/CAA_SRC.dll")
-            set(ZWO_CAA_DLL "${ZWO_CAA_ROOT}/lib/windows/x64/CAA_SRC.dll")
-        endif()
-    else()
-        set(ZWO_ASI_DLL "${ZWO_SDK_ROOT}/lib/windows/x86/ASICamera2.dll")
-        set(ZWO_EAF_DLL "${ZWO_EAF_ROOT}/EAF_Windows_SDK_V1.7.7/lib/Windows/Win32/Release/EAF_focuser.dll")
-        set(ZWO_EFW_DLL "${ZWO_EFW_ROOT}/EFW_Windows_SDK_V1.8.4/lib/Win32/Release/EFW_filter.dll")
-        set(ZWO_CAA_DLL "${ZWO_CAA_ROOT}/lib/windows/x86/CAA.dll")
-        if(EXISTS "${ZWO_CAA_ROOT}/lib/windows/x86/CAA_SRC.dll")
-            set(ZWO_CAA_DLL "${ZWO_CAA_ROOT}/lib/windows/x86/CAA_SRC.dll")
-        endif()
-    endif()
-
-    foreach(ZWO_DLL IN LISTS ZWO_ASI_DLL ZWO_EAF_DLL ZWO_EFW_DLL ZWO_CAA_DLL)
-        if(EXISTS "${ZWO_DLL}")
-            add_custom_command(TARGET alpacahttp_server POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${ZWO_DLL}"
-                    "$<TARGET_FILE_DIR:alpacahttp_server>"
-            )
-        endif()
-    endforeach()
-endif()
 
 # Tests
 if(ALPACAHTTP_BUILD_TESTS)

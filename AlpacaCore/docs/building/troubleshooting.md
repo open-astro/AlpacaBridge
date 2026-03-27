@@ -16,10 +16,7 @@ Common build issues and solutions for AlpacaCore.
 **Warning**: `No test framework found. Install Catch2 or doctest to build tests.`
 
 **Solution**: 
-- Install Catch2: 
-  - macOS: `brew install catch2`
-  - Linux: Use your package manager (e.g., `sudo apt-get install catch2`)
-  - Windows: Use vcpkg or download from https://github.com/catchorg/Catch2
+- Install Catch2 (e.g. `sudo apt-get install catch2` on Debian/Ubuntu), or download from https://github.com/catchorg/Catch2
 - Or install doctest as an alternative
 - Or disable tests: `cmake .. -DALPACACORE_BUILD_TESTS=OFF`
 
@@ -30,8 +27,8 @@ Common build issues and solutions for AlpacaCore.
 **Solution**: 
 1. Ensure the vendor SDK is placed in the `external/` directory
    - See [external/README.md](../../external/README.md) for details on SDK placement
-   - SDKs should be extracted directly into `external/` (e.g., `external/ASI_Camera_SDK/`)
-   - ZWO builds use the vendored subset in `external/ASI_Camera_SDK/`
+   - SDKs should be extracted directly into `external/` (e.g., `external/ZWO/ASI_Camera_SDK/`)
+   - ZWO builds use the vendored subset in `external/ZWO/ASI_Camera_SDK/`
 2. Verify the SDK folder structure matches what the CMakeLists.txt expects
 3. Check that the SDK folder name matches the expected pattern
 4. Ensure you've enabled the vendor option: `-DALPACACORE_ENABLE_<VENDOR>=ON`
@@ -47,16 +44,6 @@ Common build issues and solutions for AlpacaCore.
 4. Verify the library file exists and is the correct format (`.a` for static, `.so`/`.dylib` for shared)
 5. Check that all required SDK dependencies are available
 
-## Build Errors on macOS
-
-**Error**: Framework or library not found
-
-**Solution**:
-1. Ensure Xcode Command Line Tools are installed: `xcode-select --install`
-2. Verify CMake can find system libraries
-3. Check that you're using a compatible compiler version
-4. For framework issues, verify the framework path in CMakeLists.txt
-
 ## Build Errors on Linux
 
 **Error**: Missing system libraries
@@ -66,25 +53,12 @@ Common build issues and solutions for AlpacaCore.
 2. Install any missing system dependencies
 3. Check that your compiler version is compatible (C++20 support required)
 
-## Build Errors on Windows
-
-**Error**: Visual Studio not found or compiler errors
-
-**Solution**:
-1. Ensure Visual Studio 2019 or later is installed with C++ development tools
-2. Use the Developer Command Prompt for Visual Studio
-3. Verify CMake generator matches your Visual Studio version
-4. Check that the Windows SDK is installed
-
 ## Compiler Version Issues
 
 **Error**: C++20 features not supported
 
 **Solution**:
-1. Update your compiler to a version that supports C++20:
-   - GCC 10 or later
-   - Clang 10 or later
-   - MSVC 2019 or later (with `/std:c++20`)
+1. Update your compiler to a version that supports C++20: GCC 10 or later, or Clang 10 or later.
 2. Verify compiler version: `g++ --version` or `clang++ --version`
 
 ## Permission Errors
@@ -94,7 +68,30 @@ Common build issues and solutions for AlpacaCore.
 **Solution**:
 1. Ensure you have write permissions in the build directory
 2. Don't build in system directories - use a local `build/` directory
-3. On Linux/macOS, avoid using `sudo` for builds
+3. On Linux, avoid using `sudo` for builds
+
+## Serial Port Connection Fails (Mounts, Focusers, etc.)
+
+**Symptom**: Device (e.g. iOptron or SynScan mount) does not connect when using a serial port such as `/dev/ttyUSB0`; connection fails in the Alpaca server or Web UI.
+
+**Checks**:
+1. **Port path in config**  
+   For serial connection, the device must have **Connection type** set to **Serial/USB** and **Port path** set to the actual device (e.g. `/dev/ttyUSB0`). In the Web UI: add/edit the device, choose Serial/USB, and enter the port path. Stored config uses keys `connectionType: "serial"` and `portPath: "/dev/ttyUSB0"`.
+
+2. **Permissions**  
+   On Linux, your user must be able to open the serial device. Add your user to the `dialout` group, then log out and back in (or reboot):
+   ```bash
+   sudo usermod -aG dialout $USER
+   ```
+   Verify: `groups` should list `dialout`; `ls -la /dev/ttyUSB0` should show the device (e.g. `crw-rw---- ... dialout`). Without this, `open()` fails with **Permission denied** (errno 13).
+
+3. **Device present and not in use**  
+   Plug in the USB cable and check that the port exists: `ls /dev/ttyUSB*` or `ls /dev/ttyACM*`. Ensure no other process (e.g. another Alpaca server, serial terminal, or PHD2) has the port open.
+
+4. **Server logs**  
+   When connection fails, the server logs a clear error (e.g. "Failed to open serial port [...] Permission denied"). Run the server from a terminal or check its log output to see the exact reason.
+
+See also [SUPPORTED-DRIVERS.md](../../SUPPORTED-DRIVERS.md) for driver-specific notes (e.g. iOptron USB/Serial, SynScan).
 
 ## Still Having Issues?
 

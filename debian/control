@@ -1,0 +1,32 @@
+Source: alpacabridge
+Section: science
+Priority: optional
+Maintainer: OpenAstro <support@openastro.net>
+Build-Depends: debhelper-compat (= 13),
+               cmake (>= 3.20),
+               g++,
+               libusb-1.0-0-dev,
+               libudev-dev,
+               nlohmann-json3-dev,
+               libcurl4-openssl-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/open-astro/AlpacaBridge
+Rules-Requires-Root: no
+
+Package: alpacabridge
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends},
+         libusb-1.0-0,
+         libudev1,
+         adduser
+Description: ASCOM Alpaca HTTP server for astronomical devices
+ AlpacaBridge provides an ASCOM Alpaca-compatible HTTP server supporting
+ cameras (ZWO ASI, QHY), mounts (iOptron, SynScan/Celestron), focusers,
+ filter wheels, rotators, and weather stations via the Alpaca protocol.
+ .
+ Includes bundled vendor SDKs, udev rules, and QHY firmware for
+ plug-and-play USB device access. Runs as the alpacabridge system user
+ and starts automatically via systemd on each boot.
+ .
+ Open the Alpaca management interface at http://localhost:11111/management/
+ and the device API at http://localhost:11111/ after installation.

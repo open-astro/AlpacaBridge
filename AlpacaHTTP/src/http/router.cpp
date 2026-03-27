@@ -64,6 +64,9 @@
 #ifdef ALPACACORE_ENABLE_WEEWX
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_GEMINI
+#include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
+#endif
 
 namespace {
 
@@ -1756,8 +1759,31 @@ Response Router::dispatch_device_method(
                 if (!found) {
                     throw std::runtime_error("Missing parameter: Connected");
                 }
-                
-                device->set_connected(connected);
+
+                if (connected && !device->get_connected()) {
+                    // Use async connect then poll for completion.
+                    // Slow-connecting devices (serial focusers etc.) can exceed
+                    // ASCOM Alpaca client timeouts if set_connected() blocks
+                    // synchronously.  The async path + poll lets us return as
+                    // soon as the handshake succeeds without hard-blocking the
+                    // full worst-case duration.
+                    device->connect();
+                    auto deadline = std::chrono::steady_clock::now()
+                                  + std::chrono::seconds(8);
+                    while (!device->get_connected()
+                           && device->get_connecting()
+                           && std::chrono::steady_clock::now() < deadline) {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(100));
+                    }
+                    if (!device->get_connected() && !device->get_connecting()) {
+                        throw alpacacore::AlpacaException(
+                            "Connection failed",
+                            alpacacore::AlpacaError::NotConnected);
+                    }
+                } else if (!connected && device->get_connected()) {
+                    device->disconnect();
+                }
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -2668,11 +2694,7 @@ Response Router::dispatch_telescope_method(
                 if (ss.fail()) {
                     throw std::runtime_error("Invalid UTC date format: " + date_str);
                 }
-#if defined(_WIN32)
-                auto utc_time = _mkgmtime(&tm);
-#else
                 auto utc_time = timegm(&tm);
-#endif
                 if (utc_time == static_cast<std::time_t>(-1)) {
                     throw std::runtime_error("Failed to convert UTC date: " + date_str);
                 }
@@ -2963,15 +2985,10 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "slewtocoordinatesasync") {
-                // Debug logging
-                if (!request.body().empty()) {
-                    util::log_info("slewtocoordinatesasync body: " + request.body());
-                }
                 double ra = parse_double("RightAscension");
                 double dec = parse_double("Declination");
-                util::log_info("slewtocoordinatesasync parsed: RA=" + std::to_string(ra) + ", Dec=" + std::to_string(dec));
-                telescope->set_target_right_ascension(ra);
-                telescope->set_target_declination(dec);
+                // slew_to_coordinates_async sets targets internally; skip
+                // redundant set_target calls to avoid extra mutex round-trips.
                 telescope->slew_to_coordinates_async(ra, dec);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
@@ -6449,6 +6466,40 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "gemini" && device_type_str == "focuser") {
+#ifdef ALPACACORE_ENABLE_GEMINI
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::FocuserDriver> focuser;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // No port specified with serial mode — fall through to auto-detect
+                int focuser_index = config.value("focuserIndex", 0);
+                focuser = alpacacore::vendor::gemini::create_gemini_focuser_by_index(device_number, focuser_index);
+            } else {
+                int baud_rate = config.value("baudRate", 9600);
+                focuser = alpacacore::vendor::gemini::create_gemini_focuser(device_number, port_path, baud_rate);
+            }
+        } else {
+            // "auto" or unset — auto-detect
+            int focuser_index = config.value("focuserIndex", 0);
+            focuser = alpacacore::vendor::gemini::create_gemini_focuser_by_index(device_number, focuser_index);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(focuser.release()))) {
+            util::log_info("Registered Gemini focuser");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "Gemini support not enabled. Rebuild with -DALPACACORE_ENABLE_GEMINI=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -6518,6 +6569,14 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("weewxUrl");
         copy_if_present("pollIntervalSeconds");
         copy_if_present("timeoutMs");
+    } else if (vendor == "gemini") {
+        copy_if_present("connectionType");
+        copy_if_present("focuserIndex");
+        std::string connection_type = config.value("connectionType", "auto");
+        if (connection_type == "serial") {
+            copy_if_present("portPath");
+            copy_if_present("baudRate");
+        }
     }
 
     copy_if_present("responseTimeoutMs");

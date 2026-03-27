@@ -23,18 +23,6 @@ if(ALPACACORE_ENABLE_IOPTRON)
     
     # Do NOT link to alpacacore here - that creates a circular dependency
     # The vendor library only uses headers, and alpacacore will link to this library
-    
-    # Platform-specific settings
-    if(WIN32)
-        # Windows: Link Winsock library for TCP sockets
-        target_link_libraries(alpacacore_ioptron PRIVATE ws2_32)
-    endif()
-    
-    # Compiler-specific settings
-    if(MSVC)
-        # Suppress warnings for platform-specific includes
-        target_compile_options(alpacacore_ioptron PRIVATE /wd4996)
-    endif()
-    
+
     message(STATUS "iOptron driver: Serial and TCP connection support enabled")
 endif()

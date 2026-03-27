@@ -1,4 +1,6 @@
-# Changelog
+# AlpacaBridge Changelog
+
+<img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
 All notable changes to AlpacaBridge will be documented in this file.
 
@@ -6,6 +8,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
+
+## [1.0.0] - 2026-03-26
+
+### Added
+- Gemini Automatic Astro Focuser Pro driver (AlpacaCore/AlpacaHTTP)
+  - New vendor driver for Gemini/MyFocuserPro2-compatible focusers using the MyFP2 serial protocol. Supports serial (USB) and auto-detection of CH340/CH341 USB-serial adapters.
+  - Auto-detection scans `/dev/serial/by-id/` for CH340/CH341 devices and probes with firmware handshake. CH340 DTR reset handling clears HUPCL to prevent double MCU reset.
+  - Async connect with polling to avoid ASCOM Alpaca client timeouts (NINA compatibility).
+  - ConformU compliant: out-of-range moves clamp to 0/MaxStep; motor speed set to fast on connect.
+  - AlpacaHTTP web UI: vendor dropdown, connection type selector (Auto-detect/Serial).
+  - Catch2 unit tests: 7 test cases, 42 assertions.
+- Unit tests for iOptron telescope and ZWO Dew Heater Switch drivers.
+- Troubleshooting docs: serial port connection failures.
+- Refreshed ConformU test reports for all drivers on Linux x64 and ARM64.
+- Debian packaging (`debian/`): service file, maintainer scripts.
+- ZWO ASI Camera shared library packaging for Debian (`.deb` ships `libASICamera2.so`).
+- `ld.so.conf.d` registration so vendor shared libraries are discoverable system-wide.
+- Favicon using OpenAstro logo.
+
+### Fixed
+- iOptron Telescope: `SiteLatitude` write timing on Wi-Fi, `SlewToCoordinatesAsync` async dispatch, tertiary AxisRate empty range.
+- ZWO CAA Rotator: mechanical position when Reverse is enabled.
+- ZWO Telescope (AM3): `SideOfPier` hour-angle derivation, `SyncToCoordinates` retry on moving mount, `PulseGuide` accuracy and timing, Wi-Fi stability, TCP_NODELAY for Nagle latency.
+- WeeWX ObservingConditions: consistent `PropertyNotImplemented` for missing sensors.
+- Gemini Focuser: amd64 move timeout and disconnect issues.
+- Missing web UI assets in Debian package.
+
+### Changed
+- Platform support: Linux only (Debian 13 Trixie, NUC x64, Raspberry Pi 4/5 ARM64). Removed Windows and macOS from build, docs, CMake, and source.
+- iOptron Telescope name is now always "iOptron Telescope" (removed `:MountInfo#` querying).
+- ZWO EAF Focuser `get_step_size()` throws `PropertyNotImplemented` instead of returning 0.0.
+- Driver versions: SynScan and ZWO telescope drivers now report 1.0.0.
+- SUPPORTED-DRIVERS.md moved to repo root; tables and links updated for Linux-only.
+- ZWO ASI Camera SDK moved to `external/ZWO/ASI_Camera_SDK`.
+- `build_and_run.sh`: optional `ALPACA_ADD_DIALOUT` env for serial/USB group access.
+- Debian `postinst` adds `dialout` and `input` groups for USB device access.
+- Version set to 1.0.0.
+
+### Removed
+- Windows/macOS scripts, ConformU reports, and platform-specific code paths.
 
 ## [0.13.0] - 2026-03-12
 

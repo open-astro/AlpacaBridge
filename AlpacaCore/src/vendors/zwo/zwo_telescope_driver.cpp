@@ -338,7 +338,7 @@ public:
     }
 
     std::string get_driver_version() const override {
-        return "0.1.0";
+        return "1.0.0";
     }
 
     int get_interface_version() const override {
@@ -863,12 +863,16 @@ public:
         check_connected();
         apply_pending_slew_adjustment();
         EquatorialCoordinates eq;
+        double offset = 0.0;
         bool has_eq = false;
         {
+            // Read base position and offset atomically to prevent the pulse
+            // thread's reconciliation from updating both between the reads.
             std::lock_guard<std::mutex> lock(mutex_);
             if (cached_equatorial_.has_value() &&
                 (std::chrono::steady_clock::now() - cached_equatorial_at_) <= kFastEquatorialTtlForRead) {
                 eq = cached_equatorial_.value();
+                offset = dec_offset_deg_;
                 has_eq = true;
             }
         }
@@ -877,10 +881,9 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             cached_equatorial_ = eq;
             cached_equatorial_at_ = std::chrono::steady_clock::now();
+            offset = dec_offset_deg_;
         }
-        const double base_dec = eq.dec_degrees;
-        std::lock_guard<std::mutex> lock(mutex_);
-        return std::clamp(base_dec + dec_offset_deg_, -90.0, 90.0);
+        return std::clamp(eq.dec_degrees + offset, -90.0, 90.0);
     }
 
     double get_declination_rate() const override {
@@ -1061,22 +1064,14 @@ public:
         if (connected_.load() && effective > 0.0) {
             double guide_rate_multiple = effective / kSiderealRateDegPerSec;
             guide_rate_multiple = std::clamp(guide_rate_multiple, 0.10, 0.90);
-            auto& protocol = ZWOMountProtocolWrapper::instance();
-            protocol.set_guide_rate(guide_rate_multiple);
-            try {
-                const double readback = protocol.get_guide_rate();
-                const double readback_deg_per_sec = readback * kSiderealRateDegPerSec;
-                if (std::abs(readback_deg_per_sec - effective) > (0.05 * kSiderealRateDegPerSec)) {
-                    ALPACA_LOG_WARN(
-                        "ZWO",
-                        "Guide rate readback (" + std::to_string(readback) +
-                            ") differs from requested (" + std::to_string(guide_rate_multiple) + ")");
-                }
-                std::lock_guard<std::mutex> lock(mutex_);
-                guide_rate_ = {readback_deg_per_sec, readback_deg_per_sec};
-                return;
-            } catch (const std::exception&) {
-            }
+            // set_guide_rate() returns the readback value from its internal
+            // verification — no extra round-trip needed.
+            const double actual_multiple =
+                ZWOMountProtocolWrapper::instance().set_guide_rate(guide_rate_multiple);
+            const double actual_deg_per_sec = actual_multiple * kSiderealRateDegPerSec;
+            std::lock_guard<std::mutex> lock(mutex_);
+            guide_rate_ = {actual_deg_per_sec, actual_deg_per_sec};
+            return;
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1087,12 +1082,18 @@ public:
         check_connected();
         apply_pending_slew_adjustment();
         EquatorialCoordinates eq;
+        double offset = 0.0;
         bool has_eq = false;
         {
+            // Read base position and offset atomically to prevent the pulse
+            // thread's reconciliation from updating both between the reads,
+            // which would pair a stale base with a rebased offset and produce
+            // a ~1-second tracking-drift error.
             std::lock_guard<std::mutex> lock(mutex_);
             if (cached_equatorial_.has_value() &&
                 (std::chrono::steady_clock::now() - cached_equatorial_at_) <= kFastEquatorialTtlForRead) {
                 eq = cached_equatorial_.value();
+                offset = ra_offset_hours_;
                 has_eq = true;
             }
         }
@@ -1101,14 +1102,9 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             cached_equatorial_ = eq;
             cached_equatorial_at_ = std::chrono::steady_clock::now();
-        }
-        const double base_ra = eq.ra_hours;
-        double offset = 0.0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
             offset = ra_offset_hours_;
         }
-        double wrapped = std::fmod(base_ra + offset, 24.0);
+        double wrapped = std::fmod(eq.ra_hours + offset, 24.0);
         if (wrapped < 0.0) {
             wrapped += 24.0;
         }
@@ -1125,24 +1121,46 @@ public:
 
     int get_side_of_pier() const override {
         check_connected();
-        const auto now = std::chrono::steady_clock::now();
+
+        // Compute SideOfPier from the current hour angle rather than querying :Gm#.
+        // The :Gm# response from ZWO firmware does not reliably map to the ASCOM
+        // pierEast/pierWest convention, and get_destination_side_of_pier already uses
+        // this HA-based approach correctly.
+        double longitude = 0.0;
+        bool has_longitude = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (cached_pier_side_.has_value() && (now - cached_pier_side_at_) <= kFastPierSideTtl) {
-                return cached_pier_side_.value();
+            if (site_coords_valid_) {
+                longitude = site_longitude_deg_;
+                has_longitude = true;
             }
         }
 
+        if (has_longitude) {
+            const double current_ra = get_right_ascension();
+            const double lst_hours = compute_local_sidereal_time_hours(
+                std::chrono::system_clock::now(), longitude);
+            const double ha = normalize_hour_angle_hours(lst_hours - current_ra);
+            // HA >= 0 → target west of meridian → pierEast (0)
+            // HA <  0 → target east of meridian → pierWest (1)
+            const int side = ha >= 0.0 ? 0 : 1;
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_pier_side_ = side;
+            cached_pier_side_at_ = std::chrono::steady_clock::now();
+            return side;
+        }
+
+        // Fallback: site longitude not yet known, use :Gm# with ASCOM-correct mapping.
         const char direction = ZWOMountProtocolWrapper::instance().get_mount_direction();
         int side = -1;
         if (direction == 'E' || direction == 'e') {
-            side = 0;
+            side = 1;  // telescope pointing east → pierWest
         } else if (direction == 'W' || direction == 'w') {
-            side = 1;
+            side = 0;  // telescope pointing west → pierEast
         }
         std::lock_guard<std::mutex> lock(mutex_);
         cached_pier_side_ = side;
-        cached_pier_side_at_ = now;
+        cached_pier_side_at_ = std::chrono::steady_clock::now();
         return side;
     }
 
@@ -1324,14 +1342,8 @@ public:
         auto& protocol = ZWOMountProtocolWrapper::instance();
 
         if (std::abs(rate) < 1e-9) {
-            if (axis == 0) {
-                protocol.stop_move_east();
-                protocol.stop_move_west();
-            } else {
-                protocol.stop_move_north();
-                protocol.stop_move_south();
-            }
-            // Some firmware leaves motion state latched unless a generic stop is issued.
+            // :Q stops all motion; individual :Qe/:Qw/:Qn/:Qs are redundant and add
+            // round-trip latency that pushes Wi-Fi response times past the STANDARD target.
             protocol.abort_motion();
 
             std::optional<bool> restore_tracking;
@@ -1359,19 +1371,22 @@ public:
             return;
         }
 
-        bool capture_tracking_state = false;
+        // Use cached tracking state to avoid a mount round-trip that adds latency
+        // on Wi-Fi links and can push response time past the STANDARD 1.0s target.
+        std::optional<bool> tracking_before_move;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            capture_tracking_state = !manual_axis_slewing_[axis];
-        }
-        std::optional<bool> tracking_before_move;
-        if (capture_tracking_state) {
-            try {
-                tracking_before_move = get_tracking();
-            } catch (const std::exception&) {
-                tracking_before_move = std::nullopt;
+            if (!manual_axis_slewing_[axis]) {
+                if (tracking_state_valid_) {
+                    tracking_before_move = tracking_state_cached_;
+                }
             }
         }
+
+        // Pause the poll thread so its protocol reads don't hold the protocol
+        // mutex while we send the rate + move commands. On Wi-Fi the poll
+        // thread's reads can add 200-400ms of contention per blocked command.
+        poll_pause_.store(true);
 
         const double multiplier = std::abs(rate) / kSiderealRateDegPerSec;
         protocol.set_move_rate_sidereal_multiple(multiplier);
@@ -1389,6 +1404,8 @@ public:
                 protocol.start_move_south();
             }
         }
+
+        poll_pause_.store(false);
 
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[axis] = true;
@@ -1432,6 +1449,8 @@ public:
             }
         }
 
+        // Fast path: use cached status to meet the 0.1s FAST response target.
+        // The poll thread refreshes this every 250ms.
         std::optional<StatusInfo> cached_status;
         bool park_active = false;
         {
@@ -1443,6 +1462,16 @@ public:
         }
         if (!park_active && cached_status.has_value()) {
             return !cached_status.value().stop_or_tracking;
+        }
+
+        // Status cache is stale (e.g. poll thread was paused during pulse guiding).
+        // If no park command is active, use the stale cached value rather than
+        // querying the mount, which would exceed the FAST response time over Wi-Fi.
+        if (!park_active) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (cached_status_.has_value()) {
+                return !cached_status_.value().stop_or_tracking;
+            }
         }
 
         auto& protocol = ZWOMountProtocolWrapper::instance();
@@ -1773,16 +1802,17 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
-        reset_position_offsets();
-        ensure_not_parked("SlewToCoordinates");
+        // slew_to_target() -> slew_to_target_async() handles ensure_not_parked and
+        // reset_position_offsets; avoid redundant mount queries here.
         set_target_right_ascension(ra);
         set_target_declination(dec);
         slew_to_target();
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        reset_position_offsets();
-        ensure_not_parked("SlewToCoordinatesAsync");
+        // Validation only; slew_to_target_async() handles ensure_not_parked and
+        // reset_position_offsets — calling them here would add redundant mount
+        // round-trips that push Wi-Fi response times past the STANDARD 1.0s target.
         validate_ra(ra, "RightAscension");
         validate_dec(dec, "Declination");
         {
@@ -1796,8 +1826,7 @@ public:
     }
 
     void slew_to_target() override {
-        ensure_not_parked("SlewToTarget");
-        reset_position_offsets();
+        // slew_to_target_async() handles ensure_not_parked and reset_position_offsets.
         slew_to_target_async();
 
         const auto deadline = std::chrono::steady_clock::now() + kDefaultSlewTimeout;
@@ -1850,6 +1879,11 @@ public:
 
     void slew_to_target_async() override {
         check_connected();
+        // Pause the poll thread early so its protocol reads don't hold the
+        // protocol mutex while we set up the GOTO.  ensure_not_parked and
+        // reset_position_offsets use only cached state / atomics, so pausing
+        // the poll thread first is safe and avoids contention on Wi-Fi links.
+        poll_pause_.store(true);
         ensure_not_parked("SlewToTargetAsync");
         reset_position_offsets();
 
@@ -1858,14 +1892,20 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!target_ra_set_ || !target_dec_set_) {
+                poll_pause_.store(false);
                 throw AlpacaException("Target coordinates not set", AlpacaError::ValueNotSet);
             }
             target_ra = target_ra_hours_;
             target_dec = target_dec_degrees_;
         }
 
-        validate_ra(target_ra, "RightAscension");
-        validate_dec(target_dec, "Declination");
+        try {
+            validate_ra(target_ra, "RightAscension");
+            validate_dec(target_dec, "Declination");
+        } catch (...) {
+            poll_pause_.store(false);
+            throw;
+        }
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1886,6 +1926,7 @@ public:
         }
 
         std::thread([this, target_ra, target_dec]() {
+            auto resume_poll = [this]() { poll_pause_.store(false); };
             auto& protocol = ZWOMountProtocolWrapper::instance();
             try {
                 synchronize_mount_time_and_site_for_goto(false);
@@ -1894,8 +1935,10 @@ public:
                 for (int attempt = 0; attempt < 3; ++attempt) {
                     try {
                         if (!protocol.goto_target()) {
+                            resume_poll();
                             throw AlpacaException("Mount rejected GOTO request", AlpacaError::InvalidOperation);
                         }
+                        resume_poll();
                         return;
                     } catch (const AlpacaException& ex) {
                         if (attempt < 2 && is_ms_mount_busy_error(ex)) {
@@ -1936,18 +1979,19 @@ public:
                         } else {
                             ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
                         }
+                        resume_poll();
                         return;
                     }
                 }
             } catch (const std::exception& ex) {
                 ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
             }
+            resume_poll();
         }).detach();
     }
 
     void sync_to_coordinates(double ra, double dec) override {
-        reset_position_offsets();
-        ensure_not_parked("SyncToCoordinates");
+        // sync_to_target() handles ensure_not_parked and reset_position_offsets.
         validate_ra(ra, "RightAscension");
         validate_dec(dec, "Declination");
         {
@@ -1980,16 +2024,47 @@ public:
         validate_dec(target_dec, "Declination");
 
         auto& protocol = ZWOMountProtocolWrapper::instance();
-        try {
-            protocol.sync_target_equatorial(target_ra, target_dec);
-        } catch (const AlpacaException& ex) {
-            if (ex.error_code() != AlpacaError::InvalidValue) {
-                throw;
+
+        auto attempt_sync = [&]() {
+            try {
+                protocol.sync_target_equatorial(target_ra, target_dec);
+                return true;
+            } catch (const AlpacaException& ex) {
+                if (is_equipment_moving_error(ex)) {
+                    return false;
+                }
+                if (ex.error_code() != AlpacaError::InvalidValue) {
+                    throw;
+                }
+                // Fallback for firmware that does not accept :SMMC.
+                protocol.set_target_ra(target_ra);
+                protocol.set_target_dec(target_dec);
+                protocol.sync_target();
+                return true;
             }
-            // Fallback for firmware that does not accept :SMMC.
-            protocol.set_target_ra(target_ra);
-            protocol.set_target_dec(target_dec);
-            protocol.sync_target();
+        };
+
+        // :SMMC can fail with e4 (equipment moving) if the mount is still settling
+        // from a prior slew.  Wait for motion to stop and retry.
+        if (!attempt_sync()) {
+            protocol.abort_motion();
+            for (int retry = 0; retry < 5; ++retry) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                try {
+                    if (!get_slewing()) {
+                        break;
+                    }
+                } catch (const std::exception&) {
+                }
+            }
+            if (!attempt_sync()) {
+                // Last resort: abort again and try the set-target + :CM path.
+                protocol.abort_motion();
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                protocol.set_target_ra(target_ra);
+                protocol.set_target_dec(target_dec);
+                protocol.sync_target();
+            }
         }
         EquatorialCoordinates raw;
         bool has_raw = false;
@@ -2201,7 +2276,15 @@ private:
         return message.find(":MS") != std::string::npos && message.find("e3") != std::string::npos;
     }
 
+    bool is_equipment_moving_error(const AlpacaException& ex) const {
+        const std::string message = ex.what();
+        return message.find("e4") != std::string::npos;
+    }
+
     void reset_position_offsets() {
+        // Signal cancellation first so the pulse thread's reconciliation read
+        // (which holds mutex_) can exit early, avoiding lock contention.
+        pulse_cancel_.store(true);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ra_offset_hours_ = 0.0;
@@ -2214,7 +2297,6 @@ private:
             pulse_queue_.clear();
             pulse_queue_end_ = std::chrono::steady_clock::time_point{};
         }
-        pulse_cancel_.store(true);
     }
 
     void ensure_not_parked(const char* operation) const {
@@ -2222,17 +2304,27 @@ private:
             return;
         }
 
-        bool parked = false;
-        try {
-            parked = get_at_park();
-        } catch (const std::exception&) {
+        // Park transitions are always driven by our own park()/unpark() code,
+        // which updates parked_cached_ immediately.  Use the cached value to
+        // avoid mount round-trips that add ~500ms+ latency on Wi-Fi links.
+        // If a fresh park_state_cached_ is available, prefer it; otherwise
+        // fall back to parked_cached_ rather than querying the mount.
+        {
             std::lock_guard<std::mutex> lock(mutex_);
-            parked = parked_cached_;
-        }
-
-        if (parked) {
-            throw AlpacaException(std::string(operation) + " is not allowed while parked",
-                                  AlpacaError::InvalidOperation);
+            const auto now = std::chrono::steady_clock::now();
+            if (park_state_cached_.has_value() && (now - park_state_at_) <= kFastParkTtl) {
+                if (park_state_cached_.value()) {
+                    throw AlpacaException(std::string(operation) + " is not allowed while parked",
+                                          AlpacaError::InvalidOperation);
+                }
+                return;
+            }
+            // No fresh park query cache — trust parked_cached_ which is kept
+            // in sync by park(), unpark(), and evaluate_park_state().
+            if (parked_cached_) {
+                throw AlpacaException(std::string(operation) + " is not allowed while parked",
+                                      AlpacaError::InvalidOperation);
+            }
         }
     }
 
@@ -2339,6 +2431,10 @@ private:
             tracking_state_at_ = now;
         } catch (const std::exception&) {
         }
+        // Yield between protocol reads so that driver commands (MoveAxis,
+        // SlewToCoordinatesAsync, etc.) can acquire the protocol mutex
+        // promptly instead of waiting for the full refresh cycle to finish.
+        if (poll_pause_.load()) return;
         try {
             const EquatorialCoordinates eq = protocol.get_current_equatorial();
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2346,6 +2442,7 @@ private:
             cached_equatorial_at_ = now;
         } catch (const std::exception&) {
         }
+        if (poll_pause_.load()) return;
         try {
             const HorizontalCoordinates hor = protocol.get_current_horizontal();
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2353,18 +2450,34 @@ private:
             cached_horizontal_at_ = now;
         } catch (const std::exception&) {
         }
-        try {
-            const char direction = protocol.get_mount_direction();
-            int side = -1;
-            if (direction == 'E' || direction == 'e') {
-                side = 0;
-            } else if (direction == 'W' || direction == 'w') {
-                side = 1;
+        // Compute pier side from current hour angle (same logic as get_side_of_pier).
+        // :Gm# is not used because ZWO firmware's E/W response does not reliably map to the
+        // ASCOM pierEast/pierWest convention.
+        {
+            double longitude = 0.0;
+            double ra_hours = 0.0;
+            double ra_offset = 0.0;
+            bool has_all = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (site_coords_valid_ && cached_equatorial_.has_value()) {
+                    longitude = site_longitude_deg_;
+                    ra_hours = cached_equatorial_.value().ra_hours;
+                    ra_offset = ra_offset_hours_;
+                    has_all = true;
+                }
             }
-            std::lock_guard<std::mutex> lock(mutex_);
-            cached_pier_side_ = side;
-            cached_pier_side_at_ = now;
-        } catch (const std::exception&) {
+            if (has_all) {
+                double current_ra = std::fmod(ra_hours + ra_offset, 24.0);
+                if (current_ra < 0.0) current_ra += 24.0;
+                const double lst = compute_local_sidereal_time_hours(
+                    std::chrono::system_clock::now(), longitude);
+                const double ha = normalize_hour_angle_hours(lst - current_ra);
+                const int side = ha >= 0.0 ? 0 : 1;
+                std::lock_guard<std::mutex> lock(mutex_);
+                cached_pier_side_ = side;
+                cached_pier_side_at_ = now;
+            }
         }
     }
 
@@ -2502,21 +2615,54 @@ private:
             remaining_ms -= step;
         }
 
-        int hold_ms = static_cast<int>(kPulseGuideHold.count());
-        while (hold_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
-            const int sleep_ms = std::min(hold_ms, 100);
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-            hold_ms -= sleep_ms;
+        // Rebase the predictive offset against the mount's actual position.
+        // The mount may or may not update its reported coordinates during pulse
+        // guiding; reconciling here prevents double-counting (offset + actual
+        // movement) without losing the prediction when coordinates don't update.
+        if (!pulse_cancel_.load() && task.generation == pulse_generation_.load()) {
+            try {
+                const EquatorialCoordinates eq = protocol.get_current_equatorial();
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (cached_equatorial_.has_value()) {
+                    // Compute the expected final position from the pre-pulse base + offset.
+                    double target_ra = std::fmod(cached_equatorial_->ra_hours + ra_offset_hours_, 24.0);
+                    if (target_ra < 0.0) target_ra += 24.0;
+                    const double target_dec = std::clamp(
+                        cached_equatorial_->dec_degrees + dec_offset_deg_, -90.0, 90.0);
+                    // Rebase: set offset so actual_pos + new_offset = expected_final.
+                    ra_offset_hours_ = normalize_hour_angle_hours(target_ra - eq.ra_hours);
+                    dec_offset_deg_ = target_dec - eq.dec_degrees;
+                }
+                cached_equatorial_ = eq;
+                cached_equatorial_at_ = std::chrono::steady_clock::now();
+            } catch (const std::exception&) {
+                // Read failed; refresh the cache timestamp to prevent TTL expiration
+                // from triggering a double-count on the next position read.
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (cached_equatorial_.has_value()) {
+                    cached_equatorial_at_ = std::chrono::steady_clock::now();
+                }
+            }
         }
 
-        try {
-            const EquatorialCoordinates eq = protocol.get_current_equatorial();
-            ALPACA_LOG_DEBUG(
-                "ZWO",
-                "PulseGuide post dir=" + std::to_string(task.direction) +
-                    " ra_hours=" + std::to_string(eq.ra_hours) +
-                    " dec_deg=" + std::to_string(eq.dec_degrees));
-        } catch (const std::exception&) {
+        // Only hold after the last queued task.  When multiple axes are
+        // pulsed simultaneously (e.g. East + North), skipping the hold
+        // between tasks prevents the total time from exceeding ConformU's
+        // 6-second IsPulseGuiding timeout.
+        {
+            bool more_queued = false;
+            {
+                std::lock_guard<std::mutex> lock(pulse_mutex_);
+                more_queued = !pulse_queue_.empty();
+            }
+            if (!more_queued) {
+                int hold_ms = static_cast<int>(kPulseGuideHold.count());
+                while (hold_ms > 0 && !pulse_thread_stop_.load() && !pulse_cancel_.load()) {
+                    const int sleep_ms = std::min(hold_ms, 100);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                    hold_ms -= sleep_ms;
+                }
+            }
         }
     }
 

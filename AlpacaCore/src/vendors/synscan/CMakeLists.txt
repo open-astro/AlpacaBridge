@@ -16,13 +16,5 @@ if(ALPACACORE_ENABLE_SYNSCAN)
         ${CMAKE_SOURCE_DIR}/include
     )
 
-    if(WIN32)
-        target_link_libraries(alpacacore_synscan PRIVATE ws2_32)
-    endif()
-
-    if(MSVC)
-        target_compile_options(alpacacore_synscan PRIVATE /wd4996)
-    endif()
-
     message(STATUS "SynScan driver: Serial and TCP connection support enabled")
 endif()

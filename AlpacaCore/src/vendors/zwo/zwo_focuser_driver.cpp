@@ -220,7 +220,8 @@ public:
     }
 
     double get_step_size() const override {
-        return 0.0;
+        throw AlpacaException("Step size is not available for this focuser",
+                              AlpacaError::PropertyNotImplemented);
     }
 
     bool get_temp_comp_available() const override {

@@ -109,6 +109,19 @@ install_udev_rules() {
     fi
   fi
 
+  # Install ZWO ASI Camera shared library (used by SmartGuider via zwoasi)
+  local zwo_camera_lib_dir=""
+  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
+    zwo_camera_lib_dir="${CORE_DIR}/external/ZWO/ASI_Camera_SDK/lib/linux/armv8"
+  elif [[ "${arch}" == "x86_64" ]]; then
+    zwo_camera_lib_dir="${CORE_DIR}/external/ZWO/ASI_Camera_SDK/lib/linux/x64"
+  fi
+  if [[ -n "${zwo_camera_lib_dir}" && -f "${zwo_camera_lib_dir}/libASICamera2.so" ]]; then
+    echo "Installing ZWO ASI Camera shared library to /usr/local/lib"
+    sudo cp -a "${zwo_camera_lib_dir}/libASICamera2.so"* /usr/local/lib/
+    sudo ldconfig
+  fi
+
   sudo udevadm control --reload-rules
   sudo udevadm trigger
 }
