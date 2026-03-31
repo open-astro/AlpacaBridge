@@ -122,6 +122,19 @@ install_udev_rules() {
     sudo ldconfig
   fi
 
+  # Install SVBONY Camera shared library
+  local svbony_lib_dir=""
+  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
+    svbony_lib_dir="${CORE_DIR}/external/SVBONY/lib/armv8"
+  elif [[ "${arch}" == "x86_64" ]]; then
+    svbony_lib_dir="${CORE_DIR}/external/SVBONY/lib/x64"
+  fi
+  if [[ -n "${svbony_lib_dir}" && -f "${svbony_lib_dir}/libSVBCameraSDK.so" ]]; then
+    echo "Installing SVBONY Camera shared library to /usr/local/lib"
+    sudo cp -a "${svbony_lib_dir}/libSVBCameraSDK.so"* /usr/local/lib/
+    sudo ldconfig
+  fi
+
   sudo udevadm control --reload-rules
   sudo udevadm trigger
 }

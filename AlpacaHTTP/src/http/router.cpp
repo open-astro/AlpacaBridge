@@ -67,6 +67,9 @@
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_SVBONY
+#include <alpacacore/vendor/svbony/svbony_camera_driver.h>
+#endif
 
 namespace {
 
@@ -1783,6 +1786,14 @@ Response Router::dispatch_device_method(
                     }
                 } else if (!connected && device->get_connected()) {
                     device->disconnect();
+                    auto deadline = std::chrono::steady_clock::now()
+                                  + std::chrono::seconds(8);
+                    while (device->get_connected()
+                           && device->get_connecting()
+                           && std::chrono::steady_clock::now() < deadline) {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(50));
+                    }
                 }
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
@@ -6466,6 +6477,25 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "svbony" && device_type_str == "camera") {
+#ifdef ALPACACORE_ENABLE_SVBONY
+        int camera_index = config.value("cameraIndex", 0);
+
+        auto camera = alpacacore::vendor::svbony::create_svbony_camera(device_number, camera_index);
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+            util::log_info("Registered SVBONY camera");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "SVBONY support not enabled. Rebuild with -DALPACACORE_ENABLE_SVBONY=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "gemini" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_GEMINI
         std::string conn_type = config.value("connectionType", "auto");
@@ -6565,6 +6595,8 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "qhy") {
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
+    } else if (vendor == "svbony") {
+        copy_if_present("cameraIndex");
     } else if (vendor == "weewx") {
         copy_if_present("weewxUrl");
         copy_if_present("pollIntervalSeconds");

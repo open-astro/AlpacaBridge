@@ -13,6 +13,8 @@
 #include "catch2_compat.h"
 
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
+#include <alpacacore/alpaca_defs.h>
+#include <alpacacore/util/error_handling.h>
 #include <cmath>
 
 TEST_CASE("WeeWX current parsing", "[weewx]") {
@@ -48,4 +50,46 @@ TEST_CASE("WeeWX current parsing", "[weewx]") {
     REQUIRE(std::abs(v.pressure_hpa - 1015.9166) < 1e-3);
     REQUIRE(std::abs(v.sky_quality - 21.3) < 1e-6);
     REQUIRE(std::abs(v.sky_temperature_c - 5.0) < 1e-6);
+}
+
+TEST_CASE("WeeWX ObservingConditions Driver - Defaults", "[weewx]") {
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = "http://localhost:9999/dummy";
+
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(7, config);
+    REQUIRE(driver);
+
+    CHECK(driver->get_device_type() == alpacacore::DeviceType::ObservingConditions);
+    CHECK(driver->get_device_number() == 7);
+    CHECK(driver->get_connected() == false);
+    CHECK(driver->get_name() == "WeeWX ObservingConditions");
+}
+
+TEST_CASE("WeeWX ObservingConditions Driver - Device metadata", "[weewx]") {
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = "http://localhost:9999/dummy";
+
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(3, config);
+    REQUIRE(driver);
+
+    CHECK(driver->get_description() == "WeeWX ObservingConditions from HTTP JSON");
+    CHECK(driver->get_driver_info() == "AlpacaCore WeeWX ObservingConditions Driver");
+    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_interface_version() == 1);
+    CHECK(driver->get_unique_id() == "WEEWX_OC_3");
+}
+
+TEST_CASE("WeeWX ObservingConditions Driver - Unsupported actions", "[weewx]") {
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = "http://localhost:9999/dummy";
+
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config);
+    REQUIRE(driver);
+
+    CHECK(driver->get_supported_actions().empty());
+    CHECK(driver->can_action("anything") == false);
+    CHECK_THROWS_AS(driver->action("foo", "bar"), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->command_blind("foo", false), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->command_bool("foo", false), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->command_string("foo", false), alpacacore::AlpacaException);
 }

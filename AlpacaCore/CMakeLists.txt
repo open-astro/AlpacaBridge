@@ -20,6 +20,7 @@ option(ALPACACORE_ENABLE_IOPTRON "Enable iOptron vendor support" OFF)
 option(ALPACACORE_ENABLE_SYNSCAN "Enable SynScan vendor support" OFF)
 option(ALPACACORE_ENABLE_WEEWX "Enable WeeWX vendor support" OFF)
 option(ALPACACORE_ENABLE_GEMINI "Enable Gemini focuser vendor support" OFF)
+option(ALPACACORE_ENABLE_SVBONY "Enable SVBONY vendor support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
@@ -30,6 +31,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_SYNSCAN ON)
     set(ALPACACORE_ENABLE_WEEWX ON)
     set(ALPACACORE_ENABLE_GEMINI ON)
+    set(ALPACACORE_ENABLE_SVBONY ON)
 endif()
 
 # Compiler warnings (Linux)
@@ -133,6 +135,13 @@ if(ALPACACORE_ENABLE_GEMINI)
     endif()
 endif()
 
+if(ALPACACORE_ENABLE_SVBONY)
+    add_subdirectory(src/vendors/svbony)
+    if(TARGET alpacacore_svbony)
+        target_link_libraries(alpacacore PRIVATE alpacacore_svbony)
+    endif()
+endif()
+
 # Custom target to clean everything including CMake cache
 # Usage: cmake --build . --target alpacacore-clean-all
 # Note: Named with project prefix to avoid conflicts when used as subdirectory
@@ -219,6 +228,15 @@ endif()
 
 if(ALPACACORE_ENABLE_GEMINI AND TARGET alpacacore_gemini)
     install(TARGETS alpacacore_gemini
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_SVBONY AND TARGET alpacacore_svbony)
+    install(TARGETS alpacacore_svbony
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

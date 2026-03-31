@@ -61,6 +61,7 @@
                         <option value="synscan">SynScan V3/V4</option>
                         <option value="zwo">ZWO</option>
                         <option value="qhy">QHY</option>
+                        <option value="svbony">SVBONY</option>
                         <option value="weewx">WeeWX</option>
                         <option value="gemini">Gemini</option>
                     </select>
@@ -361,6 +362,18 @@
                         <label for="qhy-camera-index">Camera Index:</label>
                         <input type="number" id="qhy-camera-index" name="cameraIndex" value="0" min="0">
                         <small>0-based index from the QHY SDK enumeration.</small>
+                    </div>
+
+                </div>
+
+                <!-- SVBONY Camera Configuration -->
+                <div id="svbony-config" class="vendor-config" style="display: none;">
+                    <h3>SVBONY Camera Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="svbony-camera-index">Camera Index:</label>
+                        <input type="number" id="svbony-camera-index" name="cameraIndex" value="0" min="0">
+                        <small>0-based index from the SVBONY SDK enumeration.</small>
                     </div>
 
                 </div>

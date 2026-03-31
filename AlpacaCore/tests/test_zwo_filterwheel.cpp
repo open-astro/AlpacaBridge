@@ -64,3 +64,31 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Disconnected Behavior", "[zwo][filterwh
     require_alpaca_error([&]() { driver->command_bool("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->command_string("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
 }
+
+TEST_CASE("ZWO EFW Filter Wheel Driver - Device metadata", "[zwo][filterwheel][unit]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(3, 0);
+
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_description() == "ZWO EFW Filter Wheel Driver");
+    CHECK(driver->get_driver_info() == "AlpacaCore ZWO EFW Filter Wheel Driver");
+    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_unique_id() == "ZWO_EFW_3");
+}
+
+TEST_CASE("ZWO EFW Filter Wheel Driver - Device Number Assignment", "[zwo][filterwheel][unit]") {
+    auto d0 = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(0, 0);
+    auto d1 = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(1, 0);
+    auto d5 = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(5, 0);
+
+    CHECK(d0->get_device_number() == 0);
+    CHECK(d1->get_device_number() == 1);
+    CHECK(d5->get_device_number() == 5);
+}
+
+TEST_CASE("ZWO EFW Filter Wheel Driver - Unique IDs", "[zwo][filterwheel][unit]") {
+    auto d0 = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(0, 0);
+    auto d1 = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(1, 0);
+
+    CHECK(d0->get_unique_id() != d1->get_unique_id());
+}

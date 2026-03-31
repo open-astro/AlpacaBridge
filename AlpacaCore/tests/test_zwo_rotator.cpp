@@ -70,3 +70,31 @@ TEST_CASE("ZWO CAA Rotator Driver - Disconnected Behavior", "[zwo][rotator][unit
     require_alpaca_error([&]() { driver->command_bool("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->command_string("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
 }
+
+TEST_CASE("ZWO CAA Rotator Driver - Device metadata", "[zwo][rotator][unit]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(3, 0);
+
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_description() == "ZWO CAA Rotator Driver");
+    CHECK(driver->get_driver_info() == "AlpacaCore ZWO CAA Rotator Driver");
+    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_unique_id() == "ZWO_CAA_3");
+}
+
+TEST_CASE("ZWO CAA Rotator Driver - Device Number Assignment", "[zwo][rotator][unit]") {
+    auto driver0 = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0);
+    auto driver1 = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(1, 0);
+    auto driver5 = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(5, 0);
+
+    CHECK(driver0->get_device_number() == 0);
+    CHECK(driver1->get_device_number() == 1);
+    CHECK(driver5->get_device_number() == 5);
+}
+
+TEST_CASE("ZWO CAA Rotator Driver - Unique IDs", "[zwo][rotator][unit]") {
+    auto driver0 = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0);
+    auto driver1 = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(1, 0);
+
+    CHECK(driver0->get_unique_id() != driver1->get_unique_id());
+}

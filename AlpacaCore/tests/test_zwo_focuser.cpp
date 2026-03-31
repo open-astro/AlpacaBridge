@@ -69,3 +69,33 @@ TEST_CASE("ZWO EAF Focuser Driver - Disconnected Behavior", "[zwo][focuser][unit
     require_alpaca_error([&]() { driver->command_bool("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->command_string("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
 }
+
+TEST_CASE("ZWO EAF Focuser Driver - Device metadata", "[zwo][focuser][unit]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(3, 0);
+
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_description() == "ZWO EAF Focuser Driver");
+    CHECK(driver->get_driver_info() == "AlpacaCore ZWO EAF Focuser Driver");
+    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_unique_id() == "ZWO_EAF_3");
+}
+
+TEST_CASE("ZWO EAF Focuser Driver - Device Number Assignment", "[zwo][focuser][unit]") {
+    auto driver0 = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(0, 0);
+    auto driver1 = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(1, 0);
+    auto driver5 = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(5, 0);
+
+    CHECK(driver0->get_device_number() == 0);
+    CHECK(driver1->get_device_number() == 1);
+    CHECK(driver5->get_device_number() == 5);
+}
+
+TEST_CASE("ZWO EAF Focuser Driver - Unique IDs", "[zwo][focuser][unit]") {
+    auto driver_a = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(0, 0);
+    auto driver_b = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(1, 0);
+
+    REQUIRE(!driver_a->get_unique_id().empty());
+    REQUIRE(!driver_b->get_unique_id().empty());
+    CHECK(driver_a->get_unique_id() != driver_b->get_unique_id());
+}

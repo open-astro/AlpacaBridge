@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-03-27
+## Updated 2026-03-30
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -35,6 +35,17 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: QHY CCD SDK 25.09.29 (build target)
 - **Connection**: USB (requires udev rules and firmware; see below)
 - **Cooler power**: `CanGetCoolerPower` returns false; cooler power reporting is not implemented to avoid SDK timeouts.
+
+### SVBONY
+
+| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|---------------|-----------------|--------|
+| SV905C2 | USB | ✓ |  | [ConformU Validation](AlpacaCore/conformu/SVBONY/SV905C2/) |
+
+### SVBONY Driver Notes
+
+- **SDK**: SVBONY Camera SDK v1.13.4 (build target) 
+- **Connection**: USB (requires udev rules `90-ckusb.rules`)
 
 ### ZWO
 

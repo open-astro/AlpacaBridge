@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [1.0.2] - NOT RELEASED
+
+### Added
+- **SVBONY Camera Driver** (AlpacaCore)
+  - New vendor driver for SVBONY cameras with full ASCOM Alpaca Camera API (ICameraV3) support.
+  - SDK wrapper singleton (`SVBSDKWrapper`) managing camera enumeration, lifecycle, and shared SDK init/release.
+  - Exposure via video capture mode (start capture → `SVBGetVideoData` → stop) with background thread.
+  - Gain, offset, ROI, binning, temperature readout, and ST-4 pulse guide support (`SVBPulseGuide`).
+  - Camera binding by index only (SVBONY SDK does not support camera ID lookup).
+  - Architecture-aware SDK selection: `lib/x64/` (Linux x86_64) and `lib/armv8/` (Linux ARM64).
+- **SVBONY Device Support** (AlpacaHTTP)
+  - Router registration and configuration support for SVBONY camera devices (`cameraIndex` binding).
+  - Web UI: SVBONY vendor selection and camera index configuration field.
+- **SVBONY SDK** (AlpacaBridge)
+  - SVBONY SDK libraries included under `AlpacaCore/external/SVBONY/`; `.gitignore` allowlist added.
+- **Expanded Unit Tests** (AlpacaCore)
+  - SVBONY camera: 6 test cases (defaults, metadata, disconnected throws, disconnected state, unsupported actions, sub-exposure).
+  - QHY camera: expanded from 1 to 6 test cases.
+  - ZWO camera: expanded from 1 to 6 test cases.
+  - ZWO focuser: expanded from 2 to 5 test cases (metadata, device number assignment, unique IDs).
+  - ZWO filter wheel: expanded from 2 to 5 test cases (metadata, device number assignment, unique IDs).
+  - ZWO rotator: expanded from 2 to 5 test cases (metadata, device number assignment, unique IDs).
+  - ZWO switch: expanded from 3 to 5 test cases (metadata, unsupported actions).
+  - SynScan telescope: expanded from 3 to 5 test cases (metadata, disconnected behavior).
+  - iOptron telescope: expanded from 4 to 5 test cases (metadata).
+  - WeeWX observing conditions: expanded from 1 to 4 test cases (defaults, metadata, unsupported actions).
+  - Total: 69 test cases, 484 assertions across all vendor drivers.
+- **AGENTS.md**: added required test case checklist for new vendor device drivers and CMake integration steps.
+
+### Fixed
+- SynScan Telescope: `SideOfPier` comment corrected — OTA east of pier observes west, not east.
+
 ## [1.0.1] - 2026-03-27
 
 ### Added

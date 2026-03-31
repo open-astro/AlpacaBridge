@@ -690,6 +690,8 @@ function startEditDevice(device) {
     } else if (vendor === 'qhy') {
         setFormValue('qhy-camera-index', config.cameraIndex);
         setFormValue('qhy-camera-id', config.cameraId);
+    } else if (vendor === 'svbony') {
+        setFormValue('svbony-camera-index', config.cameraIndex);
     } else if (vendor === 'weewx') {
         setFormValue('weewx-url', config.weewxUrl);
         setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
@@ -1229,6 +1231,11 @@ function updateVendorOptions() {
         qhyOption.disabled = !isCamera;
         qhyOption.hidden = !isCamera;
     }
+    const svbonyOption = vendorSelect.querySelector('option[value="svbony"]');
+    if (svbonyOption) {
+        svbonyOption.disabled = !isCamera;
+        svbonyOption.hidden = !isCamera;
+    }
     const weewxOption = vendorSelect.querySelector('option[value="weewx"]');
     if (weewxOption) {
         weewxOption.disabled = !isObservingConditions;
@@ -1251,6 +1258,9 @@ function updateVendorOptions() {
         vendorSelect.value = '';
     }
     if (!isCamera && vendorSelect.value === 'qhy') {
+        vendorSelect.value = '';
+    }
+    if (!isCamera && vendorSelect.value === 'svbony') {
         vendorSelect.value = '';
     }
     if (!isObservingConditions && vendorSelect.value === 'weewx') {
@@ -1278,6 +1288,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('zwo-config').style.display = 'block';
     } else if (vendor === 'qhy') {
         document.getElementById('qhy-config').style.display = 'block';
+    } else if (vendor === 'svbony') {
+        document.getElementById('svbony-config').style.display = 'block';
     } else if (vendor === 'weewx') {
         document.getElementById('weewx-config').style.display = 'block';
     } else if (vendor === 'gemini') {
@@ -1876,6 +1888,9 @@ document.getElementById('device-form').addEventListener('submit', async function
             const qhyCameraIndex = readOptionalNumber(formData, 'cameraIndex');
             deviceData.cameraIndex = qhyCameraIndex !== null ? qhyCameraIndex : 0;
         }
+    } else if (deviceData.vendor === 'svbony') {
+        const svbonyCameraIndex = readOptionalNumber(formData, 'cameraIndex');
+        deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
     } else if (deviceData.vendor === 'weewx') {
         deviceData.weewxUrl = formData.get('weewxUrl');
         const pollInterval = readOptionalNumber(formData, 'pollIntervalSeconds');

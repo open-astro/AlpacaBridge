@@ -124,6 +124,46 @@ Vendor registration alone is not enough for HTTP/UI visibility. All eight steps 
   - `test_<component>.cpp`
   - `test_<vendor>_<device>.cpp`
 - Use tags to separate unit/integration/hardware behavior when applicable.
+- Use Catch2 macros (`REQUIRE`, `CHECK`, `CHECK_THROWS_AS`, etc.) via the `catch2_compat.h` header.
+
+### Required Test Cases for Every New Vendor Device Driver
+
+Every new driver **must** ship with at least the following test cases. Use the existing tests (e.g. `test_svbony_camera.cpp`, `test_gemini_focuser.cpp`) as reference.
+
+1. **Defaults** `"<Vendor> <Device> Driver - Defaults"` `[<vendor>][<device>][unit]`
+   - Create driver with device number 0.
+   - `REQUIRE` device type, device number, and `get_connected() == false`.
+   - `CHECK` the default device name.
+   - `CHECK` any static capability flags (e.g. `get_can_abort_exposure`, `get_can_reverse`, `get_absolute`).
+
+2. **Device metadata** `"<Vendor> <Device> Driver - Device metadata"` `[<vendor>][<device>][unit]`
+   - Create driver with a non-zero device number (e.g. 3) so `get_unique_id()` is distinguishable.
+   - `CHECK` all of: `get_device_number`, `get_description`, `get_driver_info`, `get_driver_version`, `get_interface_version`, `get_unique_id`.
+   - String values must match the implementation exactly — read the driver source to get the correct strings.
+
+3. **Not connected throws / Disconnected behavior** `[<vendor>][<device>][unit]`
+   - Verify that operations requiring a live connection throw `alpacacore::AlpacaException` (or return safe defaults where the driver explicitly does so — document why in a comment).
+   - Cover the device's primary operations (e.g. for cameras: `get_gain`, `start_exposure`, `get_image_array`; for telescopes: `get_right_ascension`, `get_tracking`, `slew_to_target_async`).
+
+4. **Unsupported actions** `[<vendor>][<device>][unit]`
+   - `CHECK` `get_supported_actions()` is empty (unless the driver defines actions).
+   - `CHECK` `can_action("anything") == false`.
+   - `CHECK_THROWS_AS` for `action()`, `command_blind()`, `command_bool()`, `command_string()`.
+
+5. **Device-specific behavior** — at least one test covering behavior unique to the device type:
+   - Cameras: sub-exposure support (`get_sub_exposure_duration` / `set_sub_exposure_duration` throw if unsupported).
+   - Telescopes: target coordinate validation, axis rate ranges.
+   - Focusers: `get_absolute`, `get_temp_comp_available`, device state telemetry.
+   - Filter wheels: names/offsets defaults, invalid position handling.
+   - Switches: `get_max_switch`, invalid switch ID handling.
+   - Rotators: `get_can_reverse`, device state telemetry.
+
+### Test CMake Integration
+
+When adding a test file for a new vendor device:
+- Add `test_<vendor>_<device>.cpp` to the conditional `TEST_SOURCES` list in `AlpacaCore/tests/CMakeLists.txt`, guarded by `if(TARGET alpacacore_<vendor>)`.
+- Add `target_link_libraries(alpacacore_tests PRIVATE alpacacore_<vendor>)` in the matching conditional block.
+- Build and run all tests (`cmake --build build --target alpacacore_tests && ./build/tests/alpacacore_tests`) before considering the driver complete.
 
 ## Logging, Threading, and Errors
 

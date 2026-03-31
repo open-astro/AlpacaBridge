@@ -13,10 +13,12 @@ ifeq ($(DEB_HOST_ARCH),arm64)
   QHY_SDK_DIR         := $(CURDIR)/AlpacaCore/external/QHY/sdk_Arm64_25.09.29
   ZWO_EAF_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/armv8
   ZWO_CAMERA_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/armv8
+  SVBONY_LIB_DIR     := $(CURDIR)/AlpacaCore/external/SVBONY/lib/armv8
 else
   QHY_SDK_DIR         := $(CURDIR)/AlpacaCore/external/QHY/sdk_linux64_25.09.29
   ZWO_EAF_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/x64
   ZWO_CAMERA_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/x64
+  SVBONY_LIB_DIR     := $(CURDIR)/AlpacaCore/external/SVBONY/lib/x64
 endif
 
 # Cross-compilation flags (no-op when building natively)
@@ -56,6 +58,9 @@ override_dh_auto_install:
 	# ZWO ASI Camera shared library (used by SmartGuider via zwoasi)
 	cp -a $(ZWO_CAMERA_LIB_DIR)/libASICamera2.so* \
 	  $(STAGING)/usr/lib/alpacabridge/
+	# SVBONY Camera shared library
+	cp -a $(SVBONY_LIB_DIR)/libSVBCameraSDK.so* \
+	  $(STAGING)/usr/lib/alpacabridge/
 
 	# --- Register vendor library path with the dynamic linker ---
 	install -d $(STAGING)/etc/ld.so.conf.d
@@ -93,6 +98,9 @@ override_dh_auto_install:
 	  $(STAGING)/lib/udev/rules.d/
 	install -m 644 \
 	  $(QHY_SDK_DIR)/lib/udev/rules.d/85-qhyccd.rules \
+	  $(STAGING)/lib/udev/rules.d/
+	install -m 644 \
+	  $(CURDIR)/AlpacaCore/external/SVBONY/90-ckusb.rules \
 	  $(STAGING)/lib/udev/rules.d/
 
 	# --- Web UI assets ---
