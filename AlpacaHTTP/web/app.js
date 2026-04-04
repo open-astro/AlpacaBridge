@@ -663,6 +663,22 @@ function startEditDevice(device) {
         if (synscanConnectionTypeEl) {
             synscanConnectionTypeEl.dispatchEvent(new Event('change'));
         }
+    } else if (vendor === 'celestron') {
+        const celestronConnectionType = config.connectionType || 'auto';
+        setFormValue('celestron-connection-type', celestronConnectionType);
+        if (celestronConnectionType === 'serial') {
+            setFormValue('celestron-port-path', config.portPath);
+            setFormValue('celestron-baud-rate', config.baudRate);
+        } else {
+            setFormValue('celestron-host', config.host);
+            setFormValue('celestron-tcp-port', config.tcpPort);
+        }
+        setFormValue('celestron-aperture-diameter', config.apertureDiameter);
+        setFormValue('celestron-focal-length', config.focalLength);
+        const celestronConnectionTypeEl = document.getElementById('celestron-connection-type');
+        if (celestronConnectionTypeEl) {
+            celestronConnectionTypeEl.dispatchEvent(new Event('change'));
+        }
     } else if (vendor === 'zwo' && deviceType === 'telescope') {
         const zwoMountConnectionType = config.connectionType || 'serial';
         setFormValue('zwo-mount-connection-type', zwoMountConnectionType);
@@ -1220,6 +1236,11 @@ function updateVendorOptions() {
         synscanOption.disabled = !isTelescope;
         synscanOption.hidden = !isTelescope;
     }
+    const celestronOption = vendorSelect.querySelector('option[value="celestron"]');
+    if (celestronOption) {
+        celestronOption.disabled = !isTelescope;
+        celestronOption.hidden = !isTelescope;
+    }
     const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
     if (zwoOption) {
         const zwoAllowed = isTelescope || isCamera || isSwitch || isFilterWheel || isFocuser || isRotator;
@@ -1253,6 +1274,9 @@ function updateVendorOptions() {
     if (!isTelescope && vendorSelect.value === 'synscan') {
         vendorSelect.value = '';
     }
+    if (!isTelescope && vendorSelect.value === 'celestron') {
+        vendorSelect.value = '';
+    }
     if (!isTelescope && !isCamera && !isSwitch && !isFilterWheel && !isFocuser && !isRotator &&
         vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
@@ -1284,6 +1308,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('ioptron-config').style.display = 'block';
     } else if (vendor === 'synscan') {
         document.getElementById('synscan-config').style.display = 'block';
+    } else if (vendor === 'celestron') {
+        document.getElementById('celestron-config').style.display = 'block';
     } else if (vendor === 'zwo') {
         document.getElementById('zwo-config').style.display = 'block';
     } else if (vendor === 'qhy') {
@@ -1312,6 +1338,15 @@ if (synscanConnectionType) {
         const type = this.value;
         document.getElementById('synscan-serial-config').style.display = type === 'serial' ? 'block' : 'none';
         document.getElementById('synscan-network-config').style.display = type === 'network' ? 'block' : 'none';
+    });
+}
+
+const celestronConnectionType = document.getElementById('celestron-connection-type');
+if (celestronConnectionType) {
+    celestronConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('celestron-serial-config').style.display = type === 'serial' ? 'block' : 'none';
+        document.getElementById('celestron-network-config').style.display = type === 'network' ? 'block' : 'none';
     });
 }
 
@@ -1771,6 +1806,26 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
 
         const focalLength = readOptionalNumber(formData, 'synscanFocalLength');
+        if (focalLength !== null) {
+            deviceData.focalLength = focalLength;
+        }
+    } else if (deviceData.vendor === 'celestron') {
+        deviceData.connectionType = formData.get('celestronConnectionType') || 'auto';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('celestronPortPath');
+            deviceData.baudRate = parseInt(formData.get('celestronBaudRate')) || 9600;
+        } else if (deviceData.connectionType === 'network') {
+            deviceData.host = formData.get('celestronHost');
+            deviceData.tcpPort = parseInt(formData.get('celestronTcpPort')) || 2000;
+        }
+        // "auto" needs no connection fields — port is discovered at startup
+
+        const apertureDiameter = readOptionalNumber(formData, 'celestronApertureDiameter');
+        if (apertureDiameter !== null) {
+            deviceData.apertureDiameter = apertureDiameter;
+        }
+
+        const focalLength = readOptionalNumber(formData, 'celestronFocalLength');
         if (focalLength !== null) {
             deviceData.focalLength = focalLength;
         }
