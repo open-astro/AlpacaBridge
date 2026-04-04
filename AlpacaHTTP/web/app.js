@@ -679,6 +679,11 @@ function startEditDevice(device) {
         if (celestronConnectionTypeEl) {
             celestronConnectionTypeEl.dispatchEvent(new Event('change'));
         }
+    } else if (vendor === 'bisque') {
+        setFormValue('bisque-host', config.host || 'localhost');
+        setFormValue('bisque-tcp-port', config.tcpPort || 3040);
+        setFormValue('bisque-aperture-diameter', config.apertureDiameter);
+        setFormValue('bisque-focal-length', config.focalLength);
     } else if (vendor === 'zwo' && deviceType === 'telescope') {
         const zwoMountConnectionType = config.connectionType || 'serial';
         setFormValue('zwo-mount-connection-type', zwoMountConnectionType);
@@ -1241,6 +1246,11 @@ function updateVendorOptions() {
         celestronOption.disabled = !isTelescope;
         celestronOption.hidden = !isTelescope;
     }
+    const bisqueOption = vendorSelect.querySelector('option[value="bisque"]');
+    if (bisqueOption) {
+        bisqueOption.disabled = !isTelescope;
+        bisqueOption.hidden = !isTelescope;
+    }
     const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
     if (zwoOption) {
         const zwoAllowed = isTelescope || isCamera || isSwitch || isFilterWheel || isFocuser || isRotator;
@@ -1277,6 +1287,9 @@ function updateVendorOptions() {
     if (!isTelescope && vendorSelect.value === 'celestron') {
         vendorSelect.value = '';
     }
+    if (!isTelescope && vendorSelect.value === 'bisque') {
+        vendorSelect.value = '';
+    }
     if (!isTelescope && !isCamera && !isSwitch && !isFilterWheel && !isFocuser && !isRotator &&
         vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
@@ -1310,6 +1323,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('synscan-config').style.display = 'block';
     } else if (vendor === 'celestron') {
         document.getElementById('celestron-config').style.display = 'block';
+    } else if (vendor === 'bisque') {
+        document.getElementById('bisque-config').style.display = 'block';
     } else if (vendor === 'zwo') {
         document.getElementById('zwo-config').style.display = 'block';
     } else if (vendor === 'qhy') {
@@ -1826,6 +1841,19 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
 
         const focalLength = readOptionalNumber(formData, 'celestronFocalLength');
+        if (focalLength !== null) {
+            deviceData.focalLength = focalLength;
+        }
+    } else if (deviceData.vendor === 'bisque') {
+        deviceData.host = formData.get('bisqueHost') || 'localhost';
+        deviceData.tcpPort = parseInt(formData.get('bisqueTcpPort')) || 3040;
+
+        const apertureDiameter = readOptionalNumber(formData, 'bisqueApertureDiameter');
+        if (apertureDiameter !== null) {
+            deviceData.apertureDiameter = apertureDiameter;
+        }
+
+        const focalLength = readOptionalNumber(formData, 'bisqueFocalLength');
         if (focalLength !== null) {
             deviceData.focalLength = focalLength;
         }

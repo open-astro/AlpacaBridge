@@ -22,6 +22,7 @@ option(ALPACACORE_ENABLE_WEEWX "Enable WeeWX vendor support" OFF)
 option(ALPACACORE_ENABLE_GEMINI "Enable Gemini focuser vendor support" OFF)
 option(ALPACACORE_ENABLE_SVBONY "Enable SVBONY vendor support" OFF)
 option(ALPACACORE_ENABLE_CELESTRON "Enable Celestron NexStar vendor support" OFF)
+option(ALPACACORE_ENABLE_BISQUE "Enable Bisque/Paramount (TheSkyX) telescope support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
@@ -34,6 +35,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_GEMINI ON)
     set(ALPACACORE_ENABLE_SVBONY ON)
     set(ALPACACORE_ENABLE_CELESTRON ON)
+    set(ALPACACORE_ENABLE_BISQUE ON)
 endif()
 
 # Compiler warnings (Linux)
@@ -151,6 +153,13 @@ if(ALPACACORE_ENABLE_CELESTRON)
     endif()
 endif()
 
+if(ALPACACORE_ENABLE_BISQUE)
+    add_subdirectory(src/vendors/bisque)
+    if(TARGET alpacacore_bisque)
+        target_link_libraries(alpacacore PRIVATE alpacacore_bisque)
+    endif()
+endif()
+
 # Custom target to clean everything including CMake cache
 # Usage: cmake --build . --target alpacacore-clean-all
 # Note: Named with project prefix to avoid conflicts when used as subdirectory
@@ -255,6 +264,15 @@ endif()
 
 if(ALPACACORE_ENABLE_CELESTRON AND TARGET alpacacore_celestron)
     install(TARGETS alpacacore_celestron
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_BISQUE AND TARGET alpacacore_bisque)
+    install(TARGETS alpacacore_bisque
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib
