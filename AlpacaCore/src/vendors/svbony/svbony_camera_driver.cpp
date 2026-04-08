@@ -207,6 +207,39 @@ public:
             }
             roi_dirty_ = false;
 
+            // Probe gain control: log caps and try several values to learn
+            // which the SDK actually accepts. SV905C2 reports range [0,100]
+            // but rejects boundary writes with SVB_ERROR_GENERAL_ERROR — we
+            // need to know whether mid-range writes work, and at what step.
+            {
+                auto it = control_caps_.find(SVBControlType::Gain);
+                if (it != control_caps_.end()) {
+                    const auto& gcaps = it->second;
+                    ALPACA_LOG_INFO("SVBONY",
+                        "Gain caps: name=" + gcaps.name +
+                        " range=[" + std::to_string(gcaps.min_value) + "," + std::to_string(gcaps.max_value) + "]" +
+                        " default=" + std::to_string(gcaps.default_value) +
+                        " writable=" + std::string(gcaps.is_writable ? "yes" : "no") +
+                        " autoSupported=" + std::string(gcaps.is_auto_supported ? "yes" : "no"));
+
+                    if (gcaps.is_writable) {
+                        long lo = gcaps.min_value;
+                        long hi = gcaps.max_value;
+                        long mid = lo + (hi - lo) / 2;
+                        long probes[] = {gcaps.default_value, mid, lo, hi, lo + 1, hi - 1};
+                        for (long pv : probes) {
+                            if (pv < lo || pv > hi) continue;
+                            try {
+                                sdk.set_control_value(resolved_id, SVBControlType::Gain, pv, false);
+                                ALPACA_LOG_INFO("SVBONY", "Gain probe " + std::to_string(pv) + " OK");
+                            } catch (const std::exception& e) {
+                                ALPACA_LOG_WARN("SVBONY", "Gain probe " + std::to_string(pv) + " FAILED: " + e.what());
+                            }
+                        }
+                    }
+                }
+            }
+
             // Refresh pixel size now that camera is open
             try {
                 float px = sdk.get_sensor_pixel_size(resolved_id);
