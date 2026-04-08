@@ -169,6 +169,7 @@ public:
 
         if (connected) {
             int resolved_id = resolve_camera_id_locked();
+            ALPACA_LOG_INFO("SVBONY", "SDK version: " + sdk.get_sdk_version());
             sdk.open_camera(resolved_id);
             // Reset any leftover state from a previous session before
             // touching mode/controls. Some models (notably SV905C2) start in
@@ -177,7 +178,9 @@ public:
             // failure on cameras/SDK builds that don't support the call.
             try {
                 sdk.restore_default_param(resolved_id);
-            } catch (const std::exception&) {
+                ALPACA_LOG_DEBUG("SVBONY", "SVBRestoreDefaultParam succeeded");
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("SVBONY", "SVBRestoreDefaultParam failed: " + std::string(e.what()));
             }
             sdk.set_camera_mode_normal(resolved_id);
             sdk.set_auto_save_param(resolved_id, false);
@@ -468,6 +471,25 @@ public:
 
     void set_gain(int gain) override {
         ensure_connected();
+        // Diagnostic logging — SV905C2 has reported persistent
+        // SVB_ERROR_GENERAL_ERROR on gain writes; capture exact range,
+        // current value/auto state, and target value so we can see why.
+        try {
+            const auto& caps = get_control_caps_or_throw(SVBControlType::Gain);
+            long cur_value = 0;
+            bool is_auto = false;
+            bool got = SVBSDKWrapper::instance().get_control_value(
+                camera_id_value(), SVBControlType::Gain, cur_value, is_auto);
+            ALPACA_LOG_DEBUG("SVBONY",
+                "set_gain target=" + std::to_string(gain) +
+                " range=[" + std::to_string(caps.min_value) + "," + std::to_string(caps.max_value) + "]" +
+                " writable=" + std::string(caps.is_writable ? "yes" : "no") +
+                " autoSupported=" + std::string(caps.is_auto_supported ? "yes" : "no") +
+                " current=" + (got ? std::to_string(cur_value) : std::string("?")) +
+                " currentAuto=" + (got ? std::string(is_auto ? "yes" : "no") : std::string("?")));
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("SVBONY", "set_gain pre-log failed: " + std::string(e.what()));
+        }
         // Disable auto-gain first; some SVBONY models reject manual writes
         // while auto mode is active (SVB_ERROR_GENERAL_ERROR).
         disable_auto_if_needed(SVBControlType::Gain);
