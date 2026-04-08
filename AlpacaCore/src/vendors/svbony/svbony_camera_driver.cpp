@@ -207,35 +207,25 @@ public:
             }
             roi_dirty_ = false;
 
-            // Probe ALL enumerated controls to find which (if any) accept
-            // an SVBSetControlValue write. Earlier probes showed Gain fails
-            // both cold and during capture, so we need to know whether
-            // SVBSetControlValue is broken for the entire camera or just
-            // for SVB_GAIN specifically on SV905C2.
-            {
-                ALPACA_LOG_INFO("SVBONY",
-                    "Control enumeration: " + std::to_string(control_caps_.size()) + " controls reported");
-                for (const auto& kv : control_caps_) {
-                    const auto& c = kv.second;
-                    ALPACA_LOG_INFO("SVBONY",
-                        " - " + c.name +
-                        " range=[" + std::to_string(c.min_value) + "," + std::to_string(c.max_value) + "]" +
-                        " default=" + std::to_string(c.default_value) +
-                        " writable=" + std::string(c.is_writable ? "yes" : "no") +
-                        " autoSupported=" + std::string(c.is_auto_supported ? "yes" : "no"));
-                }
-                for (const auto& kv : control_caps_) {
-                    const auto& c = kv.second;
-                    if (!c.is_writable) continue;
-                    try {
-                        sdk.set_control_value(resolved_id, kv.first, c.default_value, false);
-                        ALPACA_LOG_INFO("SVBONY",
-                            "Probe write " + c.name + "=" + std::to_string(c.default_value) + " OK");
-                    } catch (const std::exception& e) {
-                        ALPACA_LOG_WARN("SVBONY",
-                            "Probe write " + c.name + "=" + std::to_string(c.default_value) +
-                            " FAILED: " + e.what());
-                    }
+            // Control warm-up: write every writable control to its default
+            // value at connect time. SV905C2 (and possibly other SVBONY
+            // models) rejects SVBSetControlValue(SVB_GAIN, ...) with
+            // SVB_ERROR_GENERAL_ERROR until at least one control has been
+            // written via SVBSetControlValue post-open. Iterating every
+            // writable control here puts the SDK into a state where later
+            // client writes succeed. Failures are tolerated — they'll be
+            // surfaced again the next time the client touches that control.
+            for (const auto& kv : control_caps_) {
+                const auto& c = kv.second;
+                if (!c.is_writable) continue;
+                try {
+                    sdk.set_control_value(resolved_id, kv.first, c.default_value, false);
+                    ALPACA_LOG_DEBUG("SVBONY",
+                        "Warmup write " + c.name + "=" + std::to_string(c.default_value) + " OK");
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("SVBONY",
+                        "Warmup write " + c.name + "=" + std::to_string(c.default_value) +
+                        " failed: " + e.what());
                 }
             }
 
@@ -503,25 +493,6 @@ public:
 
     void set_gain(int gain) override {
         ensure_connected();
-        // Diagnostic logging — SV905C2 has reported persistent
-        // SVB_ERROR_GENERAL_ERROR on gain writes; capture exact range,
-        // current value/auto state, and target value so we can see why.
-        try {
-            const auto& caps = get_control_caps_or_throw(SVBControlType::Gain);
-            long cur_value = 0;
-            bool is_auto = false;
-            bool got = SVBSDKWrapper::instance().get_control_value(
-                camera_id_value(), SVBControlType::Gain, cur_value, is_auto);
-            ALPACA_LOG_DEBUG("SVBONY",
-                "set_gain target=" + std::to_string(gain) +
-                " range=[" + std::to_string(caps.min_value) + "," + std::to_string(caps.max_value) + "]" +
-                " writable=" + std::string(caps.is_writable ? "yes" : "no") +
-                " autoSupported=" + std::string(caps.is_auto_supported ? "yes" : "no") +
-                " current=" + (got ? std::to_string(cur_value) : std::string("?")) +
-                " currentAuto=" + (got ? std::string(is_auto ? "yes" : "no") : std::string("?")));
-        } catch (const std::exception& e) {
-            ALPACA_LOG_DEBUG("SVBONY", "set_gain pre-log failed: " + std::string(e.what()));
-        }
         // Disable auto-gain first; some SVBONY models reject manual writes
         // while auto mode is active (SVB_ERROR_GENERAL_ERROR).
         disable_auto_if_needed(SVBControlType::Gain);
