@@ -207,63 +207,34 @@ public:
             }
             roi_dirty_ = false;
 
-            // Probe gain control to learn which values the SDK accepts.
-            // Earlier probes showed *every* value fails when video capture
-            // is not active. Test the same probe twice: once cold, once
-            // wrapped in StartVideoCapture/StopVideoCapture, to confirm
-            // whether SV905C2 requires an active capture session before
-            // SVBSetControlValue will accept gain writes.
+            // Probe ALL enumerated controls to find which (if any) accept
+            // an SVBSetControlValue write. Earlier probes showed Gain fails
+            // both cold and during capture, so we need to know whether
+            // SVBSetControlValue is broken for the entire camera or just
+            // for SVB_GAIN specifically on SV905C2.
             {
-                auto it = control_caps_.find(SVBControlType::Gain);
-                if (it != control_caps_.end()) {
-                    const auto& gcaps = it->second;
+                ALPACA_LOG_INFO("SVBONY",
+                    "Control enumeration: " + std::to_string(control_caps_.size()) + " controls reported");
+                for (const auto& kv : control_caps_) {
+                    const auto& c = kv.second;
                     ALPACA_LOG_INFO("SVBONY",
-                        "Gain caps: name=" + gcaps.name +
-                        " range=[" + std::to_string(gcaps.min_value) + "," + std::to_string(gcaps.max_value) + "]" +
-                        " default=" + std::to_string(gcaps.default_value) +
-                        " writable=" + std::string(gcaps.is_writable ? "yes" : "no") +
-                        " autoSupported=" + std::string(gcaps.is_auto_supported ? "yes" : "no"));
-
-                    if (gcaps.is_writable) {
-                        long lo = gcaps.min_value;
-                        long hi = gcaps.max_value;
-                        long mid = lo + (hi - lo) / 2;
-                        long probes[] = {gcaps.default_value, mid, lo, hi};
-
-                        auto run_probes = [&](const char* phase) {
-                            for (long pv : probes) {
-                                if (pv < lo || pv > hi) continue;
-                                try {
-                                    sdk.set_control_value(resolved_id, SVBControlType::Gain, pv, false);
-                                    ALPACA_LOG_INFO("SVBONY",
-                                        std::string("Gain probe[") + phase + "] " +
-                                        std::to_string(pv) + " OK");
-                                } catch (const std::exception& e) {
-                                    ALPACA_LOG_WARN("SVBONY",
-                                        std::string("Gain probe[") + phase + "] " +
-                                        std::to_string(pv) + " FAILED: " + e.what());
-                                }
-                            }
-                        };
-
-                        run_probes("cold");
-
-                        // Now repeat with video capture active.
-                        try {
-                            sdk.start_video_capture(resolved_id);
-                            ALPACA_LOG_INFO("SVBONY", "Gain probe: SVBStartVideoCapture OK");
-                            run_probes("capturing");
-                            try {
-                                sdk.stop_video_capture(resolved_id);
-                                ALPACA_LOG_INFO("SVBONY", "Gain probe: SVBStopVideoCapture OK");
-                            } catch (const std::exception& e) {
-                                ALPACA_LOG_WARN("SVBONY",
-                                    std::string("Gain probe: SVBStopVideoCapture failed: ") + e.what());
-                            }
-                        } catch (const std::exception& e) {
-                            ALPACA_LOG_WARN("SVBONY",
-                                std::string("Gain probe: SVBStartVideoCapture failed: ") + e.what());
-                        }
+                        " - " + c.name +
+                        " range=[" + std::to_string(c.min_value) + "," + std::to_string(c.max_value) + "]" +
+                        " default=" + std::to_string(c.default_value) +
+                        " writable=" + std::string(c.is_writable ? "yes" : "no") +
+                        " autoSupported=" + std::string(c.is_auto_supported ? "yes" : "no"));
+                }
+                for (const auto& kv : control_caps_) {
+                    const auto& c = kv.second;
+                    if (!c.is_writable) continue;
+                    try {
+                        sdk.set_control_value(resolved_id, kv.first, c.default_value, false);
+                        ALPACA_LOG_INFO("SVBONY",
+                            "Probe write " + c.name + "=" + std::to_string(c.default_value) + " OK");
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_WARN("SVBONY",
+                            "Probe write " + c.name + "=" + std::to_string(c.default_value) +
+                            " FAILED: " + e.what());
                     }
                 }
             }
