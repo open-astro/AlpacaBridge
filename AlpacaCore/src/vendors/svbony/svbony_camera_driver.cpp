@@ -207,10 +207,12 @@ public:
             }
             roi_dirty_ = false;
 
-            // Probe gain control: log caps and try several values to learn
-            // which the SDK actually accepts. SV905C2 reports range [0,100]
-            // but rejects boundary writes with SVB_ERROR_GENERAL_ERROR — we
-            // need to know whether mid-range writes work, and at what step.
+            // Probe gain control to learn which values the SDK accepts.
+            // Earlier probes showed *every* value fails when video capture
+            // is not active. Test the same probe twice: once cold, once
+            // wrapped in StartVideoCapture/StopVideoCapture, to confirm
+            // whether SV905C2 requires an active capture session before
+            // SVBSetControlValue will accept gain writes.
             {
                 auto it = control_caps_.find(SVBControlType::Gain);
                 if (it != control_caps_.end()) {
@@ -226,15 +228,41 @@ public:
                         long lo = gcaps.min_value;
                         long hi = gcaps.max_value;
                         long mid = lo + (hi - lo) / 2;
-                        long probes[] = {gcaps.default_value, mid, lo, hi, lo + 1, hi - 1};
-                        for (long pv : probes) {
-                            if (pv < lo || pv > hi) continue;
-                            try {
-                                sdk.set_control_value(resolved_id, SVBControlType::Gain, pv, false);
-                                ALPACA_LOG_INFO("SVBONY", "Gain probe " + std::to_string(pv) + " OK");
-                            } catch (const std::exception& e) {
-                                ALPACA_LOG_WARN("SVBONY", "Gain probe " + std::to_string(pv) + " FAILED: " + e.what());
+                        long probes[] = {gcaps.default_value, mid, lo, hi};
+
+                        auto run_probes = [&](const char* phase) {
+                            for (long pv : probes) {
+                                if (pv < lo || pv > hi) continue;
+                                try {
+                                    sdk.set_control_value(resolved_id, SVBControlType::Gain, pv, false);
+                                    ALPACA_LOG_INFO("SVBONY",
+                                        std::string("Gain probe[") + phase + "] " +
+                                        std::to_string(pv) + " OK");
+                                } catch (const std::exception& e) {
+                                    ALPACA_LOG_WARN("SVBONY",
+                                        std::string("Gain probe[") + phase + "] " +
+                                        std::to_string(pv) + " FAILED: " + e.what());
+                                }
                             }
+                        };
+
+                        run_probes("cold");
+
+                        // Now repeat with video capture active.
+                        try {
+                            sdk.start_video_capture(resolved_id);
+                            ALPACA_LOG_INFO("SVBONY", "Gain probe: SVBStartVideoCapture OK");
+                            run_probes("capturing");
+                            try {
+                                sdk.stop_video_capture(resolved_id);
+                                ALPACA_LOG_INFO("SVBONY", "Gain probe: SVBStopVideoCapture OK");
+                            } catch (const std::exception& e) {
+                                ALPACA_LOG_WARN("SVBONY",
+                                    std::string("Gain probe: SVBStopVideoCapture failed: ") + e.what());
+                            }
+                        } catch (const std::exception& e) {
+                            ALPACA_LOG_WARN("SVBONY",
+                                std::string("Gain probe: SVBStartVideoCapture failed: ") + e.what());
                         }
                     }
                 }
