@@ -170,6 +170,15 @@ public:
         if (connected) {
             int resolved_id = resolve_camera_id_locked();
             sdk.open_camera(resolved_id);
+            // Reset any leftover state from a previous session before
+            // touching mode/controls. Some models (notably SV905C2) start in
+            // an inconsistent state where SVBSetControlValue returns
+            // SVB_ERROR_GENERAL_ERROR until defaults are restored. Tolerate
+            // failure on cameras/SDK builds that don't support the call.
+            try {
+                sdk.restore_default_param(resolved_id);
+            } catch (const std::exception&) {
+            }
             sdk.set_camera_mode_normal(resolved_id);
             sdk.set_auto_save_param(resolved_id, false);
 

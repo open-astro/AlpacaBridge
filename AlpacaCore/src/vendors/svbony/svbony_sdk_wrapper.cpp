@@ -13,9 +13,11 @@
 #include <alpacacore/vendor/svbony/svbony_sdk_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <SVBCameraSDK.h>
+#include <chrono>
+#include <iomanip>
 #include <mutex>
 #include <sstream>
-#include <iomanip>
+#include <thread>
 #include <unordered_map>
 
 namespace alpacacore::vendor::svbony {
@@ -434,7 +436,22 @@ bool SVBSDKWrapper::get_control_value(int camera_id, SVBControlType type, long& 
 void SVBSDKWrapper::set_control_value(int camera_id, SVBControlType type, long value, bool is_auto) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     SVB_BOOL auto_flag = is_auto ? SVB_TRUE : SVB_FALSE;
-    throw_on_error(SVBSetControlValue(camera_id, to_svb_control_type(type), value, auto_flag), "SVBSetControlValue");
+    SVB_CONTROL_TYPE sdk_type = to_svb_control_type(type);
+    // SV905C2 (and possibly other models) intermittently returns
+    // SVB_ERROR_GENERAL_ERROR from SVBSetControlValue on the first attempt for
+    // some controls (notably Gain), even when the value is in range. The SDK
+    // documents this code as "operate to camera hardware failed" — a transient
+    // USB/firmware fault. Retry a few times with a short backoff before giving
+    // up so ConformU and well-behaved clients see consistent success.
+    SVB_ERROR_CODE code = SVB_SUCCESS;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        code = SVBSetControlValue(camera_id, sdk_type, value, auto_flag);
+        if (code != SVB_ERROR_GENERAL_ERROR) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    throw_on_error(code, "SVBSetControlValue");
 }
 
 SVBROIFormat SVBSDKWrapper::get_roi_format(int camera_id) {
@@ -535,6 +552,11 @@ void SVBSDKWrapper::set_camera_mode_normal(int camera_id) {
 void SVBSDKWrapper::set_auto_save_param(int camera_id, bool enable) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     throw_on_error(SVBSetAutoSaveParam(camera_id, enable ? SVB_TRUE : SVB_FALSE), "SVBSetAutoSaveParam");
+}
+
+void SVBSDKWrapper::restore_default_param(int camera_id) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(SVBRestoreDefaultParam(camera_id), "SVBRestoreDefaultParam");
 }
 
 } // namespace alpacacore::vendor::svbony

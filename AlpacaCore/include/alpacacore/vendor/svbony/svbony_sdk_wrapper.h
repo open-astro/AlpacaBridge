@@ -139,6 +139,7 @@ public:
 
     void set_camera_mode_normal(int camera_id);
     void set_auto_save_param(int camera_id, bool enable);
+    void restore_default_param(int camera_id);
 
 private:
     class Impl;
