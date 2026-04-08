@@ -340,6 +340,22 @@ public:
             return CameraState::Idle;
         }
         if (exposure_active_.load()) {
+            // Watchdog: if the exposure thread is hung in an SVBONY SDK call
+            // past the expected deadline, force the state machine back to
+            // Idle so the client (e.g. ConformU) can recover. The thread is
+            // left running and will exit naturally when the SDK call returns
+            // or the camera is disconnected. This is intentional — we cannot
+            // safely cancel a blocked SDK call from outside.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (exposure_deadline_valid_ &&
+                std::chrono::steady_clock::now() >= exposure_deadline_) {
+                ALPACA_LOG_WARN("SVBONY",
+                    "Exposure deadline exceeded; forcing CameraState=Idle. "
+                    "Exposure thread may still be blocked inside the SVBONY SDK.");
+                exposure_active_.store(false);
+                exposure_deadline_valid_ = false;
+                return CameraState::Idle;
+            }
             return CameraState::Exposing;
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -861,6 +877,15 @@ public:
             last_exposure_valid_ = true;
             image_ready_ = false;
             image_cached_ = false;
+            // Watchdog deadline: exposure time + a generous margin for SDK
+            // overhead, deferred ROI / FrameSpeedMode writes, and the
+            // SVBGetVideoData poll loop. If the exposure thread is still
+            // hung past this point, get_camera_state forces Idle so the
+            // client can recover instead of polling Exposing forever.
+            exposure_deadline_ = std::chrono::steady_clock::now() +
+                std::chrono::microseconds(exposure_us) +
+                std::chrono::seconds(15);
+            exposure_deadline_valid_ = true;
         }
 
         exposure_active_.store(true);
@@ -987,6 +1012,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         image_ready_ = false;
         image_cached_ = false;
+        exposure_deadline_valid_ = false;
     }
 
 private:
@@ -1026,8 +1052,14 @@ private:
     bool frame_speed_dirty_{false};
     long pending_frame_speed_{0};
 
-    std::atomic<bool> exposure_active_;
+    mutable std::atomic<bool> exposure_active_;
     std::thread exposure_thread_;
+    // Watchdog deadline: get_camera_state forces Idle once now >= this, even
+    // if the exposure thread is still hung in an SVBONY SDK call. Protected
+    // by mutex_; mutable because get_camera_state (const) clears the flag
+    // after triggering recovery.
+    mutable std::chrono::steady_clock::time_point exposure_deadline_{};
+    mutable bool exposure_deadline_valid_{false};
 
     mutable std::atomic<bool> pulse_guiding_;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
@@ -1045,6 +1077,7 @@ private:
         last_exposure_start_ = std::chrono::system_clock::time_point{};
         last_exposure_valid_ = false;
         exposure_active_.store(false);
+        exposure_deadline_valid_ = false;
     }
 
     bool is_roi_valid_locked(int width, int height, int sx, int sy) const {
