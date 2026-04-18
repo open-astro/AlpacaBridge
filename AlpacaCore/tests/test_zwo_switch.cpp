@@ -14,6 +14,7 @@
 #include "catch2_compat.h"
 
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
+#include <alpacacore/util/error_handling.h>
 
 TEST_CASE("ZWO Dew Heater Switch Driver - Defaults", "[zwo][switch][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0);
@@ -43,4 +44,31 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Invalid Switch ID", "[zwo][switch][uni
     REQUIRE(driver->get_max_switch() == 1);
     REQUIRE_THROWS(driver->get_can_write(1));
     REQUIRE_THROWS(driver->get_switch_name(1));
+}
+
+TEST_CASE("ZWO Dew Heater Switch Driver - Device metadata", "[zwo][switch][unit]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(3, 0);
+
+    REQUIRE(driver != nullptr);
+
+    CHECK(driver->get_device_number() == 3);
+    CHECK(driver->get_description() == "ZWO camera dew heater switch");
+    CHECK(driver->get_driver_info() == "AlpacaCore ZWO Dew Heater Switch");
+    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_unique_id() == "ZWO_DEW_3");
+}
+
+TEST_CASE("ZWO Dew Heater Switch Driver - Unsupported actions", "[zwo][switch][unit]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0);
+
+    REQUIRE(driver != nullptr);
+
+    CHECK(driver->get_supported_actions().empty());
+    CHECK_FALSE(driver->can_action("anything"));
+
+    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 }

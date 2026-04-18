@@ -15,6 +15,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
+#include <alpacacore/util/error_handling.h>
 
 using alpacacore::DeviceType;
 
@@ -88,4 +89,50 @@ TEST_CASE("SynScan Telescope Driver - Axis Rate Ranges", "[synscan][telescope][u
     REQUIRE(tertiary_ranges.empty());
 
     REQUIRE_THROWS(driver->get_axis_rate_range(2));
+}
+
+TEST_CASE("SynScan Telescope Driver - Device metadata", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        3, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    CHECK(driver->get_description() == "Sky-Watcher SynScan V3/V4 Mount Driver");
+    CHECK(driver->get_driver_info() == "AlpacaCore SynScan Driver v0.1");
+    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_unique_id() == "SynScan_3");
+}
+
+TEST_CASE("SynScan Telescope Driver - Disconnected Behavior", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    REQUIRE_FALSE(driver->get_connected());
+
+    // Position queries require connection
+    CHECK_THROWS_AS(driver->get_right_ascension(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->get_declination(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->get_altitude(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->get_azimuth(), alpacacore::AlpacaException);
+
+    // Tracking requires connection
+    CHECK_THROWS_AS(driver->get_tracking(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
+
+    // Slew and park require connection (or target not set, both throw AlpacaException)
+    CHECK_THROWS_AS(driver->slew_to_target_async(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
+
+    // Action and command methods
+    CHECK_THROWS_AS(driver->action("test", ""), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 }

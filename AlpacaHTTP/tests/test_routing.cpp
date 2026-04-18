@@ -150,6 +150,203 @@ int main() {
 #endif
     }
 
+    // --- Celestron telescope routing/config persistence test ---
+#ifdef ALPACACORE_ENABLE_CELESTRON
+    {
+        nlohmann::json remove_body = {
+            {"vendor", "celestron"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9102}
+        };
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        nlohmann::json configure_body = {
+            {"vendor", "celestron"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9102},
+            {"connectionType", "serial"},
+            {"portPath", "/dev/null"},
+            {"baudRate", 9600},
+            {"responseTimeoutMs", 5000},
+            {"apertureDiameter", 0.28},
+            {"focalLength", 2.8},
+            {"siteLatitude", 33.85},
+            {"siteLongitude", -118.34},
+            {"siteElevation", 100.0},
+            {"syncTimeOnConnect", true}
+        };
+
+        const auto configure_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_CELESTRON
+        assert(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        assert(configured_json.value("ErrorNumber", -1) == 0);
+        assert(configured_json.contains("Value"));
+        assert(configured_json["Value"].is_array());
+
+        bool found_celestron = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Telescope" &&
+                entry.value("DeviceNumber", -1) == 9102) {
+                assert(entry.value("Vendor", "") == "celestron");
+                assert(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                assert(cfg.value("vendor", "") == "celestron");
+                assert(cfg.value("deviceType", "") == "telescope");
+                assert(cfg.value("connectionType", "") == "serial");
+                assert(cfg.value("portPath", "") == "/dev/null");
+                assert(cfg.value("baudRate", -1) == 9600);
+                assert(cfg.value("responseTimeoutMs", -1) == 5000);
+                assert(std::abs(cfg.value("apertureDiameter", 0.0) - 0.28) < 1e-12);
+                assert(std::abs(cfg.value("focalLength", 0.0) - 2.8) < 1e-12);
+                assert(std::abs(cfg.value("siteLatitude", 0.0) - 33.85) < 1e-12);
+                assert(std::abs(cfg.value("siteLongitude", 0.0) - (-118.34)) < 1e-12);
+                assert(std::abs(cfg.value("siteElevation", 0.0) - 100.0) < 1e-12);
+                assert(cfg.value("syncTimeOnConnect", false) == true);
+                found_celestron = true;
+                break;
+            }
+        }
+        assert(found_celestron);
+
+        // Test network connection type sanitization
+        nlohmann::json net_configure_body = {
+            {"vendor", "celestron"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9103},
+            {"connectionType", "network"},
+            {"host", "192.168.1.100"},
+            {"tcpPort", 2000}
+        };
+
+        const auto net_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            net_configure_body.dump());
+        const auto net_json = nlohmann::json::parse(net_response.body());
+        assert(net_json.value("ErrorNumber", -1) == 0);
+
+        const auto net_configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto net_configured_json = nlohmann::json::parse(net_configured_response.body());
+        bool found_net_celestron = false;
+        for (const auto& entry : net_configured_json["Value"]) {
+            if (entry.value("DeviceNumber", -1) == 9103) {
+                const auto& cfg = entry["Config"];
+                assert(cfg.value("connectionType", "") == "network");
+                assert(cfg.value("host", "") == "192.168.1.100");
+                assert(cfg.value("tcpPort", -1) == 2000);
+                found_net_celestron = true;
+                break;
+            }
+        }
+        assert(found_net_celestron);
+
+        // Cleanup
+        nlohmann::json remove_body = {
+            {"vendor", "celestron"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9102}
+        };
+        const auto remove_response = route_request(
+            router,
+            "POST",
+            "/management/v1/removedevice",
+            remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        assert(remove_json.value("ErrorNumber", -1) == 0);
+
+        nlohmann::json remove_net_body = {
+            {"vendor", "celestron"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9103}
+        };
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_net_body.dump());
+#else
+        assert(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
+    // --- ToupTek camera routing/config persistence test ---
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    {
+        nlohmann::json remove_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "camera"},
+            {"deviceNumber", 9201}
+        };
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        nlohmann::json configure_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "camera"},
+            {"deviceNumber", 9201},
+            {"cameraIndex", 2}
+        };
+
+        const auto configure_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        assert(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        assert(configured_json.value("ErrorNumber", -1) == 0);
+        assert(configured_json.contains("Value"));
+        assert(configured_json["Value"].is_array());
+
+        bool found_touptek = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Camera" &&
+                entry.value("DeviceNumber", -1) == 9201) {
+                assert(entry.value("Vendor", "") == "touptek");
+                assert(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                assert(cfg.value("vendor", "") == "touptek");
+                assert(cfg.value("deviceType", "") == "camera");
+                assert(cfg.value("cameraIndex", -1) == 2);
+                found_touptek = true;
+                break;
+            }
+        }
+        assert(found_touptek);
+
+        nlohmann::json remove_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "camera"},
+            {"deviceNumber", 9201}
+        };
+        const auto remove_response = route_request(
+            router,
+            "POST",
+            "/management/v1/removedevice",
+            remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        assert(remove_json.value("ErrorNumber", -1) == 0);
+#else
+        assert(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }

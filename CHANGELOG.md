@@ -9,6 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [1.0.2] - 2026-04-26
+
+### Added
+- **SVBONY Camera Driver** (AlpacaCore)
+  - New vendor driver for SVBONY cameras with full ASCOM Alpaca Camera API (ICameraV3) support.
+  - SDK wrapper singleton (`SVBSDKWrapper`) managing camera enumeration, lifecycle, and shared SDK init/release.
+  - Exposure via video capture mode (start capture → `SVBGetVideoData` → stop) with background thread.
+  - Gain, offset, ROI, binning, temperature readout, and ST-4 pulse guide support (`SVBPulseGuide`).
+  - Camera binding by index only (SVBONY SDK does not support camera ID lookup).
+  - Architecture-aware SDK selection: `lib/x64/` (Linux x86_64) and `lib/armv8/` (Linux ARM64).
+- **SVBONY Device Support** (AlpacaHTTP)
+  - Router registration and configuration support for SVBONY camera devices (`cameraIndex` binding).
+  - Web UI: SVBONY vendor selection and camera index configuration field.
+- **SVBONY SDK** (AlpacaBridge)
+  - SVBONY SDK libraries included under `AlpacaCore/external/SVBONY/`; `.gitignore` allowlist added.
+- **ToupTek Camera Driver** (AlpacaCore)
+  - New vendor driver for ToupTek cameras with ASCOM Alpaca Camera API (ICameraV3) support.
+  - SDK wrapper (`ToupTekSDKWrapper`) over `toupcamsdk.20260128` managing camera enumeration, lifecycle, and shared SDK init/release.
+  - Exposure via ToupTek pull-mode still capture with configurable gain, offset, ROI, and binning; temperature readout and TEC cooling gated on `TOUPCAM_FLAG_TEC` / `TOUPCAM_FLAG_TEC_ONOFF` so uncooled guide cameras expose an accurate capability set.
+  - Camera binding by index (`cameraIndex`) from the ToupTek SDK enumeration.
+  - Architecture-aware SDK selection: `linux/x64/` (Linux x86_64) and `linux/arm64/glibc/` (Linux ARM64).
+  - ConformU validated for **ToupTek GPCMOS01200KPF** on Linux x86_64 with 0 errors and 0 issues; other ToupTek models are expected to work, but the driver's dew-heater support is not yet wired (no cooled ToupTek camera available for testing).
+- **ToupTek Device Support** (AlpacaHTTP)
+  - Router registration and configuration support for ToupTek camera devices (`cameraIndex` binding).
+  - Web UI: ToupTek vendor selection and camera-index configuration field.
+  - New routing test covering a ToupTek camera configure/list/remove round-trip.
+- **ToupTek SDK** (AlpacaBridge)
+  - ToupTek SDK libraries included under `AlpacaCore/external/ToupTek/`; `.gitignore` allowlist added.
+  - `libtoupcam.so` installed to `/usr/lib/alpacabridge/` (Debian package) and `/usr/local/lib/` (build scripts), and registered with the dynamic linker via `/etc/ld.so.conf.d/alpacabridge.conf` so companion tools (e.g. SmartGuider) can load the ToupTek SDK at runtime.
+  - `99-toupcam.rules` udev rule installed for ToupTek USB devices.
+- **Expanded Unit Tests** (AlpacaCore)
+  - SVBONY camera: 6 test cases (defaults, metadata, disconnected throws, disconnected state, unsupported actions, sub-exposure).
+  - QHY camera: expanded from 1 to 6 test cases.
+  - ZWO camera: expanded from 1 to 6 test cases.
+  - ZWO focuser: expanded from 2 to 5 test cases (metadata, device number assignment, unique IDs).
+  - ZWO filter wheel: expanded from 2 to 5 test cases (metadata, device number assignment, unique IDs).
+  - ZWO rotator: expanded from 2 to 5 test cases (metadata, device number assignment, unique IDs).
+  - ZWO switch: expanded from 3 to 5 test cases (metadata, unsupported actions).
+  - SynScan telescope: expanded from 3 to 5 test cases (metadata, disconnected behavior).
+  - iOptron telescope: expanded from 4 to 5 test cases (metadata).
+  - WeeWX observing conditions: expanded from 1 to 4 test cases (defaults, metadata, unsupported actions).
+  - Total: 69 test cases, 484 assertions across all vendor drivers.
+- **AGENTS.md**: added required test case checklist for new vendor device drivers and CMake integration steps.
+- **Bisque Paramount Telescope Driver** (AlpacaCore / AlpacaHTTP) — *in progress*
+  - Initial Bisque / Paramount driver over the TheSkyX TCP protocol; vendor plumbing and web UI configuration panel added.
+  - Hidden from the web UI vendor dropdown pending ConformU validation.
+- **Celestron NexStar CGX-L Telescope Driver** (AlpacaCore / AlpacaHTTP) — *partial, in progress*
+  - Initial Celestron NexStar driver (CGX-L target) with serial/network connection support; vendor plumbing and web UI configuration panel added.
+  - Hidden from the web UI vendor dropdown pending completion and ConformU validation.
+
+### Changed
+- **Documentation** (AlpacaBridge)
+  - README rewritten around installation via the [apt.openastro.net](https://apt.openastro.net) APT repository now that packaged releases are public.
+  - Development workflow (build scripts, CMake flags, source-install, custom-driver guidance) moved to a new `DEVELOPMENT.md`.
+  - Added Wiki link to README.
+- **Web UI** (AlpacaHTTP)
+  - Celestron and Bisque vendor options temporarily hidden in the device configuration dropdown until their drivers ship.
+- **AGENTS.md**: rewrote the "Vendor SDK Shared Library Packaging" section with a mandatory 6-step checklist (SDK placement, both-arch coverage, `.gitignore` allowlist with `git check-ignore` verification, `debian/rules`, `build_and_run.sh`, `install_alpaca_service.sh`) plus a dynamic-linker registration explainer, so future camera vendors (PlayerOne next) cannot ship with the `.so` missing from apt/package/source-install paths.
+
+### Fixed
+- SynScan Telescope: `SideOfPier` comment corrected — OTA east of pier observes west, not east.
+- **SVBONY SV905C2 gain writes** (AlpacaCore)
+  - Gain writes on the SV905C2 were rejected by the SDK unless writable controls were warmed up at connect; added a control warm-up pass on connect to unlock gain writes.
+  - Added an exposure watchdog so `CameraState` recovers when the SVBONY SDK hangs mid-exposure instead of leaving the camera stuck in `Exposing`.
+- **AlpacaHTTP build**: added the missing Bisque compile definition in `AlpacaHTTP/CMakeLists.txt` so the in-progress Bisque driver builds cleanly.
+- **ToupTek Defaults test** (AlpacaCore): loosened the `get_name()` assertion in `test_touptek_camera.cpp` from a substring match on `"ToupTek"` to a non-empty check, since the SDK returns the model-specific `displayname` (e.g. `"GPCMOS01200KPF"`) whenever a physical camera is attached.
+
+### Removed
+- `build_and_run.cmd` (Windows-only build script; workspace has been Linux-only since 1.0.0).
+
 ## [1.0.1] - 2026-03-27
 
 ### Added

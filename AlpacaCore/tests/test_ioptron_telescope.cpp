@@ -102,3 +102,17 @@ TEST_CASE("iOptron Telescope Driver - Disconnected Behavior", "[ioptron][telesco
     REQUIRE_THROWS(driver->get_altitude());
     REQUIRE_THROWS(driver->get_azimuth());
 }
+
+TEST_CASE("iOptron Telescope Driver - Device metadata", "[ioptron][telescope][unit]") {
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(3, conn);
+
+    CHECK(driver->get_description() == "iOptron CEM120,70,40,26, GEM, HEM, HAE, HAZ series and SkyHunter Mount Driver");
+    CHECK(driver->get_driver_info() == "AlpacaCore iOptron Driver v1.0");
+    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_unique_id() == "iOptron_3");
+}

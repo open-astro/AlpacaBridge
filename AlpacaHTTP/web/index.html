@@ -59,8 +59,14 @@
                         <option value="">Select vendor...</option>
                         <option value="ioptron">iOptron</option>
                         <option value="synscan">SynScan V3/V4</option>
+                        <!-- TODO: re-enable when drivers are ready
+                        <option value="celestron">Celestron NexStar</option>
+                        <option value="bisque">Bisque (Paramount / TheSkyX)</option>
+                        -->
                         <option value="zwo">ZWO</option>
                         <option value="qhy">QHY</option>
+                        <option value="svbony">SVBONY</option>
+                        <option value="touptek">ToupTek</option>
                         <option value="weewx">WeeWX</option>
                         <option value="gemini">Gemini</option>
                     </select>
@@ -185,6 +191,86 @@
                     <div class="form-group">
                         <label for="synscan-focal-length">Focal Length (m):</label>
                         <input type="number" id="synscan-focal-length" name="synscanFocalLength" min="0" step="0.001" placeholder="0.800">
+                        <small>Optional. Some clients may ignore this value.</small>
+                    </div>
+                </div>
+
+                <!-- Celestron NexStar Telescope Configuration -->
+                <div id="celestron-config" class="vendor-config" style="display: none;">
+                    <h3>Celestron NexStar Telescope Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="celestron-connection-type">Connection Type:</label>
+                        <select id="celestron-connection-type" name="celestronConnectionType" required>
+                            <option value="auto">Auto-Detect</option>
+                            <option value="serial">Serial/USB (Manual)</option>
+                            <option value="network">Network/WiFi</option>
+                        </select>
+                    </div>
+
+                    <!-- Serial Connection -->
+                    <div id="celestron-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="celestron-port-path">Serial Port:</label>
+                            <input type="text" id="celestron-port-path" name="celestronPortPath" placeholder="/dev/ttyUSB0">
+                            <small>Linux: /dev/ttyUSB0. Connect to the RS-232 port on the NexStar hand control.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="celestron-baud-rate">Baud Rate:</label>
+                            <input type="number" id="celestron-baud-rate" name="celestronBaudRate" value="9600" min="1200" max="115200">
+                        </div>
+                    </div>
+
+                    <!-- Network Connection -->
+                    <div id="celestron-network-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="celestron-host">IP Address:</label>
+                            <input type="text" id="celestron-host" name="celestronHost" placeholder="192.168.1.100">
+                        </div>
+                        <div class="form-group">
+                            <label for="celestron-tcp-port">TCP Port:</label>
+                            <input type="number" id="celestron-tcp-port" name="celestronTcpPort" value="2000" min="1" max="65535">
+                            <small>Default port for NexStar WiFi bridges.</small>
+                        </div>
+                    </div>
+
+                    <h4>Optics</h4>
+                    <div class="form-group">
+                        <label for="celestron-aperture-diameter">Aperture Diameter (m):</label>
+                        <input type="number" id="celestron-aperture-diameter" name="celestronApertureDiameter" min="0" step="0.001" placeholder="0.203">
+                        <small>Optional. Some clients may ignore this value.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="celestron-focal-length">Focal Length (m):</label>
+                        <input type="number" id="celestron-focal-length" name="celestronFocalLength" min="0" step="0.001" placeholder="2.032">
+                        <small>Optional. Some clients may ignore this value.</small>
+                    </div>
+                </div>
+
+                <!-- Bisque (Paramount / TheSkyX) Telescope Configuration -->
+                <div id="bisque-config" class="vendor-config" style="display: none;">
+                    <h3>Bisque / Paramount (TheSkyX) Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="bisque-host">TheSkyX Host:</label>
+                        <input type="text" id="bisque-host" name="bisqueHost" value="localhost" placeholder="localhost">
+                        <small>IP address or hostname of the computer running TheSkyX Pro.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="bisque-tcp-port">TCP Port:</label>
+                        <input type="number" id="bisque-tcp-port" name="bisqueTcpPort" value="3040" min="1" max="65535">
+                        <small>Default: 3040 (TheSkyX TCP server port)</small>
+                    </div>
+
+                    <h4>Optics</h4>
+                    <div class="form-group">
+                        <label for="bisque-aperture-diameter">Aperture Diameter (m):</label>
+                        <input type="number" id="bisque-aperture-diameter" name="bisqueApertureDiameter" min="0" step="0.001" placeholder="0.356">
+                        <small>Optional. Some clients may ignore this value.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="bisque-focal-length">Focal Length (m):</label>
+                        <input type="number" id="bisque-focal-length" name="bisqueFocalLength" min="0" step="0.001" placeholder="3.454">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                 </div>
@@ -361,6 +447,30 @@
                         <label for="qhy-camera-index">Camera Index:</label>
                         <input type="number" id="qhy-camera-index" name="cameraIndex" value="0" min="0">
                         <small>0-based index from the QHY SDK enumeration.</small>
+                    </div>
+
+                </div>
+
+                <!-- SVBONY Camera Configuration -->
+                <div id="svbony-config" class="vendor-config" style="display: none;">
+                    <h3>SVBONY Camera Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="svbony-camera-index">Camera Index:</label>
+                        <input type="number" id="svbony-camera-index" name="cameraIndex" value="0" min="0">
+                        <small>0-based index from the SVBONY SDK enumeration.</small>
+                    </div>
+
+                </div>
+
+                <!-- ToupTek Camera Configuration -->
+                <div id="touptek-config" class="vendor-config" style="display: none;">
+                    <h3>ToupTek Camera Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="touptek-camera-index">Camera Index:</label>
+                        <input type="number" id="touptek-camera-index" name="cameraIndex" value="0" min="0">
+                        <small>0-based index from the ToupTek SDK enumeration.</small>
                     </div>
 
                 </div>

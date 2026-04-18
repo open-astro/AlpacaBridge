@@ -67,6 +67,18 @@
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_SVBONY
+#include <alpacacore/vendor/svbony/svbony_camera_driver.h>
+#endif
+#ifdef ALPACACORE_ENABLE_CELESTRON
+#include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+#include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
+#endif
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+#include <alpacacore/vendor/touptek/touptek_camera_driver.h>
+#endif
 
 namespace {
 
@@ -1783,6 +1795,14 @@ Response Router::dispatch_device_method(
                     }
                 } else if (!connected && device->get_connected()) {
                     device->disconnect();
+                    auto deadline = std::chrono::steady_clock::now()
+                                  + std::chrono::seconds(8);
+                    while (device->get_connected()
+                           && device->get_connecting()
+                           && std::chrono::steady_clock::now() < deadline) {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(50));
+                    }
                 }
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
@@ -6169,6 +6189,143 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "celestron" && device_type_str == "telescope") {
+#ifdef ALPACACORE_ENABLE_CELESTRON
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::optional<double> site_latitude;
+        std::optional<double> site_longitude;
+        std::optional<double> site_elevation;
+        std::optional<bool> sync_time_on_connect;
+
+        if (config.contains("siteLatitude")) {
+            site_latitude = config.value("siteLatitude", 0.0);
+        }
+        if (config.contains("siteLongitude")) {
+            site_longitude = config.value("siteLongitude", 0.0);
+        }
+        if (config.contains("siteElevation")) {
+            site_elevation = config.value("siteElevation", 0.0);
+        }
+        if (config.contains("syncTimeOnConnect")) {
+            sync_time_on_connect = config.value("syncTimeOnConnect", false);
+        }
+
+        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
+
+        if (conn_type == "auto" || conn_type.empty()) {
+            int mount_index = config.value("mountIndex", 0);
+            telescope = alpacacore::vendor::celestron::create_celestron_telescope_auto(
+                device_number, mount_index, site_latitude, site_longitude,
+                site_elevation, sync_time_on_connect);
+        } else {
+            alpacacore::vendor::celestron::ConnectionInfo conn_info;
+
+            if (conn_type == "serial") {
+                conn_info.type = alpacacore::vendor::celestron::ConnectionType::Serial;
+                conn_info.port_path = config.value("portPath", "");
+                conn_info.baud_rate = config.value("baudRate", 9600);
+
+                if (conn_info.port_path.empty()) {
+                    error_message = "Serial port path is required";
+                    return false;
+                }
+            } else if (conn_type == "network") {
+                conn_info.type = alpacacore::vendor::celestron::ConnectionType::Network;
+                conn_info.host = config.value("host", "");
+                conn_info.tcp_port = config.value("tcpPort", conn_info.tcp_port);
+
+                if (conn_info.host.empty()) {
+                    error_message = "Host IP address is required";
+                    return false;
+                }
+            } else {
+                error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
+                return false;
+            }
+
+            conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+
+            telescope = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+                device_number, conn_info, site_latitude, site_longitude,
+                site_elevation, sync_time_on_connect);
+        }
+
+        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+            telescope->set_aperture_diameter(aperture);
+        }
+        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+            telescope->set_focal_length(focal);
+        }
+        if (site_elevation.has_value()) {
+            telescope->set_site_elevation(site_elevation.value());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(telescope.release()))) {
+            util::log_info("Registered Celestron telescope");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "Celestron support not enabled. Rebuild with -DALPACACORE_ENABLE_CELESTRON=ON";
+        return false;
+#endif
+    }
+
+    if (vendor == "bisque" && device_type_str == "telescope") {
+#ifdef ALPACACORE_ENABLE_BISQUE
+        alpacacore::vendor::bisque::ConnectionInfo conn_info;
+        conn_info.host = config.value("host", "localhost");
+        conn_info.tcp_port = config.value("tcpPort", 3040);
+        conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+
+        if (conn_info.host.empty()) {
+            error_message = "Host is required for Bisque/TheSkyX connection";
+            return false;
+        }
+
+        std::optional<double> site_latitude;
+        std::optional<double> site_longitude;
+        std::optional<double> site_elevation;
+
+        if (config.contains("siteLatitude")) {
+            site_latitude = config.value("siteLatitude", 0.0);
+        }
+        if (config.contains("siteLongitude")) {
+            site_longitude = config.value("siteLongitude", 0.0);
+        }
+        if (config.contains("siteElevation")) {
+            site_elevation = config.value("siteElevation", 0.0);
+        }
+
+        auto telescope = alpacacore::vendor::bisque::create_bisque_telescope_with_site(
+            device_number, conn_info, site_latitude, site_longitude, site_elevation);
+
+        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+            telescope->set_aperture_diameter(aperture);
+        }
+        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+            telescope->set_focal_length(focal);
+        }
+        if (site_elevation.has_value()) {
+            telescope->set_site_elevation(site_elevation.value());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(telescope.release()))) {
+            util::log_info("Registered Bisque/Paramount telescope");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "Bisque support not enabled. Rebuild with -DALPACACORE_ENABLE_BISQUE=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "zwo" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_ZWO
         int camera_id = config.value("cameraId", -1);
@@ -6466,6 +6623,44 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "svbony" && device_type_str == "camera") {
+#ifdef ALPACACORE_ENABLE_SVBONY
+        int camera_index = config.value("cameraIndex", 0);
+
+        auto camera = alpacacore::vendor::svbony::create_svbony_camera(device_number, camera_index);
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+            util::log_info("Registered SVBONY camera");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "SVBONY support not enabled. Rebuild with -DALPACACORE_ENABLE_SVBONY=ON";
+        return false;
+#endif
+    }
+
+    if (vendor == "touptek" && device_type_str == "camera") {
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        int camera_index = config.value("cameraIndex", 0);
+
+        auto camera = alpacacore::vendor::touptek::create_touptek_camera(device_number, camera_index);
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+            util::log_info("Registered ToupTek camera");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "gemini" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_GEMINI
         std::string conn_type = config.value("connectionType", "auto");
@@ -6565,10 +6760,26 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "qhy") {
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
+    } else if (vendor == "svbony") {
+        copy_if_present("cameraIndex");
+    } else if (vendor == "touptek") {
+        copy_if_present("cameraIndex");
     } else if (vendor == "weewx") {
         copy_if_present("weewxUrl");
         copy_if_present("pollIntervalSeconds");
         copy_if_present("timeoutMs");
+    } else if (vendor == "celestron") {
+        copy_if_present("connectionType");
+        copy_if_present("mountIndex");
+        std::string connection_type = config.value("connectionType", "");
+        if (connection_type == "serial") {
+            copy_if_present("portPath");
+            copy_if_present("baudRate");
+        } else if (connection_type == "network") {
+            copy_if_present("host");
+            copy_if_present("tcpPort");
+        }
+        // "auto" needs no extra fields — port is discovered at startup
     } else if (vendor == "gemini") {
         copy_if_present("connectionType");
         copy_if_present("focuserIndex");
@@ -6577,6 +6788,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("portPath");
             copy_if_present("baudRate");
         }
+    } else if (vendor == "bisque") {
+        copy_if_present("host");
+        copy_if_present("tcpPort");
     }
 
     copy_if_present("responseTimeoutMs");

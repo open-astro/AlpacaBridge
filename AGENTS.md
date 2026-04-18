@@ -73,18 +73,40 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 
 ## Vendor SDK Shared Library Packaging
 
-When a vendor SDK provides shared libraries (`.so`) that are needed at runtime — either by AlpacaBridge itself or by companion projects (e.g. SmartGuider uses `libASICamera2.so` via the `zwoasi` Python package) — they must be included in the repository and installed by all packaging/deployment scripts.
+**Every new camera vendor MUST ship its `.so` in the `.deb`, regardless of whether AlpacaBridge itself statically links the library.** Camera `.so` files are also consumed by companion projects (e.g. SmartGuider at `/home/dev/Documents/GitHub/SmartGuider/` — uses `libASICamera2.so` via `zwoasi`, `libqhyccd.so`, etc. for autoguiding) which dynamically `dlopen` them from the system library path. If the `.so` is missing or not registered with `ldconfig`, guiding fails at runtime with no warning from the AlpacaBridge build or test suite. The fact that the AlpacaBridge server binary links fine is NOT evidence that packaging is correct.
 
-- Store both static (`.a`) and shared (`.so`) libraries under `AlpacaCore/external/<VENDOR>/` in the architecture-appropriate subdirectory (e.g. `lib/linux/armv8/`, `lib/linux/x64/`).
-- Ensure `.gitignore` allowlist entries (`!external/<VENDOR>/**`) cover `.so` files as well as `.a` files.
-- Update **all three** install/packaging paths to install the `.so` to a system library path and run `ldconfig`:
-  1. **`debian/rules`** — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/` in `override_dh_auto_install`. This ensures the `.deb` package ships the shared library.
-  2. **`build_and_run.sh`** — detect architecture, copy `.so*` to `/usr/local/lib/`, run `ldconfig`. Add inside the udev rules block alongside existing QHY/ZWO install logic.
-  3. **`install_alpaca_service.sh`** — same as `build_and_run.sh`, inside the `install_udev_rules()` function.
-- **Dynamic linker registration**: the `.deb` ships `/etc/ld.so.conf.d/alpacabridge.conf` which adds `/usr/lib/alpacabridge` to the system library search path. The `postinst` script runs `ldconfig` so the libraries are discoverable immediately after install. This is critical — without it, companion projects like SmartGuider cannot load vendor shared libraries (e.g. `zwoasi` Python package needs `libASICamera2.so`).
-- **Camera drivers and SmartGuider**: when adding a new camera vendor, always ship the vendor's shared library in the `.deb`. SmartGuider (`/home/dev/Documents/GitHub/SmartGuider/`) uses camera vendor libraries directly for autoguiding (e.g. ZWO via `zwoasi`, QHY via `libqhyccd`). If the shared library is missing or not registered with `ldconfig`, guiding will fail at runtime.
-- Keep the install logic in `build_and_run.sh` and `install_alpaca_service.sh` in sync — they must install the same set of vendor libraries.
-- When a vendor releases a new SDK version, update the `.so` files in `external/` and bump symlink targets (e.g. `libASICamera2.so.1.41` → `libASICamera2.so.1.42`).
+Non-camera vendors (focusers, mounts, switches, rotators) also ship their `.so` if the SDK provides one, for consistency — but the camera rule is non-negotiable.
+
+### Mandatory Checklist — New Vendor SDK with `.so`
+
+Do **all** of the following when adding a new vendor SDK. Skipping any step will either silently break companion projects (steps 1–2), break CI / clean clones (step 3), or break runtime loading on installed systems (steps 4–6).
+
+1. **Store** both static (`.a`) and shared (`.so`) libraries under `AlpacaCore/external/<VENDOR>/` in the architecture-appropriate subdirectory (e.g. `lib/linux/armv8/`, `lib/linux/x64/`, or whatever structure the upstream SDK uses — document the exact path in the vendor-specific notes section below).
+2. **Ship both architectures**: x64 and arm64 `.so` files must both be present in the tree. If upstream only ships one architecture, document the gap and guard the CMake build with an architecture check.
+3. **Allowlist in `.gitignore`**: add `!external/<VENDOR>/**` to `AlpacaCore/.gitignore` **before** committing the SDK files. The global `*.so` ignore rule will silently drop the library from the commit otherwise. Verify with `git check-ignore -v <path-to-.so>` — the output must show the `!external/<VENDOR>/**` rule winning.
+4. **`debian/rules`** — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/` in `override_dh_auto_install`, alongside existing QHY/ZWO/SVBONY entries. Add a per-arch `<VENDOR>_LIB_DIR` variable at the top of the file if the path differs by architecture.
+5. **`build_and_run.sh`** — detect architecture, copy `.so*` to `/usr/local/lib/`, run `ldconfig`. Add inside the udev rules block alongside existing QHY/ZWO/SVBONY install logic.
+6. **`install_alpaca_service.sh`** — same as `build_and_run.sh`, inside the `install_udev_rules()` function. Keep the two scripts in sync — they must install the same set of vendor libraries.
+
+### Dynamic Linker Registration
+
+The `.deb` ships `/etc/ld.so.conf.d/alpacabridge.conf` which adds `/usr/lib/alpacabridge` to the system library search path. The `postinst` script runs `ldconfig` so libraries are discoverable immediately after install. This is what makes companion projects (SmartGuider's `zwoasi`, `ctypes.CDLL('libtoupcam.so')`, etc.) able to find vendor libraries without setting `LD_LIBRARY_PATH`.
+
+### SDK Version Bumps
+
+When a vendor releases a new SDK version, update the `.so` files in `external/` and bump symlink targets (e.g. `libASICamera2.so.1.41` → `libASICamera2.so.1.42`). If the vendor's SDK path is versioned (e.g. ToupTek's `toupcamsdk.20260128/`), update the path reference in `debian/rules`, `build_and_run.sh`, `install_alpaca_service.sh`, AND `AlpacaCore/src/vendors/<vendor>/CMakeLists.txt` in the same commit.
+
+### Verification
+
+After wiring a new camera vendor, verify the `.so` is reachable as SmartGuider would see it:
+
+```bash
+# After ./build_and_run.sh or dpkg -i alpacabridge_*.deb:
+ldconfig -p | grep <libname>                    # must list the .so
+python3 -c "import ctypes; ctypes.CDLL('<libname>.so')"  # must not raise OSError
+```
+
+Failing this check means guiding will fail at runtime, no matter how green the AlpacaBridge test suite is.
 
 ## AlpacaHTTP Integration Checklist (Required for New Vendor/Device Types)
 
@@ -124,6 +146,46 @@ Vendor registration alone is not enough for HTTP/UI visibility. All eight steps 
   - `test_<component>.cpp`
   - `test_<vendor>_<device>.cpp`
 - Use tags to separate unit/integration/hardware behavior when applicable.
+- Use Catch2 macros (`REQUIRE`, `CHECK`, `CHECK_THROWS_AS`, etc.) via the `catch2_compat.h` header.
+
+### Required Test Cases for Every New Vendor Device Driver
+
+Every new driver **must** ship with at least the following test cases. Use the existing tests (e.g. `test_svbony_camera.cpp`, `test_gemini_focuser.cpp`) as reference.
+
+1. **Defaults** `"<Vendor> <Device> Driver - Defaults"` `[<vendor>][<device>][unit]`
+   - Create driver with device number 0.
+   - `REQUIRE` device type, device number, and `get_connected() == false`.
+   - `CHECK` the default device name.
+   - `CHECK` any static capability flags (e.g. `get_can_abort_exposure`, `get_can_reverse`, `get_absolute`).
+
+2. **Device metadata** `"<Vendor> <Device> Driver - Device metadata"` `[<vendor>][<device>][unit]`
+   - Create driver with a non-zero device number (e.g. 3) so `get_unique_id()` is distinguishable.
+   - `CHECK` all of: `get_device_number`, `get_description`, `get_driver_info`, `get_driver_version`, `get_interface_version`, `get_unique_id`.
+   - String values must match the implementation exactly — read the driver source to get the correct strings.
+
+3. **Not connected throws / Disconnected behavior** `[<vendor>][<device>][unit]`
+   - Verify that operations requiring a live connection throw `alpacacore::AlpacaException` (or return safe defaults where the driver explicitly does so — document why in a comment).
+   - Cover the device's primary operations (e.g. for cameras: `get_gain`, `start_exposure`, `get_image_array`; for telescopes: `get_right_ascension`, `get_tracking`, `slew_to_target_async`).
+
+4. **Unsupported actions** `[<vendor>][<device>][unit]`
+   - `CHECK` `get_supported_actions()` is empty (unless the driver defines actions).
+   - `CHECK` `can_action("anything") == false`.
+   - `CHECK_THROWS_AS` for `action()`, `command_blind()`, `command_bool()`, `command_string()`.
+
+5. **Device-specific behavior** — at least one test covering behavior unique to the device type:
+   - Cameras: sub-exposure support (`get_sub_exposure_duration` / `set_sub_exposure_duration` throw if unsupported).
+   - Telescopes: target coordinate validation, axis rate ranges.
+   - Focusers: `get_absolute`, `get_temp_comp_available`, device state telemetry.
+   - Filter wheels: names/offsets defaults, invalid position handling.
+   - Switches: `get_max_switch`, invalid switch ID handling.
+   - Rotators: `get_can_reverse`, device state telemetry.
+
+### Test CMake Integration
+
+When adding a test file for a new vendor device:
+- Add `test_<vendor>_<device>.cpp` to the conditional `TEST_SOURCES` list in `AlpacaCore/tests/CMakeLists.txt`, guarded by `if(TARGET alpacacore_<vendor>)`.
+- Add `target_link_libraries(alpacacore_tests PRIVATE alpacacore_<vendor>)` in the matching conditional block.
+- Build and run all tests (`cmake --build build --target alpacacore_tests && ./build/tests/alpacacore_tests`) before considering the driver complete.
 
 ## Logging, Threading, and Errors
 
@@ -171,6 +233,19 @@ SDK locations: `AlpacaCore/external/QHY/sdk_Arm64_25.09.29/`, `sdk_linux64_25.09
 - The system `fxload` from apt does **not** support `-t fx3` (FX3-based cameras) and will exit 255 silently — always install the QHY SDK's own `fxload` binary from `sdk_<arch>_*/sbin/fxload` to `/sbin/fxload` instead.
 - Re-enumeration in VMs: after `fxload` fires, the camera disconnects as `1618:c268` (Cypress WestBridge) and reconnects with its operational product ID. VMware and similar hypervisors will not automatically pass through the re-enumerated device unless the USB filter covers the entire QHYCCD vendor ID (`1618`). Test QHY cameras on bare metal or RPi rather than VMs where possible.
 
+### SVBONY
+
+Devices: Camera.
+
+SDK locations: `AlpacaCore/external/SVBONY/lib/x64/`, `lib/armv8/`, headers under `external/SVBONY/include/`.
+
+- **Control warm-up at connect (SV905C2 quirk)**: After `SVBOpenCamera`, `SVBSetControlValue(SVB_GAIN, ...)` returns `SVB_ERROR_GENERAL_ERROR` indefinitely on SV905C2 — regardless of value, regardless of `bAuto` flag, regardless of whether `SVBStartVideoCapture` is active, and `SVBRestoreDefaultParam` does not clear the state. The driver works around this by iterating every writable control reported by `SVBGetControlCaps` and writing each to its `default_value` during the connect path (after `SVBSetROIFormat` / `SVBSetOutputImageType`). Once any `SVBSetControlValue` call has landed, subsequent client gain writes succeed. Failures during the warm-up are tolerated and logged at DEBUG. Do not remove the warm-up loop in `set_connected` without re-running ConformU against an SV905C2 — the failure is silent until a client tries to set gain. Likely related to SDK readme entries `v1.13.1: Fixup ASCOM software to support SV905C2` and `v1.13.2: Optimize gain settings of SV905C2`.
+- **Auto control writes**: `disable_auto_if_needed` reads the current value/auto flag and only writes back if currently auto, since some SVBONY models reject manual writes while auto is active with the same `SVB_ERROR_GENERAL_ERROR`.
+- **`SVBSetControlValue` retry**: The wrapper retries up to 3 times with a 50 ms backoff specifically on `SVB_ERROR_GENERAL_ERROR` to absorb genuinely transient hardware-op faults; deterministic rejections still surface after the retries are exhausted.
+- **Camera mode**: We use `SVB_MODE_NORMAL` (continuous video) and start/stop `SVBStartVideoCapture` per exposure. INDI's `indi-svbony` driver instead uses `SVB_MODE_TRIG_SOFT` with persistent video capture for stills — keep this in mind if a future SVBONY model needs trigger-mode behavior.
+- **Bin/ROI quirks**: ROI width must be a multiple of 8 and height a multiple of 2 (SDK requirement). The driver aligns down for SDK calls while preserving the requested values for the Alpaca interface. ROI updates and `FrameSpeedMode` writes are deferred to `start_exposure` because some SDK control writes take ~1.1 s and would otherwise blow ASCOM client timing budgets.
+- **`SVBRestoreDefaultParam`** is called immediately after `SVBOpenCamera` to clear any leftover state from a previous session, mirroring `indi-svbony`. Tolerate failure for older SDK builds that don't export the symbol.
+
 ### SynScan (SkyWatcher)
 
 Devices: Telescope.
@@ -182,6 +257,46 @@ Protocol documentation: `AlpacaCore/external/SynScan/`. No external SDK required
 Devices: Telescope.
 
 Protocol documentation: `AlpacaCore/external/iOptron/`. No external SDK required — uses RS-232 serial communication directly.
+
+### Celestron (NexStar)
+
+Devices: Telescope.
+
+Protocol documentation: `AlpacaCore/external/Celestron/nexstar_protocol_reference.md` (combined reference — RS-232 serial, AUX bus, GPS, and AlpacaBridge driver notes). Original sources preserved in same directory. No external SDK required — uses RS-232 serial communication directly.
+
+Connection types: Serial (RS-232 on hand control base) and Network (WiFi bridge adapters, default TCP port 2000).
+
+- Communication: 9600 baud, no parity, one stop bit. All responses terminated with `#`.
+- Position encoding: hexadecimal fraction of a revolution. Standard commands use 16-bit (4 hex digits, ~19.8 arcsec precision), precise commands use 24-bit (6 hex digits + "00" padding, ~0.08 arcsec precision). Commands: `E`/`e` for RA/Dec, `Z`/`z` for Alt/Az.
+- GOTO: `R`/`r` for RA/Dec, `B`/`b` for Alt/Az. Sync: `S`/`s` (firmware v4.10+).
+- Tracking modes: 0=Off, 1=Alt/Az, 2=EQ North, 3=EQ South.
+- **CGE/Advanced GT quirk**: firmware versions 3.01–3.04 swap EQ North (1) and EQ South (2). This was corrected in later firmware. TODO: detect and handle this if needed.
+- Model IDs from `"m"` command: 1=GPS, 3=i-Series, 4=i-Series SE, 5=CGE, 6=Advanced GT, 7=SLT, 9=CPC, 10=GT, 11=4/5 SE, 12=6/8 SE, 14=CGEM, 20=Advanced VX, 22=Evolution.
+- Slew commands use pass-through (`P`) to motor controllers: device 16 = AZM/RA motor, device 17 = ALT/DEC motor. Fixed rates 1–9 (0 to stop), variable rates encoded as arcsec/sec × 4 in high/low bytes.
+- Timeouts: NexStar spec says up to 3.5 seconds worst case for pass-through commands. Driver uses 5-second default.
+- Time/Location: binary format (not ASCII). Timezone stored as hour offset (256-zone for negative). Location sign: 0=North/East, 1=South/West.
+- **Home**: Mounts with hardware home switches (CGX, CGX-L, CGE Pro) use `MC_LEVEL_START` (0x0B) on both axes followed by polling `MC_LEVEL_DONE` (0x12). FindHome is asynchronous — send commands, return immediately, poll via Slewing/AtHome. Note: `MC_SEEK_INDEX` (0x19) / `MC_AT_INDEX` (0x18) are for PEC worm gear index (RA only), NOT home. See protocol reference for details.
+- Side of pier: NexStar protocol does not expose pointing state directly. TODO: infer from hour angle for GEM mounts (CGE, Advanced GT, CGEM, CGX, AVX).
+- The NexStar serial protocol is nearly identical to SynScan — both derive from the same Celestron protocol family. The driver implementation follows the same pattern but with separate namespace and branding.
+
+### Bisque (Paramount / TheSkyX)
+
+Devices: Telescope.
+
+Protocol documentation: `AlpacaCore/external/Bisque/` (INDI reference driver and TheSkyX scripting API docs). No external SDK required — communicates via JavaScript commands over TCP to TheSkyX Pro.
+
+Connection types: TCP only. TheSkyX acts as middleware between the driver and the actual mount hardware.
+
+- Communication is via JavaScript command snippets sent to the TheSkyX TCP scripting server (default port 3040).
+- Commands are strings terminated with `#`. Responses are prefixed with `|No error. Error = 0.` on success, terminated with `#`.
+- Special case: Handshake (`ConnectAndDoNotUnpark`/`IsConnected`) returns just `1` with no prefix.
+- Slew is async: set `sky6RASCOMTele.Asynchronous = true`, call `SlewToRaDec`, poll `IsSlewComplete`.
+- Pulse guiding uses `sky6DirectGuide.MoveTelescope(dRA, dDec)` with arcsecond displacement.
+- Open loop motion for MoveAxis uses `DoCommand(9, 'direction|rate')` and `DoCommand(10, '')`.
+- Park uses `ParkAndDoNotDisconnect()` to keep TCP connection alive (not `Park()` which disconnects).
+- Pier side is read-only via `DoCommand(11, 'Pier Side')` — returns 1 for west of pier, else east.
+- Find Home uses `FindHome()` with a 60-second timeout.
+- Slew speed presets: 9 rates (1x, 2x, 4x, 8x, 32x, 64x, 128x, 256x, 512x sidereal).
 
 ### Gemini (Automatic Astro Focuser Pro)
 
