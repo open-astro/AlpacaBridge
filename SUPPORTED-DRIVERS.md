@@ -51,7 +51,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| GPCMOS01200KPF | USB | ✓ |  | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS01200KPF/) |
+| GPCMOS01200KPF | USB | ✓ | ✓  | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS01200KPF/) |
 
 ### ToupTek Driver Notes
 
