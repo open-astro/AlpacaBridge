@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [1.0.2] - 2026-04-26
+## [1.0.2] - 2026-04-18
 
 ### Added
 - **SVBONY Camera Driver** (AlpacaCore)
