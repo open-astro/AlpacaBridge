@@ -2,101 +2,89 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-AlpacaBridge is a unified workspace for building, testing, and running a complete ASCOM Alpaca server. It combines AlpacaCore (driver library) and AlpacaHTTP (HTTP server) with a focus on clean, standards-compliant Alpaca implementations and ConformU-validated drivers.
+AlpacaBridge is a complete ASCOM Alpaca server for Linux. Install it on a machine at the mount, connect your gear once, and access cameras, focusers, filter wheels, rotators, mounts, and weather stations over the network from any Alpaca-compatible software (N.I.N.A., SGP, and others). All drivers are validated against ConformU.
 
-#### [1.0.1] - 2026-03-27 [CHANGELOG Information](CHANGELOG.md)
+#### [1.0.1] - 2026-03-27 &middot; [Changelog](CHANGELOG.md)
 
-## AlpacaBridge Explained
+## Features
 
-- ScopeTrader: [Openastro AlpacaBridge Launches and Why it Matters](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/)
+- **Turnkey Alpaca server** — installs as a systemd service, starts on boot
+- **ConformU-validated drivers** — pre-built support for ZWO cameras, iOptron mounts, and more (see [SUPPORTED-DRIVERS.md](SUPPORTED-DRIVERS.md))
+- **Bundled vendor SDKs and udev rules** — plug in supported USB devices and go
+- **Web management UI** — configure devices from any browser on your network
 
-- This video walks through building, testing, and running a complete ASCOM Alpaca server, including
-AI-assisted driver development and ConformU validation [
-Building the Future of Astrophotography & EAA with AlpacaBridge, an ASCOM Alpaca Solution!](https://youtu.be/7yPSW0KXQzM)
+## AlpacaBridge Overview
 
-## Project Overview
+ScopeTrader covered the project launch and what it means for the Alpaca ecosystem: [OpenAstro AlpacaBridge Launches and Why It Matters](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/).
 
-**Key Features:**
-- **Complete Alpaca Server** - Build and run a full-featured ASCOM Alpaca server with web UI
-- **Comprehensive Driver Support** - Pre-built drivers for ZWO cameras, switches, and focusers, plus iOptron telescopes (all ConformU validated)
-- **AI-Accelerated Driver Development** - Leveraging modern AI workflows to implement and validate Alpaca-compliant drivers efficiently
-- **Convenience Scripts** - One-command build, test, and run workflows
-- **ConformU Validated** – Drivers are tested against the ASCOM Alpaca specification
+Watch a full install on a ToupTek StellaVita: [Installing AlpacaBridge on a ToupTek StellaVita](https://youtu.be/nVAS45OTltA).
 
 ## Supported platforms
 
-AlpacaBridge is supported on **Debian 13 (Trixie)** for:
-
-- **NUC x64** (Intel/AMD 64-bit)
-- **Raspberry Pi 4 / Raspberry Pi 5** (ARM64)
+- **Debian 13 (Trixie)** on `amd64` (Intel/AMD 64-bit) or `arm64` (Raspberry Pi 3B+, 4 & 5)
 
 ## Learn more
 
-For deeper details, see the project READMEs:
+- [Wiki](https://github.com/open-astro/AlpacaBridge/wiki) — user guides, configuration, and troubleshooting
+- [SUPPORTED-DRIVERS.md](SUPPORTED-DRIVERS.md) — validated driver matrix
+- [DEVELOPMENT.md](DEVELOPMENT.md) — building from source, writing drivers, running tests
 
-- [SUPPORTED-DRIVERS.md](SUPPORTED-DRIVERS.md) - List of validated drivers
-- [AlpacaCore/README.md](AlpacaCore/README.md) - Core library and driver development
-- [AlpacaHTTP/README.md](AlpacaHTTP/README.md) - HTTP server implementation
-- [AGENTS.md](AGENTS.md) - AI-assisted development workflow and rules
+## Installation
 
-## Support the Project
+AlpacaBridge is distributed via the OpenAstro APT repository at [apt.openastro.net](https://apt.openastro.net).
 
-AlpacaBridge is developed and maintained independently. Contributions help fund hardware access, testing, and ongoing standards compliance work.
+### 1. Add the OpenAstro signing key
 
-If you'd like to support the project:
+```sh
+sudo curl -fsSL https://apt.openastro.net/repo/openastro-archive-keyring.gpg \
+    | sudo gpg --dearmor -o /usr/share/keyrings/openastro-archive-keyring.gpg
+```
+
+### 2. Add the repository
+
+```sh
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/openastro-archive-keyring.gpg] \
+https://apt.openastro.net trixie main" \
+    | sudo tee /etc/apt/sources.list.d/openastro.list
+```
+
+### 3. Install
+
+```sh
+sudo apt update
+sudo apt install alpacabridge
+```
+
+The service starts automatically and runs as the `alpacabridge` system user.
+
+## Using AlpacaBridge
+
+Once installed, open:
+
+- **Management UI:** http://localhost:6800/management/
+- **Device API:** http://localhost:6800/
+
+From another machine on your network, substitute the hostname or IP address of the server.
+
+### Updating
+
+```sh
+sudo apt update
+sudo apt upgrade alpacabridge
+```
+
+### Uninstalling
+
+```sh
+sudo apt remove alpacabridge
+```
+
+## Support the project
+
+AlpacaBridge is developed and maintained independently. Contributions help fund hardware access, testing, and ongoing standards-compliance work.
 
 [![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/paypalme/joeytroynm)
 
-## Quick Start
+## License
 
-### Run all tests
-
-```sh
-chmod +x run_all_tests.sh
-./run_all_tests.sh
-```
-
-### Build and run the HTTP server
-
-```sh
-chmod +x build_and_run.sh
-./build_and_run.sh
-```
-
-When the server starts, it prints:
-`AlpacaHTTP is running. Open http://localhost:6800/ in your browser.`
-
-## Optional settings
-
-- `ALPACAHTTP_USE_BOOST_BEAST` (default: OFF): set to ON to build AlpacaHTTP with Boost.Beast.
-- `ALPACACORE_ENABLE_ALL_VENDORS` (default: ON): set to OFF to disable vendor drivers.
-
-## Installation (Linux)
-
-For Linux systems, you can use the installation script to build and install AlpacaCore and AlpacaHTTP as a systemd service.
-
-```bash
-chmod +x install_alpaca_service.sh
-./install_alpaca_service.sh install
-```
-
-### Commands
-
-- **`install`** - Builds AlpacaCore and AlpacaHTTP, installs udev rules, creates a systemd service, and starts the service
-- **`update`** - Stops the service, rebuilds the projects, and restarts the service
-- **`uninstall`** - Stops and disables the systemd service, removes the service file
-- **`status`** - Shows the current status of the AlpacaHTTP service
-
-## Building Custom Drivers
-
-AlpacaBridge supports AI-assisted driver development, making it easy to build drivers for any vendor device. The workspace includes comprehensive guides and Cursor rules that help AI agents understand the architecture and build drivers following established patterns.
-
-**Getting Started:**
-1. Place your vendor SDK in `AlpacaCore/external/`
-2. Use AI (with Cursor or similar tools) to build your driver - the AI will automatically reference [AGENTS.md](AGENTS.md) and the Cursor rules in `AlpacaCore/.cursor/rules/` to understand the architecture and build patterns
-3. Test your driver using the workspace test scripts
-4. Validate with ConformU before adding to [SUPPORTED-DRIVERS.md](SUPPORTED-DRIVERS.md)
-
-**Note:** [AGENTS.md](AGENTS.md) is designed for AI agents to read when building drivers, though users can also reference it to understand the development workflow.
-
-See [AlpacaCore/README.md](AlpacaCore/README.md) for detailed driver development guidance.
+See [LICENSE](LICENSE).
