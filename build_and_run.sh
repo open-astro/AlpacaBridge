@@ -85,6 +85,19 @@ if [[ "${INSTALL_UDEV_RULES}" == "ON" && "${OSTYPE:-}" == "linux"* ]]; then
     sudo ldconfig
   fi
 
+  # Install ToupTek Camera shared library (used by companion guiding software)
+  touptek_lib_dir=""
+  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
+    touptek_lib_dir="${CORE_DIR}/external/ToupTek/toupcamsdk.20260128/linux/arm64/glibc"
+  elif [[ "${arch}" == "x86_64" ]]; then
+    touptek_lib_dir="${CORE_DIR}/external/ToupTek/toupcamsdk.20260128/linux/x64"
+  fi
+  if [[ -n "${touptek_lib_dir}" && -f "${touptek_lib_dir}/libtoupcam.so" ]]; then
+    echo "Installing ToupTek Camera shared library to /usr/local/lib"
+    sudo cp -a "${touptek_lib_dir}/libtoupcam.so"* /usr/local/lib/
+    sudo ldconfig
+  fi
+
   sudo udevadm control --reload-rules
   sudo udevadm trigger
 

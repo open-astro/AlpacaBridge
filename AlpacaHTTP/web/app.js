@@ -713,6 +713,8 @@ function startEditDevice(device) {
         setFormValue('qhy-camera-id', config.cameraId);
     } else if (vendor === 'svbony') {
         setFormValue('svbony-camera-index', config.cameraIndex);
+    } else if (vendor === 'touptek') {
+        setFormValue('touptek-camera-index', config.cameraIndex);
     } else if (vendor === 'weewx') {
         setFormValue('weewx-url', config.weewxUrl);
         setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
@@ -1267,6 +1269,11 @@ function updateVendorOptions() {
         svbonyOption.disabled = !isCamera;
         svbonyOption.hidden = !isCamera;
     }
+    const touptekOption = vendorSelect.querySelector('option[value="touptek"]');
+    if (touptekOption) {
+        touptekOption.disabled = !isCamera;
+        touptekOption.hidden = !isCamera;
+    }
     const weewxOption = vendorSelect.querySelector('option[value="weewx"]');
     if (weewxOption) {
         weewxOption.disabled = !isObservingConditions;
@@ -1300,6 +1307,9 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'svbony') {
         vendorSelect.value = '';
     }
+    if (!isCamera && vendorSelect.value === 'touptek') {
+        vendorSelect.value = '';
+    }
     if (!isObservingConditions && vendorSelect.value === 'weewx') {
         vendorSelect.value = '';
     }
@@ -1331,6 +1341,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('qhy-config').style.display = 'block';
     } else if (vendor === 'svbony') {
         document.getElementById('svbony-config').style.display = 'block';
+    } else if (vendor === 'touptek') {
+        document.getElementById('touptek-config').style.display = 'block';
     } else if (vendor === 'weewx') {
         document.getElementById('weewx-config').style.display = 'block';
     } else if (vendor === 'gemini') {
@@ -1974,6 +1986,9 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'svbony') {
         const svbonyCameraIndex = readOptionalNumber(formData, 'cameraIndex');
         deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
+    } else if (deviceData.vendor === 'touptek') {
+        const touptekCameraIndex = readOptionalNumber(formData, 'cameraIndex');
+        deviceData.cameraIndex = touptekCameraIndex !== null ? touptekCameraIndex : 0;
     } else if (deviceData.vendor === 'weewx') {
         deviceData.weewxUrl = formData.get('weewxUrl');
         const pollInterval = readOptionalNumber(formData, 'pollIntervalSeconds');

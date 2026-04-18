@@ -73,18 +73,40 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 
 ## Vendor SDK Shared Library Packaging
 
-When a vendor SDK provides shared libraries (`.so`) that are needed at runtime — either by AlpacaBridge itself or by companion projects (e.g. SmartGuider uses `libASICamera2.so` via the `zwoasi` Python package) — they must be included in the repository and installed by all packaging/deployment scripts.
+**Every new camera vendor MUST ship its `.so` in the `.deb`, regardless of whether AlpacaBridge itself statically links the library.** Camera `.so` files are also consumed by companion projects (e.g. SmartGuider at `/home/dev/Documents/GitHub/SmartGuider/` — uses `libASICamera2.so` via `zwoasi`, `libqhyccd.so`, etc. for autoguiding) which dynamically `dlopen` them from the system library path. If the `.so` is missing or not registered with `ldconfig`, guiding fails at runtime with no warning from the AlpacaBridge build or test suite. The fact that the AlpacaBridge server binary links fine is NOT evidence that packaging is correct.
 
-- Store both static (`.a`) and shared (`.so`) libraries under `AlpacaCore/external/<VENDOR>/` in the architecture-appropriate subdirectory (e.g. `lib/linux/armv8/`, `lib/linux/x64/`).
-- Ensure `.gitignore` allowlist entries (`!external/<VENDOR>/**`) cover `.so` files as well as `.a` files.
-- Update **all three** install/packaging paths to install the `.so` to a system library path and run `ldconfig`:
-  1. **`debian/rules`** — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/` in `override_dh_auto_install`. This ensures the `.deb` package ships the shared library.
-  2. **`build_and_run.sh`** — detect architecture, copy `.so*` to `/usr/local/lib/`, run `ldconfig`. Add inside the udev rules block alongside existing QHY/ZWO install logic.
-  3. **`install_alpaca_service.sh`** — same as `build_and_run.sh`, inside the `install_udev_rules()` function.
-- **Dynamic linker registration**: the `.deb` ships `/etc/ld.so.conf.d/alpacabridge.conf` which adds `/usr/lib/alpacabridge` to the system library search path. The `postinst` script runs `ldconfig` so the libraries are discoverable immediately after install. This is critical — without it, companion projects like SmartGuider cannot load vendor shared libraries (e.g. `zwoasi` Python package needs `libASICamera2.so`).
-- **Camera drivers and SmartGuider**: when adding a new camera vendor, always ship the vendor's shared library in the `.deb`. SmartGuider (`/home/dev/Documents/GitHub/SmartGuider/`) uses camera vendor libraries directly for autoguiding (e.g. ZWO via `zwoasi`, QHY via `libqhyccd`). If the shared library is missing or not registered with `ldconfig`, guiding will fail at runtime.
-- Keep the install logic in `build_and_run.sh` and `install_alpaca_service.sh` in sync — they must install the same set of vendor libraries.
-- When a vendor releases a new SDK version, update the `.so` files in `external/` and bump symlink targets (e.g. `libASICamera2.so.1.41` → `libASICamera2.so.1.42`).
+Non-camera vendors (focusers, mounts, switches, rotators) also ship their `.so` if the SDK provides one, for consistency — but the camera rule is non-negotiable.
+
+### Mandatory Checklist — New Vendor SDK with `.so`
+
+Do **all** of the following when adding a new vendor SDK. Skipping any step will either silently break companion projects (steps 1–2), break CI / clean clones (step 3), or break runtime loading on installed systems (steps 4–6).
+
+1. **Store** both static (`.a`) and shared (`.so`) libraries under `AlpacaCore/external/<VENDOR>/` in the architecture-appropriate subdirectory (e.g. `lib/linux/armv8/`, `lib/linux/x64/`, or whatever structure the upstream SDK uses — document the exact path in the vendor-specific notes section below).
+2. **Ship both architectures**: x64 and arm64 `.so` files must both be present in the tree. If upstream only ships one architecture, document the gap and guard the CMake build with an architecture check.
+3. **Allowlist in `.gitignore`**: add `!external/<VENDOR>/**` to `AlpacaCore/.gitignore` **before** committing the SDK files. The global `*.so` ignore rule will silently drop the library from the commit otherwise. Verify with `git check-ignore -v <path-to-.so>` — the output must show the `!external/<VENDOR>/**` rule winning.
+4. **`debian/rules`** — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/` in `override_dh_auto_install`, alongside existing QHY/ZWO/SVBONY entries. Add a per-arch `<VENDOR>_LIB_DIR` variable at the top of the file if the path differs by architecture.
+5. **`build_and_run.sh`** — detect architecture, copy `.so*` to `/usr/local/lib/`, run `ldconfig`. Add inside the udev rules block alongside existing QHY/ZWO/SVBONY install logic.
+6. **`install_alpaca_service.sh`** — same as `build_and_run.sh`, inside the `install_udev_rules()` function. Keep the two scripts in sync — they must install the same set of vendor libraries.
+
+### Dynamic Linker Registration
+
+The `.deb` ships `/etc/ld.so.conf.d/alpacabridge.conf` which adds `/usr/lib/alpacabridge` to the system library search path. The `postinst` script runs `ldconfig` so libraries are discoverable immediately after install. This is what makes companion projects (SmartGuider's `zwoasi`, `ctypes.CDLL('libtoupcam.so')`, etc.) able to find vendor libraries without setting `LD_LIBRARY_PATH`.
+
+### SDK Version Bumps
+
+When a vendor releases a new SDK version, update the `.so` files in `external/` and bump symlink targets (e.g. `libASICamera2.so.1.41` → `libASICamera2.so.1.42`). If the vendor's SDK path is versioned (e.g. ToupTek's `toupcamsdk.20260128/`), update the path reference in `debian/rules`, `build_and_run.sh`, `install_alpaca_service.sh`, AND `AlpacaCore/src/vendors/<vendor>/CMakeLists.txt` in the same commit.
+
+### Verification
+
+After wiring a new camera vendor, verify the `.so` is reachable as SmartGuider would see it:
+
+```bash
+# After ./build_and_run.sh or dpkg -i alpacabridge_*.deb:
+ldconfig -p | grep <libname>                    # must list the .so
+python3 -c "import ctypes; ctypes.CDLL('<libname>.so')"  # must not raise OSError
+```
+
+Failing this check means guiding will fail at runtime, no matter how green the AlpacaBridge test suite is.
 
 ## AlpacaHTTP Integration Checklist (Required for New Vendor/Device Types)
 
