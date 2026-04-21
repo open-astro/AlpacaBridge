@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [1.0.3] - 2026-04-21
+
+### Added
+- **Player One Camera Driver** (AlpacaCore)
+  - New vendor driver for Player One astronomy cameras with ASCOM Alpaca Camera API (ICameraV3) support.
+  - SDK wrapper singleton (`PlayerOneSDKWrapper`) over Player One Camera SDK v3.10.0 managing camera enumeration, lifecycle, and the generic `POAConfig` table (gain, offset, exposure, cooler, ST4 pulse guide, temperature, etc.).
+  - Exposure via single-frame software trigger with background thread, `POAImageReady` polling, abort support, and a 15 s deadline safety margin.
+  - Capability-gated cooler control (`POA_COOLER` / `POA_TARGET_TEMP` / `POA_COOLER_POWER`) so uncooled cameras accurately report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`.
+  - ST4 pulse guiding gated on `isHasST4Port`; pulse duration timed by the driver via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
+  - RAW8 / RAW16 / RGB24 / MONO8 image format support with format-aware `ImageArray` builders (RGB24 transposes the SDK's B,G,R pixel order to R,G,B and reports rank 3).
+  - SDK requires `width % 4 == 0` and `height % 2 == 0`; driver accepts any user-provided ROI and internally aligns the SDK call DOWN while returning the `ImageArray` at the user's exact `NumX × NumY` (trailing row/col zero-padded).
+  - Camera binding by index (`cameraIndex`) from the Player One SDK enumeration.
+  - Architecture-aware SDK selection: `lib/x64/` (Linux x86_64) and `lib/arm64/` (Linux ARM64).
+  - ConformU validated for **Player One Ceres 462M** on Linux arm64 with 0 errors and 0 issues; x64 validation pending.
+- **Player One Device Support** (AlpacaHTTP)
+  - Router registration and configuration support for Player One camera devices (`cameraIndex` binding).
+  - Web UI: Player One vendor selection and camera-index configuration field.
+- **Player One SDK** (AlpacaBridge)
+  - Player One Camera SDK v3.10.0 libraries included under `AlpacaCore/external/PlayerOne/`; `.gitignore` allowlist added.
+  - `libPlayerOneCamera.so` installed to `/usr/lib/alpacabridge/` (Debian package) and `/usr/local/lib/` (build scripts) so companion tools (e.g. SmartGuider) can `dlopen` the Player One SDK at runtime.
+  - `99-player_one_astronomy.rules` udev rule installed for Player One USB devices.
+- **Player One Unit Tests** (AlpacaCore)
+  - 6 test cases covering defaults, device metadata, disconnected throws, disconnected state, unsupported actions, and sub-exposure rejection.
+
+### Changed
+- **External SDK directory**: renamed `AlpacaCore/external/Player One/` (space) → `AlpacaCore/external/PlayerOne/` (no space) so `debian/rules` Makefile variables and shell install scripts don't break on the embedded whitespace.
+- **Supported Drivers Documentation**: added Player One section between QHY and SVBONY with Ceres 462M entry, ConformU link, and driver notes (SDK version, tested model, cooling gating, dew-heater not-wired status, pulse guiding mechanism).
+
 ## [1.0.2] - 2026-04-18
 
 ### Added

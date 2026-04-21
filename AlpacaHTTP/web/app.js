@@ -715,6 +715,8 @@ function startEditDevice(device) {
         setFormValue('svbony-camera-index', config.cameraIndex);
     } else if (vendor === 'touptek') {
         setFormValue('touptek-camera-index', config.cameraIndex);
+    } else if (vendor === 'playerone') {
+        setFormValue('playerone-camera-index', config.cameraIndex);
     } else if (vendor === 'weewx') {
         setFormValue('weewx-url', config.weewxUrl);
         setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
@@ -1274,6 +1276,11 @@ function updateVendorOptions() {
         touptekOption.disabled = !isCamera;
         touptekOption.hidden = !isCamera;
     }
+    const playerOneOption = vendorSelect.querySelector('option[value="playerone"]');
+    if (playerOneOption) {
+        playerOneOption.disabled = !isCamera;
+        playerOneOption.hidden = !isCamera;
+    }
     const weewxOption = vendorSelect.querySelector('option[value="weewx"]');
     if (weewxOption) {
         weewxOption.disabled = !isObservingConditions;
@@ -1310,6 +1317,9 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'touptek') {
         vendorSelect.value = '';
     }
+    if (!isCamera && vendorSelect.value === 'playerone') {
+        vendorSelect.value = '';
+    }
     if (!isObservingConditions && vendorSelect.value === 'weewx') {
         vendorSelect.value = '';
     }
@@ -1343,6 +1353,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('svbony-config').style.display = 'block';
     } else if (vendor === 'touptek') {
         document.getElementById('touptek-config').style.display = 'block';
+    } else if (vendor === 'playerone') {
+        document.getElementById('playerone-config').style.display = 'block';
     } else if (vendor === 'weewx') {
         document.getElementById('weewx-config').style.display = 'block';
     } else if (vendor === 'gemini') {
@@ -1989,6 +2001,9 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'touptek') {
         const touptekCameraIndex = readOptionalNumber(formData, 'cameraIndex');
         deviceData.cameraIndex = touptekCameraIndex !== null ? touptekCameraIndex : 0;
+    } else if (deviceData.vendor === 'playerone') {
+        const playerOneCameraIndex = readOptionalNumber(formData, 'cameraIndex');
+        deviceData.cameraIndex = playerOneCameraIndex !== null ? playerOneCameraIndex : 0;
     } else if (deviceData.vendor === 'weewx') {
         deviceData.weewxUrl = formData.get('weewxUrl');
         const pollInterval = readOptionalNumber(formData, 'pollIntervalSeconds');

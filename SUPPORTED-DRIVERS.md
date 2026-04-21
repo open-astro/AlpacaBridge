@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-04-16
+## Updated 2026-04-21
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -35,6 +35,21 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: QHY CCD SDK 25.09.29 (build target)
 - **Connection**: USB (requires udev rules and firmware; see below)
 - **Cooler power**: `CanGetCoolerPower` returns false; cooler power reporting is not implemented to avoid SDK timeouts.
+
+### Player One
+
+| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|---------------|-----------------|--------|
+| Ceres 462M | USB |  | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Ceres%20462M/) |
+
+### Player One Driver Notes
+
+- **SDK**: Player One Camera SDK v3.10.0 (build target)
+- **Connection**: USB (requires udev rules `99-player_one_astronomy.rules`)
+- **Tested model**: Ceres 462M (uncooled) on Linux arm64. x64 validation pending.
+- **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control paths (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) are implemented but untested against physical cooled hardware.
+- **Dew Heater**: Not exposed. The SDK advertises `POA_HEATER_POWER` on cooled models, but we do not currently have a cooled Player One camera available to implement and validate the Switch device. Will be added when hardware is available.
+- **Pulse guiding**: Capability-gated on `isHasST4Port`. Driver times the pulse duration via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
 
 ### SVBONY
 

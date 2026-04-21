@@ -79,6 +79,9 @@
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+#include <alpacacore/vendor/playerone/playerone_camera_driver.h>
+#endif
 
 namespace {
 
@@ -6661,6 +6664,25 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "playerone" && device_type_str == "camera") {
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+        int camera_index = config.value("cameraIndex", 0);
+
+        auto camera = alpacacore::vendor::playerone::create_playerone_camera(device_number, camera_index);
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+            util::log_info("Registered Player One camera");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "gemini" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_GEMINI
         std::string conn_type = config.value("connectionType", "auto");
@@ -6763,6 +6785,8 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "svbony") {
         copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
+        copy_if_present("cameraIndex");
+    } else if (vendor == "playerone") {
         copy_if_present("cameraIndex");
     } else if (vendor == "weewx") {
         copy_if_present("weewxUrl");
