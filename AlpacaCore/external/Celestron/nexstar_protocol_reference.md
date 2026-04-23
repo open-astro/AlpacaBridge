@@ -216,7 +216,7 @@ H chr(15) chr(26) chr(0) chr(4) chr(6) chr(5) chr(251) chr(1)
 
 GEM mounts only (CGE, CGX, CGX-L). Returns `W#` when the OTA is on the west side of the pier (normal pointing, counterweight down) or `E#` when on the east side (through-the-pole / counterweight up). Not documented in the original NexStar protocol spec; discovered in INDI driver source (`celestrondriver.cpp:1031`).
 
-ASCOM mapping: `W` → pierWest (0), `E` → pierEast (1). Alt-az mounts return an empty or undefined response.
+ASCOM mapping: `W` → pierEast (0), `E` → pierWest (1). Alt-az mounts return an empty or undefined response.
 
 #### Get Device Version (via pass-through)
 
