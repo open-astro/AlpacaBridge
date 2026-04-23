@@ -192,7 +192,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| CGX-L | USB/Serial (hand controller) | ✓ |  | [ConformU Validation](AlpacaCore/conformu/Celestron/) |
+| CGX-L | USB/Serial (hand controller) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/) |
 
 ### Celestron Driver Notes
 
