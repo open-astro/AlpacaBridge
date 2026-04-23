@@ -448,26 +448,45 @@ public:
         // NexStar "J" command: chr(1) if aligned, chr(0) if not
         std::string response = send_command("J", true, 0, 1);
         if (response.empty()) {
+            ALPACA_LOG_WARN("Celestron", "is_aligned (J): empty response → false");
             return false;
         }
         unsigned char ch = static_cast<unsigned char>(response[0]);
-        if (ch == '1') {
-            return true;
+        bool aligned = (ch == '1') || (ch != 0);
+        {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf),
+                          "is_aligned (J): response_byte=0x%02X ascii='%c' → %s",
+                          ch, (ch >= 32 && ch < 127) ? ch : '?',
+                          aligned ? "true" : "false");
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
         }
-        return ch != 0;
+        return aligned;
     }
 
     bool is_goto_in_progress() {
         // NexStar "L" command: ASCII "0" or "1" & "#"
         std::string response = send_command("L", true, 0);
         if (response.empty()) {
+            ALPACA_LOG_WARN("Celestron", "is_goto_in_progress (L): empty response → false");
             return false;
         }
-        return response[0] == '1';
+        bool in_progress = response[0] == '1';
+        {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf),
+                          "is_goto_in_progress (L): response_byte=0x%02X ascii='%c' → %s",
+                          static_cast<unsigned char>(response[0]),
+                          (response[0] >= 32 && response[0] < 127) ? response[0] : '?',
+                          in_progress ? "true" : "false");
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
+        return in_progress;
     }
 
     void cancel_goto() {
         // NexStar "M" command: responds "#"
+        ALPACA_LOG_WARN("Celestron", "cancel_goto (M) sent");
         (void)send_command("M", true, 0);
     }
 
@@ -678,6 +697,14 @@ public:
         return static_cast<unsigned char>(response[0]) != 0;
     }
 
+    char get_pier_side() {
+        std::string response = send_command("p", true, 0, 1);
+        if (response.empty()) {
+            return '\0';
+        }
+        return response[0];
+    }
+
     void set_autoguide_rate(int axis, double percent) {
         // MC_SET_AUTOGUIDE_RATE (0x46): P chr(2) chr(dev) chr(0x46) chr(val) chr(0) chr(0) chr(0)
         // val = desired_percent * 256 / 100
@@ -688,6 +715,15 @@ public:
         double clamped = std::clamp(percent, 0.0, 100.0);
         int val = static_cast<int>(std::round(clamped * 256.0 / 100.0));
         if (val > 255) val = 255;
+
+        {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "set_autoguide_rate axis=%d dev=0x%02X percent=%.4f val=%d "
+                          "bytes=[50 02 %02X 46 %02X 00 00 00]",
+                          axis, dev, clamped, val, dev, val);
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
 
         std::string cmd;
         cmd.reserve(8);
@@ -721,10 +757,19 @@ public:
         cmd.push_back(static_cast<char>(1));
         std::string response = send_command(cmd, true, 0, 1);
         if (response.empty()) {
+            ALPACA_LOG_WARN("Celestron", "get_autoguide_rate: empty response → 0.0");
             return 0.0;
         }
         int val = static_cast<unsigned char>(response[0]);
-        return 100.0 * static_cast<double>(val) / 256.0;
+        double percent = 100.0 * static_cast<double>(val) / 256.0;
+        {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf),
+                          "get_autoguide_rate axis=%d dev=0x%02X response_byte=0x%02X → %.4f%%",
+                          axis, dev, val, percent);
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
+        return percent;
     }
 
     void pec_seek_index() {
@@ -899,6 +944,13 @@ public:
         cmd.push_back(static_cast<char>((position >> 8) & 0xFF));
         cmd.push_back(static_cast<char>(position & 0xFF));
         cmd.push_back(static_cast<char>(0));
+        {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "mc_goto_fast axis=%d dev=0x%02X target=0x%06X",
+                          axis, dev, position);
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
         (void)send_command(cmd, true, 0);
     }
 
@@ -909,6 +961,17 @@ public:
             throw AlpacaException("Invalid axis for mc_set_position");
         }
         const int dev = (axis == 0) ? 0x10 : 0x11;
+        {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "mc_set_position axis=%d dev=0x%02X target=0x%06X "
+                          "bytes=[50 03 %02X 04 %02X %02X %02X 00]",
+                          axis, dev, position, dev,
+                          static_cast<unsigned>((position >> 16) & 0xFF),
+                          static_cast<unsigned>((position >> 8) & 0xFF),
+                          static_cast<unsigned>(position & 0xFF));
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
         std::string cmd;
         cmd.reserve(8);
         cmd.push_back('P');
@@ -926,7 +989,16 @@ public:
         // NexStar "t" command: chr(mode) & "#"
         // 0=Off, 1=Alt/Az, 2=EQ North, 3=EQ South
         std::string response = send_command("t", true, 0, 1);
-        return parse_mode_byte(response);
+        int mode = parse_mode_byte(response);
+        {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf),
+                          "get_tracking_mode (t): response_byte=0x%02X → mode=%d",
+                          response.empty() ? 0 : static_cast<unsigned char>(response[0]),
+                          mode);
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
+        return mode;
     }
 
     void set_tracking_mode(int mode) {
@@ -935,6 +1007,17 @@ public:
             mode = 0;
         } else if (mode > 3) {
             mode = 3;
+        }
+        {
+            const char* name = (mode == 0) ? "Off" :
+                              (mode == 1) ? "AltAz" :
+                              (mode == 2) ? "EQ-North" :
+                              (mode == 3) ? "EQ-South" : "Unknown";
+            char buf[96];
+            std::snprintf(buf, sizeof(buf),
+                          "set_tracking_mode (T): mode=%d (%s) bytes=[54 %02X]",
+                          mode, name, mode);
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
         }
         std::string cmd = "T";
         cmd.push_back(static_cast<char>(mode));
@@ -994,7 +1077,34 @@ public:
             cmd.push_back(static_cast<char>(scaled_rate & 0xFF));
             cmd.push_back(static_cast<char>(0));
             cmd.push_back(static_cast<char>(0));
-            (void)send_command(cmd, true, 0);
+            std::string resp;
+            try {
+                resp = send_command(cmd, true, 0);
+            } catch (const std::exception& e) {
+                char buf[128];
+                std::snprintf(buf, sizeof(buf),
+                              "move_axis_variable_rate FRAME axis=%d dev=0x%02X dir=%d scaled=%u "
+                              "bytes=[50 03 %02X %02X %02X %02X 00 00] send FAILED: %s",
+                              axis, dev, direction_code, scaled_rate,
+                              static_cast<unsigned>(dev),
+                              static_cast<unsigned>(direction_code),
+                              static_cast<unsigned>((scaled_rate >> 8) & 0xFF),
+                              static_cast<unsigned>(scaled_rate & 0xFF),
+                              e.what());
+                ALPACA_LOG_WARN("Celestron", std::string(buf));
+                throw;
+            }
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                          "move_axis_variable_rate FRAME axis=%d dev=0x%02X dir=%d scaled=%u "
+                          "bytes=[50 03 %02X %02X %02X %02X 00 00] respLen=%zu",
+                          axis, dev, direction_code, scaled_rate,
+                          static_cast<unsigned>(dev),
+                          static_cast<unsigned>(direction_code),
+                          static_cast<unsigned>((scaled_rate >> 8) & 0xFF),
+                          static_cast<unsigned>(scaled_rate & 0xFF),
+                          resp.size());
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
         };
 
         if (abs_deg_per_sec < 1e-6) {
@@ -1016,6 +1126,15 @@ public:
         }
         const auto scaled_rate = static_cast<uint16_t>(scaled);
         const int direction_code = (rate_deg_per_sec > 0.0) ? 6 : 7;
+        {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "move_axis_variable_rate REQUEST axis=%d rate_deg_per_sec=%.9f "
+                          "arcsec_per_sec=%.4f scaled=%u dir=%d",
+                          axis, rate_deg_per_sec, rate_arcsec_per_sec,
+                          scaled_rate, direction_code);
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
         send_variable(direction_code, scaled_rate);
     }
 
@@ -1060,6 +1179,13 @@ public:
             dec_hex += "00";
         }
         std::string cmd = std::string(precise ? "r" : "R") + ra_hex + "," + dec_hex;
+        {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                          "goto_ra_dec_raw target ra_raw=0x%06X dec_raw=0x%06X precise=%d cmd=\"%s\"",
+                          ra_raw, dec_raw, precise ? 1 : 0, cmd.c_str());
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
         (void)send_command(cmd, true, 0);
     }
 
@@ -1084,6 +1210,13 @@ public:
             dec_hex += "00";
         }
         std::string cmd = std::string(precise ? "s" : "S") + ra_hex + "," + dec_hex;
+        {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                          "sync_ra_dec_raw ra_raw=0x%06X dec_raw=0x%06X precise=%d cmd=\"%s\"",
+                          ra_raw, dec_raw, precise ? 1 : 0, cmd.c_str());
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
         (void)send_command(cmd, true, 0);
     }
 
@@ -1511,6 +1644,10 @@ void CelestronProtocolWrapper::pulse_guide_axis(int axis, int velocity, int dura
 
 bool CelestronProtocolWrapper::is_aux_guide_active(int axis) {
     return pimpl_->is_aux_guide_active(axis);
+}
+
+char CelestronProtocolWrapper::get_pier_side() {
+    return pimpl_->get_pier_side();
 }
 
 void CelestronProtocolWrapper::set_autoguide_rate(int axis, double percent) {

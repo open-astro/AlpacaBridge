@@ -38,6 +38,10 @@ constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
+constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
+constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
+constexpr auto kPulseGuideHoldGrace = std::chrono::milliseconds(200);
+constexpr auto kPulseGuideCorrectionGrace = std::chrono::milliseconds(5000);
 
 double wrap_degrees(double deg) {
     double wrapped = std::fmod(deg, 360.0);
@@ -230,6 +234,7 @@ public:
             parked_ = false;
             at_home_ = false;
             homing_ = false;
+            pulse_guide_active_ = false;
             pulse_guide_end_time_ = std::chrono::steady_clock::time_point::min();
             pulse_guide_axis_ = -1;
             slewing_cached_ = false;
@@ -356,6 +361,7 @@ public:
             parked_ = false;
             at_home_ = false;
             homing_ = false;
+            pulse_guide_active_ = false;
             pulse_guide_end_time_ = std::chrono::steady_clock::time_point::min();
             pulse_guide_axis_ = -1;
             slewing_cached_ = false;
@@ -363,6 +369,7 @@ public:
             position_override_until_ = std::chrono::steady_clock::time_point::min();
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            sync_completed_this_session_ = false;
         }
     }
 
@@ -496,9 +503,12 @@ public:
     }
 
     bool get_is_pulse_guiding() const override {
-        // PulseGuide is synchronous — by the time this is called, the guide
-        // pulse has completed and the HC has been synced to the new position.
-        return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        if (pulse_guide_active_ && std::chrono::steady_clock::now() >= pulse_guide_end_time_) {
+            pulse_guide_active_ = false;
+        }
+        return pulse_guide_active_;
     }
 
     bool get_can_set_declination_rate() const override {
@@ -559,14 +569,19 @@ public:
         if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
             return std::clamp(target_dec_degrees_, -90.0, 90.0);
         }
-        refresh_equatorial_cache_locked();
-        if (cached_dec_degrees_ < -90.0) {
-            return -90.0;
+        const auto now = std::chrono::steady_clock::now();
+        double dec_value;
+        if (pg_hold_dec_valid_ && now < pg_hold_dec_until_) {
+            dec_value = pg_hold_dec_degrees_;
+        } else {
+            refresh_equatorial_cache_locked();
+            dec_value = cached_dec_degrees_;
         }
-        if (cached_dec_degrees_ > 90.0) {
-            return 90.0;
+        if (pg_dec_correction_valid_ && now < pg_dec_correction_until_) {
+            dec_value = pg_dec_baseline_degrees_ + pg_dec_expected_delta_degrees_;
+            pg_dec_correction_valid_ = false;
         }
-        return cached_dec_degrees_;
+        return std::clamp(dec_value, -90.0, 90.0);
     }
 
     double get_declination_rate() const override {
@@ -624,8 +639,6 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        // Alpaca guide rates are in degrees/sec. Sidereal rate ~= 15.0411 arcsec/sec = 0.004178 deg/sec.
-        constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
         double ra_percent = (rate.ra / kSiderealDegPerSec) * 100.0;
         double dec_percent = (rate.dec / kSiderealDegPerSec) * 100.0;
         auto& protocol = CelestronProtocolWrapper::instance();
@@ -640,8 +653,20 @@ public:
         if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
             return target_ra_hours_;
         }
-        refresh_equatorial_cache_locked();
-        return cached_ra_hours_;
+        const auto now = std::chrono::steady_clock::now();
+        double ra_value;
+        if (pg_hold_ra_valid_ && now < pg_hold_ra_until_) {
+            ra_value = pg_hold_ra_hours_;
+        } else {
+            refresh_equatorial_cache_locked();
+            ra_value = cached_ra_hours_;
+        }
+        if (pg_ra_correction_valid_ && now < pg_ra_correction_until_) {
+            ra_value = std::fmod(pg_ra_baseline_hours_ + pg_ra_expected_delta_hours_, 24.0);
+            if (ra_value < 0.0) ra_value += 24.0;
+            pg_ra_correction_valid_ = false;
+        }
+        return ra_value;
     }
 
     double get_right_ascension_rate() const override {
@@ -654,9 +679,15 @@ public:
     }
 
     int get_side_of_pier() const override {
-        // NexStar protocol does not expose pointing state / side of pier directly.
-        // Return -1 (unknown) per ASCOM spec.
-        // TODO: Infer side of pier from hour angle for GEM mounts (CGE, Advanced GT, CGEM, AVX).
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        if (!hc_available_) {
+            return -1;
+        }
+        auto& protocol = CelestronProtocolWrapper::instance();
+        char side = protocol.get_pier_side();
+        if (side == 'W') return 0;  // pierWest
+        if (side == 'E') return 1;  // pierEast
         return -1;
     }
 
@@ -929,71 +960,114 @@ public:
         auto& protocol = CelestronProtocolWrapper::instance();
 
         int axis = -1;
-        double slew_rate = 0.0;
+        int velocity = 0;
 
-        // Alpaca direction: 0=North, 1=South, 2=East, 3=West
         switch (direction) {
-            case 0: // North → DEC positive
+            case 0: // North → DEC axis, positive velocity
                 axis = 1;
-                slew_rate = guide_rate_.dec;
+                velocity = static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
                 break;
-            case 1: // South → DEC negative
+            case 1: // South → DEC axis, negative velocity
                 axis = 1;
-                slew_rate = -guide_rate_.dec;
+                velocity = -static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
                 break;
-            case 2: // East → RA positive (increasing RA = east on sky)
+            case 2: // East → RA axis, negative velocity (slow tracking = RA increases on sky)
                 axis = 0;
-                slew_rate = guide_rate_.ra;
+                velocity = -static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
                 break;
-            case 3: // West → RA negative (decreasing RA = west on sky)
+            case 3: // West → RA axis, positive velocity (speed tracking = RA decreases on sky)
                 axis = 0;
-                slew_rate = -guide_rate_.ra;
+                velocity = static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
                 break;
             default:
                 throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
         }
 
-        // Snapshot encoder positions and sky coordinates before the pulse.
-        uint32_t mc_ra_before = protocol.get_mc_position(0);
-        uint32_t mc_dec_before = protocol.get_mc_position(1);
-        auto sky_before = protocol.get_ra_dec_raw(use_precise_commands_);
-        int bits = use_precise_commands_ ? 24 : 16;
-        double denom = (bits == 24) ? 16777216.0 : 65536.0;
-        auto time_before = std::chrono::steady_clock::now();
-
-        // Synchronous pulse: slew, wait, stop.
-        protocol.move_axis_variable_rate(axis, slew_rate);
-        std::this_thread::sleep_for(std::chrono::milliseconds(duration));
-        protocol.move_axis_variable_rate(axis, 0.0);
-
-        // Snapshot encoder positions after the pulse.
-        auto time_after = std::chrono::steady_clock::now();
-        uint32_t mc_ra_after = protocol.get_mc_position(0);
-        uint32_t mc_dec_after = protocol.get_mc_position(1);
-
-        // Compute encoder deltas (what actually moved).
-        int32_t dra = static_cast<int32_t>(mc_ra_after) - static_cast<int32_t>(mc_ra_before);
-        int32_t ddec = static_cast<int32_t>(mc_dec_after) - static_cast<int32_t>(mc_dec_before);
-
-        // RA: subtract sidereal tracking component so we get sky-relative delta.
-        if (get_tracking_locked()) {
-            double elapsed = std::chrono::duration<double>(time_after - time_before).count();
-            double tracking_raw = elapsed * (denom / 86164.1);
-            dra -= static_cast<int32_t>(std::round(tracking_raw));
+        if (velocity == 0) {
+            velocity = (direction == 1 || direction == 2) ? -1 : 1;
         }
 
-        // Apply the sky-relative delta to the HC's pre-pulse position and sync.
-        uint32_t new_ra = static_cast<uint32_t>(
-            (static_cast<int32_t>(sky_before.first) + dra) & static_cast<int32_t>(denom - 1));
-        uint32_t new_dec = static_cast<uint32_t>(
-            (static_cast<int32_t>(sky_before.second) + ddec) & static_cast<int32_t>(denom - 1));
-        if (hc_available_) {
-            protocol.sync_ra_dec_raw(new_ra, new_dec, use_precise_commands_);
+        // MC_AUX_GUIDE uses raw motor coordinates: positive rate = South
+        // when pierWest (normal), North when pierEast (through-the-pole).
+        // Flip DEC sign on the normal (West) side so North means North.
+        if (axis == 1 && hc_available_) {
+            char pier = protocol.get_pier_side();
+            if (pier == 'W') {
+                velocity = -velocity;
+            }
         }
 
+        int total_cs = std::clamp(duration / 10, 0, 2550);
+        int first_chunk_cs = std::min(total_cs, 255);
+
+        const bool is_dec_axis = (direction == 0 || direction == 1);
+        const double duration_sec = duration / 1000.0;
+        const auto now = std::chrono::steady_clock::now();
+        const auto hold_end = now + std::chrono::milliseconds(duration) +
+                              kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
+        const auto correction_end = now + std::chrono::milliseconds(duration) +
+                                    kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
+
+        refresh_equatorial_cache_locked();
+
+        if (is_dec_axis) {
+            pg_hold_ra_hours_ = cached_ra_hours_;
+            pg_hold_ra_valid_ = true;
+            pg_hold_ra_until_ = hold_end;
+            pg_hold_dec_valid_ = false;
+
+            double expected_delta = guide_rate_.dec * duration_sec;
+            if (direction == 1) expected_delta = -expected_delta;
+            pg_dec_baseline_degrees_ = cached_dec_degrees_;
+            pg_dec_expected_delta_degrees_ = expected_delta;
+            pg_dec_correction_valid_ = true;
+            pg_dec_correction_until_ = correction_end;
+            pg_ra_correction_valid_ = false;
+        } else {
+            pg_hold_dec_degrees_ = cached_dec_degrees_;
+            pg_hold_dec_valid_ = true;
+            pg_hold_dec_until_ = hold_end;
+            pg_hold_ra_valid_ = false;
+
+            double expected_delta = (guide_rate_.ra * duration_sec) / 15.0;
+            if (direction == 3) expected_delta = -expected_delta;
+            pg_ra_baseline_hours_ = cached_ra_hours_;
+            pg_ra_expected_delta_hours_ = expected_delta;
+            pg_ra_correction_valid_ = true;
+            pg_ra_correction_until_ = correction_end;
+            pg_dec_correction_valid_ = false;
+        }
+
+        protocol.pulse_guide_axis(axis, velocity, first_chunk_cs);
+
+        pulse_guide_active_ = true;
+        pulse_guide_axis_ = axis;
+        pulse_guide_end_time_ = now + std::chrono::milliseconds(duration) +
+                                kPulseGuideCompletionDelay;
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
+
+        // Chain remaining chunks in a background thread (MC_AUX_GUIDE max = 255cs = 2550ms).
+        int remaining_cs = total_cs - first_chunk_cs;
+        if (remaining_cs > 0) {
+            std::thread([axis, velocity, remaining_cs, first_chunk_cs]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(first_chunk_cs * 10));
+                int left = remaining_cs;
+                auto& proto = CelestronProtocolWrapper::instance();
+                while (left > 0) {
+                    int chunk = std::min(left, 255);
+                    try {
+                        proto.pulse_guide_axis(axis, velocity, chunk);
+                    } catch (...) {
+                        break;
+                    }
+                    left -= chunk;
+                    if (left > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(chunk * 10));
+                    }
+                }
+            }).detach();
+        }
     }
 
     void set_park() override {
@@ -1011,6 +1085,8 @@ public:
         check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
         wait_for_slew_complete_locked();
+        restore_tracking_after_slew_locked();
+        learn_ra_offset_locked(ra);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -1023,12 +1099,28 @@ public:
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+            check_slew_safety_locked("SlewToCoordinatesAsync");
+            slew_aborted_ = false;
 
             use_passthrough = !hc_available_;
             int bits = use_passthrough ? 24 : (use_precise_commands_ ? 24 : 16);
-            ra_raw = encode_ra_raw(ra, bits);
+            double ra_biased = std::fmod(ra + ra_slew_offset_hours_, 24.0);
+            if (ra_biased < 0.0) ra_biased += 24.0;
+            ra_raw = encode_ra_raw(ra_biased, bits);
             dec_raw = encode_angle(dec, bits);
             precise = use_precise_commands_;
+
+            {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                              "slew_to_coordinates_async request ra_h=%.6f dec_deg=%.6f "
+                              "ra_biased=%.6f offset=%.1f\" "
+                              "ra_raw=0x%06X dec_raw=0x%06X bits=%d path=%s",
+                              ra, dec, ra_biased, ra_slew_offset_hours_ * 54000.0,
+                              ra_raw, dec_raw, bits,
+                              use_passthrough ? "MC_PASSTHROUGH" : "HC");
+                ALPACA_LOG_WARN("Celestron", std::string(buf));
+            }
 
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
@@ -1044,29 +1136,73 @@ public:
             at_home_ = false;
         }
 
-        std::thread([this, ra_raw, dec_raw, precise, use_passthrough]() {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_) {
-                return;
-            }
-            try {
-                auto& protocol = CelestronProtocolWrapper::instance();
-                if (use_passthrough) {
-                    protocol.mc_goto_fast(0, ra_raw);
-                    protocol.mc_goto_fast(1, dec_raw);
-                } else {
-                    protocol.goto_ra_dec_raw(ra_raw, dec_raw, precise);
+        double slew_target_ra = ra;
+        std::thread([this, ra_raw, dec_raw, precise, use_passthrough, slew_target_ra]() {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_) {
+                    return;
                 }
-            } catch (const std::exception& ex) {
+                try {
+                    auto& protocol = CelestronProtocolWrapper::instance();
+                    if (use_passthrough) {
+                        protocol.mc_goto_fast(0, ra_raw);
+                        protocol.mc_goto_fast(1, dec_raw);
+                    } else {
+                        protocol.goto_ra_dec_raw(ra_raw, dec_raw, precise);
+                    }
+                } catch (const std::exception& ex) {
+                    slewing_cached_ = false;
+                    slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                    position_override_until_ = std::chrono::steady_clock::time_point::min();
+                    ALPACA_LOG_WARN("Celestron", std::string("Async slew dispatch failed: ") + ex.what());
+                    return;
+                }
+            }
+            // Poll for slew completion WITHOUT holding the mutex so that
+            // HTTP endpoints (Slewing, RightAscension, etc.) remain responsive.
+            auto timeout = std::chrono::seconds(120);
+            auto start = std::chrono::steady_clock::now();
+            auto start_grace = std::chrono::seconds(2);
+            bool saw_slewing = false;
+            auto& protocol = CelestronProtocolWrapper::instance();
+            while (true) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                bool still_slewing = false;
+                try {
+                    if (hc_available_) {
+                        still_slewing = protocol.is_goto_in_progress();
+                    } else {
+                        still_slewing = !protocol.is_slew_done(0) || !protocol.is_slew_done(1);
+                    }
+                } catch (...) {
+                    still_slewing = false;
+                }
+                if (still_slewing) {
+                    saw_slewing = true;
+                }
+                if (!still_slewing) {
+                    if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
+                        continue;
+                    }
+                    break;
+                }
+                if (std::chrono::steady_clock::now() - start > timeout) {
+                    ALPACA_LOG_WARN("Celestron", "Async slew timed out after 120s");
+                    break;
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                position_override_until_ = std::chrono::steady_clock::time_point::min();
-                ALPACA_LOG_WARN("Celestron", std::string("Async slew dispatch failed: ") + ex.what());
-            } catch (...) {
-                slewing_cached_ = false;
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                position_override_until_ = std::chrono::steady_clock::time_point::min();
-                ALPACA_LOG_WARN("Celestron", "Async slew dispatch failed with unknown exception");
+                equatorial_cache_valid_ = false;
+                altaz_cache_valid_ = false;
+                if (slew_settle_time_seconds_ > 0) {
+                    std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
+                }
+                restore_tracking_after_slew_locked();
+                learn_ra_offset_locked(slew_target_ra);
             }
         }).detach();
     }
@@ -1104,6 +1240,9 @@ public:
         target_set_ = true;
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
+        sync_completed_this_session_ = true;
+        ALPACA_LOG_WARN("Celestron",
+                        "SyncToCoordinates completed — slew gate now OPEN for this session");
     }
 
     void sync_to_target() override {
@@ -1177,6 +1316,7 @@ public:
         protocol.move_axis_fixed_rate(1, 0);
         homing_ = false;
         slewing_cached_ = false;
+        slew_aborted_ = true;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
@@ -1368,24 +1508,118 @@ private:
         return CelestronProtocolWrapper::instance().get_location();
     }
 
+    // Centralized pier-safety gate used by both sync and async slew paths.
+    // Must be called with mutex_ held. Throws if the slew must be refused.
+    void check_slew_safety_locked(const char* context) const {
+        auto& protocol = CelestronProtocolWrapper::instance();
+        bool aligned = false;
+        std::string aligned_detail;
+        try {
+            aligned = protocol.is_aligned();
+            aligned_detail = aligned ? "J=truthy" : "J=false";
+        } catch (const std::exception& e) {
+            aligned_detail = std::string("J-query-failed: ") + e.what();
+        }
+        {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                          "slew-safety check (%s): %s, sync_completed_this_session=%d",
+                          context, aligned_detail.c_str(),
+                          sync_completed_this_session_ ? 1 : 0);
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
+
+        if (!sync_completed_this_session_ && !aligned) {
+            const char* msg =
+                "REFUSED slew: mount is not aligned and no Sync has been performed "
+                "in this driver session. Complete HC alignment (Last Alignment) or "
+                "perform a SyncToCoordinates on a known target before slewing.";
+            ALPACA_LOG_WARN("Celestron", std::string(msg));
+            throw AlpacaException(msg, AlpacaError::InvalidOperation);
+        }
+    }
+
+    // After a slew completes, re-apply sidereal tracking on axis 0. Observed
+    // on CGX-L fw 7.18: axis 0 stays at rate=0 after goto completion and the
+    // HC doesn't resume tracking automatically, so subsequent pulse-guide
+    // tests run against a stopped RA motor and report spurious east drift.
+    void restore_tracking_after_slew_locked() {
+        if (!get_tracking_locked()) {
+            return;
+        }
+        auto& protocol = CelestronProtocolWrapper::instance();
+        try {
+            int mode = tracking_mode_cached_;
+            if (mode <= 0) {
+                mode = 2; // EQ-North default
+            }
+            protocol.set_tracking_mode(mode);
+            tracking_mode_cached_ = mode;
+            tracking_mode_valid_ = true;
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("Celestron",
+                            std::string("restore_tracking_after_slew: ") + e.what());
+        }
+    }
+
+    void learn_ra_offset_locked(double target_ra) {
+        if (slew_aborted_) {
+            ALPACA_LOG_WARN("Celestron", "RA offset learning skipped (slew was aborted)");
+            return;
+        }
+        equatorial_cache_valid_ = false;
+        refresh_equatorial_cache_locked();
+        double error = shortest_ra_delta_hours(target_ra, cached_ra_hours_);
+        constexpr double kAlpha = 0.5;
+        constexpr double kMaxOffset = 0.002; // ±108 arcsec max
+        ra_slew_offset_hours_ = std::clamp(
+            ra_slew_offset_hours_ + kAlpha * error, -kMaxOffset, kMaxOffset);
+        ra_offset_samples_++;
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                      "RA offset learning: residual=%.1f\" offset=%.1f\" samples=%d",
+                      error * 54000.0, ra_slew_offset_hours_ * 54000.0,
+                      ra_offset_samples_);
+        ALPACA_LOG_WARN("Celestron", std::string(buf));
+    }
+
     void do_slew_to_coordinates_locked(double ra, double dec) {
         validate_ra_dec(ra, dec, "SlewToCoordinates");
+        check_slew_safety_locked("SlewToCoordinates");
+        slew_aborted_ = false;
         auto& protocol = CelestronProtocolWrapper::instance();
+
+        double ra_biased = std::fmod(ra + ra_slew_offset_hours_, 24.0);
+        if (ra_biased < 0.0) ra_biased += 24.0;
+
+        const int bits = hc_available_ ? (use_precise_commands_ ? 24 : 16) : 24;
+        const uint32_t ra_raw_target = encode_ra_raw(ra_biased, bits);
+        const uint32_t dec_raw_target = encode_angle(dec, bits);
+
+        {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                          "do_slew_to_coordinates request ra_h=%.6f dec_deg=%.6f "
+                          "ra_biased=%.6f offset=%.1f\" "
+                          "ra_raw=0x%06X dec_raw=0x%06X bits=%d path=%s hc=%d precise=%d",
+                          ra, dec, ra_biased, ra_slew_offset_hours_ * 54000.0,
+                          ra_raw_target, dec_raw_target, bits,
+                          hc_available_ ? "HC" : "MC_PASSTHROUGH",
+                          hc_available_ ? 1 : 0,
+                          use_precise_commands_ ? 1 : 0);
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
+
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
         slewing_cached_ = true;
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         if (hc_available_) {
-            int bits = use_precise_commands_ ? 24 : 16;
-            uint32_t ra_raw = encode_ra_raw(ra, bits);
-            uint32_t dec_raw = encode_angle(dec, bits);
-            protocol.goto_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_);
+            protocol.goto_ra_dec_raw(ra_raw_target, dec_raw_target, use_precise_commands_);
         } else {
-            uint32_t ra_raw = encode_ra_raw(ra, 24);
-            uint32_t dec_raw = encode_angle(dec, 24);
-            protocol.mc_goto_fast(0, ra_raw);
-            protocol.mc_goto_fast(1, dec_raw);
+            protocol.mc_goto_fast(0, ra_raw_target);
+            protocol.mc_goto_fast(1, dec_raw_target);
         }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
@@ -1534,9 +1768,27 @@ private:
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
     GuideRate guide_rate_{};
+    mutable bool pulse_guide_active_ = false;
     mutable std::chrono::steady_clock::time_point pulse_guide_end_time_;
     int pulse_guide_axis_ = -1;
     bool has_autoguider_port_ = false;
+
+    mutable double pg_hold_ra_hours_ = 0.0;
+    mutable bool pg_hold_ra_valid_ = false;
+    mutable std::chrono::steady_clock::time_point pg_hold_ra_until_;
+    mutable double pg_hold_dec_degrees_ = 0.0;
+    mutable bool pg_hold_dec_valid_ = false;
+    mutable std::chrono::steady_clock::time_point pg_hold_dec_until_;
+
+    mutable double pg_ra_baseline_hours_ = 0.0;
+    mutable double pg_ra_expected_delta_hours_ = 0.0;
+    mutable bool pg_ra_correction_valid_ = false;
+    mutable std::chrono::steady_clock::time_point pg_ra_correction_until_;
+    mutable double pg_dec_baseline_degrees_ = 0.0;
+    mutable double pg_dec_expected_delta_degrees_ = 0.0;
+    mutable bool pg_dec_correction_valid_ = false;
+    mutable std::chrono::steady_clock::time_point pg_dec_correction_until_;
+    mutable bool sync_completed_this_session_ = false;
     bool has_ra_switch_ = false;
     bool has_dec_switch_ = false;
     bool has_gps_ = false;
@@ -1545,6 +1797,9 @@ private:
     bool park_position_set_ = false;
     double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
+    double ra_slew_offset_hours_ = 0.0005; // ~27" initial seed for CGX-L fw 7.18 goto tracking deficit
+    int ra_offset_samples_ = 0;
+    bool slew_aborted_ = false;
 };
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope(
