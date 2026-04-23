@@ -370,6 +370,8 @@ public:
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             sync_completed_this_session_ = false;
+            skip_next_ra_learn_ = false;
+            flip_in_progress_ = false;
         }
     }
 
@@ -686,8 +688,8 @@ public:
         }
         auto& protocol = CelestronProtocolWrapper::instance();
         char side = protocol.get_pier_side();
-        if (side == 'W') return 0;  // pierWest
-        if (side == 'E') return 1;  // pierEast
+        if (side == 'W') return 0;  // pierEast (ASCOM enum: 0=pierEast)
+        if (side == 'E') return 1;  // pierWest (ASCOM enum: 1=pierWest)
         return -1;
     }
 
@@ -1094,6 +1096,8 @@ public:
         uint32_t dec_raw = 0;
         bool precise = false;
         bool use_passthrough = false;
+        bool do_flip = false;
+        uint32_t flip_ra = 0, flip_dec = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1110,15 +1114,18 @@ public:
             dec_raw = encode_angle(dec, bits);
             precise = use_precise_commands_;
 
+            do_flip = compute_flip_locked(ra, dec, ra_biased, flip_ra, flip_dec);
+
             {
                 char buf[256];
                 std::snprintf(buf, sizeof(buf),
                               "slew_to_coordinates_async request ra_h=%.6f dec_deg=%.6f "
                               "ra_biased=%.6f offset=%.1f\" "
-                              "ra_raw=0x%06X dec_raw=0x%06X bits=%d path=%s",
+                              "ra_raw=0x%06X dec_raw=0x%06X bits=%d path=%s flip=%d",
                               ra, dec, ra_biased, ra_slew_offset_hours_ * 54000.0,
                               ra_raw, dec_raw, bits,
-                              use_passthrough ? "MC_PASSTHROUGH" : "HC");
+                              use_passthrough ? "MC_PASSTHROUGH" : "HC",
+                              do_flip ? 1 : 0);
                 ALPACA_LOG_WARN("Celestron", std::string(buf));
             }
 
@@ -1127,6 +1134,7 @@ public:
             slewing_cached_ = true;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             position_override_until_ = std::chrono::steady_clock::time_point::min();
+            flip_in_progress_ = do_flip;
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
             target_set_ = true;
@@ -1137,7 +1145,8 @@ public:
         }
 
         double slew_target_ra = ra;
-        std::thread([this, ra_raw, dec_raw, precise, use_passthrough, slew_target_ra]() {
+        std::thread([this, ra_raw, dec_raw, precise, use_passthrough,
+                     do_flip, flip_ra, flip_dec, slew_target_ra]() {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_) {
@@ -1145,7 +1154,10 @@ public:
                 }
                 try {
                     auto& protocol = CelestronProtocolWrapper::instance();
-                    if (use_passthrough) {
+                    if (do_flip) {
+                        protocol.mc_goto_fast(0, flip_ra);
+                        protocol.mc_goto_fast(1, flip_dec);
+                    } else if (use_passthrough) {
                         protocol.mc_goto_fast(0, ra_raw);
                         protocol.mc_goto_fast(1, dec_raw);
                     } else {
@@ -1155,6 +1167,7 @@ public:
                     slewing_cached_ = false;
                     slew_force_until_ = std::chrono::steady_clock::time_point::min();
                     position_override_until_ = std::chrono::steady_clock::time_point::min();
+                    flip_in_progress_ = false;
                     ALPACA_LOG_WARN("Celestron", std::string("Async slew dispatch failed: ") + ex.what());
                     return;
                 }
@@ -1165,12 +1178,13 @@ public:
             auto start = std::chrono::steady_clock::now();
             auto start_grace = std::chrono::seconds(2);
             bool saw_slewing = false;
+            bool use_axis_poll = do_flip || use_passthrough;
             auto& protocol = CelestronProtocolWrapper::instance();
             while (true) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 bool still_slewing = false;
                 try {
-                    if (hc_available_) {
+                    if (hc_available_ && !use_axis_poll) {
                         still_slewing = protocol.is_goto_in_progress();
                     } else {
                         still_slewing = !protocol.is_slew_done(0) || !protocol.is_slew_done(1);
@@ -1198,6 +1212,7 @@ public:
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 equatorial_cache_valid_ = false;
                 altaz_cache_valid_ = false;
+                flip_in_progress_ = false;
                 if (slew_settle_time_seconds_ > 0) {
                     std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
                 }
@@ -1241,8 +1256,10 @@ public:
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
         sync_completed_this_session_ = true;
+        skip_next_ra_learn_ = true;
         ALPACA_LOG_WARN("Celestron",
-                        "SyncToCoordinates completed — slew gate now OPEN for this session");
+                        "SyncToCoordinates completed — slew gate now OPEN for this session, "
+                        "RA offset learning suspended for next slew");
     }
 
     void sync_to_target() override {
@@ -1317,6 +1334,7 @@ public:
         homing_ = false;
         slewing_cached_ = false;
         slew_aborted_ = true;
+        flip_in_progress_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
@@ -1437,7 +1455,7 @@ private:
         bool was_slewing = slewing_cached_;
         try {
             auto& protocol = CelestronProtocolWrapper::instance();
-            if (hc_available_) {
+            if (hc_available_ && !flip_in_progress_) {
                 slewing_cached_ = protocol.is_goto_in_progress();
             } else {
                 bool ra_done = protocol.is_slew_done(0);
@@ -1449,6 +1467,7 @@ private:
         if (was_slewing && !slewing_cached_) {
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
+            flip_in_progress_ = false;
         }
         return slewing_cached_;
     }
@@ -1567,9 +1586,23 @@ private:
             ALPACA_LOG_WARN("Celestron", "RA offset learning skipped (slew was aborted)");
             return;
         }
+        if (skip_next_ra_learn_) {
+            skip_next_ra_learn_ = false;
+            ALPACA_LOG_WARN("Celestron", "RA offset learning skipped (first slew after SyncToCoordinates)");
+            return;
+        }
         equatorial_cache_valid_ = false;
         refresh_equatorial_cache_locked();
         double error = shortest_ra_delta_hours(target_ra, cached_ra_hours_);
+        constexpr double kMaxResidualHours = 30.0 / 54000.0; // 30 arcsec
+        if (std::abs(error) > kMaxResidualHours) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "RA offset learning: outlier rejected residual=%.1f\" (limit ±30\")",
+                          error * 54000.0);
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+            return;
+        }
         constexpr double kAlpha = 0.5;
         constexpr double kMaxOffset = 0.002; // ±108 arcsec max
         ra_slew_offset_hours_ = std::clamp(
@@ -1581,6 +1614,48 @@ private:
                       error * 54000.0, ra_slew_offset_hours_ * 54000.0,
                       ra_offset_samples_);
         ALPACA_LOG_WARN("Celestron", std::string(buf));
+    }
+
+    // Determines whether the mount needs a forced meridian flip to reach
+    // the target.  Returns true if mc_goto_fast should be used with flipped
+    // encoder coordinates; fills ra_raw/dec_raw accordingly (24-bit).
+    bool compute_flip_locked(double ra, double dec, double ra_biased,
+                             uint32_t& ra_raw_out, uint32_t& dec_raw_out) const {
+        if (!hc_available_) return false;
+        if (!site_info_valid_) {
+            ensure_site_info_cached_locked();
+            if (!site_info_valid_) return false;
+        }
+        auto& protocol = CelestronProtocolWrapper::instance();
+        char hw_side = protocol.get_pier_side();
+        int curr = (hw_side == 'W') ? 0 : (hw_side == 'E') ? 1 : -1;
+        if (curr < 0) return false;
+
+        double lst = compute_local_sidereal_time_hours(
+            std::chrono::system_clock::now(), site_longitude_cached_);
+        double ha = shortest_ra_delta_hours(lst, ra);
+        int dest = ha >= 0.0 ? 0 : 1;   // 0=pierEast, 1=pierWest
+        if (dest == curr) return false;
+
+        if (dest == 0) {
+            // Flip to pierEast: RA encoder = RA+12h, DEC encoder = 180°-DEC
+            double ra_flip = std::fmod(ra_biased + 12.0, 24.0);
+            ra_raw_out = encode_ra_raw(ra_flip, 24);
+            dec_raw_out = encode_angle(180.0 - dec, 24);
+        } else {
+            // Flip to pierWest: normal encoder coords
+            ra_raw_out = encode_ra_raw(ra_biased, 24);
+            dec_raw_out = encode_angle(dec, 24);
+        }
+        {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                          "forced meridian flip: curr=%c dest=%d ha=%.2fh "
+                          "ra_raw=0x%06X dec_raw=0x%06X",
+                          hw_side, dest, ha, ra_raw_out, dec_raw_out);
+            ALPACA_LOG_WARN("Celestron", std::string(buf));
+        }
+        return true;
     }
 
     void do_slew_to_coordinates_locked(double ra, double dec) {
@@ -1615,9 +1690,19 @@ private:
         slewing_cached_ = true;
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         position_override_until_ = std::chrono::steady_clock::time_point::min();
-        if (hc_available_) {
+
+        uint32_t flip_ra = 0, flip_dec = 0;
+        bool flip = compute_flip_locked(ra, dec, ra_biased, flip_ra, flip_dec);
+
+        if (flip) {
+            flip_in_progress_ = true;
+            protocol.mc_goto_fast(0, flip_ra);
+            protocol.mc_goto_fast(1, flip_dec);
+        } else if (hc_available_) {
+            flip_in_progress_ = false;
             protocol.goto_ra_dec_raw(ra_raw_target, dec_raw_target, use_precise_commands_);
         } else {
+            flip_in_progress_ = false;
             protocol.mc_goto_fast(0, ra_raw_target);
             protocol.mc_goto_fast(1, dec_raw_target);
         }
@@ -1800,6 +1885,8 @@ private:
     double ra_slew_offset_hours_ = 0.0005; // ~27" initial seed for CGX-L fw 7.18 goto tracking deficit
     int ra_offset_samples_ = 0;
     bool slew_aborted_ = false;
+    bool skip_next_ra_learn_ = false;
+    mutable bool flip_in_progress_ = false;
 };
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope(
