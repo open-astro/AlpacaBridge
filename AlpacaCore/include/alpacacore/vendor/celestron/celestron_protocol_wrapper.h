@@ -147,6 +147,9 @@ public:
     void pulse_guide_axis(int axis, int velocity, int duration_cs);
     bool is_aux_guide_active(int axis);
 
+    // Pier side via HC 'p' command. Returns 'W' (west/normal) or 'E' (east/through-the-pole).
+    char get_pier_side();
+
     // Autoguide rate (percentage of sidereal).
     void set_autoguide_rate(int axis, double percent);
     double get_autoguide_rate(int axis);

@@ -63,6 +63,9 @@ endif()
 if(TARGET alpacacore_touptek)
     list(APPEND TEST_SOURCES test_touptek_camera.cpp)
 endif()
+if(TARGET alpacacore_playerone)
+    list(APPEND TEST_SOURCES test_playerone_camera.cpp)
+endif()
 
 # Create test executable
 add_executable(alpacacore_tests ${TEST_SOURCES})
@@ -96,6 +99,9 @@ if(TARGET alpacacore_bisque)
 endif()
 if(TARGET alpacacore_touptek)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_touptek)
+endif()
+if(TARGET alpacacore_playerone)
+    target_link_libraries(alpacacore_tests PRIVATE alpacacore_playerone)
 endif()
 
 # Both QHY and ZWO SDKs define isLeapYear() at file scope.

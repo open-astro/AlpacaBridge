@@ -192,6 +192,7 @@ H chr(15) chr(26) chr(0) chr(4) chr(6) chr(5) chr(251) chr(1)
 | Is Alignment Complete? | `J` | `chr(0 or 1) #` | 1.2+ |
 | Is GOTO in Progress? | `L` | ASCII `0` or `1` + `#` | 1.2+ |
 | Cancel GOTO | `M` | `#` | 1.2+ |
+| Get Pier Side | `p` | ASCII `W` or `E` + `#` | GEM only |
 
 #### Model IDs
 
@@ -207,6 +208,15 @@ H chr(15) chr(26) chr(0) chr(4) chr(6) chr(5) chr(251) chr(1)
 | 10 | GT |
 | 11 | 4/5 SE |
 | 12 | 6/8 SE |
+| 14 | CGX |
+| 20 | CGX-L |
+| 22 | Evolution |
+
+#### Pier Side (`p` command)
+
+GEM mounts only (CGE, CGX, CGX-L). Returns `W#` when the OTA is on the west side of the pier (normal pointing, counterweight down) or `E#` when on the east side (through-the-pole / counterweight up). Not documented in the original NexStar protocol spec; discovered in INDI driver source (`celestrondriver.cpp:1031`).
+
+ASCOM mapping: `W` → pierEast (0), `E` → pierWest (1). Alt-az mounts return an empty or undefined response.
 
 #### Get Device Version (via pass-through)
 
@@ -776,3 +786,25 @@ This command is not documented in any original protocol reference. It was discov
 - Velocity is a signed byte: positive = North (DEC) or West (RA), negative = South or East.
 - Duration is an unsigned byte in centiseconds (10ms units), max 255 = 2550ms.
 - MTR_IS_AUX_GUIDE_ACTIVE (0x27) returns 1 while a pulse guide is in progress, 0 when expired.
+
+### 8. RA Slew Offset Compensation (CGX-L fw 7.18)
+
+CGX-L firmware 7.18 does not track during a GOTO. The mount stops sidereal tracking when a slew begins and does not resume it until the slew completes. For slews lasting several seconds, this causes a consistent RA undershoot — the sky moves during the slew but the mount doesn't follow.
+
+The AlpacaBridge driver compensates by learning a running-average RA residual across completed slews and pre-biasing subsequent GOTO targets by the accumulated offset. This is the same pattern INDI uses (`SlewOffsetRa`). The residual converges after 3–4 slews and typically stabilizes around 2–4 arcseconds.
+
+### 9. Post-Slew Tracking Restoration (CGX-L fw 7.18)
+
+CGX-L firmware 7.18 does not auto-resume tracking after a GOTO completes. The driver must explicitly re-assert tracking via the HC-level `T` (Set Tracking Mode) command after each slew finishes. Using the per-axis variable rate slew command to resume sidereal tracking works but bypasses the HC's tracking state machine, which can cause the HC display to show "No Track" even though the motor is moving.
+
+The `T` command with the mount's configured tracking mode (EQ-North = 2, EQ-South = 3) is the correct approach and keeps the HC display in sync.
+
+### 10. Pulse Guide Position Hold/Correction Pattern
+
+MC_AUX_GUIDE (0x26) fires the motor controller's autoguider output for a timed pulse, but it does **not** update the HC's internal RA/DEC coordinate model. Reading positions via `e`/`E` (Get RA/DEC) during or immediately after a pulse guide returns values that don't reflect the pulse guide motion.
+
+For ASCOM/Alpaca compliance, the driver must compute and return expected positions during the pulse guide window:
+- **Cross-axis hold**: The axis not being guided is frozen at its pre-pulse value for the duration of the pulse plus a grace period, preventing geometric noise (especially severe near the celestial poles where cos(DEC) amplification reaches 10x+ at DEC > 80°).
+- **Active-axis correction**: The guided axis returns `baseline + (rate × duration)` as the expected final position, applied as a one-shot correction after the pulse completes.
+
+This pattern matches the approach used by iOptron and ZWO drivers in AlpacaBridge and is necessary to pass ConformU pulse guide tolerance tests at high declinations.

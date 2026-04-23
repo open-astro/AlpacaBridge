@@ -148,6 +148,19 @@ install_udev_rules() {
     sudo ldconfig
   fi
 
+  # Install Player One Camera shared library (SmartGuider dlopens this directly)
+  local playerone_lib_dir=""
+  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
+    playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64"
+  elif [[ "${arch}" == "x86_64" ]]; then
+    playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/x64"
+  fi
+  if [[ -n "${playerone_lib_dir}" && -f "${playerone_lib_dir}/libPlayerOneCamera.so" ]]; then
+    echo "Installing Player One Camera shared library to /usr/local/lib"
+    sudo cp -a "${playerone_lib_dir}/libPlayerOneCamera.so"* /usr/local/lib/
+    sudo ldconfig
+  fi
+
   sudo udevadm control --reload-rules
   sudo udevadm trigger
 }

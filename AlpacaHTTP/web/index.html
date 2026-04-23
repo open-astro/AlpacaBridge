@@ -57,18 +57,19 @@
                     <label for="vendor">Vendor:</label>
                     <select id="vendor" name="vendor" required>
                         <option value="">Select vendor...</option>
-                        <option value="ioptron">iOptron</option>
-                        <option value="synscan">SynScan V3/V4</option>
                         <!-- TODO: re-enable when drivers are ready
-                        <option value="celestron">Celestron NexStar</option>
                         <option value="bisque">Bisque (Paramount / TheSkyX)</option>
                         -->
-                        <option value="zwo">ZWO</option>
+                        <option value="celestron">Celestron NexStar</option>
+                        <option value="gemini">Gemini</option>
+                        <option value="ioptron">iOptron</option>
+                        <option value="playerone">Player One</option>
                         <option value="qhy">QHY</option>
                         <option value="svbony">SVBONY</option>
+                        <option value="synscan">SynScan V3/V4</option>
                         <option value="touptek">ToupTek</option>
                         <option value="weewx">WeeWX</option>
-                        <option value="gemini">Gemini</option>
+                        <option value="zwo">ZWO</option>
                     </select>
                 </div>
 
@@ -437,6 +438,18 @@
                             <small>If set, overrides the rotator index.</small>
                         </div>
                     </div>
+                </div>
+
+                <!-- Player One Camera Configuration -->
+                <div id="playerone-config" class="vendor-config" style="display: none;">
+                    <h3>Player One Camera Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="playerone-camera-index">Camera Index:</label>
+                        <input type="number" id="playerone-camera-index" name="cameraIndex" value="0" min="0">
+                        <small>0-based index from the Player One SDK enumeration.</small>
+                    </div>
+
                 </div>
 
                 <!-- QHY Camera Configuration -->

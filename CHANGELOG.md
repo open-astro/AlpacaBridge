@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [1.0.3] - 2026-04-23
+
+### Added
+- **Player One Camera Driver** (AlpacaCore)
+  - New vendor driver for Player One astronomy cameras with ASCOM Alpaca Camera API (ICameraV3) support.
+  - SDK wrapper singleton (`PlayerOneSDKWrapper`) over Player One Camera SDK v3.10.0 managing camera enumeration, lifecycle, and the generic `POAConfig` table (gain, offset, exposure, cooler, ST4 pulse guide, temperature, etc.).
+  - Exposure via single-frame software trigger with background thread, `POAImageReady` polling, abort support, and a 15 s deadline safety margin.
+  - Capability-gated cooler control (`POA_COOLER` / `POA_TARGET_TEMP` / `POA_COOLER_POWER`) so uncooled cameras accurately report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`.
+  - ST4 pulse guiding gated on `isHasST4Port`; pulse duration timed by the driver via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
+  - RAW8 / RAW16 / RGB24 / MONO8 image format support with format-aware `ImageArray` builders (RGB24 transposes the SDK's B,G,R pixel order to R,G,B and reports rank 3).
+  - SDK requires `width % 4 == 0` and `height % 2 == 0`; driver accepts any user-provided ROI and internally aligns the SDK call DOWN while returning the `ImageArray` at the user's exact `NumX × NumY` (trailing row/col zero-padded).
+  - Camera binding by index (`cameraIndex`) from the Player One SDK enumeration.
+  - Architecture-aware SDK selection: `lib/x64/` (Linux x86_64) and `lib/arm64/` (Linux ARM64).
+  - ConformU validated for **Player One Ceres 462M** on Linux arm64 with 0 errors and 0 issues; x64 validation pending.
+- **Player One Device Support** (AlpacaHTTP)
+  - Router registration and configuration support for Player One camera devices (`cameraIndex` binding).
+  - Web UI: Player One vendor selection and camera-index configuration field.
+- **Player One SDK** (AlpacaBridge)
+  - Player One Camera SDK v3.10.0 libraries included under `AlpacaCore/external/PlayerOne/`; `.gitignore` allowlist added.
+  - `libPlayerOneCamera.so` installed to `/usr/lib/alpacabridge/` (Debian package) and `/usr/local/lib/` (build scripts) so companion tools (e.g. SmartGuider) can `dlopen` the Player One SDK at runtime.
+  - `99-player_one_astronomy.rules` udev rule installed for Player One USB devices.
+- **Player One Unit Tests** (AlpacaCore)
+  - 6 test cases covering defaults, device metadata, disconnected throws, disconnected state, unsupported actions, and sub-exposure rejection.
+- **Celestron Telescope Driver** (AlpacaCore)
+  - ConformU validated for **Celestron CGX-L** on Linux x64 with 0 errors and 0 issues; arm64 validation pending.
+
+### Changed
+- **Celestron Telescope Driver** (AlpacaCore)
+  - Pulse guide rewritten to use native MC_AUX_GUIDE (0x26) hardware command instead of software-timed MoveAxis + sync. The firmware times the pulse internally — no sleep, encoder snapshotting, or sync_ra_dec_raw calls required.
+  - `SideOfPier` now reports actual pier side via the HC `p` command (`W` → pierWest, `E` → pierEast) instead of always returning -1 (unknown).
+  - `IsPulseGuiding` now returns actual status (time-based tracking of pulse guide end time plus completion delay) instead of always returning false.
+  - Added pulse guide position hold/correction pattern: cross-axis is frozen at pre-pulse value during the guide window, active axis returns computed `baseline + (rate × duration)` as a one-shot correction. Fixes ConformU tolerance failures at high declinations (DEC > 80°) where cos(DEC) amplification causes geometric noise.
+  - Pier-safety gate relaxed to accept either a successful `SyncToCoordinates` in the current driver session **or** HC-reported alignment (`J` command), bringing behavior in line with INDI/INDIGO. HC workflow: power on → Switch Position → Location → Last Alignment → "CGX-L Ready".
+  - Post-slew tracking restoration now re-issues the top-level `T` set-tracking-mode command rather than a per-axis variable-rate passthrough, keeping the HC's internal tracking state coherent with the LCD readout on CGX-L fw 7.18.
+  - Added adaptive RA slew offset (matches INDI's `SlewOffsetRa`): driver learns a running average of RA undershoot and pre-biases subsequent slews to compensate for the CGX-L's no-tracking-during-goto behavior.
+  - `SiteLatitude`, `SiteLongitude`, and `UTCDate` writes are silently skipped when the mount is aligned (log warn, no protocol call, return success), matching INDI's UpdateLocation/UpdateTime pattern — preserves ConformU property round-trip tests while protecting HC alignment models.
+  - Documented required firmware (HC GEM 5.35.3179, MC 7.18.5020) and HC startup procedure in `SUPPORTED-DRIVERS.md`.
+- **NexStar Protocol Reference** (AlpacaCore)
+  - Added HC `p` command (Get Pier Side) for GEM mounts, with ASCOM mapping notes.
+  - Added model IDs for CGX (14), CGX-L (20), and Evolution (22).
+  - Added implementation notes: RA slew offset compensation, post-slew tracking restoration via `T` command, and pulse guide position hold/correction pattern.
+- **External SDK directory**: renamed `AlpacaCore/external/Player One/` (space) → `AlpacaCore/external/PlayerOne/` (no space) so `debian/rules` Makefile variables and shell install scripts don't break on the embedded whitespace.
+- **Supported Drivers Documentation**: added Player One section between QHY and SVBONY with Ceres 462M entry, ConformU link, and driver notes (SDK version, tested model, cooling gating, dew-heater not-wired status, pulse guiding mechanism).
+- **Supported Drivers Documentation**: alphabetized vendors within the Camera Drivers section (Player One now precedes QHY).
+- **Web UI** (AlpacaHTTP): alphabetized vendor dropdown options and camera configuration `<div>` blocks in `index.html` so the Focuser group shows Gemini before ZWO and the Camera group shows Player One, QHY, SVBONY, ToupTek, ZWO in order.
+- **Web UI** (AlpacaHTTP): fixed vendor dropdown alphabetical order for Celestron telescope mount.
+
+### Fixed
+- **Celestron Telescope Driver** (AlpacaCore)
+  - Fixed SideOfPier race condition in RA offset learning: async slew lambda now captures target RA at dispatch time so back-to-back slews don't corrupt the running-average residual.
+
 ## [1.0.2] - 2026-04-18
 
 ### Added
@@ -55,9 +106,6 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Bisque Paramount Telescope Driver** (AlpacaCore / AlpacaHTTP) — *in progress*
   - Initial Bisque / Paramount driver over the TheSkyX TCP protocol; vendor plumbing and web UI configuration panel added.
   - Hidden from the web UI vendor dropdown pending ConformU validation.
-- **Celestron NexStar CGX-L Telescope Driver** (AlpacaCore / AlpacaHTTP) — *partial, in progress*
-  - Initial Celestron NexStar driver (CGX-L target) with serial/network connection support; vendor plumbing and web UI configuration panel added.
-  - Hidden from the web UI vendor dropdown pending completion and ConformU validation.
 
 ### Changed
 - **Documentation** (AlpacaBridge)
@@ -65,7 +113,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Development workflow (build scripts, CMake flags, source-install, custom-driver guidance) moved to a new `DEVELOPMENT.md`.
   - Added Wiki link to README.
 - **Web UI** (AlpacaHTTP)
-  - Celestron and Bisque vendor options temporarily hidden in the device configuration dropdown until their drivers ship.
+  - Bisque vendor option temporarily hidden in the device configuration dropdown until the driver ships.
 - **AGENTS.md**: rewrote the "Vendor SDK Shared Library Packaging" section with a mandatory 6-step checklist (SDK placement, both-arch coverage, `.gitignore` allowlist with `git check-ignore` verification, `debian/rules`, `build_and_run.sh`, `install_alpaca_service.sh`) plus a dynamic-linker registration explainer, so future camera vendors (PlayerOne next) cannot ship with the `.so` missing from apt/package/source-install paths.
 
 ### Fixed

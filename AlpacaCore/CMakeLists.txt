@@ -24,6 +24,7 @@ option(ALPACACORE_ENABLE_SVBONY "Enable SVBONY vendor support" OFF)
 option(ALPACACORE_ENABLE_CELESTRON "Enable Celestron NexStar vendor support" OFF)
 option(ALPACACORE_ENABLE_BISQUE "Enable Bisque/Paramount (TheSkyX) telescope support" OFF)
 option(ALPACACORE_ENABLE_TOUPTEK "Enable ToupTek vendor support" OFF)
+option(ALPACACORE_ENABLE_PLAYERONE "Enable Player One vendor support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
@@ -38,6 +39,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_CELESTRON ON)
     set(ALPACACORE_ENABLE_BISQUE ON)
     set(ALPACACORE_ENABLE_TOUPTEK ON)
+    set(ALPACACORE_ENABLE_PLAYERONE ON)
 endif()
 
 # Compiler warnings (Linux)
@@ -169,6 +171,13 @@ if(ALPACACORE_ENABLE_TOUPTEK)
     endif()
 endif()
 
+if(ALPACACORE_ENABLE_PLAYERONE)
+    add_subdirectory(src/vendors/playerone)
+    if(TARGET alpacacore_playerone)
+        target_link_libraries(alpacacore PRIVATE alpacacore_playerone)
+    endif()
+endif()
+
 # Custom target to clean everything including CMake cache
 # Usage: cmake --build . --target alpacacore-clean-all
 # Note: Named with project prefix to avoid conflicts when used as subdirectory
@@ -291,6 +300,15 @@ endif()
 
 if(ALPACACORE_ENABLE_TOUPTEK AND TARGET alpacacore_touptek)
     install(TARGETS alpacacore_touptek
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_PLAYERONE AND TARGET alpacacore_playerone)
+    install(TARGETS alpacacore_playerone
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

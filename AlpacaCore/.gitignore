@@ -47,6 +47,7 @@ Thumbs.db
 !external/QHY/**
 !external/SVBONY/**
 !external/ToupTek/**
+!external/PlayerOne/**
 
 # Vendor SDKs - exclude all files except documentation
 # Explicitly exclude .DS_Store files even in allowed directories

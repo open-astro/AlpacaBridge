@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-04-16
+## Updated 2026-04-23
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -23,6 +23,21 @@ This document lists all hardware vendors and device types that are verified to w
   - **Debian 13 (Trixie)**: Wi-Fi has been tested from Raspberry Pi to the mount. Due to the limited Wi-Fi power management on the Raspberry Pi, it is highly recommended to disable low power mode if you opt to connect via Wi-Fi to the mount. Even with a NUC running Debian 13, it is recommended to use a USB connection to the mount when possible, as commands are much quicker and more reliable.
 
 ## Camera Drivers
+
+### Player One
+
+| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|---------------|-----------------|--------|
+| Ceres 462M | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Ceres%20462M/) |
+
+### Player One Driver Notes
+
+- **SDK**: Player One Camera SDK v3.10.0 (build target)
+- **Connection**: USB (requires udev rules `99-player_one_astronomy.rules`)
+- **Tested model**: Ceres 462M (uncooled) on Linux arm64. x64 validation pending.
+- **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control paths (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) are implemented but untested against physical cooled hardware.
+- **Dew Heater**: Not exposed. The SDK advertises `POA_HEATER_POWER` on cooled models, but we do not currently have a cooled Player One camera available to implement and validate the Switch device. Will be added when hardware is available.
+- **Pulse guiding**: Capability-gated on `isHasST4Port`. Driver times the pulse duration via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
 
 ### QHY
 
@@ -172,6 +187,24 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: Exposed as a Switch device when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`
 
 ## Telescope Drivers
+
+### Celestron
+
+| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|---------------|-----------------|--------|
+| CGX-L | USB/Serial (hand controller) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/) |
+
+### Celestron Driver Notes
+
+- **Protocol**: NexStar HC serial protocol with MC passthrough (P-command) for per-axis control.
+- **Connection**: USB/Serial via hand controller.
+- **Required firmware**: Driver is built and tested against **HC (GEM) 5.35.3179** and **MC 7.18.5020**. Other firmware versions are not supported — behavior on earlier or later firmware has not been validated and may differ in slew, tracking, and pier-side semantics.
+- **Required HC startup**: Power mount on, press Enter through Switch Position → Location → select **Last Alignment** → Enter. HC must show **"CGX-L Ready"** before connecting the driver. Slews are refused until the mount reports aligned or a `SyncToCoordinates` has been performed in the current driver session.
+- **Location/time**: `SiteLatitude`, `SiteLongitude`, and `UTCDate` writes are silently skipped once the mount is aligned — applying them would invalidate the HC alignment model (especially StarSense). Writes succeed from the client's perspective but do not touch the mount. Set these before completing alignment if you need them to take effect.
+- **RA slew offset**: Driver learns a running-average RA undershoot correction and pre-biases subsequent slews (adaptation matches INDI's `SlewOffsetRa`). CGX-L fw 7.18 does not track during a goto, causing consistent RA undershoot without this compensation.
+- **Post-slew tracking**: Tracking is re-asserted via the top-level `T` set-tracking-mode command after each slew completes; CGX-L fw 7.18 does not auto-resume tracking after goto.
+- **Pulse guiding**: Uses native MC_AUX_GUIDE (0x26) hardware command via the autoguider port. The firmware times the pulse internally — no software sleep or encoder math required. Position hold/correction pattern bridges the gap between the low-level firmware command and ASCOM coordinate expectations.
+- **Pier side**: `SideOfPier` reports actual pier side via the HC `p` command (`W` = pierWest, `E` = pierEast).
 
 ### iOptron
 
