@@ -37,6 +37,9 @@ constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
+constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
+constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
+constexpr auto kPulseGuidePositionGrace = std::chrono::milliseconds(3000);
 
 double wrap_degrees(double deg) {
     double wrapped = std::fmod(deg, 360.0);
@@ -107,6 +110,26 @@ LocalTimeInfo compute_local_timezone_info(std::time_t base_time) {
     return info;
 }
 
+// SynScan V3/V4 hand controller model IDs (from "m" command).
+// Only includes mounts that ship with the V3/V4 handset.
+std::string synscan_model_id_to_name(int model_id) {
+    switch (model_id) {
+        case 0:  return "EQ6 Pro";
+        case 1:  return "HEQ5 Pro";
+        case 2:  return "EQ5";
+        case 3:  return "EQ3";
+        case 4:  return "EQ8";
+        case 5:  return "AZ-EQ6";
+        case 6:  return "AZ-EQ5";
+        case 56: return "HEQ5 Pro";
+        case 160: return "AllView";
+        default:
+            if (model_id >= 128 && model_id <= 143) return "AZ GOTO";
+            if (model_id >= 144 && model_id <= 159) return "DOB GOTO";
+            return "Mount (ID " + std::to_string(model_id) + ")";
+    }
+}
+
 } // namespace
 
 class SynScanTelescopeDriver : public TelescopeDriver {
@@ -168,9 +191,9 @@ public:
 
     std::string get_name() const override {
         if (mount_model_id_ >= 0) {
-            return "SynScan V3/V4 Telescope " + std::to_string(mount_model_id_);
+            return "Sky-Watcher " + synscan_model_id_to_name(mount_model_id_);
         }
-        return "SynScan V3/V4 Telescope";
+        return "Sky-Watcher SynScan Mount";
     }
 
     DeviceType get_device_type() const override {
@@ -435,11 +458,16 @@ public:
     }
 
     bool get_can_pulse_guide() const override {
-        return false;
+        return true;
     }
 
     bool get_is_pulse_guiding() const override {
-        throw AlpacaException("IsPulseGuiding not supported", AlpacaError::PropertyNotImplemented);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        if (pulse_guiding_active_ && std::chrono::steady_clock::now() >= pulse_guide_end_time_) {
+            pulse_guiding_active_ = false;
+        }
+        return pulse_guiding_active_;
     }
 
     bool get_can_set_declination_rate() const override {
@@ -447,7 +475,7 @@ public:
     }
 
     bool get_can_set_guide_rates() const override {
-        return false;
+        return true;
     }
 
     bool get_can_set_park() const override {
@@ -501,13 +529,7 @@ public:
             return std::clamp(target_dec_degrees_, -90.0, 90.0);
         }
         refresh_equatorial_cache_locked();
-        if (cached_dec_degrees_ < -90.0) {
-            return -90.0;
-        }
-        if (cached_dec_degrees_ > 90.0) {
-            return 90.0;
-        }
-        return cached_dec_degrees_;
+        return std::clamp(cached_dec_degrees_, -90.0, 90.0);
     }
 
     double get_declination_rate() const override {
@@ -552,12 +574,19 @@ public:
     }
 
     GuideRate get_guide_rate() const override {
-        throw AlpacaException("Guide rates not supported", AlpacaError::PropertyNotImplemented);
+        return guide_rate_;
     }
 
     void set_guide_rate(const GuideRate& rate) override {
-        (void)rate;
-        throw AlpacaException("Guide rates not supported", AlpacaError::PropertyNotImplemented);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        double ra_percent = (rate.ra / kSiderealDegPerSec) * 100.0;
+        double dec_percent = (rate.dec / kSiderealDegPerSec) * 100.0;
+        if (ra_percent < 0.0 || ra_percent > 100.0 || dec_percent < 0.0 || dec_percent > 100.0) {
+            throw AlpacaException("Guide rate must be between 0 and 1x sidereal",
+                                  AlpacaError::InvalidValue);
+        }
+        guide_rate_ = rate;
     }
 
     double get_right_ascension() const override {
@@ -836,9 +865,82 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
-        (void)direction;
-        (void)duration;
-        throw AlpacaException("PulseGuide not supported", AlpacaError::MethodNotImplemented);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        check_not_parked_locked("PulseGuide");
+
+        if (duration < 0) {
+            throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
+        }
+
+        auto& protocol = SynScanProtocolWrapper::instance();
+
+        int axis = -1;
+        double slew_rate_deg_per_sec = 0.0;
+
+        switch (direction) {
+            case 0: axis = 1; slew_rate_deg_per_sec = guide_rate_.dec; break;
+            case 1: axis = 1; slew_rate_deg_per_sec = -guide_rate_.dec; break;
+            case 2: axis = 0; slew_rate_deg_per_sec = -guide_rate_.ra; break;
+            case 3: axis = 0; slew_rate_deg_per_sec = guide_rate_.ra; break;
+            default:
+                throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
+        }
+
+        if (axis == 1) {
+            char pier = protocol.get_pointing_state();
+            if (pier == 'W') {
+                slew_rate_deg_per_sec = -slew_rate_deg_per_sec;
+            }
+        }
+
+        const double duration_sec = duration / 1000.0;
+        const auto now = std::chrono::steady_clock::now();
+
+        // Initialize target coords from mount if position override isn't active
+        if (!target_set_ || now >= position_override_until_) {
+            refresh_equatorial_cache_locked();
+            target_ra_hours_ = cached_ra_hours_;
+            target_dec_degrees_ = cached_dec_degrees_;
+            target_set_ = true;
+        }
+
+        // Accumulate expected pulse delta directly into target coordinates
+        if (direction == 0 || direction == 1) {
+            double delta_deg = guide_rate_.dec * duration_sec;
+            if (direction == 1) delta_deg = -delta_deg;
+            target_dec_degrees_ = std::clamp(target_dec_degrees_ + delta_deg, -90.0, 90.0);
+        } else {
+            double delta_hours = (guide_rate_.ra * duration_sec) / 15.0;
+            if (direction == 3) delta_hours = -delta_hours;
+            target_ra_hours_ = std::fmod(target_ra_hours_ + delta_hours, 24.0);
+            if (target_ra_hours_ < 0.0) target_ra_hours_ += 24.0;
+        }
+
+        // Keep position override active so get_ra/get_dec return target coords
+        position_override_until_ = now + std::chrono::milliseconds(duration) +
+                                   kPulseGuideCompletionDelay + kPulseGuidePositionGrace;
+
+        protocol.move_axis_variable_rate(axis, slew_rate_deg_per_sec);
+
+        pulse_guiding_active_ = true;
+        pulse_guide_end_time_ = now + std::chrono::milliseconds(duration) +
+                                kPulseGuideCompletionDelay;
+        equatorial_cache_valid_ = false;
+        altaz_cache_valid_ = false;
+
+        int tracking_mode = tracking_mode_cached_;
+        std::thread([axis, duration, tracking_mode]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
+            try {
+                auto& proto = SynScanProtocolWrapper::instance();
+                proto.move_axis_variable_rate(axis, 0.0);
+                if (axis == 0 && tracking_mode > 0) {
+                    proto.set_tracking_mode(tracking_mode);
+                }
+            } catch (...) {
+            }
+        }).detach();
     }
 
     void set_park() override {
@@ -1347,7 +1449,9 @@ private:
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
     GuideRate guide_rate_{};
-    bool pulse_guiding_active_ = false;
+    mutable bool pulse_guiding_active_ = false;
+    mutable std::chrono::steady_clock::time_point pulse_guide_end_time_;
+
     bool park_position_set_ = false;
     double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
@@ -1372,6 +1476,37 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
     return std::make_unique<SynScanTelescopeDriver>(device_number, connection_info, version,
                                                     site_latitude_deg, site_longitude_deg,
                                                     site_elevation_m, sync_time_on_connect);
+}
+
+std::unique_ptr<TelescopeDriver> create_synscan_telescope_auto(
+    int device_number,
+    int mount_index,
+    SynScanVersion version,
+    std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect) {
+
+    auto ports = enumerate_synscan_ports();
+    if (ports.empty()) {
+        throw AlpacaException("No SynScan mount found on any serial port");
+    }
+    if (mount_index < 0 || mount_index >= static_cast<int>(ports.size())) {
+        throw AlpacaException("Mount index " + std::to_string(mount_index) +
+                              " out of range (found " + std::to_string(ports.size()) + " mount(s))");
+    }
+
+    const auto& port = ports[static_cast<std::size_t>(mount_index)];
+    ALPACA_LOG_INFO("SynScan", "Auto-detected mount on " + port.port_path +
+                    " (HC fw " + port.firmware_version + ")");
+
+    ConnectionInfo conn;
+    conn.type = ConnectionType::Serial;
+    conn.port_path = port.port_path;
+
+    return create_synscan_telescope_with_site(
+        device_number, conn, version, site_latitude_deg, site_longitude_deg,
+        site_elevation_m, sync_time_on_connect);
 }
 
 } // namespace alpacacore::vendor::synscan

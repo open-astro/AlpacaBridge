@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [1.0.4] - UNRELEASED
+
+### Changed
+- **SynScan Telescope Driver** (AlpacaCore)
+  - Auto-detection of SynScan mounts: `connectionType: "auto"` scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for SynScan hand controllers, probes each port with a firmware version query, and connects to the first responding mount. No manual port configuration required.
+  - Implemented pulse guiding via software-timed variable-rate slew (SynScan V3/V4 protocol has no hardware pulse guide command). Driver issues a variable-rate axis slew at the guide rate, sleeps for the requested duration, then stops the axis and restores sidereal tracking.
+  - GEM pier-side DEC direction flip: DEC motor direction is inverted when the mount's pointing state is 'W' (west), matching the physical axis reversal on German equatorial mounts.
+  - Position override accumulation for pulse guide coordinate reporting: instead of reading back noisy mount positions after tiny guide pulses, the driver accumulates expected `rate × duration` deltas directly into the target coordinate frame. All consecutive pulse guide directions (N/S/E/W) operate in the same coordinate baseline, eliminating drift between reads.
+  - RA tracking restoration after pulse guide: the stop thread re-issues `set_tracking_mode()` after stopping an RA-axis pulse to counteract the variable-rate stop command killing sidereal tracking.
+  - `IsPulseGuiding` now returns actual status (time-based tracking of pulse guide end time plus completion delay) instead of always returning false.
+  - ConformU 4.3.0 validated for **Sky-Watcher HEQ5 PRO** on Linux x64 with 0 errors and 0 issues across all four pulse guide directions at declinations -9, +9, -3, +3.
+
 ## [1.0.3] - 2026-04-23
 
 ### Added

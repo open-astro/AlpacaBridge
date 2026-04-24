@@ -17,8 +17,17 @@
 #include <memory>
 #include <chrono>
 #include <utility>
+#include <vector>
 
 namespace alpacacore::vendor::synscan {
+
+struct SynScanPortInfo {
+    std::string port_path;
+    std::string device_id;
+    std::string firmware_version;
+};
+
+std::vector<SynScanPortInfo> enumerate_synscan_ports();
 
 enum class ConnectionType {
     Serial,

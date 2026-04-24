@@ -232,8 +232,11 @@ This document lists all hardware vendors and device types that are verified to w
 ### SynScan Driver Notes
 
 - **Protocol**: Sky-Watcher SynScan V3/V4 protocol
-- **Connection**: USB/Serial via hand controller (tested)
+- **Connection**: USB/Serial via hand controller (tested). Auto-detection supported — `connectionType: "auto"` scans serial ports for SynScan hand controllers and connects to the first responding mount.
+- **Auto-detection**: Scans `/dev/serial/by-id/` for Prolific, FTDI, CP210x, and generic USB-serial devices and probes each with a SynScan firmware version query. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
 - **Sky-Watcher HEQ5 PRO Firmware**: Hand controller firmware 4.42.00, motor controller firmware 3.46
+- **Pulse guiding**: Software-timed variable-rate slew (SynScan has no hardware pulse guide command). Driver issues a variable-rate axis slew at the configured guide rate, times the pulse duration in a background thread, then stops the axis and restores sidereal tracking. GEM pier-side DEC direction flip applied automatically. Position reporting uses accumulated `rate × duration` deltas in the target coordinate frame for ConformU tolerance compliance.
+- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues (pulse guide tested across N/S/E/W at declinations -9, +9, -3, +3).
 
 ### ZWO
 

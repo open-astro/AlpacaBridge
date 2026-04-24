@@ -42,8 +42,8 @@ TEST_CASE("SynScan Telescope Driver - Defaults", "[synscan][telescope][unit]") {
     REQUIRE(driver->get_can_park());
     REQUIRE(driver->get_can_unpark());
     REQUIRE(driver->get_can_set_park());
-    REQUIRE_FALSE(driver->get_can_pulse_guide());
-    REQUIRE_FALSE(driver->get_can_set_guide_rates());
+    REQUIRE(driver->get_can_pulse_guide());
+    REQUIRE(driver->get_can_set_guide_rates());
     REQUIRE(driver->get_can_move_axis(0));
     REQUIRE(driver->get_can_move_axis(1));
     REQUIRE_FALSE(driver->get_can_move_axis(2));

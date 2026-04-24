@@ -147,13 +147,14 @@
                     <div class="form-group">
                         <label for="synscan-connection-type">Connection Type:</label>
                         <select id="synscan-connection-type" name="synscanConnectionType" required>
-                            <option value="serial">Serial/USB</option>
+                            <option value="auto">Auto-Detect</option>
+                            <option value="serial">Serial/USB (Manual)</option>
                             <option value="network">Network/WiFi</option>
                         </select>
                     </div>
 
                     <!-- Serial Connection -->
-                    <div id="synscan-serial-config" class="connection-config">
+                    <div id="synscan-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="synscan-port-path">Serial Port:</label>
                             <input type="text" id="synscan-port-path" name="synscanPortPath" placeholder="/dev/ttyUSB0">

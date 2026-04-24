@@ -6111,33 +6111,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "synscan" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-        alpacacore::vendor::synscan::ConnectionInfo conn_info;
-        std::string conn_type = config.value("connectionType", "serial");
-
-        if (conn_type == "serial") {
-            conn_info.type = alpacacore::vendor::synscan::ConnectionType::Serial;
-            conn_info.port_path = config.value("portPath", "");
-            conn_info.baud_rate = config.value("baudRate", 9600);
-
-            if (conn_info.port_path.empty()) {
-                error_message = "Serial port path is required";
-                return false;
-            }
-        } else if (conn_type == "network") {
-            conn_info.type = alpacacore::vendor::synscan::ConnectionType::Network;
-            conn_info.host = config.value("host", "");
-            conn_info.tcp_port = config.value("tcpPort", conn_info.tcp_port);
-
-            if (conn_info.host.empty()) {
-                error_message = "Host IP address is required";
-                return false;
-            }
-        } else {
-            error_message = "Invalid connection type. Use 'serial' or 'network'";
-            return false;
-        }
-
-        conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+        std::string conn_type = config.value("connectionType", "auto");
 
         std::string version_value = config.value("synscanVersion", "auto");
         std::string version_normalized = to_lower_copy(version_value);
@@ -6166,8 +6140,44 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             sync_time_on_connect = config.value("syncTimeOnConnect", false);
         }
 
-        auto telescope = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
-            device_number, conn_info, version, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
+        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
+
+        if (conn_type == "auto" || conn_type.empty()) {
+            int mount_index = config.value("mountIndex", 0);
+            telescope = alpacacore::vendor::synscan::create_synscan_telescope_auto(
+                device_number, mount_index, version, site_latitude, site_longitude,
+                site_elevation, sync_time_on_connect);
+        } else {
+            alpacacore::vendor::synscan::ConnectionInfo conn_info;
+
+            if (conn_type == "serial") {
+                conn_info.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+                conn_info.port_path = config.value("portPath", "");
+                conn_info.baud_rate = config.value("baudRate", 9600);
+
+                if (conn_info.port_path.empty()) {
+                    error_message = "Serial port path is required";
+                    return false;
+                }
+            } else if (conn_type == "network") {
+                conn_info.type = alpacacore::vendor::synscan::ConnectionType::Network;
+                conn_info.host = config.value("host", "");
+                conn_info.tcp_port = config.value("tcpPort", conn_info.tcp_port);
+
+                if (conn_info.host.empty()) {
+                    error_message = "Host IP address is required";
+                    return false;
+                }
+            } else {
+                error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
+                return false;
+            }
+
+            conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+
+            telescope = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+                device_number, conn_info, version, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
+        }
 
         if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
             telescope->set_aperture_diameter(aperture);

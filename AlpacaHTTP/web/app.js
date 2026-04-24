@@ -647,12 +647,12 @@ function startEditDevice(device) {
         updateApertureAreaFromDiameter('aperture-diameter', 'aperture-area');
     } else if (vendor === 'synscan') {
         setFormValue('synscan-version', config.synscanVersion || 'auto');
-        const synscanConnectionType = config.connectionType || 'serial';
+        const synscanConnectionType = config.connectionType || 'auto';
         setFormValue('synscan-connection-type', synscanConnectionType);
         if (synscanConnectionType === 'serial') {
             setFormValue('synscan-port-path', config.portPath);
             setFormValue('synscan-baud-rate', config.baudRate);
-        } else {
+        } else if (synscanConnectionType === 'network') {
             setFormValue('synscan-host', config.host);
             setFormValue('synscan-tcp-port', config.tcpPort);
         }
@@ -1829,15 +1829,16 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.focalLength = focalLength;
         }
     } else if (deviceData.vendor === 'synscan') {
-        deviceData.connectionType = formData.get('synscanConnectionType') || 'serial';
+        deviceData.connectionType = formData.get('synscanConnectionType') || 'auto';
         deviceData.synscanVersion = formData.get('synscanVersion') || 'auto';
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('synscanPortPath');
             deviceData.baudRate = parseInt(formData.get('synscanBaudRate')) || 9600;
-        } else {
+        } else if (deviceData.connectionType === 'network') {
             deviceData.host = formData.get('synscanHost');
             deviceData.tcpPort = parseInt(formData.get('synscanTcpPort')) || 11880;
         }
+        // "auto" needs no connection fields — port is discovered at startup
 
         const apertureDiameter = readOptionalNumber(formData, 'synscanApertureDiameter');
         if (apertureDiameter !== null) {
