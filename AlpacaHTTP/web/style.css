@@ -163,6 +163,19 @@ h2 {
     border-color: #72A12D;
 }
 
+.device-card.device-error {
+    border-color: #c0392b;
+    background: #fdf2f2;
+}
+
+.device-card.device-error:hover {
+    border-color: #e74c3c;
+}
+
+.device-card.device-error h3 {
+    color: #c0392b;
+}
+
 .device-card h3 {
     color: #72A12D;
     margin-bottom: 10px;

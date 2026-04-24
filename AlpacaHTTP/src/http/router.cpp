@@ -1552,12 +1552,41 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
             device["DeviceType"] = alpacacore::device_type_to_string(cap.type);
             device["DeviceNumber"] = cap.device_number;
             device["UniqueID"] = cap.unique_id;
-            
+
             if (const auto* config = find_config(device["DeviceType"].get<std::string>(), cap.device_number)) {
                 device["Vendor"] = config->value("vendor", "");
                 device["Config"] = *config;
             }
             devices.push_back(device);
+        }
+
+        for (const auto& entry : persisted_devices_) {
+            std::string ptype = entry.value("deviceType", "");
+            int pnum = entry.value("deviceNumber", -1);
+            bool already_listed = false;
+            for (const auto& cap : capabilities) {
+                std::string cap_type = alpacacore::device_type_to_string(cap.type);
+                std::transform(cap_type.begin(), cap_type.end(), cap_type.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                std::string entry_type = ptype;
+                std::transform(entry_type.begin(), entry_type.end(), entry_type.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (cap_type == entry_type && cap.device_number == pnum) {
+                    already_listed = true;
+                    break;
+                }
+            }
+            if (!already_listed) {
+                nlohmann::json device;
+                device["DeviceName"] = entry.value("vendor", "unknown") + " (failed to load)";
+                device["DeviceType"] = ptype;
+                device["DeviceNumber"] = pnum;
+                device["UniqueID"] = "";
+                device["Vendor"] = entry.value("vendor", "");
+                device["Config"] = entry;
+                device["LoadError"] = true;
+                devices.push_back(device);
+            }
         }
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
@@ -5641,13 +5670,20 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         
-        if (registry.unregister_device(device_type, device_number)) {
+        bool was_registered = registry.unregister_device(device_type, device_number);
+
+        std::size_t before = persisted_devices_.size();
+        remove_persisted_device(vendor, device_type_str, device_number);
+        bool was_persisted = persisted_devices_.size() < before;
+
+        if (was_registered || was_persisted) {
+            if (was_persisted) {
+                save_persisted_devices();
+            }
             AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
             alpaca_response.value = std::string("Device removed successfully");
             response.set_body(alpaca_response);
             util::log_info("Removed device: " + device_type_str + " #" + std::to_string(device_number));
-            remove_persisted_device(vendor, device_type_str, device_number);
-            save_persisted_devices();
             return response;
         } else {
             AlpacaResponse alpaca_response = make_error_response(
@@ -6038,38 +6074,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "ioptron" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        alpacacore::vendor::ioptron::ConnectionInfo conn_info;
-        std::string conn_type = config.value("connectionType", "");
-
-        if (conn_type == "serial") {
-            conn_info.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
-            conn_info.port_path = config.value("portPath", "");
-            conn_info.baud_rate = config.value("baudRate", 9600);
-
-            if (conn_info.port_path.empty()) {
-                error_message = "Serial port path is required";
-                return false;
-            }
-        } else if (conn_type == "network") {
-            conn_info.type = alpacacore::vendor::ioptron::ConnectionType::Network;
-            conn_info.host = config.value("host", "");
-            conn_info.tcp_port = config.value("tcpPort", 4030);
-
-            if (conn_info.host.empty()) {
-                error_message = "Host IP address is required";
-                return false;
-            }
-        } else {
-            error_message = "Invalid connection type. Use 'serial' or 'network'";
-            return false;
-        }
-
-        conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+        std::string conn_type = config.value("connectionType", "auto");
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
         std::optional<double> site_elevation;
         std::optional<bool> sync_time_on_connect;
+
         if (config.contains("siteLatitude")) {
             site_latitude = config.value("siteLatitude", 0.0);
         }
@@ -6083,8 +6094,45 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             sync_time_on_connect = config.value("syncTimeOnConnect", false);
         }
 
-        auto telescope = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
-            device_number, conn_info, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
+        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
+
+        if (conn_type == "auto" || conn_type.empty()) {
+            int mount_index = config.value("mountIndex", 0);
+            telescope = alpacacore::vendor::ioptron::create_ioptron_telescope_auto(
+                device_number, mount_index, site_latitude, site_longitude,
+                site_elevation, sync_time_on_connect);
+        } else {
+            alpacacore::vendor::ioptron::ConnectionInfo conn_info;
+
+            if (conn_type == "serial") {
+                conn_info.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+                conn_info.port_path = config.value("portPath", "");
+                conn_info.baud_rate = config.value("baudRate", 115200);
+
+                if (conn_info.port_path.empty()) {
+                    error_message = "Serial port path is required";
+                    return false;
+                }
+            } else if (conn_type == "network") {
+                conn_info.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+                conn_info.host = config.value("host", "");
+                conn_info.tcp_port = config.value("tcpPort", 4030);
+
+                if (conn_info.host.empty()) {
+                    error_message = "Host IP address is required";
+                    return false;
+                }
+            } else {
+                error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
+                return false;
+            }
+
+            conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+
+            telescope = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
+                device_number, conn_info, site_latitude, site_longitude,
+                site_elevation, sync_time_on_connect);
+        }
 
         if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
             telescope->set_aperture_diameter(aperture);
@@ -6924,16 +6972,19 @@ void Router::load_persisted_devices() {
 
         persisted_devices_.clear();
         for (const auto& entry : payload) {
+            auto sanitized = sanitize_device_config(entry);
+            persisted_devices_.push_back(sanitized);
             std::string error_message;
-            if (register_device_from_config(entry, error_message)) {
-                persisted_devices_.push_back(sanitize_device_config(entry));
-            } else {
-                util::log_warning("Skipping persisted device: " + error_message);
+            try {
+                if (!register_device_from_config(entry, error_message)) {
+                    util::log_warning("Skipping persisted device: " + error_message);
+                }
+            } catch (const std::exception& e) {
+                util::log_error("Failed to load persisted device: " + std::string(e.what()));
             }
         }
     } catch (const std::exception& e) {
         util::log_error("Failed to load registered devices: " + std::string(e.what()));
-        persisted_devices_.clear();
     }
 }
 

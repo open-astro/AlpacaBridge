@@ -35,7 +35,226 @@
 #include <netdb.h>
 #include <errno.h>
 
+#ifndef _WIN32
+#include <filesystem>
+#endif
+
 namespace alpacacore::vendor::ioptron {
+
+namespace {
+
+// Probe a serial port for an iOptron mount by sending :MountInfo# and checking
+// for a valid 4-digit model code response.
+// iOptron returns exactly 4 ASCII digits with no '#' terminator.
+// Returns the model code (e.g. "0025") on success, empty string on failure.
+std::string probe_ioptron_port(const std::string& port_path) {
+#ifndef _WIN32
+    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (fd < 0) {
+        return "";
+    }
+
+    struct termios tty{};
+    if (tcgetattr(fd, &tty) != 0) {
+        close(fd);
+        return "";
+    }
+
+    cfsetospeed(&tty, B115200);
+    cfsetispeed(&tty, B115200);
+    tty.c_cflag &= ~PARENB;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+    tty.c_cflag &= ~CRTSCTS;
+    tty.c_cflag |= CREAD | CLOCAL;
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
+    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    tty.c_oflag &= ~OPOST;
+    tty.c_oflag &= ~ONLCR;
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 20;
+
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
+        close(fd);
+        return "";
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    tcflush(fd, TCIOFLUSH);
+
+    const char cmd[] = ":MountInfo#";
+    ssize_t written = write(fd, cmd, sizeof(cmd) - 1);
+    if (written != static_cast<ssize_t>(sizeof(cmd) - 1)) {
+        close(fd);
+        return "";
+    }
+
+    // iOptron :MountInfo# returns exactly 4 ASCII digit bytes, no terminator.
+    char resp[4] = {};
+    int total = 0;
+    auto start = std::chrono::steady_clock::now();
+    while (total < 4) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed > 3) {
+            break;
+        }
+        char ch = 0;
+        ssize_t r = read(fd, &ch, 1);
+        if (r == 1) {
+            resp[total++] = ch;
+        } else if (r == 0) {
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    close(fd);
+
+    if (total == 4) {
+        bool all_digit = true;
+        for (int i = 0; i < 4; ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(resp[i]))) {
+                all_digit = false;
+                break;
+            }
+        }
+        if (all_digit) {
+            return std::string(resp, 4);
+        }
+    }
+
+    return "";
+#else
+    (void)port_path;
+    return "";
+#endif
+}
+
+} // anonymous namespace
+
+std::string model_code_to_name(const std::string& code) {
+    // Current v3 protocol assignments (from INDI ioptronv3 driver).
+    // iOptron has reassigned some codes from earlier products:
+    //   0010: Cube II EQ → SkyHunter EQ
+    //   0011: SmartEQ Pro+ → SkyHunter AA
+    //   0025: CEM25 → HEM27
+    //   0030: iEQ30 Pro → HEM27-EC
+    if (code == "0010") return "SkyHunter EQ";
+    if (code == "0011") return "SkyHunter AA";
+    if (code == "0012") return "HAE16 EQ";
+    if (code == "0013") return "HAE16 AA";
+    if (code == "0014") return "HAE18 EQ";
+    if (code == "0015") return "HEM15";
+    if (code == "0022") return "HAE18 AA";
+    if (code == "0025") return "HEM27";
+    if (code == "0026") return "CEM26";
+    if (code == "0027") return "CEM26-EC";
+    if (code == "0028") return "GEM28";
+    if (code == "0029") return "GEM28-EC";
+    if (code == "0030") return "HEM27-EC";
+    if (code == "0031") return "HAE29 EQ";
+    if (code == "0032") return "HAE29-EC AA";
+    if (code == "0033") return "HAE29 AA";
+    if (code == "0034") return "HAE29-EC AA";
+    if (code == "0035") return "HAZ31";
+    if (code == "0036") return "HAE29C EQ";
+    if (code == "0037") return "HAE29C-EC EQ";
+    if (code == "0038") return "HAE29C AA";
+    if (code == "0039") return "HAE29C-EC EQ";
+    if (code == "0040") return "CEM40";
+    if (code == "0041") return "CEM40-EC";
+    if (code == "0043") return "GEM45";
+    if (code == "0045") return "HEM44-EC";
+    if (code == "0046") return "HEM44A";
+    if (code == "0047") return "HEM44A-EC";
+    if (code == "0048") return "HAE43 EQ";
+    if (code == "0049") return "HAE43-EC EQ";
+    if (code == "0050") return "HAE43 AA";
+    if (code == "0051") return "HAE43-EC AA";
+    if (code == "0052") return "HAZ46";
+    if (code == "0053") return "HAE43C EQ";
+    if (code == "0054") return "HAE43C-EC EQ";
+    if (code == "0055") return "HAE43C AA";
+    if (code == "0056") return "HAE43C-EC AA";
+    if (code == "0060") return "CEM60";
+    if (code == "0061") return "CEM60-EC";
+    if (code == "0062") return "HAE69 EQ";
+    if (code == "0063") return "HAZ69-EC EQ";
+    if (code == "0064") return "HAE69 AA";
+    if (code == "0065") return "HAE69-EC AA";
+    if (code == "0066") return "HAE69C EQ";
+    if (code == "0067") return "HAE69C-EC EQ";
+    if (code == "0068") return "HAE69C AA";
+    if (code == "0069") return "HAE69C-EC AA";
+    if (code == "0070") return "CEM70";
+    if (code == "0071") return "CEM70-EC";
+    if (code == "0072") return "CEM70-EC2";
+    if (code == "0073") return "HAZ71";
+    if (code == "0120") return "CEM120";
+    if (code == "0121") return "CEM120-EC";
+    if (code == "0122") return "CEM120-EC2";
+    if (code == "5010") return "Cube II AA";
+    if (code == "5035") return "AZ Mount Pro";
+    if (code == "5045") return "iEQ45 Pro AA";
+    return "";
+}
+
+std::vector<iOptronPortInfo> enumerate_ioptron_ports() {
+    std::vector<iOptronPortInfo> results;
+
+#ifndef _WIN32
+    const std::filesystem::path serial_by_id("/dev/serial/by-id");
+    if (!std::filesystem::exists(serial_by_id)) {
+        for (int i = 0; i < 10; ++i) {
+            std::string port = "/dev/ttyUSB" + std::to_string(i);
+            if (std::filesystem::exists(port)) {
+                ALPACA_LOG_INFO("iOptron", "Probing " + port + "...");
+                std::string code = probe_ioptron_port(port);
+                if (!code.empty()) {
+                    std::string name = model_code_to_name(code);
+                    ALPACA_LOG_INFO("iOptron", "Found iOptron mount on " + port +
+                                    " (model " + code + (name.empty() ? "" : " / " + name) + ")");
+                    results.push_back({port, "", code});
+                }
+            }
+        }
+        return results;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
+        if (!entry.is_symlink()) continue;
+        std::string name = entry.path().filename().string();
+
+        bool is_candidate = (name.find("Prolific") != std::string::npos) ||
+                            (name.find("PL2303") != std::string::npos) ||
+                            (name.find("067b") != std::string::npos) ||
+                            (name.find("FTDI") != std::string::npos) ||
+                            (name.find("CP210") != std::string::npos) ||
+                            (name.find("Silicon_Labs") != std::string::npos) ||
+                            (name.find("USB_Serial") != std::string::npos) ||
+                            (name.find("USB-Serial") != std::string::npos);
+        if (!is_candidate) continue;
+
+        std::string resolved = std::filesystem::canonical(entry.path()).string();
+        ALPACA_LOG_INFO("iOptron", "Probing " + resolved + " (" + name + ")...");
+
+        std::string code = probe_ioptron_port(resolved);
+        if (!code.empty()) {
+            std::string model = model_code_to_name(code);
+            ALPACA_LOG_INFO("iOptron", "Found iOptron mount on " + resolved +
+                            " (model " + code + (model.empty() ? "" : " / " + model) + ")");
+            results.push_back({resolved, name, code});
+        }
+    }
+#endif
+
+    return results;
+}
 
 namespace {
 
@@ -205,6 +424,30 @@ public:
 
         if (!write_data(full_command)) {
             throw AlpacaException("Failed to send command to mount");
+        }
+    }
+
+    void flush_input() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_) {
+            return;
+        }
+        if (connection_type_ == ConnectionType::Serial) {
+#ifndef _WIN32
+            if (serial_fd_ >= 0) {
+                tcflush(serial_fd_, TCIFLUSH);
+            }
+#else
+            if (serial_handle_ != INVALID_HANDLE_VALUE) {
+                PurgeComm(serial_handle_, PURGE_RXCLEAR);
+            }
+#endif
+        } else {
+            char discard[64];
+            for (int i = 0; i < 16; ++i) {
+                bool got = read_network_char(discard[0]);
+                if (!got) break;
+            }
         }
     }
 
@@ -715,19 +958,30 @@ void iOptronProtocolWrapper::send_command_blind(const std::string& command) {
     pimpl_->send_command_blind(command);
 }
 
+void iOptronProtocolWrapper::flush_input() {
+    pimpl_->flush_input();
+}
+
 // Mount information queries
 MountInfo iOptronProtocolWrapper::get_mount_info() {
-    // Legacy helper retained for potential future use, but the current
-    // driver does not depend on mount-specific model information.
-    // We issue a single :MountInfo query (no retries) and return the
-    // raw response as the model_code; model_name and has_encoder are
-    // left at their defaults.
     MountInfo info;
     try {
-        std::string response = send_command(":MountInfo");
-        info.model_code = std::move(response);
+        std::string response = send_command(":MountInfo", false);
+        info.model_code = response;
+        info.model_name = model_code_to_name(response);
+        info.has_encoder = (response == "0027" || response == "0029" ||
+                            response == "0030" || response == "0032" ||
+                            response == "0034" || response == "0037" ||
+                            response == "0039" || response == "0041" ||
+                            response == "0045" || response == "0047" ||
+                            response == "0049" || response == "0051" ||
+                            response == "0054" || response == "0056" ||
+                            response == "0061" || response == "0063" ||
+                            response == "0065" || response == "0067" ||
+                            response == "0069" || response == "0071" ||
+                            response == "0072" || response == "0121" ||
+                            response == "0122");
     } catch (const std::exception&) {
-        // Swallow errors; callers should treat missing model info as non-fatal.
     }
     return info;
 }
@@ -950,7 +1204,7 @@ void iOptronProtocolWrapper::set_target_dec(double dec_degrees) {
 }
 
 bool iOptronProtocolWrapper::slew_to_ra_dec() {
-    // :MS1 returns "1" (accepted) or "0" (rejected). Read the response to keep the stream aligned.
+    flush_input();
     try {
         std::string response = send_command(":MS1", false);
         if (response == "0") {
@@ -973,6 +1227,7 @@ bool iOptronProtocolWrapper::slew_to_ra_dec() {
 }
 
 bool iOptronProtocolWrapper::slew_to_ra_dec_cw_up() {
+    flush_input();
     try {
         std::string response = send_command(":MS2", false);
         if (response == "0") {

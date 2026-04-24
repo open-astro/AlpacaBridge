@@ -89,9 +89,6 @@ public:
         , last_utc_set_{}
         , last_utc_set_monotonic_(std::chrono::steady_clock::now())
         , last_utc_valid_(false)
-        , sync_offset_ra_hours_(0.0)
-        , sync_offset_dec_degrees_(0.0)
-        , sync_offset_active_(false)
         , utc_query_supported_(true)
         , fast_cache_until_(std::chrono::steady_clock::time_point{})
         , clock_sync_cancel_(false)
@@ -117,6 +114,9 @@ public:
     }
     
     std::string get_name() const override {
+        if (!mount_info_.model_name.empty()) {
+            return "iOptron " + mount_info_.model_name;
+        }
         return "iOptron Telescope";
     }
     
@@ -192,9 +192,6 @@ public:
                 status_cache_valid_ = false;
                 guide_rate_valid_ = false;
                 last_utc_valid_ = false;
-                sync_offset_ra_hours_ = 0.0;
-                sync_offset_dec_degrees_ = 0.0;
-                sync_offset_active_ = false;
                 device_faulted_ = false;
                 last_device_error_.clear();
                 dec_guide_calibration_attempted_ = false;
@@ -231,17 +228,23 @@ public:
                 pulse_guiding_hold_dec_until_ = std::chrono::steady_clock::time_point{};
                 last_dec_read_valid_ = false;
                 last_dec_read_degrees_ = 0.0;
-                sync_offset_pending_ = false;
                 target_set_ = false;
                 target_ra_hours_ = 0.0;
                 target_dec_degrees_ = 0.0;
-                slew_ra_bias_valid_ = false;
-                slew_ra_bias_hours_ = 0.0;
+                sync_offset_ra_hours_ = 0.0;
+                sync_offset_dec_degrees_ = 0.0;
                 slew_in_progress_ = false;
                 prefetch_mount_state_locked();
+                try {
+                    mount_info_ = protocol.get_mount_info();
+                } catch (...) {
+                }
                 fast_cache_until_ = std::chrono::steady_clock::now() + kFastCacheGrace;
                 schedule_clock_sync = true;
-                ALPACA_LOG_INFO("iOptron", "Connected to mount over " +
+                std::string mount_desc = mount_info_.model_name.empty()
+                    ? "unknown model"
+                    : mount_info_.model_name + " (" + mount_info_.model_code + ")";
+                ALPACA_LOG_INFO("iOptron", "Connected to " + mount_desc + " over " +
                                             std::string(connection_info_.type == ConnectionType::Serial
                                                             ? "Serial/USB"
                                                             : "Network"));
@@ -258,9 +261,6 @@ public:
             status_cache_valid_ = false;
             guide_rate_valid_ = false;
             last_utc_valid_ = false;
-            sync_offset_ra_hours_ = 0.0;
-            sync_offset_dec_degrees_ = 0.0;
-            sync_offset_active_ = false;
             device_faulted_ = false;
             last_device_error_.clear();
             dec_guide_calibration_attempted_ = false;
@@ -273,13 +273,14 @@ public:
             guide_rate_scale_ra_ = 1.0;
             guide_rate_scale_dec_ = 1.0;
             utc_query_supported_ = true;
+            sync_offset_ra_hours_ = 0.0;
+            sync_offset_dec_degrees_ = 0.0;
             fast_cache_until_ = std::chrono::steady_clock::time_point{};
             axis_move_active_primary_ = false;
             axis_move_active_secondary_ = false;
             tracking_state_before_move_.reset();
             park_override_until_ = std::chrono::steady_clock::time_point{};
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
-            sync_offset_pending_ = false;
             pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_ra_hours_ = 0.0;
             pulse_guiding_hold_until_ = std::chrono::steady_clock::time_point{};
@@ -301,8 +302,6 @@ public:
             target_set_ = false;
             target_ra_hours_ = 0.0;
             target_dec_degrees_ = 0.0;
-            slew_ra_bias_valid_ = false;
-            slew_ra_bias_hours_ = 0.0;
             slew_in_progress_ = false;
             disconnect_protocol = true;
         }
@@ -561,7 +560,7 @@ public:
         }
         last_dec_read_degrees_ = dec_value;
         last_dec_read_valid_ = true;
-        return dec_value;
+        return dec_value + sync_offset_dec_degrees_;
     }
     
     double get_declination_rate() const override {
@@ -676,9 +675,9 @@ public:
         }
         last_ra_read_hours_ = ra_value;
         last_ra_read_valid_ = true;
-        return ra_value;
+        return normalize_ra_hours(ra_value + sync_offset_ra_hours_);
     }
-    
+
     double get_right_ascension_rate() const override {
         if (!get_can_set_right_ascension_rate()) {
             return 0.0;
@@ -715,11 +714,22 @@ public:
     int get_side_of_pier() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        
+
         refresh_position_cache_locked();
-        return normalize_side_of_pier_value(cached_side_of_pier_);
+        if (!site_info_valid_) {
+            ensure_site_info_cached_locked();
+            if (!site_info_valid_) {
+                return normalize_side_of_pier_value(cached_side_of_pier_);
+            }
+        }
+
+        const double lst = compute_local_sidereal_time_hours(current_utc_time_locked(),
+                                                             site_longitude_cached_);
+        const double synced_ra = normalize_ra_hours(cached_ra_hours_ + sync_offset_ra_hours_);
+        const double hour_angle = shortest_ra_delta_hours(lst, synced_ra);
+        return (hour_angle >= 0.0) ? 0 : 1;
     }
-    
+
     int get_destination_side_of_pier(double ra, double dec) const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
@@ -974,7 +984,6 @@ public:
             if (slew_in_progress_ && target_set_) {
                 if (slew_target_reached_locked()) {
                     ALPACA_LOG_INFO("iOptron", "Slew complete by position tolerance (status still slewing)");
-                    update_slew_ra_bias_locked();
                     cached_status_.is_slewing = false;
                     status_cache_valid_ = true;
                     last_status_update_ = now;
@@ -989,7 +998,7 @@ public:
         if (slew_override_until_ > now) {
             return true;
         }
-        update_slew_ra_bias_locked();
+        slew_in_progress_ = false;
         restore_altitude_limit_locked("Slewing");
         restore_meridian_treatment_locked("Slewing");
         return false;
@@ -1007,11 +1016,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         validate_dec(dec, "TargetDeclination");
-        
+
         target_dec_degrees_ = dec;
         target_set_ = true;
         auto& protocol = iOptronProtocolWrapper::instance();
-        protocol.set_target_dec(strip_sync_offset_dec(dec));
+        protocol.set_target_dec(dec);
     }
     
     double get_target_right_ascension() const override {
@@ -1026,11 +1035,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         validate_ra(ra, "TargetRightAscension");
-        
+
         target_ra_hours_ = ra;
         target_set_ = true;
         auto& protocol = iOptronProtocolWrapper::instance();
-        protocol.set_target_ra(strip_sync_offset_ra(ra));
+        protocol.set_target_ra(ra);
     }
     
     int get_tracking_rate() const override {
@@ -1284,23 +1293,32 @@ public:
     }
     
     void slew_to_coordinates(double ra, double dec) override {
+        validate_ra_dec(ra, dec, "SlewToCoordinates");
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            start_slew_to_coordinates_locked(ra, dec, false);
+            double phys_ra = normalize_ra_hours(ra - sync_offset_ra_hours_);
+            double phys_dec = dec - sync_offset_dec_degrees_;
+            prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
+            dispatch_slew_command_locked(phys_ra, phys_dec, false, "SlewToCoordinates");
         }
         wait_for_slew_completion("SlewToCoordinates");
     }
-    
+
     void slew_to_coordinates_async(double ra, double dec) override {
+        validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+        double phys_ra = 0.0;
+        double phys_dec = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            prepare_slew_state_locked(ra, dec, "SlewToCoordinatesAsync");
+            phys_ra = normalize_ra_hours(ra - sync_offset_ra_hours_);
+            phys_dec = dec - sync_offset_dec_degrees_;
+            prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
         }
         try {
-            std::thread([this, ra, dec]() {
+            std::thread([this, phys_ra, phys_dec]() {
                 std::lock_guard<std::mutex> lock(mutex_);
                 try {
-                    dispatch_slew_command_locked(ra, dec, true, "SlewToCoordinatesAsync");
+                    dispatch_slew_command_locked(phys_ra, phys_dec, true, "SlewToCoordinatesAsync");
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
                     ALPACA_LOG_WARN("iOptron", std::string("Async slew failed: ") + e.what());
@@ -1349,13 +1367,16 @@ public:
         check_connected();
         validate_ra_dec(ra, dec, "SyncToCoordinates");
         ensure_not_parked_locked("SyncToCoordinates");
-        
+
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
         target_set_ = true;
 
         refresh_position_cache_locked(true);
-        apply_driver_sync_locked(ra, dec);
+        sync_offset_ra_hours_ = ra - cached_ra_hours_;
+        sync_offset_dec_degrees_ = dec - cached_dec_degrees_;
+        if (sync_offset_ra_hours_ > 12.0) sync_offset_ra_hours_ -= 24.0;
+        if (sync_offset_ra_hours_ < -12.0) sync_offset_ra_hours_ += 24.0;
     }
     
     void sync_to_target() override {
@@ -1367,7 +1388,10 @@ public:
         ensure_not_parked_locked("SyncToTarget");
 
         refresh_position_cache_locked(true);
-        apply_driver_sync_locked(target_ra_hours_, target_dec_degrees_);
+        sync_offset_ra_hours_ = target_ra_hours_ - cached_ra_hours_;
+        sync_offset_dec_degrees_ = target_dec_degrees_ - cached_dec_degrees_;
+        if (sync_offset_ra_hours_ > 12.0) sync_offset_ra_hours_ -= 24.0;
+        if (sync_offset_ra_hours_ < -12.0) sync_offset_ra_hours_ += 24.0;
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
@@ -1388,7 +1412,7 @@ public:
                 altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
             ra_hours = converted.first;
             dec_degrees = converted.second;
-            prepare_slew_state_locked(ra_hours, dec_degrees, "SlewToAltAzAsync");
+            prepare_slew_state_locked(ra_hours, dec_degrees, ra_hours, dec_degrees, "SlewToAltAzAsync");
         }
 
         try {
@@ -1468,7 +1492,7 @@ private:
     static constexpr std::chrono::seconds kFastCacheGrace{30};
     static constexpr std::chrono::seconds kUnparkGrace{120};
     static constexpr std::chrono::milliseconds kPulseGuideCompletionDelay{1000};
-    static constexpr std::chrono::milliseconds kPulseGuideHoldGrace{200};
+    static constexpr std::chrono::milliseconds kPulseGuideHoldGrace{2000};
     static constexpr std::chrono::milliseconds kPulseGuideCorrectionGrace{5000};
     static constexpr double kSlewCompletionToleranceArcsec = 60.0;
     static constexpr double kSiderealSeconds = 86164.0905;
@@ -1531,8 +1555,8 @@ private:
         auto now = std::chrono::steady_clock::now();
         try {
             Position pos = protocol.get_position();
-            cached_dec_degrees_ = apply_sync_offset_dec(pos.dec_degrees);
-            cached_ra_hours_ = apply_sync_offset_ra(pos.ra_hours);
+            cached_dec_degrees_ = pos.dec_degrees;
+            cached_ra_hours_ = pos.ra_hours;
             cached_side_of_pier_ = pos.side_of_pier;
             position_cache_valid_ = true;
             last_position_update_ = now;
@@ -1642,23 +1666,24 @@ private:
         }
     }
 
-    void prepare_slew_state_locked(double ra, double dec, const char* label) {
+    void prepare_slew_state_locked(double ascom_ra, double ascom_dec,
+                                    double phys_ra, double phys_dec,
+                                    const char* label) {
         check_connected();
-        validate_ra_dec(ra, dec, label);
         ensure_not_parked_locked(label);
 
-        target_ra_hours_ = ra;
-        target_dec_degrees_ = dec;
+        target_ra_hours_ = ascom_ra;
+        target_dec_degrees_ = ascom_dec;
         target_set_ = true;
         slew_in_progress_ = true;
-        slew_target_ra_hours_ = ra;
-        slew_target_dec_degrees_ = dec;
+        slew_target_ra_hours_ = phys_ra;
+        slew_target_dec_degrees_ = phys_dec;
     }
 
     void dispatch_slew_command_locked(double ra, double dec, bool allow_soft_fail, const char* label) {
         auto& protocol = iOptronProtocolWrapper::instance();
-        protocol.set_target_ra(strip_sync_offset_ra(ra));
-        protocol.set_target_dec(strip_sync_offset_dec(dec));
+        protocol.set_target_ra(ra);
+        protocol.set_target_dec(dec);
         bool accepted = protocol.slew_to_ra_dec();
         if (!accepted) {
             accepted = protocol.slew_to_ra_dec_cw_up();
@@ -1697,7 +1722,7 @@ private:
     }
 
     void start_slew_to_coordinates_locked(double ra, double dec, bool allow_soft_fail) {
-        prepare_slew_state_locked(ra, dec, "SlewToCoordinates");
+        prepare_slew_state_locked(ra, dec, ra, dec, "SlewToCoordinates");
         dispatch_slew_command_locked(ra, dec, allow_soft_fail, "SlewToCoordinates");
     }
 
@@ -1712,7 +1737,7 @@ private:
         if (slew_settle_time_seconds_ > 0) {
             std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
-        update_slew_ra_bias_locked();
+        slew_in_progress_ = false;
         restore_altitude_limit_locked(label);
         restore_meridian_treatment_locked(label);
     }
@@ -1729,9 +1754,8 @@ private:
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
             Position pos = protocol.get_position();
-            resolve_sync_offset_pending_locked(pos);
-            cached_dec_degrees_ = apply_sync_offset_dec(pos.dec_degrees);
-            cached_ra_hours_ = apply_sync_offset_ra(pos.ra_hours);
+            cached_dec_degrees_ = pos.dec_degrees;
+            cached_ra_hours_ = pos.ra_hours;
             cached_side_of_pier_ = pos.side_of_pier;
             position_cache_valid_ = true;
             last_position_update_ = now;
@@ -1981,16 +2005,6 @@ private:
         return ra_hours;
     }
 
-    static double normalize_ra_offset_hours(double ra_hours) {
-        while (ra_hours > 12.0) {
-            ra_hours -= 24.0;
-        }
-        while (ra_hours < -12.0) {
-            ra_hours += 24.0;
-        }
-        return ra_hours;
-    }
-
     static double shortest_ra_delta_hours(double target_hours, double current_hours) {
         double delta = target_hours - current_hours;
         while (delta > 12.0) {
@@ -2000,137 +2014,6 @@ private:
             delta += 24.0;
         }
         return delta;
-    }
-
-    double apply_sync_offset_ra(double ra_hours) const {
-        double adjusted = ra_hours;
-        if (sync_offset_active_) {
-            adjusted += sync_offset_ra_hours_;
-        }
-        if (slew_ra_bias_valid_) {
-            adjusted += slew_ra_bias_hours_;
-        }
-        return normalize_ra_hours(adjusted);
-    }
-
-    double apply_sync_offset_dec(double dec_degrees) const {
-        if (!sync_offset_active_) {
-            return dec_degrees;
-        }
-        return dec_degrees + sync_offset_dec_degrees_;
-    }
-
-    double strip_sync_offset_ra(double ra_hours) const {
-        double adjusted = ra_hours;
-        if (slew_ra_bias_valid_) {
-            adjusted -= slew_ra_bias_hours_;
-        }
-        if (sync_offset_active_) {
-            adjusted -= sync_offset_ra_hours_;
-        }
-        return normalize_ra_hours(adjusted);
-    }
-
-    double strip_sync_offset_dec(double dec_degrees) const {
-        if (!sync_offset_active_) {
-            return dec_degrees;
-        }
-        return dec_degrees - sync_offset_dec_degrees_;
-    }
-
-    void update_sync_offset_locked(const Position& raw_pos, double target_ra_hours, double target_dec_degrees) const {
-        const double ra_offset = shortest_ra_delta_hours(target_ra_hours, raw_pos.ra_hours);
-        const double dec_offset = target_dec_degrees - raw_pos.dec_degrees;
-        sync_offset_ra_hours_ = ra_offset;
-        sync_offset_dec_degrees_ = dec_offset;
-        constexpr double kSyncOffsetEpsilon = 1.0e-6;
-        sync_offset_active_ = (std::abs(ra_offset) > kSyncOffsetEpsilon ||
-                               std::abs(dec_offset) > kSyncOffsetEpsilon);
-    }
-
-    void schedule_sync_offset_update_locked(double target_ra_hours, double target_dec_degrees) {
-        const double raw_ra = strip_sync_offset_ra(cached_ra_hours_);
-        const double raw_dec = strip_sync_offset_dec(cached_dec_degrees_);
-        const double ra_offset = shortest_ra_delta_hours(target_ra_hours, raw_ra);
-        const double dec_offset = target_dec_degrees - raw_dec;
-        sync_offset_ra_hours_ = ra_offset;
-        sync_offset_dec_degrees_ = dec_offset;
-        constexpr double kSyncOffsetEpsilon = 1.0e-6;
-        sync_offset_active_ = (std::abs(ra_offset) > kSyncOffsetEpsilon ||
-                               std::abs(dec_offset) > kSyncOffsetEpsilon);
-        sync_pending_ra_hours_ = target_ra_hours;
-        sync_pending_dec_degrees_ = target_dec_degrees;
-        sync_offset_pending_ = false;
-    }
-
-    void apply_driver_sync_locked(double target_ra_hours, double target_dec_degrees) {
-        Position raw_pos{};
-        raw_pos.ra_hours = strip_sync_offset_ra(cached_ra_hours_);
-        raw_pos.dec_degrees = strip_sync_offset_dec(cached_dec_degrees_);
-        update_sync_offset_locked(raw_pos, target_ra_hours, target_dec_degrees);
-        sync_offset_pending_ = false;
-        cached_ra_hours_ = target_ra_hours;
-        cached_dec_degrees_ = target_dec_degrees;
-        position_cache_valid_ = true;
-        last_position_update_ = std::chrono::steady_clock::now();
-    }
-
-    void resolve_sync_offset_pending_locked(const Position& raw_pos) const {
-        if (!sync_offset_pending_) {
-            return;
-        }
-        constexpr double kSyncToleranceArcsec = 30.0;
-        const double ra_arcsec =
-            std::abs(shortest_ra_delta_hours(sync_pending_ra_hours_, raw_pos.ra_hours)) * 15.0 * 3600.0;
-        const double dec_arcsec = std::abs(sync_pending_dec_degrees_ - raw_pos.dec_degrees) * 3600.0;
-        if (ra_arcsec <= kSyncToleranceArcsec && dec_arcsec <= kSyncToleranceArcsec) {
-            sync_offset_ra_hours_ = 0.0;
-            sync_offset_dec_degrees_ = 0.0;
-            sync_offset_active_ = false;
-            sync_offset_pending_ = false;
-            return;
-        }
-        update_sync_offset_locked(raw_pos, sync_pending_ra_hours_, sync_pending_dec_degrees_);
-    }
-
-    void update_slew_ra_bias_locked() const {
-        if (!slew_in_progress_) {
-            return;
-        }
-        if (!target_set_) {
-            slew_in_progress_ = false;
-            return;
-        }
-        try {
-            auto& protocol = iOptronProtocolWrapper::instance();
-            const Position raw_pos = protocol.get_position();
-            double adjusted_ra = raw_pos.ra_hours;
-            if (sync_offset_active_) {
-                adjusted_ra = normalize_ra_hours(adjusted_ra + sync_offset_ra_hours_);
-            }
-            if (slew_ra_bias_valid_) {
-                adjusted_ra = normalize_ra_hours(adjusted_ra + slew_ra_bias_hours_);
-            }
-            const double delta = shortest_ra_delta_hours(slew_target_ra_hours_, adjusted_ra);
-            const double delta_arcsec = std::abs(delta) * 15.0 * 3600.0;
-            constexpr double kMinBiasArcsec = 2.0;
-            constexpr double kMaxBiasArcsec = 30.0;
-            if (delta_arcsec >= kMinBiasArcsec && delta_arcsec <= kMaxBiasArcsec) {
-                slew_ra_bias_hours_ = normalize_ra_offset_hours(slew_ra_bias_hours_ + delta);
-                slew_ra_bias_valid_ = true;
-                adjusted_ra = normalize_ra_hours(adjusted_ra + delta);
-                ALPACA_LOG_INFO("iOptron", "Applied RA slew bias: " +
-                                             std::to_string(slew_ra_bias_hours_ * 3600.0 * 15.0) +
-                                             " arcsec");
-            }
-            cached_ra_hours_ = adjusted_ra;
-            cached_dec_degrees_ = apply_sync_offset_dec(raw_pos.dec_degrees);
-            position_cache_valid_ = true;
-            last_position_update_ = std::chrono::steady_clock::now();
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string("Slew RA bias update failed: ") + e.what());
-        }
-        slew_in_progress_ = false;
     }
 
     bool slew_target_reached_locked() const {
@@ -2476,6 +2359,9 @@ private:
     mutable bool dst_observed_;
     mutable std::chrono::steady_clock::time_point last_site_info_fetch_;
     
+    mutable double sync_offset_ra_hours_ = 0.0;
+    mutable double sync_offset_dec_degrees_ = 0.0;
+
     mutable double cached_ra_hours_ = 0.0;
     mutable double cached_dec_degrees_ = 0.0;
     mutable int cached_side_of_pier_ = -1;
@@ -2509,14 +2395,6 @@ private:
     mutable std::chrono::system_clock::time_point last_utc_set_;
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
-    mutable double sync_offset_ra_hours_ = 0.0;
-    mutable double sync_offset_dec_degrees_ = 0.0;
-    mutable bool sync_offset_active_ = false;
-    mutable bool sync_offset_pending_ = false;
-    mutable double sync_pending_ra_hours_ = 0.0;
-    mutable double sync_pending_dec_degrees_ = 0.0;
-    mutable double slew_ra_bias_hours_ = 0.0;
-    mutable bool slew_ra_bias_valid_ = false;
     mutable bool slew_in_progress_ = false;
     mutable double slew_target_ra_hours_ = 0.0;
     mutable double slew_target_dec_degrees_ = 0.0;
@@ -2563,6 +2441,39 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_with_site(
     return std::make_unique<iOptronTelescopeDriver>(
         device_number, connection_info, site_latitude_deg, site_longitude_deg, site_elevation_m,
         sync_time_on_connect);
+}
+
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(
+    int device_number,
+    int mount_index,
+    std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect) {
+
+    auto ports = enumerate_ioptron_ports();
+    if (ports.empty()) {
+        throw AlpacaException("No iOptron mount found on any serial port");
+    }
+    if (mount_index < 0 || mount_index >= static_cast<int>(ports.size())) {
+        throw AlpacaException("Mount index " + std::to_string(mount_index) +
+                              " out of range (found " + std::to_string(ports.size()) + " mount(s))");
+    }
+
+    const auto& port = ports[static_cast<std::size_t>(mount_index)];
+    std::string model = model_code_to_name(port.model_code);
+    ALPACA_LOG_INFO("iOptron", "Auto-detected mount on " + port.port_path +
+                    " (model " + port.model_code +
+                    (model.empty() ? "" : " / " + model) + ")");
+
+    ConnectionInfo conn;
+    conn.type = ConnectionType::Serial;
+    conn.port_path = port.port_path;
+    conn.baud_rate = 115200;
+
+    return create_ioptron_telescope_with_site(
+        device_number, conn, site_latitude_deg, site_longitude_deg,
+        site_elevation_m, sync_time_on_connect);
 }
 
 } // namespace alpacacore::vendor::ioptron

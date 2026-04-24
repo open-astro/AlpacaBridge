@@ -210,18 +210,17 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| CEM series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
-| GEM series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
-| HAE series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
-| HAZ series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
-| HEM series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
-| SkyHunter | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/) |
+| HEM27 series | USB/Serial, Wi-Fi | ✓ |  | [ConformU Validation](AlpacaCore/conformu/iOptron/HEM27) |
+| HAE29 series | USB/Serial, Wi-Fi |  |  | [ConformU Validation](AlpacaCore/conformu/iOptron/HAE29) |
+
 
 ### iOptron Driver Notes
 
 - **Protocol**: iOptron Mount RS-232 Command Language Version 3.10 (January 4th, 2021)
-- **Connection**: USB/Serial or Wi-Fi
-- **Tested firmware**: Drivers test on **firmware V241201**. Other firmware versions and models may work but have not been verified.
+- **Connection**: USB/Serial or Wi-Fi. Auto-detection supported — `connectionType: "auto"` scans serial ports for iOptron mounts and connects to the first responding mount.
+- **Auto-detection**: Scans `/dev/serial/by-id/` for Prolific, FTDI, CP210x, Silicon Labs, and generic USB-serial devices and probes each with an iOptron `:MountInfo#` query at 115200 baud. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`. The 4-byte model code response (no `#` terminator) is mapped to a human-readable mount name (e.g., `0025` → HEM27) using the current INDI v3 model table.
+- **Mount identification**: On connect, the driver queries `:MountInfo#` and maps the model code to a name displayed in `Name` (e.g., "iOptron HEM27"), `UniqueID`, and server logs. 60+ models supported including CEM, GEM, HEM, HAE, HAZ, and SkyHunter series.
+- **Tested firmware**: Driver tested on **HEM27** with main board firmware **V240121** and hand controller firmware **V241201**. Other firmware versions and models may work but have not been individually verified.
 
 ### SynScan V3/V4
 

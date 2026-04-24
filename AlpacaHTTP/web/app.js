@@ -478,10 +478,11 @@ async function loadDevices() {
             const vendor = (device.Vendor || (config && config.vendor) || '—').toString();
             const settingsHtml = renderDeviceSettings(config);
             const deviceName = device.DeviceName || device.Name || 'Unknown Device';
+            const hasLoadError = device.LoadError === true;
             return `
-            <div class="device-card collapsed">
+            <div class="device-card collapsed${hasLoadError ? ' device-error' : ''}">
                 <div class="device-card-header">
-                    <h3>${escapeHtml(deviceName)}</h3>
+                    <h3>${hasLoadError ? '&#x26a0; ' : ''}${escapeHtml(deviceName)}</h3>
                     <button class="device-toggle" type="button" aria-expanded="false" data-device-index="${index}">
                         <span class="device-toggle-icon" aria-hidden="true"></span>
                         <span class="device-toggle-label">Details</span>
@@ -632,19 +633,22 @@ function startEditDevice(device) {
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
     if (vendor === 'ioptron') {
-        const connectionTypeEl = document.getElementById('connection-type');
-        if (connectionTypeEl) {
-            const connectionType = config.connectionType || 'serial';
-            setFormValue('connection-type', connectionType);
-            connectionTypeEl.dispatchEvent(new Event('change'));
+        const ioptronConnectionType = config.connectionType || 'auto';
+        setFormValue('ioptron-connection-type', ioptronConnectionType);
+        if (ioptronConnectionType === 'serial') {
+            setFormValue('ioptron-port-path', config.portPath);
+            setFormValue('ioptron-baud-rate', config.baudRate);
+        } else if (ioptronConnectionType === 'network') {
+            setFormValue('ioptron-host', config.host);
+            setFormValue('ioptron-tcp-port', config.tcpPort);
         }
-        setFormValue('port-path', config.portPath);
-        setFormValue('baud-rate', config.baudRate);
-        setFormValue('host', config.host);
-        setFormValue('tcp-port', config.tcpPort);
         setFormValue('aperture-diameter', config.apertureDiameter);
         setFormValue('focal-length', config.focalLength);
         updateApertureAreaFromDiameter('aperture-diameter', 'aperture-area');
+        const ioptronConnectionTypeEl = document.getElementById('ioptron-connection-type');
+        if (ioptronConnectionTypeEl) {
+            ioptronConnectionTypeEl.dispatchEvent(new Event('change'));
+        }
     } else if (vendor === 'synscan') {
         setFormValue('synscan-version', config.synscanVersion || 'auto');
         const synscanConnectionType = config.connectionType || 'auto';
@@ -1365,11 +1369,14 @@ document.getElementById('vendor').addEventListener('change', function() {
     updateAutoNumbering();
 });
 
-document.getElementById('connection-type').addEventListener('change', function() {
-    const type = this.value;
-    document.getElementById('serial-config').style.display = type === 'serial' ? 'block' : 'none';
-    document.getElementById('network-config').style.display = type === 'network' ? 'block' : 'none';
-});
+const ioptronConnectionType = document.getElementById('ioptron-connection-type');
+if (ioptronConnectionType) {
+    ioptronConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('ioptron-serial-config').style.display = type === 'serial' ? 'block' : 'none';
+        document.getElementById('ioptron-network-config').style.display = type === 'network' ? 'block' : 'none';
+    });
+}
 
 const synscanConnectionType = document.getElementById('synscan-connection-type');
 if (synscanConnectionType) {
@@ -1809,15 +1816,15 @@ document.getElementById('device-form').addEventListener('submit', async function
     };
 
     if (deviceData.vendor === 'ioptron') {
-        deviceData.connectionType = formData.get('connectionType') || 'serial';
+        deviceData.connectionType = formData.get('ioptronConnectionType') || 'auto';
         if (deviceData.connectionType === 'serial') {
-            deviceData.portPath = formData.get('portPath');
-            // Default to 115200 for modern iOptron mounts if the field is empty/invalid
-            deviceData.baudRate = parseInt(formData.get('baudRate')) || 115200;
-        } else {
-            deviceData.host = formData.get('host');
-            deviceData.tcpPort = parseInt(formData.get('tcpPort')) || 4030;
+            deviceData.portPath = formData.get('ioptronPortPath');
+            deviceData.baudRate = parseInt(formData.get('ioptronBaudRate')) || 115200;
+        } else if (deviceData.connectionType === 'network') {
+            deviceData.host = formData.get('ioptronHost');
+            deviceData.tcpPort = parseInt(formData.get('ioptronTcpPort')) || 4030;
         }
+        // "auto" needs no connection fields — port is discovered at startup
 
         const apertureDiameter = readOptionalNumber(formData, 'apertureDiameter');
         if (apertureDiameter !== null) {

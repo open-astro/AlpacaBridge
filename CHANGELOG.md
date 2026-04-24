@@ -20,6 +20,31 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - RA tracking restoration after pulse guide: the stop thread re-issues `set_tracking_mode()` after stopping an RA-axis pulse to counteract the variable-rate stop command killing sidereal tracking.
   - `IsPulseGuiding` now returns actual status (time-based tracking of pulse guide end time plus completion delay) instead of always returning false.
   - ConformU 4.3.0 validated for **Sky-Watcher HEQ5 PRO** on Linux x64 with 0 errors and 0 issues across all four pulse guide directions at declinations -9, +9, -3, +3.
+- **iOptron Telescope Driver** (AlpacaCore)
+  - Auto-detection of iOptron mounts: `connectionType: "auto"` scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for Prolific/FTDI/CP210x/Silicon Labs USB-serial adapters, probes each port with `:MountInfo#`, and connects to the first responding mount. No manual port configuration required.
+  - Mount model identification via `:MountInfo#` query using the INDI v3 model code table (60+ models). `get_name()` now returns the detected model (e.g., "iOptron HEM27") instead of the generic "iOptron Telescope".
+  - `iOptronPortInfo` struct and `enumerate_ioptron_ports()` / `model_code_to_name()` utility functions in the protocol wrapper.
+  - Default baud rate changed from 9600 to 115200 for serial connections, matching the iOptron RS-232 v3.10 protocol specification.
+  - `get_mount_info()` now populates `model_name` and `has_encoder` fields from the `:MountInfo#` response.
+  - `SideOfPier` now computed from hour angle (LST − RA) per the ASCOM convention (`pierEast` for HA ≥ 0, `pierWest` for HA < 0) instead of returning the raw physical pier side from the mount, which does not match ASCOM semantics when tracking past the meridian.
+  - `SlewToCoordinates` and `SlewToCoordinatesAsync` input validation now runs before sync offset subtraction, preventing `normalize_ra_hours()` from converting invalid RA values (e.g., -1, 25) into valid ones.
+  - Slew target coordinates split into ASCOM-facing values (for `TargetRightAscension`/`TargetDeclination` readback) and physical values (with sync offset applied, for actual mount dispatch), fixing ConformU `SlewToTarget` DEC errors.
+  - Pulse guide cross-axis hold grace period increased from 200 ms to 2000 ms, ensuring the frozen DEC value persists long enough for clients to read position after `IsPulseGuiding` returns false.
+  - ConformU 4.3.0 validated for **iOptron HEM27** on Linux x64 with 0 errors and 0 issues.
+- **iOptron Device Support** (AlpacaHTTP)
+  - Web UI: iOptron connection type selector with Auto-Detect (default), Serial, and Network options, matching the Celestron configuration pattern.
+  - All iOptron web UI element IDs prefixed with `ioptron-` to avoid collisions with other vendor config sections.
+- **Supported Drivers Documentation**: updated iOptron Driver Notes with auto-detection, mount identification, and tested firmware details (HEM27, V240121/V241201).
+
+### Fixed
+- **iOptron Telescope Driver** (AlpacaCore)
+  - Fixed `:MountInfo#` response parsing: iOptron returns exactly 4 ASCII digit bytes with no `#` terminator, but the driver was waiting for a `#` and timing out silently. Changed to idle-timeout read mode (`require_hash_terminator=false`).
+  - Fixed model code table: iOptron reassigned model codes in the v3 protocol (e.g., code `0025` is HEM27, not CEM25). Replaced the stale Indigo-derived table with the current INDI v3 driver's authoritative mapping.
+  - Fixed stale serial buffer bytes contaminating `:MS1#`/`:MS2#` slew responses (e.g., `"1111"` instead of `"1"`). Added `flush_input()` (via `tcflush`/`PurgeComm`) before issuing slew commands.
+- **Device Persistence** (AlpacaHTTP)
+  - Fixed stale device entries persisting across restarts: a single device failing to load on startup no longer prevents other devices from loading (individual try/catch per device).
+  - Fixed inability to remove failed devices: `handle_remove_device` now checks both the runtime registry and the persisted device list, so devices that failed to register can still be deleted.
+  - Fixed failed devices being invisible in the web UI: `handle_configured_devices` now includes persisted-but-unregistered devices marked with `LoadError: true`, displayed with a warning icon and red styling.
 
 ## [1.0.3] - 2026-04-23
 

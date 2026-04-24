@@ -252,11 +252,32 @@ Devices: Telescope.
 
 Protocol documentation: `AlpacaCore/external/SynScan/`. No external SDK required — uses serial communication directly.
 
+Connection types: Serial (USB serial) only. Default 9600 baud, 8N1. Protocol versions V3 (older) and V4 (current).
+
+- Auto-detection scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for SynScan hand controllers, probes each port with a firmware version query, and connects to the first responding mount.
+- **Pulse guiding**: SynScan V3/V4 protocol has no hardware pulse guide command. Driver implements software-timed variable-rate slew: issues a variable-rate axis slew at the guide rate, sleeps for the requested duration, then stops the axis and restores sidereal tracking. `IsPulseGuiding` tracks completion via time-based end time plus delay.
+- **GEM pier-side DEC direction flip**: DEC motor direction is inverted when the mount's pointing state is 'W' (west), matching the physical axis reversal on German equatorial mounts. This affects pulse guide and MoveAxis DEC commands.
+- **Position override accumulation**: Instead of reading back noisy mount positions after tiny guide pulses, the driver accumulates expected `rate × duration` deltas directly into the target coordinate frame. All consecutive pulse guide directions (N/S/E/W) operate in the same coordinate baseline, eliminating drift between reads.
+- **RA tracking restoration**: The stop thread re-issues `set_tracking_mode()` after stopping an RA-axis pulse to counteract the variable-rate stop command killing sidereal tracking. Without this, the mount stops tracking after every RA pulse guide.
+- ConformU 4.3.0 validated for **Sky-Watcher HEQ5 PRO** on Linux x64 with 0 errors and 0 issues.
+
 ### iOptron
 
 Devices: Telescope.
 
-Protocol documentation: `AlpacaCore/external/iOptron/`. No external SDK required — uses RS-232 serial communication directly.
+Protocol documentation: `AlpacaCore/external/iOptron/RS-232_Command_Language2014V310.md`. No external SDK required — uses RS-232 serial communication directly.
+
+Connection types: Serial (USB serial, 115200 baud default per v3.10 spec) and Network (WiFi TCP, default port 4030; varies by model — HEM27 uses 8899).
+
+- Auto-detection scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for Prolific/FTDI/CP210x/Silicon Labs USB-serial adapters, probes each port with `:MountInfo#`, and connects to the first responding mount.
+- **`:MountInfo#` quirk**: iOptron returns exactly 4 ASCII digit bytes with no `#` terminator. The protocol wrapper uses idle-timeout read mode (`require_hash_terminator=false`) for this command. Most other commands do terminate with `#`.
+- **Model code table**: iOptron reassigned model codes between protocol v2 and v3 (e.g., code `0025` is HEM27 in v3, was CEM25 in v2). Use the INDI v3 driver's mapping, not the older Indigo-derived table.
+- **SideOfPier**: The mount's `:GEP#` response includes a raw physical pier side value, but this does not match the ASCOM convention when tracking past the meridian. The driver computes SideOfPier from hour angle (LST − RA): `pierEast` (0) for HA ≥ 0, `pierWest` (1) for HA < 0. This matches the `DestinationSideOfPier` logic.
+- **Sync**: Use the mount's `:CM#` command (after `:SRA#` and `:Sd#` to set target) to calibrate the mount's internal pointing model directly. Do NOT maintain driver-level sync offsets — they cause coordinate divergence during slews because the mount doesn't know about them. The `:CM#` approach keeps mount and driver in agreement.
+- **Serial buffer flush**: Stale bytes from previous command responses can contaminate `:MS1#`/`:MS2#` slew responses (e.g., `"1111"` instead of `"1"`). The driver calls `flush_input()` (via `tcflush`/`PurgeComm`) before issuing slew commands.
+- **Pulse guiding**: Uses native iOptron pulse guide commands (`:ZS#`, `:ZQ#`, `:ZE#`, `:ZC#` for N/S/E/W with duration in ms). Hardware-timed by the mount.
+- **`:GEP#` response format**: sign + 8 RA digits + sign + 8 DEC digits + 1 side_of_pier digit + 1 pointing_state digit. No `#` terminator on some firmware versions — use idle-timeout read.
+- ConformU 4.3.0 validated for **iOptron HEM27** on Linux x64 with 0 errors and 0 issues.
 
 ### Celestron (NexStar)
 
@@ -276,7 +297,13 @@ Connection types: Serial (RS-232 on hand control base) and Network (WiFi bridge 
 - Timeouts: NexStar spec says up to 3.5 seconds worst case for pass-through commands. Driver uses 5-second default.
 - Time/Location: binary format (not ASCII). Timezone stored as hour offset (256-zone for negative). Location sign: 0=North/East, 1=South/West.
 - **Home**: Mounts with hardware home switches (CGX, CGX-L, CGE Pro) use `MC_LEVEL_START` (0x0B) on both axes followed by polling `MC_LEVEL_DONE` (0x12). FindHome is asynchronous — send commands, return immediately, poll via Slewing/AtHome. Note: `MC_SEEK_INDEX` (0x19) / `MC_AT_INDEX` (0x18) are for PEC worm gear index (RA only), NOT home. See protocol reference for details.
-- Side of pier: NexStar protocol does not expose pointing state directly. TODO: infer from hour angle for GEM mounts (CGE, Advanced GT, CGEM, CGX, AVX).
+- **Side of pier**: GEM mounts report pier side via the HC `p` command (`W` → pierWest, `E` → pierEast). This is a direct query — no hour angle inference needed.
+- **Pulse guiding**: Uses native MC_AUX_GUIDE (0x26) hardware command via AUX bus pass-through. The firmware times the pulse internally — no sleep, encoder snapshotting, or sync calls required. Cross-axis is frozen at pre-pulse value during the guide window; active axis returns computed `baseline + (rate × duration)` as a one-shot correction to avoid ConformU tolerance failures at high declinations where cos(DEC) amplification causes geometric noise.
+- **Adaptive RA slew offset**: Driver learns a running average of RA undershoot across slews and pre-biases subsequent slews to compensate for the CGX-L's no-tracking-during-goto behavior (matches INDI's `SlewOffsetRa` pattern).
+- **Post-slew tracking restoration**: Re-issues the top-level `T` set-tracking-mode command rather than a per-axis variable-rate passthrough, keeping the HC's internal tracking state coherent with the LCD readout.
+- **Site/time write skip when aligned**: `SiteLatitude`, `SiteLongitude`, and `UTCDate` writes are silently skipped (log warn, return success) when the mount is aligned, matching INDI's UpdateLocation/UpdateTime pattern. Writing these after alignment corrupts the HC's pointing model. Preserves ConformU property round-trip tests.
+- **Pier-safety gate**: Accepts either a successful `SyncToCoordinates` in the current driver session OR HC-reported alignment (`J` command). HC workflow: power on → Switch Position → Location → Last Alignment → "CGX-L Ready".
+- ConformU 4.3.0 validated for **Celestron CGX-L** on Linux x64 with 0 errors and 0 issues.
 - The NexStar serial protocol is nearly identical to SynScan — both derive from the same Celestron protocol family. The driver implementation follows the same pattern but with separate namespace and branding.
 
 ### Bisque (Paramount / TheSkyX)

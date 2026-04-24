@@ -76,37 +76,38 @@
                 <!-- iOptron Telescope Configuration -->
                 <div id="ioptron-config" class="vendor-config" style="display: none;">
                     <h3>iOptron Telescope Configuration</h3>
-                    
+
                     <div class="form-group">
-                        <label for="connection-type">Connection Type:</label>
-                        <select id="connection-type" name="connectionType" required>
-                            <option value="serial">Serial/USB</option>
+                        <label for="ioptron-connection-type">Connection Type:</label>
+                        <select id="ioptron-connection-type" name="ioptronConnectionType" required>
+                            <option value="auto">Auto-Detect</option>
+                            <option value="serial">Serial/USB (Manual)</option>
                             <option value="network">Network/WiFi</option>
                         </select>
                     </div>
 
                     <!-- Serial Connection -->
-                    <div id="serial-config" class="connection-config">
+                    <div id="ioptron-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
-                            <label for="port-path">Serial Port:</label>
-                            <input type="text" id="port-path" name="portPath" placeholder="/dev/ttyUSB0">
+                            <label for="ioptron-port-path">Serial Port:</label>
+                            <input type="text" id="ioptron-port-path" name="ioptronPortPath" placeholder="/dev/ttyUSB0">
                             <small>Linux: /dev/ttyUSB0</small>
                         </div>
                         <div class="form-group">
-                            <label for="baud-rate">Baud Rate:</label>
-                            <input type="number" id="baud-rate" name="baudRate" value="115200" min="1200" max="115200">
+                            <label for="ioptron-baud-rate">Baud Rate:</label>
+                            <input type="number" id="ioptron-baud-rate" name="ioptronBaudRate" value="115200" min="1200" max="115200">
                         </div>
                     </div>
 
                     <!-- Network Connection -->
-                    <div id="network-config" class="connection-config" style="display: none;">
+                    <div id="ioptron-network-config" class="connection-config" style="display: none;">
                         <div class="form-group">
-                            <label for="host">IP Address:</label>
-                            <input type="text" id="host" name="host" placeholder="192.168.1.100">
+                            <label for="ioptron-host">IP Address:</label>
+                            <input type="text" id="ioptron-host" name="ioptronHost" placeholder="192.168.1.100">
                         </div>
                         <div class="form-group">
-                            <label for="tcp-port">TCP Port:</label>
-                            <input type="number" id="tcp-port" name="tcpPort" value="4030" min="1" max="65535">
+                            <label for="ioptron-tcp-port">TCP Port:</label>
+                            <input type="number" id="ioptron-tcp-port" name="ioptronTcpPort" value="4030" min="1" max="65535">
                             <small>Default: 4030 (CEM60-EC), 8899 (HEM27)</small>
                         </div>
                     </div>
