@@ -6119,19 +6119,23 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.tcp_port = config.value("tcpPort", 4030);
 
                 if (conn_info.host.empty()) {
-                    error_message = "Host IP address is required";
-                    return false;
+                    int mount_index = config.value("mountIndex", 0);
+                    telescope = alpacacore::vendor::ioptron::create_ioptron_telescope_auto_network(
+                        device_number, mount_index, site_latitude, site_longitude,
+                        site_elevation, sync_time_on_connect);
                 }
             } else {
                 error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
                 return false;
             }
 
-            conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+            if (!telescope) {
+                conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
 
-            telescope = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
-                device_number, conn_info, site_latitude, site_longitude,
-                site_elevation, sync_time_on_connect);
+                telescope = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
+                    device_number, conn_info, site_latitude, site_longitude,
+                    site_elevation, sync_time_on_connect);
+            }
         }
 
         if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {

@@ -33,7 +33,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <errno.h>
+#include <poll.h>
 
 #ifndef _WIN32
 #include <filesystem>
@@ -133,6 +136,218 @@ std::string probe_ioptron_port(const std::string& port_path) {
     (void)port_path;
     return "";
 #endif
+}
+
+// Probe a TCP host:port for an iOptron mount by sending :MountInfo# over a
+// non-blocking socket with a short timeout. Returns the 4-digit model code on
+// success, empty string on failure.
+std::string probe_ioptron_network(const std::string& host, int port, int timeout_ms = 1500) {
+#ifndef _WIN32
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return "";
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    sockaddr_in addr{};
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        close(fd);
+        return "";
+    }
+
+    int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
+        close(fd);
+        return "";
+    }
+
+    if (rc < 0) {
+        struct pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        int poll_rc = poll(&pfd, 1, timeout_ms);
+        if (poll_rc <= 0) {
+            close(fd);
+            return "";
+        }
+        int sock_err = 0;
+        socklen_t len = sizeof(sock_err);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &sock_err, &len);
+        if (sock_err != 0) {
+            close(fd);
+            return "";
+        }
+    }
+
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+
+    struct timeval tv{};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    const char cmd[] = ":MountInfo#";
+    ssize_t written = write(fd, cmd, sizeof(cmd) - 1);
+    if (written != static_cast<ssize_t>(sizeof(cmd) - 1)) {
+        close(fd);
+        return "";
+    }
+
+    char resp[4] = {};
+    int total = 0;
+    auto start = std::chrono::steady_clock::now();
+    while (total < 4) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed > timeout_ms) {
+            break;
+        }
+        char ch = 0;
+        ssize_t r = read(fd, &ch, 1);
+        if (r == 1) {
+            resp[total++] = ch;
+        } else if (r == 0) {
+            break;
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
+            break;
+        }
+    }
+
+    close(fd);
+
+    if (total == 4) {
+        bool all_digit = true;
+        for (int i = 0; i < 4; ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(resp[i]))) {
+                all_digit = false;
+                break;
+            }
+        }
+        if (all_digit) {
+            return std::string(resp, 4);
+        }
+    }
+
+    return "";
+#else
+    (void)host;
+    (void)port;
+    (void)timeout_ms;
+    return "";
+#endif
+}
+
+struct LocalSubnet {
+    uint32_t base;
+    uint32_t mask;
+    uint32_t self;
+    std::string iface_name;
+};
+
+std::vector<LocalSubnet> get_local_subnets() {
+    std::vector<LocalSubnet> subnets;
+#ifndef _WIN32
+    struct ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) != 0) {
+        return subnets;
+    }
+
+    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+        if (ifa->ifa_flags & IFF_LOOPBACK) {
+            continue;
+        }
+        if (!(ifa->ifa_flags & IFF_UP)) {
+            continue;
+        }
+        if (!ifa->ifa_netmask) {
+            continue;
+        }
+
+        auto* sa = reinterpret_cast<sockaddr_in*>(ifa->ifa_addr);
+        auto* nm = reinterpret_cast<sockaddr_in*>(ifa->ifa_netmask);
+        uint32_t ip = ntohl(sa->sin_addr.s_addr);
+        uint32_t mask = ntohl(nm->sin_addr.s_addr);
+        uint32_t base = ip & mask;
+        std::string name = ifa->ifa_name ? ifa->ifa_name : "";
+
+        bool duplicate = false;
+        for (const auto& s : subnets) {
+            if (s.base == base && s.mask == mask) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            subnets.push_back({base, mask, ip, name});
+        }
+    }
+
+    freeifaddrs(ifaddr);
+#endif
+    return subnets;
+}
+
+struct KnownIOptronAddress {
+    const char* host;
+    int port;
+};
+
+// Well-known default IPs used by iOptron WiFi modules.
+// The mount acts as an AP and always assigns itself a fixed address.
+static constexpr KnownIOptronAddress KNOWN_IOPTRON_ADDRESSES[] = {
+    {"10.10.100.254", 8899},
+    {"10.10.100.254", 4030},
+    {"10.10.100.1",   8899},
+    {"10.10.100.1",   4030},
+    {"192.168.100.1",  8899},
+    {"192.168.100.1",  4030},
+};
+
+// Read default gateway for a given interface from /proc/net/route.
+// Returns the gateway IP in host byte order, or 0 if not found.
+uint32_t get_interface_gateway(const std::string& iface_name) {
+#ifndef _WIN32
+    FILE* fp = fopen("/proc/net/route", "r");
+    if (!fp) {
+        return 0;
+    }
+
+    char line[256];
+    // Skip header
+    if (!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), fp)) {
+        char iface[64];
+        unsigned int dest, gw;
+        if (sscanf(line, "%63s %x %x", iface, &dest, &gw) == 3) {
+            if (iface_name == iface && dest == 0 && gw != 0) {
+                fclose(fp);
+                return ntohl(gw);
+            }
+        }
+    }
+
+    fclose(fp);
+#else
+    (void)iface_name;
+#endif
+    return 0;
 }
 
 } // anonymous namespace
@@ -249,6 +464,224 @@ std::vector<iOptronPortInfo> enumerate_ioptron_ports() {
             ALPACA_LOG_INFO("iOptron", "Found iOptron mount on " + resolved +
                             " (model " + code + (model.empty() ? "" : " / " + model) + ")");
             results.push_back({resolved, name, code});
+        }
+    }
+#endif
+
+    return results;
+}
+
+// Try to connect + probe a single host:port in one step for the fast-path
+// known-address check. Returns model code or empty string.
+iOptronNetworkHostInfo try_known_address(const char* host, int port, int timeout_ms) {
+    std::string code = probe_ioptron_network(host, port, timeout_ms);
+    if (!code.empty()) {
+        return {host, port, code};
+    }
+    return {"", 0, ""};
+}
+
+std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
+    std::vector<iOptronNetworkHostInfo> results;
+
+#ifndef _WIN32
+    static constexpr int PROBE_PORTS[] = {8899, 4030};
+    static constexpr int NUM_PROBE_PORTS = 2;
+    static constexpr int CONNECT_BATCH_SIZE = 64;
+    static constexpr int CONNECT_TIMEOUT_MS = 1200;
+    static constexpr int PROBE_TIMEOUT_MS = 2500;
+    static constexpr int KNOWN_ADDR_TIMEOUT_MS = 2500;
+    static constexpr uint32_t MAX_SCANNABLE_HOST_BITS = 255;
+
+    // --- Phase 1: Try well-known iOptron default addresses first ---
+    ALPACA_LOG_INFO("iOptron", "Network discovery: trying known iOptron default addresses...");
+
+    for (const auto& addr : KNOWN_IOPTRON_ADDRESSES) {
+        ALPACA_LOG_INFO("iOptron", "  Probing " + std::string(addr.host) + ":" + std::to_string(addr.port) + "...");
+        auto found = try_known_address(addr.host, addr.port, KNOWN_ADDR_TIMEOUT_MS);
+        if (!found.model_code.empty()) {
+            std::string model = model_code_to_name(found.model_code);
+            ALPACA_LOG_INFO("iOptron", "Network discovery: found mount at " +
+                            found.host + ":" + std::to_string(found.tcp_port) +
+                            " (model " + found.model_code +
+                            (model.empty() ? "" : " / " + model) + ")");
+            results.push_back(found);
+            return results;
+        }
+    }
+
+    ALPACA_LOG_INFO("iOptron", "Network discovery: no mount found at known addresses, scanning subnets...");
+
+    // --- Phase 2: Enumerate local subnets and scan ---
+    auto subnets = get_local_subnets();
+    if (subnets.empty()) {
+        ALPACA_LOG_INFO("iOptron", "Network discovery: no local network interfaces found");
+        return results;
+    }
+
+    for (const auto& subnet : subnets) {
+        char self_str[INET_ADDRSTRLEN];
+        struct in_addr self_addr{};
+        self_addr.s_addr = htonl(subnet.self);
+        inet_ntop(AF_INET, &self_addr, self_str, sizeof(self_str));
+
+        char mask_str[INET_ADDRSTRLEN];
+        struct in_addr mask_addr{};
+        mask_addr.s_addr = htonl(subnet.mask);
+        inet_ntop(AF_INET, &mask_addr, mask_str, sizeof(mask_str));
+
+        uint32_t host_bits = ~subnet.mask;
+
+        ALPACA_LOG_INFO("iOptron", "Network discovery: interface " + subnet.iface_name +
+                        " addr=" + std::string(self_str) + " mask=" + std::string(mask_str) +
+                        " (" + std::to_string(host_bits > 1 ? host_bits - 1 : 0) + " scannable hosts)");
+
+        // Try the gateway address first — on mount WiFi networks, the mount IS the gateway
+        uint32_t gw = get_interface_gateway(subnet.iface_name);
+        if (gw != 0 && gw != subnet.self) {
+            struct in_addr gw_addr{};
+            gw_addr.s_addr = htonl(gw);
+            char gw_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &gw_addr, gw_str, sizeof(gw_str));
+
+            ALPACA_LOG_INFO("iOptron", "Network discovery: trying gateway " +
+                            std::string(gw_str) + " on " + subnet.iface_name);
+            for (int port : PROBE_PORTS) {
+                auto found = try_known_address(gw_str, port, KNOWN_ADDR_TIMEOUT_MS);
+                if (!found.model_code.empty()) {
+                    std::string model = model_code_to_name(found.model_code);
+                    ALPACA_LOG_INFO("iOptron", "Network discovery: found mount at gateway " +
+                                    found.host + ":" + std::to_string(found.tcp_port) +
+                                    " (model " + found.model_code +
+                                    (model.empty() ? "" : " / " + model) + ")");
+                    results.push_back(found);
+                    return results;
+                }
+            }
+        }
+
+        if (host_bits < 2) {
+            continue;
+        }
+
+        if (host_bits > MAX_SCANNABLE_HOST_BITS) {
+            ALPACA_LOG_INFO("iOptron", "Network discovery: skipping large subnet on " +
+                            subnet.iface_name + " (" + std::to_string(host_bits) +
+                            " host bits, max scannable is " +
+                            std::to_string(MAX_SCANNABLE_HOST_BITS) + ")");
+            continue;
+        }
+
+        // Build list of (ip, port) candidates
+        struct Candidate { uint32_t ip; int port; };
+        std::vector<Candidate> candidates;
+        candidates.reserve(host_bits * NUM_PROBE_PORTS);
+        for (uint32_t i = 1; i < host_bits; ++i) {
+            uint32_t ip = subnet.base | i;
+            if (ip == subnet.self) {
+                continue;
+            }
+            for (int port : PROBE_PORTS) {
+                candidates.push_back({ip, port});
+            }
+        }
+        // Also include the broadcast-1 address (often the gateway/mount on small WiFi nets)
+        uint32_t last_host = subnet.base | host_bits;
+        if (last_host != subnet.self) {
+            for (int port : PROBE_PORTS) {
+                candidates.push_back({last_host, port});
+            }
+        }
+
+        ALPACA_LOG_INFO("iOptron", "Network discovery: scanning " +
+                        std::to_string(candidates.size()) + " candidates on " + subnet.iface_name);
+
+        struct PendingConnect {
+            int fd;
+            std::string host;
+            int port;
+        };
+
+        for (std::size_t batch_start = 0; batch_start < candidates.size() && results.empty();
+             batch_start += CONNECT_BATCH_SIZE) {
+            std::size_t batch_end = std::min(batch_start + static_cast<std::size_t>(CONNECT_BATCH_SIZE),
+                                             candidates.size());
+
+            std::vector<PendingConnect> pending;
+            pending.reserve(batch_end - batch_start);
+
+            for (std::size_t ci = batch_start; ci < batch_end; ++ci) {
+                const auto& c = candidates[ci];
+                int fd = socket(AF_INET, SOCK_STREAM, 0);
+                if (fd < 0) {
+                    continue;
+                }
+
+                int flags = fcntl(fd, F_GETFL, 0);
+                fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+                sockaddr_in addr{};
+                std::memset(&addr, 0, sizeof(addr));
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons(static_cast<uint16_t>(c.port));
+                addr.sin_addr.s_addr = htonl(c.ip);
+
+                int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+                if (rc == 0 || errno == EINPROGRESS) {
+                    struct in_addr a{};
+                    a.s_addr = htonl(c.ip);
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &a, ip_str, sizeof(ip_str));
+                    pending.push_back({fd, std::string(ip_str), c.port});
+                } else {
+                    close(fd);
+                }
+            }
+
+            if (pending.empty()) {
+                continue;
+            }
+
+            std::vector<struct pollfd> pfds(pending.size());
+            for (std::size_t i = 0; i < pending.size(); ++i) {
+                pfds[i].fd = pending[i].fd;
+                pfds[i].events = POLLOUT;
+                pfds[i].revents = 0;
+            }
+
+            poll(pfds.data(), static_cast<nfds_t>(pfds.size()), CONNECT_TIMEOUT_MS);
+
+            for (std::size_t i = 0; i < pending.size(); ++i) {
+                bool connected = false;
+                if (pfds[i].revents & POLLOUT) {
+                    int sock_err = 0;
+                    socklen_t len = sizeof(sock_err);
+                    getsockopt(pending[i].fd, SOL_SOCKET, SO_ERROR, &sock_err, &len);
+                    connected = (sock_err == 0);
+                }
+                close(pending[i].fd);
+
+                if (!connected) {
+                    continue;
+                }
+
+                ALPACA_LOG_INFO("iOptron", "Network discovery: TCP open at " +
+                                pending[i].host + ":" + std::to_string(pending[i].port) +
+                                ", sending :MountInfo#...");
+                std::string code = probe_ioptron_network(pending[i].host, pending[i].port, PROBE_TIMEOUT_MS);
+                if (!code.empty()) {
+                    std::string model = model_code_to_name(code);
+                    ALPACA_LOG_INFO("iOptron", "Network discovery: found iOptron mount at " +
+                                    pending[i].host + ":" + std::to_string(pending[i].port) +
+                                    " (model " + code +
+                                    (model.empty() ? "" : " / " + model) + ")");
+                    results.push_back({pending[i].host, pending[i].port, code});
+                }
+            }
+        }
+
+        if (!results.empty()) {
+            break;
         }
     }
 #endif
@@ -410,21 +843,62 @@ public:
     
     void send_command_blind(const std::string& command) {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+
         if (!connected_) {
             throw AlpacaException("Not connected to mount");
         }
-        
+
         std::string full_command = command;
         if (full_command.empty() || full_command.back() != '#') {
             full_command += "#";
         }
-        
+
         ALPACA_LOG_TRACE("iOptron", "CMD " + full_command + " (blind)");
 
         if (!write_data(full_command)) {
             throw AlpacaException("Failed to send command to mount");
         }
+
+        // Over TCP, "blind" commands still produce acknowledgment bytes.
+        // Drain them to prevent stale data from accumulating in the receive
+        // buffer, which overwhelms the mount's WiFi module on rapid-fire
+        // command sequences.
+        if (connection_type_ == ConnectionType::Network) {
+            drain_network_stale(50);
+        }
+    }
+
+    void drain_network_stale(int wait_ms) {
+#ifndef _WIN32
+        struct pollfd pfd{};
+        pfd.fd = socket_fd_;
+        pfd.events = POLLIN;
+        while (true) {
+            int ret = poll(&pfd, 1, wait_ms);
+            if (ret <= 0) break;
+            char ch;
+            ssize_t n = recv(socket_fd_, &ch, 1, 0);
+            if (n <= 0) break;
+            wait_ms = 0;
+        }
+#else
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(socket_handle_, &readfds);
+        timeval tv{};
+        tv.tv_sec = 0;
+        tv.tv_usec = wait_ms * 1000;
+        while (true) {
+            int ret = select(0, &readfds, nullptr, nullptr, &tv);
+            if (ret <= 0) break;
+            char ch;
+            int n = recv(socket_handle_, &ch, 1, 0);
+            if (n <= 0) break;
+            tv.tv_usec = 0;
+            FD_ZERO(&readfds);
+            FD_SET(socket_handle_, &readfds);
+        }
+#endif
     }
 
     void flush_input() {

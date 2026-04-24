@@ -62,7 +62,7 @@ public:
         , aperture_area_m2_(0.0)
         , focal_length_m_(0.0)
         , pulse_guiding_active_(false)
-        , pulse_guiding_end_(std::chrono::steady_clock::now())
+        , pulse_guiding_end_ns_(0)
         , site_latitude_cached_(0.0)
         , site_longitude_cached_(0.0)
         , site_info_valid_(false)
@@ -95,7 +95,7 @@ public:
         , pending_site_latitude_(site_latitude_deg)
         , pending_site_longitude_(site_longitude_deg)
         , pending_site_elevation_(site_elevation_m)
-        , sync_time_on_connect_(sync_time_on_connect.value_or(false))
+        , sync_time_on_connect_(sync_time_on_connect.value_or(true))
     {
         // Initialize mount info (will be populated on connect)
     }
@@ -209,7 +209,8 @@ public:
                 park_override_until_ = std::chrono::steady_clock::time_point{};
                 tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
                 utc_query_supported_ = true;
-                pulse_guiding_active_ = false;
+                pulse_guiding_active_.store(false, std::memory_order_release);
+                pulse_guiding_end_ns_.store(0, std::memory_order_relaxed);
                 pulse_guiding_hold_ra_valid_ = false;
                 pulse_guiding_hold_ra_hours_ = 0.0;
                 pulse_guiding_hold_until_ = std::chrono::steady_clock::time_point{};
@@ -479,12 +480,18 @@ public:
     }
     
     bool get_is_pulse_guiding() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        if (pulse_guiding_active_ && std::chrono::steady_clock::now() >= pulse_guiding_end_) {
-            pulse_guiding_active_ = false;
+        if (!connected_) {
+            throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
         }
-        return pulse_guiding_active_;
+        if (pulse_guiding_active_.load(std::memory_order_acquire)) {
+            auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+            if (now_ns >= pulse_guiding_end_ns_.load(std::memory_order_relaxed)) {
+                pulse_guiding_active_.store(false, std::memory_order_release);
+                return false;
+            }
+            return true;
+        }
+        return false;
     }
     
     bool get_can_set_declination_rate() const override {
@@ -867,13 +874,8 @@ public:
         ensure_not_parked_locked("MoveAxis");
 
         if (axis != 0 && axis != 1) {
-            if (axis == 2) {
-                throw AlpacaException(
-                    "Axis movement not supported for this axis",
-                    AlpacaError::MethodNotImplemented
-                );
-            }
-            throw AlpacaException("Axis must be 0 or 1", AlpacaError::InvalidValue);
+            throw AlpacaException("Axis must be 0 (Primary) or 1 (Secondary)",
+                                  AlpacaError::InvalidValue);
         }
 
         double abs_rate = std::abs(rate);
@@ -981,18 +983,6 @@ public:
         }
         refresh_status_cache_locked();
         if (cached_status_.is_slewing) {
-            if (slew_in_progress_ && target_set_) {
-                if (slew_target_reached_locked()) {
-                    ALPACA_LOG_INFO("iOptron", "Slew complete by position tolerance (status still slewing)");
-                    cached_status_.is_slewing = false;
-                    status_cache_valid_ = true;
-                    last_status_update_ = now;
-                    slew_in_progress_ = false;
-                    restore_altitude_limit_locked("Slewing");
-                    restore_meridian_treatment_locked("Slewing");
-                    return false;
-                }
-            }
             return true;
         }
         if (slew_override_until_ > now) {
@@ -1272,11 +1262,15 @@ public:
             pulse_guiding_hold_dec_valid_ = false;
         }
         protocol.pulse_guide(calibrated_direction, duration);
-        pulse_guiding_active_ = (duration > 0);
-        if (pulse_guiding_active_) {
-            pulse_guiding_end_ = std::chrono::steady_clock::now() +
-                                 std::chrono::milliseconds(duration) +
-                                 kPulseGuideCompletionDelay;
+        if (duration > 0) {
+            auto end = std::chrono::steady_clock::now() +
+                       std::chrono::milliseconds(duration) +
+                       kPulseGuideCompletionDelay;
+            pulse_guiding_end_ns_.store(end.time_since_epoch().count(),
+                                        std::memory_order_relaxed);
+            pulse_guiding_active_.store(true, std::memory_order_release);
+        } else {
+            pulse_guiding_active_.store(false, std::memory_order_release);
         }
     }
     
@@ -1395,8 +1389,6 @@ public:
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
-        double ra_hours = 0.0;
-        double dec_degrees = 0.0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1408,17 +1400,19 @@ public:
                                           AlpacaError::ValueNotSet);
                 }
             }
-            auto converted = alt_az_to_ra_dec(
-                altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
-            ra_hours = converted.first;
-            dec_degrees = converted.second;
-            prepare_slew_state_locked(ra_hours, dec_degrees, ra_hours, dec_degrees, "SlewToAltAzAsync");
+            slew_in_progress_ = true;
+            ensure_not_parked_locked("SlewToAltAzAsync");
         }
 
         try {
-            std::thread([this, ra_hours, dec_degrees]() {
+            std::thread([this, altitude, azimuth]() {
                 std::lock_guard<std::mutex> lock(mutex_);
                 try {
+                    auto converted = alt_az_to_ra_dec(
+                        altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
+                    double ra_hours = converted.first;
+                    double dec_degrees = converted.second;
+                    prepare_slew_state_locked(ra_hours, dec_degrees, ra_hours, dec_degrees, "SlewToAltAzAsync");
                     dispatch_slew_command_locked(ra_hours, dec_degrees, true, "SlewToAltAzAsync");
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
@@ -1734,6 +1728,55 @@ private:
             }
             std::this_thread::sleep_for(kSlewPollInterval);
         }
+
+        // The mount may clear its slewing status well before the physical
+        // slew finishes (observed on WiFi: GLS→0 while mount still moving
+        // tens of degrees).  Wait for position readings to stabilize — two
+        // consecutive reads within tolerance of each other — AND target
+        // reached.  Uses the slew deadline, not a fixed iteration cap.
+        if (target_set_) {
+            static constexpr double kStableThresholdArcsec = 30.0;
+            static constexpr int kRequiredStableReads = 3;
+            double prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
+            double prev_dec_degrees = std::numeric_limits<double>::quiet_NaN();
+            int stable_count = 0;
+
+            while (std::chrono::steady_clock::now() < deadline) {
+                bool target_reached = false;
+                double cur_ra = 0, cur_dec = 0;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    target_reached = slew_target_reached_locked();
+                    cur_ra = cached_ra_hours_;
+                    cur_dec = cached_dec_degrees_;
+                }
+
+                if (target_reached) {
+                    break;
+                }
+
+                if (!std::isnan(prev_ra_hours)) {
+                    double ra_delta = std::abs(shortest_ra_delta_hours(cur_ra, prev_ra_hours)) * 15.0 * 3600.0;
+                    double dec_delta = std::abs(cur_dec - prev_dec_degrees) * 3600.0;
+                    if (ra_delta < kStableThresholdArcsec && dec_delta < kStableThresholdArcsec) {
+                        ++stable_count;
+                    } else {
+                        stable_count = 0;
+                    }
+                }
+                prev_ra_hours = cur_ra;
+                prev_dec_degrees = cur_dec;
+
+                if (stable_count >= kRequiredStableReads) {
+                    ALPACA_LOG_INFO("iOptron", std::string(label) +
+                                    ": position stabilized but target not reached");
+                    break;
+                }
+
+                std::this_thread::sleep_for(kSlewPollInterval);
+            }
+        }
+
         if (slew_settle_time_seconds_ > 0) {
             std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
@@ -2313,7 +2356,7 @@ private:
     
     int device_number_;
     ConnectionInfo connection_info_;
-    bool connected_;
+    std::atomic<bool> connected_{false};
     mutable MountInfo mount_info_;
     mutable std::mutex mutex_;
     
@@ -2327,8 +2370,8 @@ private:
     double custom_tracking_rate_ = 1.0;
     bool does_refraction_ = false;
     bool target_set_ = false;
-    mutable bool pulse_guiding_active_ = false;
-    mutable std::chrono::steady_clock::time_point pulse_guiding_end_{};
+    mutable std::atomic<bool> pulse_guiding_active_{false};
+    mutable std::atomic<int64_t> pulse_guiding_end_ns_{0};
     mutable bool pulse_guiding_hold_ra_valid_ = false;
     mutable double pulse_guiding_hold_ra_hours_ = 0.0;
     mutable std::chrono::steady_clock::time_point pulse_guiding_hold_until_{};
@@ -2470,6 +2513,44 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(
     conn.type = ConnectionType::Serial;
     conn.port_path = port.port_path;
     conn.baud_rate = 115200;
+
+    return create_ioptron_telescope_with_site(
+        device_number, conn, site_latitude_deg, site_longitude_deg,
+        site_elevation_m, sync_time_on_connect);
+}
+
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(
+    int device_number,
+    int mount_index,
+    std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect) {
+
+    ALPACA_LOG_INFO("iOptron", "Starting network auto-discovery...");
+    auto hosts = enumerate_ioptron_network_hosts();
+    if (hosts.empty()) {
+        throw AlpacaException(
+            "No iOptron mount found on the local network. "
+            "Tried known default addresses and scanned local subnets on ports 8899 & 4030. "
+            "Check the logs for details. Verify the mount WiFi is connected and the mount is powered on.");
+    }
+    if (mount_index < 0 || mount_index >= static_cast<int>(hosts.size())) {
+        throw AlpacaException("Mount index " + std::to_string(mount_index) +
+                              " out of range (found " + std::to_string(hosts.size()) + " mount(s) on network)");
+    }
+
+    const auto& found = hosts[static_cast<std::size_t>(mount_index)];
+    std::string model = model_code_to_name(found.model_code);
+    ALPACA_LOG_INFO("iOptron", "Network auto-detected mount at " + found.host +
+                    ":" + std::to_string(found.tcp_port) +
+                    " (model " + found.model_code +
+                    (model.empty() ? "" : " / " + model) + ")");
+
+    ConnectionInfo conn;
+    conn.type = ConnectionType::Network;
+    conn.host = found.host;
+    conn.tcp_port = found.tcp_port;
 
     return create_ioptron_telescope_with_site(
         device_number, conn, site_latitude_deg, site_longitude_deg,

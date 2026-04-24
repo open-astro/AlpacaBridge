@@ -57,4 +57,12 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(
     std::optional<double> site_elevation_m = std::nullopt,
     std::optional<bool> sync_time_on_connect = std::nullopt);
 
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(
+    int device_number,
+    int mount_index = 0,
+    std::optional<double> site_latitude_deg = std::nullopt,
+    std::optional<double> site_longitude_deg = std::nullopt,
+    std::optional<double> site_elevation_m = std::nullopt,
+    std::optional<bool> sync_time_on_connect = std::nullopt);
+
 } // namespace alpacacore::vendor::ioptron

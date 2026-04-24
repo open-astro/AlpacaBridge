@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-04-23
+## Updated 2026-04-24
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -217,10 +217,13 @@ This document lists all hardware vendors and device types that are verified to w
 ### iOptron Driver Notes
 
 - **Protocol**: iOptron Mount RS-232 Command Language Version 3.10 (January 4th, 2021)
-- **Connection**: USB/Serial or Wi-Fi. Auto-detection supported — `connectionType: "auto"` scans serial ports for iOptron mounts and connects to the first responding mount.
-- **Auto-detection**: Scans `/dev/serial/by-id/` for Prolific, FTDI, CP210x, Silicon Labs, and generic USB-serial devices and probes each with an iOptron `:MountInfo#` query at 115200 baud. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`. The 4-byte model code response (no `#` terminator) is mapped to a human-readable mount name (e.g., `0025` → HEM27) using the current INDI v3 model table.
+- **Connection**: USB/Serial or Wi-Fi (TCP). Auto-detection supported for both — `connectionType: "auto"` scans serial ports first, then falls back to network discovery if no serial mount is found.
+- **Serial auto-detection**: Scans `/dev/serial/by-id/` for Prolific, FTDI, CP210x, Silicon Labs, and generic USB-serial devices and probes each with an iOptron `:MountInfo#` query at 115200 baud. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`. The 4-byte model code response (no `#` terminator) is mapped to a human-readable mount name (e.g., `0025` → HEM27) using the current INDI v3 model table.
+- **Network auto-detection**: When the connection type is set to Network/Auto, the driver runs a multi-phase discovery: (1) probes well-known iOptron Wi-Fi module addresses (`10.10.100.254`, `10.10.100.1`, `192.168.100.1`) on ports 8899 and 4030; (2) if no mount found, queries the default gateway on each local interface (iOptron mounts act as the AP gateway); (3) if still not found, scans all hosts on each local subnet (up to /24) with parallel non-blocking TCP connect probes. Each candidate is verified with a `:MountInfo#` query before being accepted.
 - **Mount identification**: On connect, the driver queries `:MountInfo#` and maps the model code to a name displayed in `Name` (e.g., "iOptron HEM27"), `UniqueID`, and server logs. 60+ models supported including CEM, GEM, HEM, HAE, HAZ, and SkyHunter series.
+- **Wi-Fi reliability**: Network (TCP) connections drain stale acknowledgment bytes from blind commands to prevent buffer accumulation on the mount's Wi-Fi module. `IsPulseGuiding` uses lock-free atomics to meet the ConformU fast response target over high-latency links.
 - **Tested firmware**: Driver tested on **HEM27** with main board firmware **V240121** and hand controller firmware **V241201**. Other firmware versions and models may work but have not been individually verified.
+- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on both USB and Wi-Fi (x64). ARM64 validation pending.
 
 ### SynScan V3/V4
 

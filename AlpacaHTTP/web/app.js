@@ -1821,8 +1821,11 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.portPath = formData.get('ioptronPortPath');
             deviceData.baudRate = parseInt(formData.get('ioptronBaudRate')) || 115200;
         } else if (deviceData.connectionType === 'network') {
-            deviceData.host = formData.get('ioptronHost');
-            deviceData.tcpPort = parseInt(formData.get('ioptronTcpPort')) || 4030;
+            const ioptronHost = (formData.get('ioptronHost') || '').trim();
+            if (ioptronHost) {
+                deviceData.host = ioptronHost;
+                deviceData.tcpPort = parseInt(formData.get('ioptronTcpPort')) || 4030;
+            }
         }
         // "auto" needs no connection fields — port is discovered at startup
 

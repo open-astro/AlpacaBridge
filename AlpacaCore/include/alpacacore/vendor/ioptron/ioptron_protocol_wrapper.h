@@ -26,7 +26,15 @@ struct iOptronPortInfo {
     std::string model_code;
 };
 
+struct iOptronNetworkHostInfo {
+    std::string host;
+    int tcp_port = 0;
+    std::string model_code;
+};
+
 std::vector<iOptronPortInfo> enumerate_ioptron_ports();
+
+std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts();
 
 std::string model_code_to_name(const std::string& code);
 

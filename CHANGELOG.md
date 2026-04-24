@@ -21,7 +21,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - `IsPulseGuiding` now returns actual status (time-based tracking of pulse guide end time plus completion delay) instead of always returning false.
   - ConformU 4.3.0 validated for **Sky-Watcher HEQ5 PRO** on Linux x64 with 0 errors and 0 issues across all four pulse guide directions at declinations -9, +9, -3, +3.
 - **iOptron Telescope Driver** (AlpacaCore)
-  - Auto-detection of iOptron mounts: `connectionType: "auto"` scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for Prolific/FTDI/CP210x/Silicon Labs USB-serial adapters, probes each port with `:MountInfo#`, and connects to the first responding mount. No manual port configuration required.
+  - Auto-detection of iOptron mounts over serial: `connectionType: "auto"` scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for Prolific/FTDI/CP210x/Silicon Labs USB-serial adapters, probes each port with `:MountInfo#`, and connects to the first responding mount. No manual port configuration required.
+  - Network auto-discovery of iOptron mounts over Wi-Fi: when using Network connection type, the driver probes well-known iOptron Wi-Fi module addresses (`10.10.100.254`, `10.10.100.1`, `192.168.100.1`) on ports 8899 and 4030, then the default gateway on each local interface, and finally scans all hosts on local subnets (up to /24) with parallel non-blocking TCP connect probes. Each candidate is verified with `:MountInfo#` before acceptance.
   - Mount model identification via `:MountInfo#` query using the INDI v3 model code table (60+ models). `get_name()` now returns the detected model (e.g., "iOptron HEM27") instead of the generic "iOptron Telescope".
   - `iOptronPortInfo` struct and `enumerate_ioptron_ports()` / `model_code_to_name()` utility functions in the protocol wrapper.
   - Default baud rate changed from 9600 to 115200 for serial connections, matching the iOptron RS-232 v3.10 protocol specification.
@@ -30,17 +31,25 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - `SlewToCoordinates` and `SlewToCoordinatesAsync` input validation now runs before sync offset subtraction, preventing `normalize_ra_hours()` from converting invalid RA values (e.g., -1, 25) into valid ones.
   - Slew target coordinates split into ASCOM-facing values (for `TargetRightAscension`/`TargetDeclination` readback) and physical values (with sync offset applied, for actual mount dispatch), fixing ConformU `SlewToTarget` DEC errors.
   - Pulse guide cross-axis hold grace period increased from 200 ms to 2000 ms, ensuring the frozen DEC value persists long enough for clients to read position after `IsPulseGuiding` returns false.
-  - ConformU 4.3.0 validated for **iOptron HEM27** on Linux x64 with 0 errors and 0 issues.
+  - ConformU 4.3.0 validated for **iOptron HEM27** on Linux x64 with 0 errors and 0 issues over both USB and Wi-Fi.
+  - Wi-Fi reliability: blind commands (`:ST1#`, `:SR9#`, `:qR#`, `:mw#`, etc.) now drain stale TCP acknowledgment bytes via non-blocking `poll()`/`select()` after each send, preventing buffer accumulation that overwhelmed the mount's Wi-Fi module and caused GEP/GLS timeouts.
+  - `IsPulseGuiding` response time improved from ~150 ms to sub-millisecond on Wi-Fi by replacing the main mutex lock with lock-free `std::atomic` fields (`pulse_guiding_active_`, `pulse_guiding_end_ns_`), meeting the ConformU fast response target over high-latency links.
+  - Removed position tolerance shortcut from `get_slewing()` that prematurely declared slews complete while the mount was still physically moving (GLS status=2). The mount's own status register is now trusted, and the settle loop in `wait_for_slew_completion` handles final position convergence.
+  - `MoveAxis` tertiary axis (axis=2) now throws `InvalidValue` instead of `MethodNotImplemented`, matching ConformU 4.3.0 expectations.
+  - Settle loop rewritten from capped iteration count to deadline-based position stability detection with 3 consecutive stable reads within 30 arcseconds threshold.
 - **iOptron Device Support** (AlpacaHTTP)
   - Web UI: iOptron connection type selector with Auto-Detect (default), Serial, and Network options, matching the Celestron configuration pattern.
   - All iOptron web UI element IDs prefixed with `ioptron-` to avoid collisions with other vendor config sections.
-- **Supported Drivers Documentation**: updated iOptron Driver Notes with auto-detection, mount identification, and tested firmware details (HEM27, V240121/V241201).
+- **Supported Drivers Documentation**: updated iOptron Driver Notes with auto-detection, mount identification, tested firmware details (HEM27, V240121/V241201), Wi-Fi reliability notes, and ConformU validation status (USB and Wi-Fi).
 
 ### Fixed
 - **iOptron Telescope Driver** (AlpacaCore)
   - Fixed `:MountInfo#` response parsing: iOptron returns exactly 4 ASCII digit bytes with no `#` terminator, but the driver was waiting for a `#` and timing out silently. Changed to idle-timeout read mode (`require_hash_terminator=false`).
   - Fixed model code table: iOptron reassigned model codes in the v3 protocol (e.g., code `0025` is HEM27, not CEM25). Replaced the stale Indigo-derived table with the current INDI v3 driver's authoritative mapping.
   - Fixed stale serial buffer bytes contaminating `:MS1#`/`:MS2#` slew responses (e.g., `"1111"` instead of `"1"`). Added `flush_input()` (via `tcflush`/`PurgeComm`) before issuing slew commands.
+  - Fixed Wi-Fi timeout cascade during MoveAxis testing: rapid-fire blind commands accumulated stale acknowledgment bytes in the TCP receive buffer, overwhelming the mount's Wi-Fi module and causing subsequent GEP/GLS queries to timeout. Added `drain_network_stale()` using `poll()` (Linux) / `select()` (Windows) to consume pending bytes after each blind command.
+  - Fixed `SlewToTarget` DEC accuracy on Wi-Fi: `get_slewing()` had a position tolerance shortcut (60 arcseconds) that overrode the mount's GLS status register, declaring slews complete while the mount was still physically moving. ConformU measured 53.8" error. Removed the shortcut — slew completion now relies solely on the mount reporting stopped/tracking status.
+  - Fixed `strip_status_prefix()` to handle stale `0`/`1` bytes that accumulate before GEP position responses over TCP, finding the first `+`/`-` sign to locate the actual data start.
 - **Device Persistence** (AlpacaHTTP)
   - Fixed stale device entries persisting across restarts: a single device failing to load on startup no longer prevents other devices from loading (individual try/catch per device).
   - Fixed inability to remove failed devices: `handle_remove_device` now checks both the runtime registry and the persisted device list, so devices that failed to register can still be deleted.

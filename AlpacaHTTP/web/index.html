@@ -103,12 +103,13 @@
                     <div id="ioptron-network-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="ioptron-host">IP Address:</label>
-                            <input type="text" id="ioptron-host" name="ioptronHost" placeholder="192.168.1.100">
+                            <input type="text" id="ioptron-host" name="ioptronHost" placeholder="Leave blank to auto-discover">
+                            <small>Leave blank to scan the local network automatically</small>
                         </div>
                         <div class="form-group">
                             <label for="ioptron-tcp-port">TCP Port:</label>
                             <input type="number" id="ioptron-tcp-port" name="ioptronTcpPort" value="4030" min="1" max="65535">
-                            <small>Default: 4030 (CEM60-EC), 8899 (HEM27)</small>
+                            <small>Default: 4030 (CEM60-EC), 8899 (HEM27). Ignored during auto-discovery.</small>
                         </div>
                     </div>
 
