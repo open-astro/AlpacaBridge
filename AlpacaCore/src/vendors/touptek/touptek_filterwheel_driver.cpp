@@ -36,13 +36,11 @@ public:
         , filter_names_()
         , focus_offsets_()
         , connected_(false)
-        , connecting_(false)
     {
         preload_camera_info();
     }
 
     ~ToupTekFilterWheelDriver() override {
-        stop_connection_thread();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -86,9 +84,17 @@ public:
 
     bool get_connected() const override { return connected_.load(); }
 
-    void connect() override { start_connection_task(true); }
-    void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connecting_.load(); }
+    void connect() override {
+        // Synchronous connect — blocks until connected or fails.
+        // Must meet Alpaca spec expectation that Connect() returns only when
+        // the device is fully connected.
+        set_connected(true);
+    }
+    void disconnect() override {
+        // Synchronous disconnect — blocks until fully disconnected.
+        set_connected(false);
+    }
+    bool get_connecting() const override { return false; }
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -310,10 +316,7 @@ private:
     std::vector<int> focus_offsets_;
 
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
     mutable std::mutex mutex_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 
     void ensure_connected() const {
         if (!connected_.load()) {
@@ -329,33 +332,7 @@ private:
         return slot_count_;
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        // If a connection transition is already in flight, wait for it to
-        // complete before starting the new one so that state changes are
-        // never silently dropped.
-        if (connecting_.load()) {
-            if (connection_thread_.joinable()) {
-                connection_thread_.join();
-            }
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("ToupTek", "FW connection failed: " + std::string(e.what()));
-            }
-            connecting_.store(false);
-        });
-    }
 
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
 
     void preload_camera_info() {
         try {
