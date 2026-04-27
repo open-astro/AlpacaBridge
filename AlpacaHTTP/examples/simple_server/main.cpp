@@ -16,6 +16,8 @@
 #include <alpacahttp/util/logging_adapter.h>
 #include <alpacacore/device_registry.h>
 #include <alpacacore/managementdriver.h>
+#include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
+#include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <iostream>
 #include <csignal>
 #include <atomic>
@@ -66,16 +68,12 @@ int main(int argc, char* argv[]) {
     alpacahttp::util::log_info("HTTP port: " + std::to_string(config.http_port()));
     alpacahttp::util::log_info("Discovery enabled: " + std::string(config.discovery_enabled() ? "yes" : "no"));
 
-    // TODO: Register devices with AlpacaCore DeviceRegistry
-    // Example:
-    // auto& registry = alpacacore::management::DeviceRegistry::instance();
-    // auto camera = std::make_shared<YourCameraDriver>(...);
-    // registry.register_device(camera);
-    
-    // TODO: Create and set ManagementDriver
-    // Example:
-    // auto mgmt_driver = std::make_shared<YourManagementDriver>(config);
-    // server.set_management_driver(mgmt_driver);
+    // Register ToupTek camera + filter wheel devices
+    auto& registry = alpacacore::management::DeviceRegistry::instance();
+    auto camera = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
+    registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()));
+    auto filterwheel = alpacacore::vendor::touptek::create_touptek_filterwheel(0, 0);
+    registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(filterwheel.release()));
 
     // Start discovery service
     std::unique_ptr<alpacahttp::Discovery> discovery;

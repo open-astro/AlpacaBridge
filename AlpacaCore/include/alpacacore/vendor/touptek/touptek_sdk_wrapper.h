@@ -54,6 +54,8 @@ struct ToupCameraInfo {
     bool supports_cooler{};
     bool supports_tec_onoff{};
     bool supports_trigger_software{};
+    bool supports_filterwheel{};
+    int filterwheel_slots{};
     int bit_depth_max{};
 };
 
@@ -231,6 +233,19 @@ public:
 
     // AAF range query: Toupcam_AAF(handle, RANGEMAX|RANGEMIN|RANGEDEF, action, &out).
     int aaf_range(HToupcam handle, int range_action, int target_action, const char* context);
+
+    // Filter wheel ------------------------------------------------------------
+    // Get the number of filter wheel slots.
+    // Throws AlpacaException on SDK/transport failure.
+    // Returns: > 0 = number of slots, 0 = no filter wheel.
+    int get_filterwheel_slot_count(HToupcam handle);
+    // Get the current filter wheel position. Returns -1 if in motion.
+    int get_filterwheel_position(HToupcam handle);
+    // Set the filter wheel position. position: 0 to N-1.
+    // direction: 0 = clockwise, 1 = auto direction.
+    void set_filterwheel_position(HToupcam handle, int position, int direction = 0);
+    // Reset the filter wheel.
+    void reset_filterwheel(HToupcam handle);
 
 private:
     class Impl;

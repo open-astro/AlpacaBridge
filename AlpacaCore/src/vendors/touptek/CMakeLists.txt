@@ -37,6 +37,7 @@ if(ALPACACORE_ENABLE_TOUPTEK)
         touptek_sdk_wrapper.cpp
         touptek_camera_driver.cpp
         touptek_focuser_driver.cpp
+        touptek_filterwheel_driver.cpp
     )
 
     add_library(alpacacore_touptek STATIC ${TOUPTEK_SOURCES})

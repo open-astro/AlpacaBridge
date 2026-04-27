@@ -125,6 +125,8 @@ std::vector<ToupCameraInfo> ToupTekSDKWrapper::enumerate_cameras() {
         info.supports_cooler = (info.flags & TOUPCAM_FLAG_TEC) != 0;
         info.supports_tec_onoff = (info.flags & TOUPCAM_FLAG_TEC_ONOFF) != 0;
         info.supports_trigger_software = (info.flags & TOUPCAM_FLAG_TRIGGER_SOFTWARE) != 0;
+        info.supports_filterwheel = (info.flags & TOUPCAM_FLAG_FILTERWHEEL) != 0;
+        info.filterwheel_slots = 0;
 
         // Toupcam supports digital binning 1..8 via OPTION_BINNING on every
         // camera. Expose 1..4 as the commonly-useful range.
@@ -504,5 +506,35 @@ int ToupTekSDKWrapper::aaf_range(HToupcam handle, int range_action, int target_a
     throw_on_error(Toupcam_AAF(handle, range_action, target_action, &value), context);
     return value;
 }
+
+int ToupTekSDKWrapper::get_filterwheel_slot_count(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_SLOT, &value),
+                   "Toupcam_get_Option(FILTERWHEEL_SLOT)");
+    return value;
+}
+
+int ToupTekSDKWrapper::get_filterwheel_position(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_POSITION, &value),
+                   "Toupcam_get_Option(FILTERWHEEL_POSITION)");
+    return value;
+}
+
+void ToupTekSDKWrapper::set_filterwheel_position(HToupcam handle, int position, int direction) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = (position & 0xff) | ((direction & 0x1) << 8);
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_POSITION, value),
+                   "Toupcam_put_Option(FILTERWHEEL_POSITION)");
+}
+
+void ToupTekSDKWrapper::reset_filterwheel(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_POSITION, -1),
+                   "Toupcam_put_Option(FILTERWHEEL_POSITION, -1)");
+}
+
 
 } // namespace alpacacore::vendor::touptek
