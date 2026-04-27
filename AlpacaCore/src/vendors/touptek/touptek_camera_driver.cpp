@@ -227,6 +227,15 @@ public:
             serial_number_ = sdk.get_serial_number(handle_);
             firmware_version_ = sdk.get_firmware_version(handle_);
 
+            // Query filter wheel slot count if the camera has a filter wheel.
+            if (camera_info_.supports_filterwheel) {
+                try {
+                    camera_info_.filterwheel_slots = sdk.get_filterwheel_slot_count(handle_);
+                } catch (const std::exception&) {
+                    camera_info_.filterwheel_slots = 0;
+                }
+            }
+
             bin_ = 1;
             start_x_ = 0;
             start_y_ = 0;

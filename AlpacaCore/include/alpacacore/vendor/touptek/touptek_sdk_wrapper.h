@@ -54,6 +54,8 @@ struct ToupCameraInfo {
     bool supports_cooler{};
     bool supports_tec_onoff{};
     bool supports_trigger_software{};
+    bool supports_filterwheel{};
+    int filterwheel_slots{};
     int bit_depth_max{};
 };
 
@@ -167,6 +169,17 @@ public:
     void pulse_guide(HToupcam handle, ToupGuideDirection direction, unsigned duration_ms);
     // Returns true if the camera is currently guiding.
     bool is_guiding(HToupcam handle);
+
+    // Filter wheel ------------------------------------------------------------
+    // Get the number of filter wheel slots (0 if no filter wheel).
+    int get_filterwheel_slot_count(HToupcam handle);
+    // Get the current filter wheel position. Returns -1 if in motion.
+    int get_filterwheel_position(HToupcam handle);
+    // Set the filter wheel position. position: 0 to N-1.
+    // direction: 0 = clockwise, 1 = auto direction.
+    void set_filterwheel_position(HToupcam handle, int position, int direction = 0);
+    // Reset the filter wheel.
+    void reset_filterwheel(HToupcam handle);
 
 private:
     class Impl;
