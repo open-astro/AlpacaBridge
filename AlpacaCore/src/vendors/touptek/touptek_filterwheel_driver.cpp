@@ -200,8 +200,11 @@ public:
     int get_position() const override {
         ensure_connected();
         auto& sdk = ToupTekSDKWrapper::instance();
-        HToupcam h = handle_copy();
-        int pos = sdk.get_filterwheel_position(h);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!handle_) {
+            throw AlpacaException("Filter wheel disconnected", AlpacaError::NotConnected);
+        }
+        int pos = sdk.get_filterwheel_position(handle_);
         if (pos < 0) {
             // Filter wheel is in motion; return current known position or 0.
             throw AlpacaException("Filter wheel is moving", AlpacaError::InvalidOperation);
@@ -215,8 +218,15 @@ public:
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
         auto& sdk = ToupTekSDKWrapper::instance();
-        HToupcam h = handle_copy();
-        sdk.set_filterwheel_position(h, position, 1); // auto direction spinning
+        // Issue the move command while holding the mutex so disconnect() cannot
+        // close the handle concurrently.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!handle_) {
+                throw AlpacaException("Filter wheel disconnected", AlpacaError::NotConnected);
+            }
+            sdk.set_filterwheel_position(handle_, position, 1); // auto direction spinning
+        }
 
         // The filter wheel moves asynchronously. Wait in a spin-loop for
         // up to 30 seconds for the move to complete (get_position returns >= 0).
@@ -226,21 +236,35 @@ public:
         while (waited < max_wait_ms) {
             std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
             waited += poll_ms;
-            try {
-                int pos = sdk.get_filterwheel_position(h);
-                if (pos >= 0) {
-                    if (pos != position) {
-                        throw AlpacaException("Filter wheel reached wrong position",
-                                              AlpacaError::DriverException);
-                    }
-                    return;
+            int pos = -1;
+            bool handle_valid = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (handle_) {
+                    pos = sdk.get_filterwheel_position(handle_);
+                    handle_valid = true;
                 }
-            } catch (const AlpacaException&) {
-                // In motion, continue waiting.
             }
+            if (!handle_valid) {
+                throw AlpacaException("Filter wheel disconnected during move",
+                                      AlpacaError::NotConnected);
+            }
+            if (pos >= 0) {
+                if (pos != position) {
+                    throw AlpacaException("Filter wheel reached wrong position",
+                                          AlpacaError::DriverException);
+                }
+                return;
+            }
+            // pos < 0 means still in motion — continue polling.
         }
         // Timeout reached - stop the wheel to prevent endless spinning
-        sdk.reset_filterwheel(h);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (handle_) {
+                sdk.reset_filterwheel(handle_);
+            }
+        }
         throw AlpacaException("Filter wheel move timed out", AlpacaError::DriverException);
     }
 
@@ -251,7 +275,11 @@ public:
 
     void set_focus_offsets(const std::vector<int>& offsets) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        validate_slot_count_locked(static_cast<int>(offsets.size()));
+        // Only validate slot count when connected; when disconnected,
+        // just store the values for later use on connect.
+        if (slot_count_ > 0) {
+            validate_slot_count_locked(static_cast<int>(offsets.size()));
+        }
         focus_offsets_ = offsets;
     }
 
@@ -262,7 +290,11 @@ public:
 
     void set_names(const std::vector<std::string>& names) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        validate_slot_count_locked(static_cast<int>(names.size()));
+        // Only validate slot count when connected; when disconnected,
+        // just store the values for later use on connect.
+        if (slot_count_ > 0) {
+            validate_slot_count_locked(static_cast<int>(names.size()));
+        }
         filter_names_ = names;
         apply_default_names_locked();
     }
@@ -289,14 +321,6 @@ private:
         }
     }
 
-    HToupcam handle_copy() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!handle_) {
-            throw AlpacaException("Filter wheel handle is null", AlpacaError::NotConnected);
-        }
-        return handle_;
-    }
-
     int slot_count_locked() const {
         std::lock_guard<std::mutex> lock(mutex_);
         if (slot_count_ <= 0) {
@@ -307,11 +331,13 @@ private:
 
     void start_connection_task(bool connect) {
         std::lock_guard<std::mutex> lock(connection_mutex_);
+        // If a connection transition is already in flight, wait for it to
+        // complete before starting the new one so that state changes are
+        // never silently dropped.
         if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
+            if (connection_thread_.joinable()) {
+                connection_thread_.join();
+            }
         }
         connecting_.store(true);
         connection_thread_ = std::thread([this, connect]() {
