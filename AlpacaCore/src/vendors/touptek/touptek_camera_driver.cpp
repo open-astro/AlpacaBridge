@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <sstream>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -231,7 +232,13 @@ public:
             if (camera_info_.supports_filterwheel) {
                 try {
                     camera_info_.filterwheel_slots = sdk.get_filterwheel_slot_count(handle_);
-                } catch (const std::exception&) {
+                } catch (const std::exception& e) {
+                    std::ostringstream handle_oss;
+                    handle_oss << static_cast<const void*>(handle_);
+                    ALPACA_LOG_WARN("ToupTek",
+                        "get_filterwheel_slot_count(handle_=" + handle_oss.str() +
+                        ") failed: " + std::string(e.what()) +
+                        "; falling back to filterwheel_slots = 0");
                     camera_info_.filterwheel_slots = 0;
                 }
             }
