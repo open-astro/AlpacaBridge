@@ -1,105 +1,733 @@
-12:07:27.784 Check Alpaca Protocol - Conform Universal 4.3.0 (Build 49708.0503dc7) 
-12:07:27.787                                     
-12:07:27.788 Test FilterWheel device: Manually configured device - 10.234.139.103:6800 through URL: http://10.234.139.103:6800 
-12:07:27.789                                     
-12:07:27.790 OK messages are suppressed, they can be enabled through the Alpaca and COM settings page. 
-12:07:27.790                                     
-12:07:27.790 Connecting to device...             
-12:07:27.843                                     
-12:07:27.844 Successfully connected to device, disconnecting in order to test that connection using a different PUT parameter order is successful... 
-12:07:27.949                                     
-12:07:27.950 Successfully disconnected from device, re-connecting using re-ordered PUT parameters... 
-12:07:27.950                                     
-12:07:28.124 Successfully connected to device using re-ordered PUT parameters, testing device... 
-12:07:28.124                                     
-12:07:28.144 Device exposes interface version 3  
-12:07:31.031 PUT Disconnect                      INFO     Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890
-12:07:31.525 PUT Connect                         INFO     Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890
-12:07:33.253 PUT Position                        ISSUE    Parameter Position (Bad casing) - Expected HTTP status: 400 (BadRequest) but received status: 200 (OK).
-12:07:33.254                                     
-12:07:33.675 PUT Position                        INFO     Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890
-12:07:35.471                                     
-12:07:35.494 Successfully disconnected from device. 
-12:07:35.494                                     
-12:07:35.495 Found 0 errors, 1 issue and 3 information messages. 
-12:07:35.495                                     
-12:07:35.495 Issue Summary                       
-12:07:35.495 PUT Position ==> Parameter Position (Bad casing) - Expected HTTP status: 400 (BadRequest) but received status: 200 (OK).
-  Response: {"ClientTransactionID":67890,"ErrorMessage":"Missing parameter: Position","ErrorNumber":1025,"ServerTransactionID":233}
+17:10:09.654 ASCOM Universal Device Conformance Checker Version 4.3.0.49708, Build time: Mon 30 March 2026 18:23:37          
+17:10:09.662                                              
+17:10:09.662 Operating system is macOS 26.4.1, Processor is ARM 64bit, Application is 64bit.          
+17:10:09.662                                              
+17:10:09.663 Alpaca device: FILTERWHEEL FilterWheel (10.234.139.103:6800 FilterWheel/0)          
+17:10:09.663                                              
+17:10:09.665 CreateDevice                        INFO     Creating Alpaca device: IP address: 10.234.139.103, IP Port: 6800, Alpaca device number: 0
+17:10:09.673 CreateDevice                        INFO     Successfully created driver
+17:10:10.902 CreateDevice                        OK       Found a valid interface version: 3
+17:10:10.903 CreateDevice                        OK       Driver instance created successfully
+17:10:10.903                                              
+17:10:10.903 Connect to device                            
+17:10:11.105 Connected                           OK       Connected to device successfully using Connected = True
+17:10:11.676 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: The response ended prematurely. (ResponseEnded)
+17:10:11.676                                              
+17:10:11.676 ConnectToDevice                              Cannot connect to device, further tests abandoned.
+17:10:11.676                                              
+17:10:11.677 Your device had 1 issue, 0 errors and 0 configuration alerts          
+17:10:11.677                                              
+17:10:11.677 Issue Summary                                
+17:10:11.677 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: The response ended prematurely. (ResponseEnded)
+17:10:11.677                                     
+17:10:11.677 Timing Summary                               See Help for further information.
+17:10:11.677 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+17:10:11.677 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+17:10:11.677 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+17:10:11.677 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+17:10:11.677                                              
+17:10:11.677 No member timings were recorded.             
+17:10:33.816 ASCOM Universal Device Conformance Checker Version 4.3.0.49708, Build time: Mon 30 March 2026 18:23:37          
+17:10:33.816                                              
+17:10:33.816 Operating system is macOS 26.4.1, Processor is ARM 64bit, Application is 64bit.          
+17:10:33.816                                              
+17:10:33.816 Alpaca device: FILTERWHEEL FilterWheel (10.234.139.103:6800 FilterWheel/0)          
+17:10:33.816                                              
+17:10:33.816 CreateDevice                        INFO     Creating Alpaca device: IP address: 10.234.139.103, IP Port: 6800, Alpaca device number: 0
+17:10:33.816 CreateDevice                        INFO     Successfully created driver
+17:10:35.219 CreateDevice                        OK       Found a valid interface version: 1
+17:10:35.222 CreateDevice                        OK       Driver instance created successfully
+17:10:35.223                                              
+17:10:35.223 Connect to device                            
+17:10:35.565 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: Connection refused
+17:10:35.566                                              
+17:10:35.566 ConnectToDevice                              Cannot connect to device, further tests abandoned.
+17:10:35.566                                              
+17:10:35.566 Your device had 1 issue, 0 errors and 0 configuration alerts          
+17:10:35.566                                              
+17:10:35.566 Issue Summary                                
+17:10:35.566 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: Connection refused
+17:10:35.566                                     
+17:10:35.566 Timing Summary                               See Help for further information.
+17:10:35.566 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+17:10:35.566 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+17:10:35.566 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+17:10:35.566 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+17:10:35.566                                              
+17:10:35.566 No member timings were recorded.             
+17:10:37.731 ASCOM Universal Device Conformance Checker Version 4.3.0.49708, Build time: Mon 30 March 2026 18:23:37          
+17:10:37.731                                              
+17:10:37.731 Operating system is macOS 26.4.1, Processor is ARM 64bit, Application is 64bit.          
+17:10:37.731                                              
+17:10:37.731 Alpaca device: FILTERWHEEL FilterWheel (10.234.139.103:6800 FilterWheel/0)          
+17:10:37.731                                              
+17:10:37.731 CreateDevice                        INFO     Creating Alpaca device: IP address: 10.234.139.103, IP Port: 6800, Alpaca device number: 0
+17:10:37.731 CreateDevice                        INFO     Successfully created driver
+17:10:39.106 CreateDevice                        OK       Found a valid interface version: 1
+17:10:39.107 CreateDevice                        OK       Driver instance created successfully
+17:10:39.107                                              
+17:10:39.107 Connect to device                            
+17:10:39.364 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: Connection refused
+17:10:39.365                                              
+17:10:39.365 ConnectToDevice                              Cannot connect to device, further tests abandoned.
+17:10:39.366                                              
+17:10:39.366 Your device had 1 issue, 0 errors and 0 configuration alerts          
+17:10:39.366                                              
+17:10:39.366 Issue Summary                                
+17:10:39.366 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: Connection refused
+17:10:39.366                                     
+17:10:39.366 Timing Summary                               See Help for further information.
+17:10:39.366 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+17:10:39.366 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+17:10:39.366 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+17:10:39.367 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+17:10:39.367                                              
+17:10:39.367 No member timings were recorded.             
+17:11:27.167 Check Alpaca Protocol - Conform Universal 4.3.0 (Build 49708.0503dc7) 
+17:11:27.169                                     
+17:11:27.169 Test FilterWheel device: Manually configured device - 10.234.139.103:11111 through URL: http://10.234.139.103:11111 
+17:11:27.170                                     
+17:11:27.170 OK messages are suppressed, they can be enabled through the Alpaca and COM settings page. 
+17:11:27.170                                     
+17:11:27.170 Connecting to device...             
+17:11:27.295 PUT Connected                       ERROR    True - Connection refused (10.234.139.103:11111)
+17:11:27.297                                     
+17:11:27.297 Successfully connected to device, disconnecting in order to test that connection using a different PUT parameter order is successful... 
+17:11:27.369 PUT Connected                       ERROR    False - Connection refused (10.234.139.103:11111)
+17:11:27.372                                     
+17:11:27.372 Successfully disconnected from device, re-connecting using re-ordered PUT parameters... 
+17:11:27.372                                     
+17:11:27.467 PUT Connected                       ERROR    True - Connection refused (10.234.139.103:11111)
+17:11:27.469 Successfully connected to device using re-ordered PUT parameters, testing device... 
+17:11:27.470                                     
+17:11:27.573 GET InterfaceVersion                ERROR    Connection refused (10.234.139.103:11111)
+17:11:27.574 Device exposes interface version 0  
+17:11:28.239 GET Connected                       ERROR    Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:28.337 GET Connected                       ERROR    Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+17:11:28.409 GET Connected                       ERROR    Different ClientID casing - Connection refused (10.234.139.103:11111)
+17:11:28.480 GET Connected                       ERROR    Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:28.553 GET Connected                       ERROR    ClientID is empty - Connection refused (10.234.139.103:11111)
+17:11:28.622 GET Connected                       ERROR    ClientID is white space - Connection refused (10.234.139.103:11111)
+17:11:28.692 GET Connected                       ERROR    ClientID is negative - Connection refused (10.234.139.103:11111)
+17:11:28.767 GET Connected                       ERROR    ClientID is not numeric - Connection refused (10.234.139.103:11111)
+17:11:28.839 GET Connected                       ERROR    ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+17:11:28.920 GET Connected                       ERROR    ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+17:11:29.039 GET Connected                       ERROR    ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+17:11:29.109 GET Connected                       ERROR    ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+17:11:29.182 PUT Connected                       ERROR    Bad parameter value - Empty string - Connection refused (10.234.139.103:11111)
+17:11:29.249 PUT Connected                       ERROR    Bad parameter value - Number - Connection refused (10.234.139.103:11111)
+17:11:29.320 PUT Connected                       ERROR    Bad parameter value - Meaningless string - Connection refused (10.234.139.103:11111)
+17:11:29.388 GET Description                     ERROR    Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:29.499 GET Description                     ERROR    Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+17:11:29.601 GET Description                     ERROR    Different ClientID casing - Connection refused (10.234.139.103:11111)
+17:11:29.673 GET Description                     ERROR    Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:29.747 GET Description                     ERROR    ClientID is empty - Connection refused (10.234.139.103:11111)
+17:11:29.821 GET Description                     ERROR    ClientID is white space - Connection refused (10.234.139.103:11111)
+17:11:29.896 GET Description                     ERROR    ClientID is negative - Connection refused (10.234.139.103:11111)
+17:11:29.968 GET Description                     ERROR    ClientID is not numeric - Connection refused (10.234.139.103:11111)
+17:11:30.096 GET Description                     ERROR    ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+17:11:30.166 GET Description                     ERROR    ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+17:11:30.263 GET Description                     ERROR    ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+17:11:30.335 GET Description                     ERROR    ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+17:11:30.409 GET DriverInfo                      ERROR    Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:30.489 GET DriverInfo                      ERROR    Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+17:11:30.563 GET DriverInfo                      ERROR    Different ClientID casing - Connection refused (10.234.139.103:11111)
+17:11:30.635 GET DriverInfo                      ERROR    Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:30.719 GET DriverInfo                      ERROR    ClientID is empty - Connection refused (10.234.139.103:11111)
+17:11:30.793 GET DriverInfo                      ERROR    ClientID is white space - Connection refused (10.234.139.103:11111)
+17:11:30.863 GET DriverInfo                      ERROR    ClientID is negative - Connection refused (10.234.139.103:11111)
+17:11:30.939 GET DriverInfo                      ERROR    ClientID is not numeric - Connection refused (10.234.139.103:11111)
+17:11:31.010 GET DriverInfo                      ERROR    ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+17:11:31.142 GET DriverInfo                      ERROR    ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+17:11:31.212 GET DriverInfo                      ERROR    ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+17:11:31.286 GET DriverInfo                      ERROR    ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+17:11:31.386 GET DriverVersion                   ERROR    Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:31.458 GET DriverVersion                   ERROR    Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+17:11:31.532 GET DriverVersion                   ERROR    Different ClientID casing - Connection refused (10.234.139.103:11111)
+17:11:31.603 GET DriverVersion                   ERROR    Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:31.677 GET DriverVersion                   ERROR    ClientID is empty - Connection refused (10.234.139.103:11111)
+17:11:31.749 GET DriverVersion                   ERROR    ClientID is white space - Connection refused (10.234.139.103:11111)
+17:11:31.858 GET DriverVersion                   ERROR    ClientID is negative - Connection refused (10.234.139.103:11111)
+17:11:31.930 GET DriverVersion                   ERROR    ClientID is not numeric - Connection refused (10.234.139.103:11111)
+17:11:32.004 GET DriverVersion                   ERROR    ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+17:11:32.078 GET DriverVersion                   ERROR    ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+17:11:32.211 GET DriverVersion                   ERROR    ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+17:11:32.302 GET DriverVersion                   ERROR    ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+17:11:32.375 GET InterfaceVersion                ERROR    Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:32.451 GET InterfaceVersion                ERROR    Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+17:11:32.526 GET InterfaceVersion                ERROR    Different ClientID casing - Connection refused (10.234.139.103:11111)
+17:11:32.598 GET InterfaceVersion                ERROR    Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:32.672 GET InterfaceVersion                ERROR    ClientID is empty - Connection refused (10.234.139.103:11111)
+17:11:32.760 GET InterfaceVersion                ERROR    ClientID is white space - Connection refused (10.234.139.103:11111)
+17:11:32.838 GET InterfaceVersion                ERROR    ClientID is negative - Connection refused (10.234.139.103:11111)
+17:11:32.910 GET InterfaceVersion                ERROR    ClientID is not numeric - Connection refused (10.234.139.103:11111)
+17:11:32.986 GET InterfaceVersion                ERROR    ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+17:11:33.062 GET InterfaceVersion                ERROR    ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+17:11:33.133 GET InterfaceVersion                ERROR    ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+17:11:33.234 GET InterfaceVersion                ERROR    ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+17:11:33.306 GET Name                            ERROR    Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:33.378 GET Name                            ERROR    Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+17:11:33.450 GET Name                            ERROR    Different ClientID casing - Connection refused (10.234.139.103:11111)
+17:11:33.524 GET Name                            ERROR    Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:33.606 GET Name                            ERROR    ClientID is empty - Connection refused (10.234.139.103:11111)
+17:11:33.677 GET Name                            ERROR    ClientID is white space - Connection refused (10.234.139.103:11111)
+17:11:33.749 GET Name                            ERROR    ClientID is negative - Connection refused (10.234.139.103:11111)
+17:11:33.822 GET Name                            ERROR    ClientID is not numeric - Connection refused (10.234.139.103:11111)
+17:11:33.900 GET Name                            ERROR    ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+17:11:33.970 GET Name                            ERROR    ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+17:11:34.042 GET Name                            ERROR    ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+17:11:34.117 GET Name                            ERROR    ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+17:11:34.288 GET SupportedActions                ERROR    Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:34.361 GET SupportedActions                ERROR    Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+17:11:34.436 GET SupportedActions                ERROR    Different ClientID casing - Connection refused (10.234.139.103:11111)
+17:11:34.517 GET SupportedActions                ERROR    Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+17:11:34.588 GET SupportedActions                ERROR    ClientID is empty - Connection refused (10.234.139.103:11111)
+17:11:34.662 GET SupportedActions                ERROR    ClientID is white space - Connection refused (10.234.139.103:11111)
+17:11:34.737 GET SupportedActions                ERROR    ClientID is negative - Connection refused (10.234.139.103:11111)
+17:11:34.824 GET SupportedActions                ERROR    ClientID is not numeric - Connection refused (10.234.139.103:11111)
+17:11:34.897 GET SupportedActions                ERROR    ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+17:11:34.972 GET SupportedActions                ERROR    ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+17:11:35.039 GET SupportedActions                ERROR    ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+17:11:35.113 GET SupportedActions                ERROR    ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+17:11:35.187 GET InterfaceVersion                ERROR    Connection refused (10.234.139.103:11111)
+17:11:35.191                                     ERROR    ASCOM.InvalidValueException: ASCOMLibrary.DeviceCapabilities.HasConnectAndDeviceState - The Interface version parameter is 0 or negative: 0.
+   at ASCOM.Common.DeviceInterfaces.DeviceCapabilities.HasConnectAndDeviceState(Nullable`1 deviceType, Int32 interfaceVersion) in /_/ASCOM.Common/ASCOM.Common.DeviceInterfaces/Classes/DeviceCapabilities.cs:line 740
+   at ConformU.AlpacaProtocolTestManager.TestCommon() in J:\ConformU\ConformU\AlpacaProtocolTestManager.cs:line 482
+   at ConformU.AlpacaProtocolTestManager.TestAlpacaProtocol() in J:\ConformU\ConformU\AlpacaProtocolTestManager.cs:line 280
+17:11:35.191                                     
+17:11:35.193 Found 93 errors, 0 issues and 0 information messages. 
+17:11:35.193                                     
+17:11:35.193 Error Summary                       
+17:11:35.193 PUT Connected ==> True - Connection refused (10.234.139.103:11111)
+  Response: 
  
-12:07:35.495                                     
-12:07:35.496 Information Message Summary         
-12:07:35.496 PUT Disconnect ==> Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890 
+17:11:35.193 PUT Connected ==> False - Connection refused (10.234.139.103:11111)
+  Response: 
  
-12:07:35.496 PUT Connect ==> Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890 
+17:11:35.193 PUT Connected ==> True - Connection refused (10.234.139.103:11111)
+  Response: 
  
-12:07:35.496 PUT Position ==> Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890 
+17:11:35.194 GET InterfaceVersion ==> Connection refused (10.234.139.103:11111)
+  Response: 
  
-12:07:58.477 DiscoveryDiagnostics                Starting discovery...
-12:07:58.485 DiscoveryDiagnostics                Task started
-12:07:58.488 [Lib] Finder - Finder               23 Initialised
-12:07:58.494 [Lib] Finder - SearchIPv4           23 Sending IPv4 discovery broadcasts
-12:07:58.495 [Lib] Finder - SearchIPv4           23 Sent broadcast to: 127.0.0.1
-12:07:58.495 [Lib] Finder - SearchIPv4           23 Sent broadcast to: 10.234.139.196
-12:07:58.539 [Lib] Finder - ReceiveCallback      14 Received {"AlpacaPort":6800} from Alpaca device at 10.234.139.103
-12:07:58.541 [Lib] Finder - ReceiveCallback      14 Received new Alpaca API endpoint: 10.234.139.103:6800 from broadcast endpoint: 10.234.139.103:32227
-12:07:59.497 DiscoveryDiagnostics                Discovery completed. Found 1 broadcast responses.
-12:07:59.497 DiscoveryDiagnostics                 
-12:07:59.498 DiscoveryDiagnostics                Found response from 10.234.139.103                 => {"AlpacaPort":6800}
-12:07:59.499 DiscoveryDiagnostics                OK    - The Alpaca port JSON key name is spelled and cased correctly
-12:07:59.499 DiscoveryDiagnostics                OK    - Successfully parsed the JSON response and extracted port number: 6800.
-12:07:59.635 DiscoveryDiagnostics                OK    - Successfully read API version number: 1. Testing the Management API...
-12:07:59.658 TestManagementApi                   OK    - Successfully read the device description
-12:07:59.659 TestManagementApi                   Found manufacturer name: OpenAstro.net
-12:07:59.659 TestManagementApi                   Found manufacturer version: 1.0.3
-12:07:59.659 TestManagementApi                   INFO  -   Location is empty or white space
-12:07:59.660 TestManagementApi                   Found server name: AlpacaHTTP
-12:07:59.681 TestManagementApi                   OK    - Successfully read the configured devices response
-12:07:59.681 TestManagementApi                   Found Camera device.
-12:07:59.681 TestManagementApi                   Device number: 0
-12:07:59.682 TestManagementApi                   Device name: FILTERWHEEL
-12:07:59.682 TestManagementApi                   Unique ID: TOUPTEK_0
-12:07:59.682 TestManagementApi                   Found FilterWheel device.
-12:07:59.682 TestManagementApi                   Device number: 0
-12:07:59.683 TestManagementApi                   Device name: ToupTek FilterWheel
-12:07:59.683 TestManagementApi                   Unique ID: TOUPTEK_FW_0
-12:07:59.683 DiscoveryDiagnostics                 
-12:07:59.683                                     Information Alert Summary
-12:07:59.683                                     10.234.139.103:6800                                      Location is empty or white space
-12:10:36.921 Check Alpaca Protocol - Conform Universal 4.3.0 (Build 49708.0503dc7) 
-12:10:36.924                                     
-12:10:36.924 Test FilterWheel device: Manually configured device - 10.234.139.103:6800 through URL: http://10.234.139.103:6800 
-12:10:36.924                                     
-12:10:36.924 OK messages are suppressed, they can be enabled through the Alpaca and COM settings page. 
-12:10:36.924                                     
-12:10:36.924 Connecting to device...             
-12:10:37.051                                     
-12:10:37.052 Successfully connected to device, disconnecting in order to test that connection using a different PUT parameter order is successful... 
-12:10:37.124                                     
-12:10:37.125 Successfully disconnected from device, re-connecting using re-ordered PUT parameters... 
-12:10:37.126                                     
-12:10:37.251 Successfully connected to device using re-ordered PUT parameters, testing device... 
-12:10:37.252                                     
-12:10:37.270 Device exposes interface version 3  
-12:10:40.417 PUT Disconnect                      INFO     Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890
-12:10:41.121 PUT Connect                         INFO     Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890
-12:10:43.236 PUT Position                        ISSUE    Parameter Position (Bad casing) - Expected HTTP status: 400 (BadRequest) but received status: 200 (OK).
-12:10:43.236                                     
-12:10:43.566 PUT Position                        INFO     Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890
-12:10:44.921                                     
-12:10:44.947 Successfully disconnected from device. 
-12:10:44.948                                     
-12:10:44.948 Found 0 errors, 1 issue and 3 information messages. 
-12:10:44.948                                     
-12:10:44.948 Issue Summary                       
-12:10:44.948 PUT Position ==> Parameter Position (Bad casing) - Expected HTTP status: 400 (BadRequest) but received status: 200 (OK).
-  Response: {"ClientTransactionID":67890,"ErrorMessage":"Missing parameter: Position","ErrorNumber":1025,"ServerTransactionID":452}
+17:11:35.194 GET Connected ==> Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
  
-12:10:44.949                                     
-12:10:44.949 Information Message Summary         
-12:10:44.949 PUT Disconnect ==> Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890 
+17:11:35.194 GET Connected ==> Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+  Response: 
  
-12:10:44.949 PUT Connect ==> Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890 
+17:11:35.194 GET Connected ==> Different ClientID casing - Connection refused (10.234.139.103:11111)
+  Response: 
  
-12:10:44.949 PUT Position ==> Bad ClientTransactionID casing - The ClientTransactionID was round-tripped suggesting that the device did not treat it as case sensitive. Sent value: 67890, Returned value: 67890 
+17:11:35.194 GET Connected ==> Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
  
+17:11:35.194 GET Connected ==> ClientID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.194 GET Connected ==> ClientID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.194 GET Connected ==> ClientID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.194 GET Connected ==> ClientID is not numeric - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.194 GET Connected ==> ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.194 GET Connected ==> ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.194 GET Connected ==> ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.194 GET Connected ==> ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 PUT Connected ==> Bad parameter value - Empty string - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 PUT Connected ==> Bad parameter value - Number - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 PUT Connected ==> Bad parameter value - Meaningless string - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> Different ClientID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> ClientID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> ClientID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> ClientID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> ClientID is not numeric - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET Description ==> ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET DriverInfo ==> Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET DriverInfo ==> Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET DriverInfo ==> Different ClientID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET DriverInfo ==> Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET DriverInfo ==> ClientID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.195 GET DriverInfo ==> ClientID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverInfo ==> ClientID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverInfo ==> ClientID is not numeric - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverInfo ==> ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverInfo ==> ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverInfo ==> ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverInfo ==> ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverVersion ==> Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverVersion ==> Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverVersion ==> Different ClientID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverVersion ==> Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverVersion ==> ClientID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverVersion ==> ClientID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverVersion ==> ClientID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.196 GET DriverVersion ==> ClientID is not numeric - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET DriverVersion ==> ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET DriverVersion ==> ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET DriverVersion ==> ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET DriverVersion ==> ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET InterfaceVersion ==> Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET InterfaceVersion ==> Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET InterfaceVersion ==> Different ClientID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET InterfaceVersion ==> Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET InterfaceVersion ==> ClientID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET InterfaceVersion ==> ClientID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.197 GET InterfaceVersion ==> ClientID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET InterfaceVersion ==> ClientID is not numeric - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET InterfaceVersion ==> ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET InterfaceVersion ==> ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET InterfaceVersion ==> ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET InterfaceVersion ==> ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET Name ==> Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET Name ==> Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET Name ==> Different ClientID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET Name ==> Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET Name ==> ClientID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET Name ==> ClientID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET Name ==> ClientID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET Name ==> ClientID is not numeric - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET Name ==> ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.200 GET Name ==> ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET Name ==> ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET Name ==> ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> Good ClientID and ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> Good ClientID and ClientTransactionID casing with additional parameter - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> Different ClientID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> Different ClientTransactionID casing - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> ClientID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> ClientID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> ClientID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> ClientID is not numeric - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> ClientTransactionID is empty - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> ClientTransactionID is white space - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> ClientTransactionID is negative - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET SupportedActions ==> ClientTransactionID is a string - Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201 GET InterfaceVersion ==> Connection refused (10.234.139.103:11111)
+  Response: 
+ 
+17:11:35.201  ==> ASCOM.InvalidValueException: ASCOMLibrary.DeviceCapabilities.HasConnectAndDeviceState - The Interface version parameter is 0 or negative: 0.
+   at ASCOM.Common.DeviceInterfaces.DeviceCapabilities.HasConnectAndDeviceState(Nullable`1 deviceType, Int32 interfaceVersion) in /_/ASCOM.Common/ASCOM.Common.DeviceInterfaces/Classes/DeviceCapabilities.cs:line 740
+   at ConformU.AlpacaProtocolTestManager.TestCommon() in J:\ConformU\ConformU\AlpacaProtocolTestManager.cs:line 482
+   at ConformU.AlpacaProtocolTestManager.TestAlpacaProtocol() in J:\ConformU\ConformU\AlpacaProtocolTestManager.cs:line 280
+  Response: 
+ 
+17:11:58.505 DiscoveryDiagnostics                Starting discovery...
+17:11:58.514 DiscoveryDiagnostics                Task started
+17:11:58.515 [Lib] Finder - Finder               26 Initialised
+17:11:58.521 [Lib] Finder - SearchIPv4           26 Sending IPv4 discovery broadcasts
+17:11:58.522 [Lib] Finder - SearchIPv4           26 Sent broadcast to: 127.0.0.1
+17:11:58.522 [Lib] Finder - SearchIPv4           26 Sent broadcast to: 10.234.139.196
+17:11:59.524 DiscoveryDiagnostics                Discovery completed.
+17:11:59.524 DiscoveryDiagnostics                 
+17:11:59.525 DiscoveryDiagnostics                INFO  - There were no responses to the discovery broadcast.
+17:11:59.525                                     No issues or information alerts found: Your Alpaca devices pass ASCOM Discovery Diagnostics validation!!
+17:14:40.479 ASCOM Universal Device Conformance Checker Version 4.3.0.49708, Build time: Mon 30 March 2026 18:23:37          
+17:14:40.480                                              
+17:14:40.480 Operating system is macOS 26.4.1, Processor is ARM 64bit, Application is 64bit.          
+17:14:40.480                                              
+17:14:40.480 Alpaca device: FILTERWHEEL FilterWheel (10.234.139.103:6800 FilterWheel/0)          
+17:14:40.480                                              
+17:14:40.481 CreateDevice                        INFO     Creating Alpaca device: IP address: 10.234.139.103, IP Port: 6800, Alpaca device number: 0
+17:14:40.481 CreateDevice                        INFO     Successfully created driver
+17:14:41.689 CreateDevice                        OK       Found a valid interface version: 3
+17:14:41.690 CreateDevice                        OK       Driver instance created successfully
+17:14:41.690                                              
+17:14:41.690 Connect to device                            
+17:14:42.018 Connected                           OK       Connected to device successfully using Connected = True
+17:14:42.573 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: The response ended prematurely. (ResponseEnded)
+17:14:42.574                                              
+17:14:42.575 ConnectToDevice                              Cannot connect to device, further tests abandoned.
+17:14:42.575                                              
+17:14:42.576 Your device had 1 issue, 0 errors and 0 configuration alerts          
+17:14:42.576                                              
+17:14:42.577 Issue Summary                                
+17:14:42.577 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: The response ended prematurely. (ResponseEnded)
+17:14:42.577                                     
+17:14:42.577 Timing Summary                               See Help for further information.
+17:14:42.577 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+17:14:42.577 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+17:14:42.578 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+17:14:42.578 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+17:14:42.578                                              
+17:14:42.578 No member timings were recorded.             
+17:15:21.429 ASCOM Universal Device Conformance Checker Version 4.3.0.49708, Build time: Mon 30 March 2026 18:23:37          
+17:15:21.429                                              
+17:15:21.429 Operating system is macOS 26.4.1, Processor is ARM 64bit, Application is 64bit.          
+17:15:21.429                                              
+17:15:21.429 Alpaca device: FILTERWHEEL FilterWheel (10.234.139.103:6800 FilterWheel/0)          
+17:15:21.429                                              
+17:15:21.429 CreateDevice                        INFO     Creating Alpaca device: IP address: 10.234.139.103, IP Port: 6800, Alpaca device number: 0
+17:15:21.430 CreateDevice                        INFO     Successfully created driver
+17:15:22.708 CreateDevice                        OK       Found a valid interface version: 1
+17:15:22.708 CreateDevice                        OK       Driver instance created successfully
+17:15:22.708                                              
+17:15:22.709 Connect to device                            
+17:15:23.075 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: Connection refused
+17:15:23.076                                              
+17:15:23.076 ConnectToDevice                              Cannot connect to device, further tests abandoned.
+17:15:23.077                                              
+17:15:23.077 Your device had 1 issue, 0 errors and 0 configuration alerts          
+17:15:23.077                                              
+17:15:23.077 Issue Summary                                
+17:15:23.078 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: Connection refused
+17:15:23.078                                     
+17:15:23.078 Timing Summary                               See Help for further information.
+17:15:23.078 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+17:15:23.078 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+17:15:23.078 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+17:15:23.078 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+17:15:23.078                                              
+17:15:23.078 No member timings were recorded.             
+17:18:36.628 ASCOM Universal Device Conformance Checker Version 4.3.0.49708, Build time: Mon 30 March 2026 18:23:37          
+17:18:36.628                                              
+17:18:36.628 Operating system is macOS 26.4.1, Processor is ARM 64bit, Application is 64bit.          
+17:18:36.628                                              
+17:18:36.628 Alpaca device: FILTERWHEEL FilterWheel (10.234.139.103:6800 FilterWheel/0)          
+17:18:36.628                                              
+17:18:36.629 CreateDevice                        INFO     Creating Alpaca device: IP address: 10.234.139.103, IP Port: 6800, Alpaca device number: 0
+17:18:36.629 CreateDevice                        INFO     Successfully created driver
+17:18:37.719 CreateDevice                        OK       Found a valid interface version: 3
+17:18:37.720 CreateDevice                        OK       Driver instance created successfully
+17:18:37.720                                              
+17:18:37.721 Connect to device                            
+17:18:37.937 Connected                           OK       Connected to device successfully using Connected = True
+17:18:38.521 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: The response ended prematurely. (ResponseEnded)
+17:18:38.522                                              
+17:18:38.522 ConnectToDevice                              Cannot connect to device, further tests abandoned.
+17:18:38.523                                              
+17:18:38.523 Your device had 1 issue, 0 errors and 0 configuration alerts          
+17:18:38.524                                              
+17:18:38.524 Issue Summary                                
+17:18:38.524 ConnectToDevice                     ISSUE    Connection exception - further testing abandoned: The response ended prematurely. (ResponseEnded)
+17:18:38.524                                     
+17:18:38.524 Timing Summary                               See Help for further information.
+17:18:38.525 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+17:18:38.525 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+17:18:38.525 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+17:18:38.525 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+17:18:38.525                                              
+17:18:38.525 No member timings were recorded.             
+17:22:24.212 ASCOM Universal Device Conformance Checker Version 4.3.0.49708, Build time: Mon 30 March 2026 18:23:37          
+17:22:24.213                                              
+17:22:24.213 Operating system is macOS 26.4.1, Processor is ARM 64bit, Application is 64bit.          
+17:22:24.213                                              
+17:22:24.213 Alpaca device: FILTERWHEEL FilterWheel (10.234.139.103:6800 FilterWheel/0)          
+17:22:24.213                                              
+17:22:24.214 CreateDevice                        INFO     Creating Alpaca device: IP address: 10.234.139.103, IP Port: 6800, Alpaca device number: 0
+17:22:24.214 CreateDevice                        INFO     Successfully created driver
+17:22:25.283 CreateDevice                        OK       Found a valid interface version: 3
+17:22:25.284 CreateDevice                        OK       Driver instance created successfully
+17:22:25.284                                              
+17:22:25.284 Connect to device                            
+17:22:25.679 Connected                           OK       Connected to device successfully using Connected = True
+17:22:26.306 Connected                           OK       Disconnected from device successfully using Connected = False
+17:22:26.545 Connect                             OK       Connected to device successfully using Connect()
+17:22:26.545                                              
+17:22:26.551 Common Driver Methods                        
+17:22:26.551 InterfaceVersion                    OK       3
+17:22:26.570 Connected                           OK       True
+17:22:26.594 Description                         OK       ToupTek Filter Wheel Driver
+17:22:26.616 DriverInfo                          OK       AlpacaCore ToupTek Filter Wheel Driver
+17:22:26.653 DriverVersion                       OK       1.0.0
+17:22:26.706 Name                                OK       FILTERWHEEL FilterWheel
+17:22:26.707                                              
+17:22:26.741 SupportedActions                    OK       Driver returned an empty action list
+17:22:26.742 Action                              INFO     Conform cannot test the Action method
+17:22:26.743                                              
+17:22:26.784 DeviceState                         OK       Received 0 operational state properties.
+17:22:26.788 DeviceState                         INFO     Operational property Position was not included in the DeviceState response.
+17:22:26.789                                              
+17:22:26.789 Pre-run Checks                               
+17:22:28.326 Pre-run Check                       ISSUE    Unable to determine that the Filter wheel is stationary: Filter wheel is moving
+17:22:28.327                                              
+17:22:28.328 Properties                                   
+17:22:28.365 FocusOffsets Get                    OK       Found 7 filter offset values
+17:22:28.366 FocusOffsets Get                    INFO     Filter 0 Offset: 0
+17:22:28.366 FocusOffsets Get                    INFO     Filter 1 Offset: 0
+17:22:28.366 FocusOffsets Get                    INFO     Filter 2 Offset: 0
+17:22:28.367 FocusOffsets Get                    INFO     Filter 3 Offset: 0
+17:22:28.367 FocusOffsets Get                    INFO     Filter 4 Offset: 0
+17:22:28.367 FocusOffsets Get                    INFO     Filter 5 Offset: 0
+17:22:28.367 FocusOffsets Get                    INFO     Filter 6 Offset: 0
+17:22:28.399 Names Get                           OK       Found 7 filter names
+17:22:28.400 Names Get                           INFO     Filter 0 Name: Filter 1
+17:22:28.400 Names Get                           INFO     Filter 1 Name: Filter 2
+17:22:28.400 Names Get                           INFO     Filter 2 Name: Filter 3
+17:22:28.400 Names Get                           INFO     Filter 3 Name: Filter 4
+17:22:28.400 Names Get                           INFO     Filter 4 Name: Filter 5
+17:22:28.400 Names Get                           INFO     Filter 5 Name: Filter 6
+17:22:28.400 Names Get                           INFO     Filter 6 Name: Filter 7
+17:22:28.400 Names Get                           OK       Number of filter offsets and number of names are the same: 7
+17:22:28.433 Position                            ISSUE    Unexpected error: Filter wheel is moving
+17:22:28.434                                              
+17:22:28.434 Testing ascending sequential movement          
+17:22:29.530 Position Set 0                      ISSUE    The Position Set property operated synchronously and should have operated asynchronously.
+17:22:29.531 Position Set 0                      INFO     The device returned the expected position 0 but took longer than the standard response time: 1 seconds.
+17:22:29.534 Position Set 0                      INFO     Position Set should have return quickly and Position Get should return -1 while moving until the set position is achieved.
+17:22:29.698 Position Set 0                      OK       Reached position: 0 in: 1.2 seconds
+17:22:30.974 Position Set 1                      OK       Reached position: 1 in: 0.2 seconds
+17:22:33.733 Position Set 2                      ISSUE    The Position Set property operated synchronously and should have operated asynchronously.
+17:22:33.733 Position Set 2                      INFO     The device returned the expected position 2 but took longer than the standard response time: 1 seconds.
+17:22:33.733 Position Set 2                      INFO     Position Set should have return quickly and Position Get should return -1 while moving until the set position is achieved.
+17:22:33.892 Position Set 2                      OK       Reached position: 2 in: 1.9 seconds
+17:22:35.215 Position Set 3                      OK       Reached position: 3 in: 0.3 seconds
+17:22:36.548 Position Set 4                      OK       Reached position: 4 in: 0.3 seconds
+17:22:37.888 Position Set 5                      OK       Reached position: 5 in: 0.3 seconds
+17:22:39.210 Position Set 6                      OK       Reached position: 6 in: 0.3 seconds
+17:22:40.214                                              
+17:22:40.214 Testing descending sequential movement          
+17:22:40.520 Position Set 6                      OK       Reached position: 6 in: 0.3 seconds
+17:22:41.802 Position Set 5                      OK       Reached position: 5 in: 0.3 seconds
+17:22:43.115 Position Set 4                      OK       Reached position: 4 in: 0.3 seconds
+17:22:44.415 Position Set 3                      OK       Reached position: 3 in: 0.3 seconds
+17:22:45.742 Position Set 2                      OK       Reached position: 2 in: 0.3 seconds
+17:22:47.046 Position Set 1                      OK       Reached position: 1 in: 0.2 seconds
+17:22:48.249 Position Set 0                      ISSUE    Unexpected error: Filter wheel is moving
+17:22:48.251                                              
+17:22:48.251 Testing potentially long distance moves          
+17:22:48.610 Position Set 0                      OK       Reached position: 0 in: 0.3 seconds
+17:23:09.724 Position Set 6                      ISSUE    Unexpected error: Dynamic client timeout for method Position: http://10.234.139.103:6800/
+17:23:16.076 Position Set 5                      ISSUE    The Position Set property operated synchronously and should have operated asynchronously.
+17:23:16.077 Position Set 5                      INFO     The device returned the expected position 5 but took longer than the standard response time: 1 seconds.
+17:23:16.077 Position Set 5                      INFO     Position Set should have return quickly and Position Get should return -1 while moving until the set position is achieved.
+17:23:16.207 Position Set 5                      OK       Reached position: 5 in: 6.4 seconds
+17:23:23.248 Position Set 0                      ISSUE    The Position Set property operated synchronously and should have operated asynchronously.
+17:23:23.249 Position Set 0                      INFO     The device returned the expected position 0 but took longer than the standard response time: 1 seconds.
+17:23:23.250 Position Set 0                      INFO     Position Set should have return quickly and Position Get should return -1 while moving until the set position is achieved.
+17:23:23.321 Position Set 0                      ISSUE    Unexpected error: Filter wheel is moving
+17:23:43.429 Position Set 3                      ISSUE    Unexpected error: Dynamic client timeout for method Position: http://10.234.139.103:6800/
+17:23:43.824 Position Set 0                      OK       Reached position: 0 in: 0.4 seconds
+17:23:44.828                                              
+17:23:44.828 Testing error conditions                     
+17:23:44.864 Position Set                        OK       Correctly rejected bad position: -1
+17:23:44.900 Position Set                        OK       Correctly rejected bad position: 7
+17:23:44.901                                              
+17:23:44.901 Directionality assessment                    
+17:23:44.902 Directionality                      INFO     The filter wheel is uni-directional.
+17:23:44.902                                              
+17:23:44.903 Disconnect from device                       
+17:23:45.153 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+17:23:45.154                                              
+17:23:45.155 Conformance test has finished                
+17:23:45.155                                              
+17:23:45.155 Your device had 10 issues, 0 errors and 0 configuration alerts          
+17:23:45.155                                              
+17:23:45.155 Issue Summary                                
+17:23:45.155 Pre-run Check                       ISSUE    Unable to determine that the Filter wheel is stationary: Filter wheel is moving
+17:23:45.156 Position                            ISSUE    Unexpected error: Filter wheel is moving
+17:23:45.156 Position Set 0                      ISSUE    The Position Set property operated synchronously and should have operated asynchronously.
+17:23:45.156 Position Set 2                      ISSUE    The Position Set property operated synchronously and should have operated asynchronously.
+17:23:45.156 Position Set 0                      ISSUE    Unexpected error: Filter wheel is moving
+17:23:45.156 Position Set 6                      ISSUE    Unexpected error: Dynamic client timeout for method Position: http://10.234.139.103:6800/
+17:23:45.156 Position Set 5                      ISSUE    The Position Set property operated synchronously and should have operated asynchronously.
+17:23:45.156 Position Set 0                      ISSUE    The Position Set property operated synchronously and should have operated asynchronously.
+17:23:45.156 Position Set 0                      ISSUE    Unexpected error: Filter wheel is moving
+17:23:45.156 Position Set 3                      ISSUE    Unexpected error: Dynamic client timeout for method Position: http://10.234.139.103:6800/
+17:23:45.156                                     
+17:23:45.156 Timing Summary                               See Help for further information.
+17:23:45.156 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+17:23:45.156 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+17:23:45.156 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+17:23:45.156 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+17:23:45.156                                              
+17:23:45.157 Connect                                      At 17:22:26.367 Connect                  0.057 seconds. ✓ (STANDARD)
+17:23:45.158 InterfaceVersion                             At 17:22:26.551 InterfaceVersion         0.000 seconds. ✓ (FAST)
+17:23:45.158 Connected                                    At 17:22:26.570 Connected                0.019 seconds. ✓ (FAST)
+17:23:45.158 Description                                  At 17:22:26.594 Description              0.022 seconds. ✓ (FAST)
+17:23:45.158 DriverInfo                                   At 17:22:26.616 DriverInfo               0.021 seconds. ✓ (FAST)
+17:23:45.158 DriverVersion                                At 17:22:26.653 DriverVersion            0.036 seconds. ✓ (FAST)
+17:23:45.158 Name                                         At 17:22:26.706 Name                     0.053 seconds. ✓ (FAST)
+17:23:45.158 SupportedActions                             At 17:22:26.741 SupportedActions         0.034 seconds. ✓ (FAST)
+17:23:45.158 DeviceState                                  At 17:22:26.784 DeviceState              0.040 seconds. ✓ (FAST)
+17:23:45.159 FocusOffsets                                 At 17:22:28.365 FocusOffsets             0.032 seconds. ✓ (FAST)
+17:23:45.159 Names                                        At 17:22:28.399 Names                    0.032 seconds. ✓ (FAST)
+17:23:45.159 Move to position 0                           At 17:22:29.503 Move to position 0       1.067 seconds. OUTSIDE STANDARD RESPONSE TIME TARGET: 1.0 seconds.
+17:23:45.159 Move to position 1                           At 17:22:30.840 Move to position 1       0.139 seconds. ✓ (STANDARD)
+17:23:45.159 Move to position 2                           At 17:22:33.679 Move to position 2       1.702 seconds. OUTSIDE STANDARD RESPONSE TIME TARGET: 1.0 seconds.
+17:23:45.159 Move to position 3                           At 17:22:35.062 Move to position 3       0.167 seconds. ✓ (STANDARD)
+17:23:45.159 Move to position 4                           At 17:22:36.395 Move to position 4       0.177 seconds. ✓ (STANDARD)
+17:23:45.159 Move to position 5                           At 17:22:37.737 Move to position 5       0.186 seconds. ✓ (STANDARD)
+17:23:45.159 Move to position 6                           At 17:22:39.073 Move to position 6       0.182 seconds. ✓ (STANDARD)
+17:23:45.159 Move to position 6                           At 17:22:40.346 Move to position 6       0.129 seconds. ✓ (STANDARD)
+17:23:45.159 Move to position 5                           At 17:22:41.658 Move to position 5       0.135 seconds. ✓ (STANDARD)
+17:23:45.159 Move to position 4                           At 17:22:42.983 Move to position 4       0.176 seconds. ✓ (STANDARD)
+17:23:45.159 Move to position 3                           At 17:22:44.318 Move to position 3       0.201 seconds. ✓ (STANDARD)
+17:23:45.159 Move to position 2                           At 17:22:45.582 Move to position 2       0.162 seconds. ✓ (STANDARD)
+17:23:45.160 Move to position 1                           At 17:22:46.880 Move to position 1       0.135 seconds. ✓ (STANDARD)
+17:23:45.160 Move to position 0                           At 17:22:48.183 Move to position 0       0.132 seconds. ✓ (STANDARD)
+17:23:45.160 Move to position 0                           At 17:22:48.399 Move to position 0       0.147 seconds. ✓ (STANDARD)
+17:23:45.160 Move to position 5                           At 17:23:16.022 Move to position 5       6.297 seconds. OUTSIDE STANDARD RESPONSE TIME TARGET: 1.0 seconds.
+17:23:45.160 Move to position 0                           At 17:23:23.223 Move to position 0       6.013 seconds. OUTSIDE STANDARD RESPONSE TIME TARGET: 1.0 seconds.
+17:23:45.160 Move to position 0                           At 17:23:43.690 Move to position 0       0.260 seconds. ✓ (STANDARD)
+17:23:45.160 Disconnect                                   At 17:23:44.965 Disconnect               0.032 seconds. ✓ (STANDARD)
+17:23:45.160                                              
+17:23:45.160 4 members took longer than their target response times.          
