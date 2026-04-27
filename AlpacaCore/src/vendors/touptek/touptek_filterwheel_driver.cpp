@@ -16,10 +16,8 @@
 #include <alpacacore/util/logging.h>
 
 #include <atomic>
-#include <chrono>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace alpacacore::vendor::touptek {
@@ -127,6 +125,8 @@ public:
 
             handle_ = sdk.open_camera_by_id(cinfo.id);
 
+            // Wrap all initialisation after open_camera_by_id so the handle
+            // is always cleaned up if anything throws.
             try {
                 int slots = sdk.get_filterwheel_slot_count(handle_);
                 if (slots <= 0) {
@@ -135,26 +135,24 @@ public:
                     throw AlpacaException("Filter wheel has no slots", AlpacaError::DriverException);
                 }
                 slot_count_ = slots;
-            } catch (const AlpacaException&) {
-                sdk.close_camera(handle_);
-                handle_ = nullptr;
+
+                serial_number_ = sdk.get_serial_number(handle_);
+
+                // Preserve any names/offsets the client staged while
+                // disconnected; only pad/resize to match the actual slot count.
+                resize_names_to_slot_count_locked();
+                resize_offsets_to_slot_count_locked();
+                apply_default_names_locked();
+
+                connected_.store(true);
+                return;
+            } catch (...) {
+                if (handle_) {
+                    sdk.close_camera(handle_);
+                    handle_ = nullptr;
+                }
                 throw;
-            } catch (const std::exception& e) {
-                sdk.close_camera(handle_);
-                handle_ = nullptr;
-                throw AlpacaException("Failed to query filter wheel slots: " + std::string(e.what()),
-                                      AlpacaError::DriverException);
             }
-
-            serial_number_ = sdk.get_serial_number(handle_);
-
-            // Initialize filter names and focus offsets to match slot count.
-            filter_names_.assign(static_cast<std::size_t>(slot_count_), std::string());
-            focus_offsets_.assign(static_cast<std::size_t>(slot_count_), 0);
-            apply_default_names_locked();
-
-            connected_.store(true);
-            return;
         }
 
         // Disconnecting.
@@ -165,8 +163,7 @@ public:
         camera_name_.clear();
         serial_number_.clear();
         slot_count_ = 0;
-        filter_names_.clear();
-        focus_offsets_.clear();
+        // Preserve staged names/offsets so they survive reconnects.
         connected_.store(false);
     }
 
@@ -211,10 +208,7 @@ public:
             throw AlpacaException("Filter wheel disconnected", AlpacaError::NotConnected);
         }
         int pos = sdk.get_filterwheel_position(handle_);
-        if (pos < 0) {
-            // Filter wheel is in motion; return current known position or 0.
-            throw AlpacaException("Filter wheel is moving", AlpacaError::InvalidOperation);
-        }
+        // Per Alpaca spec, return -1 while the wheel is moving.
         return pos;
     }
 
@@ -233,45 +227,9 @@ public:
             }
             sdk.set_filterwheel_position(handle_, position, 1); // auto direction spinning
         }
-
-        // The filter wheel moves asynchronously. Wait in a spin-loop for
-        // up to 30 seconds for the move to complete (get_position returns >= 0).
-        const int max_wait_ms = 30000;
-        const int poll_ms = 100;
-        int waited = 0;
-        while (waited < max_wait_ms) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
-            waited += poll_ms;
-            int pos = -1;
-            bool handle_valid = false;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (handle_) {
-                    pos = sdk.get_filterwheel_position(handle_);
-                    handle_valid = true;
-                }
-            }
-            if (!handle_valid) {
-                throw AlpacaException("Filter wheel disconnected during move",
-                                      AlpacaError::NotConnected);
-            }
-            if (pos >= 0) {
-                if (pos != position) {
-                    throw AlpacaException("Filter wheel reached wrong position",
-                                          AlpacaError::DriverException);
-                }
-                return;
-            }
-            // pos < 0 means still in motion — continue polling.
-        }
-        // Timeout reached - stop the wheel to prevent endless spinning
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (handle_) {
-                sdk.reset_filterwheel(handle_);
-            }
-        }
-        throw AlpacaException("Filter wheel move timed out", AlpacaError::DriverException);
+        // Return immediately — the Alpaca spec requires Position Set to be
+        // asynchronous. The client polls get_position() which returns -1 while
+        // the wheel is moving.
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -345,6 +303,22 @@ private:
                 }
             }
         } catch (const std::exception&) {
+        }
+    }
+
+    // Resize filter_names_ to match slot_count_, preserving existing entries.
+    void resize_names_to_slot_count_locked() {
+        const auto slots = static_cast<std::size_t>(slot_count_);
+        if (filter_names_.size() != slots) {
+            filter_names_.resize(slots);
+        }
+    }
+
+    // Resize focus_offsets_ to match slot_count_, preserving existing entries.
+    void resize_offsets_to_slot_count_locked() {
+        const auto slots = static_cast<std::size_t>(slot_count_);
+        if (focus_offsets_.size() != slots) {
+            focus_offsets_.resize(slots);
         }
     }
 

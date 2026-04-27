@@ -108,7 +108,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| Integrated FW (GPCMOS01200KPF) | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS01200KPF%20Filterwheel/) |
+| Integrated FW (GPCMOS01200KPF) | USB | — | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS01200KPF%20Filterwheel/) |
 
 ### ToupTek FilterWheel Driver Notes
 
