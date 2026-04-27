@@ -47,7 +47,7 @@ int main(int argc, char* argv[]) {
 
     // Initialize logging - connect to AlpacaCore logging system
     alpacahttp::util::init_logging(config);
-    
+
     // Optionally set a custom log sink
     alpacahttp::util::set_external_log_sink([](alpacacore::logging::LogLevel level,
                                                std::string_view component,
@@ -85,12 +85,12 @@ int main(int argc, char* argv[]) {
 
     // Start HTTP server
     alpacahttp::Server server(config);
-    
+
     // Set shutdown callback - when shutdown endpoint is called, set g_running to false
     server.set_shutdown_callback([]() {
         g_running = false;
     });
-    
+
     server.start_async();
 
     // Wait for shutdown signal
@@ -110,11 +110,11 @@ int main(int argc, char* argv[]) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     alpacahttp::util::log_info("Server stopped");
-    
+
     // Flush any remaining log output
     std::cout.flush();
     std::cerr.flush();
-    
+
     // Use exit() to ensure process terminates even if there are lingering threads
     // This is safe since we've already stopped all services
     exit(0);
