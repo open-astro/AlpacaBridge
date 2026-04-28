@@ -31,6 +31,7 @@
 #include <termios.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <ifaddrs.h>
@@ -1316,18 +1317,22 @@ private:
 
     void configure_network_timeouts() {
         constexpr int kSocketTimeoutMs = 200;
+        int nodelay = 1;
 #ifdef _WIN32
         DWORD timeout = kSocketTimeoutMs;
         setsockopt(socket_handle_, SOL_SOCKET, SO_RCVTIMEO,
                    reinterpret_cast<const char*>(&timeout), sizeof(timeout));
         setsockopt(socket_handle_, SOL_SOCKET, SO_SNDTIMEO,
                    reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+        setsockopt(socket_handle_, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
 #else
         timeval timeout{};
         timeout.tv_sec = 0;
         timeout.tv_usec = kSocketTimeoutMs * 1000;
         setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 #endif
     }
 

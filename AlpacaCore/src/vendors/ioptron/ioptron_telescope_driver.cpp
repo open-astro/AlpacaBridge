@@ -2187,13 +2187,69 @@ private:
             if (clock_sync_cancel_.load()) {
                 return;
             }
-            std::unique_lock<std::mutex> lock(mutex_);
-            if (!connected_ || clock_sync_cancel_.load()) {
-                return;
+
+            std::optional<double> lat, lon;
+            std::optional<int> elev;
+            bool do_clock_sync = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_ || clock_sync_cancel_.load()) {
+                    return;
+                }
+                lat = pending_site_latitude_;
+                lon = pending_site_longitude_;
+                elev = pending_site_elevation_;
+                do_clock_sync = sync_time_on_connect_;
             }
-            sync_site_settings_with_mount_locked();
-            if (sync_time_on_connect_) {
-                sync_mount_clock_with_host_locked();
+
+            auto& protocol = iOptronProtocolWrapper::instance();
+
+            if (lat.has_value()) {
+                double latitude = lat.value();
+                retry_mount_command("site latitude", [&]() { protocol.set_latitude(latitude); });
+                retry_mount_command("hemisphere", [&]() { protocol.set_hemisphere(latitude >= 0.0); });
+            }
+            if (lon.has_value()) {
+                double longitude = lon.value();
+                retry_mount_command("site longitude", [&]() { protocol.set_longitude(longitude); });
+            }
+
+            if (do_clock_sync) {
+                auto tz_info = compute_local_timezone_info();
+                auto now_utc = std::chrono::system_clock::now();
+                retry_mount_command("timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); });
+                retry_mount_command("DST flag", [&]() { protocol.set_dst_observed(tz_info.dst_active); });
+                retry_mount_command("UTC clock", [&]() { protocol.set_utc_time(now_utc); });
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_ || clock_sync_cancel_.load()) {
+                    return;
+                }
+                if (lat.has_value()) {
+                    site_latitude_cached_ = lat.value();
+                    hemisphere_north_ = (lat.value() >= 0.0);
+                    site_info_valid_ = true;
+                    last_site_info_fetch_ = std::chrono::steady_clock::now();
+                }
+                if (lon.has_value()) {
+                    site_longitude_cached_ = lon.value();
+                    site_info_valid_ = true;
+                    last_site_info_fetch_ = std::chrono::steady_clock::now();
+                }
+                if (elev.has_value()) {
+                    site_elevation_m_ = elev.value();
+                }
+                if (do_clock_sync) {
+                    auto tz_info = compute_local_timezone_info();
+                    timezone_offset_minutes_ = tz_info.offset_minutes;
+                    timezone_offset_valid_ = true;
+                    dst_observed_ = tz_info.dst_active;
+                    last_utc_set_ = std::chrono::system_clock::now();
+                    last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+                    last_utc_valid_ = true;
+                }
             }
         });
     }
