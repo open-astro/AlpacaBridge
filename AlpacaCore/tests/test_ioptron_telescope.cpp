@@ -15,8 +15,23 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
+#include <alpacacore/util/error_handling.h>
+#include <functional>
 
 using alpacacore::DeviceType;
+
+namespace {
+
+void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+    }
+}
+
+} // namespace
 
 TEST_CASE("iOptron Telescope Driver - Defaults", "[ioptron][telescope][unit]") {
     alpacacore::vendor::ioptron::ConnectionInfo conn;
@@ -115,4 +130,37 @@ TEST_CASE("iOptron Telescope Driver - Device metadata", "[ioptron][telescope][un
     CHECK(driver->get_driver_version() == "1.0.0");
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "iOptron_3");
+}
+
+TEST_CASE("iOptron Telescope Driver - Telescope Properties", "[ioptron][telescope][unit]") {
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
+
+    CHECK(driver->get_interface_version() >= 3);
+
+    auto eq = driver->get_equatorial_system();
+    CHECK((eq == alpacacore::EquatorialSystem::Topocentric ||
+           eq == alpacacore::EquatorialSystem::J2000 ||
+           eq == alpacacore::EquatorialSystem::Other));
+
+    auto align = driver->get_alignment_mode();
+    CHECK((align == alpacacore::AlignmentMode::AltAz ||
+           align == alpacacore::AlignmentMode::Polar ||
+           align == alpacacore::AlignmentMode::GermanPolar));
+}
+
+TEST_CASE("iOptron Telescope Driver - ASCOM Error Codes", "[ioptron][telescope][unit]") {
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
+
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
 }

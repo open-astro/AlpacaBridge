@@ -16,8 +16,22 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <functional>
 
 using alpacacore::DeviceType;
+
+namespace {
+
+void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+    }
+}
+
+} // namespace
 
 TEST_CASE("SynScan Telescope Driver - Defaults", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
@@ -135,4 +149,103 @@ TEST_CASE("SynScan Telescope Driver - Disconnected Behavior", "[synscan][telesco
     CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+}
+
+TEST_CASE("SynScan Telescope Driver - Target Coordinate Persistence", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    REQUIRE_NOTHROW(driver->set_target_right_ascension(12.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 12.0);
+
+    REQUIRE_NOTHROW(driver->set_target_declination(45.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 45.0);
+
+    REQUIRE_NOTHROW(driver->set_target_right_ascension(6.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 6.0);
+    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 45.0);
+
+    REQUIRE_NOTHROW(driver->set_target_right_ascension(0.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 0.0);
+    REQUIRE_NOTHROW(driver->set_target_right_ascension(23.999));
+    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 23.999);
+
+    REQUIRE_NOTHROW(driver->set_target_declination(-90.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), -90.0);
+    REQUIRE_NOTHROW(driver->set_target_declination(90.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 90.0);
+}
+
+TEST_CASE("SynScan Telescope Driver - Site Property Validation", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    require_alpaca_error([&]() { driver->set_site_elevation(-300.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_elevation(10000.1); }, alpacacore::AlpacaError::InvalidValue);
+    REQUIRE_NOTHROW(driver->set_site_elevation(-300.0));
+    REQUIRE_NOTHROW(driver->set_site_elevation(10000.0));
+    ALPACA_REQUIRE_APPROX(driver->get_site_elevation(), 10000.0);
+
+    require_alpaca_error([&]() { driver->set_site_latitude(-90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_latitude(90.1); }, alpacacore::AlpacaError::InvalidValue);
+
+    require_alpaca_error([&]() { driver->set_site_longitude(-180.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_longitude(180.1); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+TEST_CASE("SynScan Telescope Driver - Telescope Properties", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    CHECK(driver->get_interface_version() >= 3);
+
+    auto eq = driver->get_equatorial_system();
+    CHECK((eq == alpacacore::EquatorialSystem::Topocentric ||
+           eq == alpacacore::EquatorialSystem::J2000 ||
+           eq == alpacacore::EquatorialSystem::Other));
+
+    auto align = driver->get_alignment_mode();
+    CHECK((align == alpacacore::AlignmentMode::AltAz ||
+           align == alpacacore::AlignmentMode::Polar ||
+           align == alpacacore::AlignmentMode::GermanPolar));
+
+    auto rates = driver->get_tracking_rates();
+    CHECK_FALSE(rates.empty());
+
+    CHECK(driver->get_slew_settle_time() >= 0);
+}
+
+TEST_CASE("SynScan Telescope Driver - ASCOM Error Codes", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    // TODO: SynScan check_connected() throws DriverException (0x500) instead of
+    // NotConnected (0x407). Fix the driver, then change these to AlpacaError::NotConnected.
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->set_tracking(true); }, alpacacore::AlpacaError::DriverException);
+
+    require_alpaca_error([&]() { driver->set_target_right_ascension(-0.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_declination(-90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
 }

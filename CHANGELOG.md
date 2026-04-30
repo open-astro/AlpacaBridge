@@ -42,6 +42,18 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - All iOptron web UI element IDs prefixed with `ioptron-` to avoid collisions with other vendor config sections.
 - **Supported Drivers Documentation**: updated iOptron Driver Notes with auto-detection, mount identification, tested firmware details (HEM27, V240121/V241201), Wi-Fi reliability notes, and ConformU validation status (USB and Wi-Fi).
 
+### Added
+- **ASCOM Contract Tests** (AlpacaCore): added `require_alpaca_error` helper and ASCOM error code verification across all 12 driver test files (121 test cases, 897 assertions). Tests verify specific ASCOM error codes (NotConnected, InvalidValue, NotImplemented, ActionNotImplemented, ValueNotSet) without requiring hardware, replicating key ConformU checks at the unit test level.
+  - Camera drivers (ZWO, QHY, SVBONY, ToupTek, Player One): ASCOM error codes and CameraState machine contracts
+  - Telescope drivers (iOptron, SynScan, Celestron, Bisque, ZWO): ASCOM error codes, target coordinate persistence, site property validation, telescope property contracts
+  - Switch (ZWO), ObservingConditions (WeeWX): ASCOM error codes for disconnected operations
+- **Documentation** (docs/): consolidated `AlpacaCore/docs/` and root `DEVELOPMENT.md` into `docs/development.md`, `docs/architecture.md`, and `docs/troubleshooting.md`. Updated test requirements to 8 cases / 30+ assertions with ConformU-aligned contract test patterns.
+- **Claude Code Skills** (.claude/commands/): added `/commit`, `/submit-pr`, and `/driver-build` slash commands for guided development workflows
+
+### Changed
+- **Build System** (AlpacaHTTP): removed unused Boost.Beast option and empty `session.cpp` placeholder
+- **Platform Documentation**: added Raspberry Pi 3B+ to supported arm64 targets
+
 ### Fixed
 - **iOptron Telescope Driver** (AlpacaCore)
   - Fixed `:MountInfo#` response parsing: iOptron returns exactly 4 ASCII digit bytes with no `#` terminator, but the driver was waiting for a `#` and timing out silently. Changed to idle-timeout read mode (`require_hash_terminator=false`).

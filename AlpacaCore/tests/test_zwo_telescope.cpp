@@ -135,6 +135,32 @@ TEST_CASE("ZWO Mount Telescope Driver - Site Elevation Validation", "[zwo][teles
     ALPACA_REQUIRE_APPROX(driver->get_site_elevation(), 10000.0);
 }
 
+TEST_CASE("ZWO Mount Telescope Driver - Site Latitude/Longitude Validation", "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(3, conn);
+
+    require_alpaca_error([&]() { driver->set_site_latitude(-90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_latitude(90.1); }, alpacacore::AlpacaError::InvalidValue);
+
+    require_alpaca_error([&]() { driver->set_site_longitude(-180.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_longitude(180.1); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+TEST_CASE("ZWO Mount Telescope Driver - Telescope Properties", "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+
+    CHECK(driver->get_interface_version() >= 3);
+    CHECK(driver->get_slew_settle_time() >= 0);
+    require_alpaca_error([&]() { driver->set_slew_settle_time(-1); }, alpacacore::AlpacaError::InvalidValue);
+}
+
 TEST_CASE("ZWO Mount Telescope Driver - Axis Rate Ranges", "[zwo][telescope][unit]") {
     alpacacore::vendor::zwo::ConnectionInfo conn;
     conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;

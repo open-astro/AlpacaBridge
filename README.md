@@ -27,7 +27,7 @@ Watch a full install on a ToupTek StellaVita: [Installing AlpacaBridge on a Toup
 
 - [Wiki](https://github.com/open-astro/AlpacaBridge/wiki) — user guides, configuration, and troubleshooting
 - [SUPPORTED-DRIVERS.md](SUPPORTED-DRIVERS.md) — validated driver matrix
-- [DEVELOPMENT.md](DEVELOPMENT.md) — building from source, writing drivers, running tests
+- [Development Guide](docs/development.md) — building from source, writing drivers, running tests
 
 ## Installation
 
