@@ -248,11 +248,11 @@ SDK locations: `AlpacaCore/external/SVBONY/lib/x64/`, `lib/armv8/`, headers unde
 
 ### ToupTek
 
-Devices: Camera, Focuser (AAF — Astro Auto Focuser).
+Devices: Camera, Focuser (AAF — Astro Auto Focuser), FilterWheel.
 
-SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between camera and focuser drivers).
+SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between camera, focuser, and filter wheel drivers).
 
-- **Single SDK, two device types**: Both camera and focuser drivers go through `ToupTekSDKWrapper`. Cameras enumerate via `enumerate_cameras()`, focusers via `enumerate_focusers()` which filters `Toupcam_EnumV2` results by `TOUPCAM_FLAG_AUTOFOCUSER`. Same `Toupcam_Open` is used for both — the device-class is determined entirely by the capability flag.
+- **Single SDK, three device types**: All three drivers go through `ToupTekSDKWrapper`. Cameras enumerate via `enumerate_cameras()`, focusers via `enumerate_focusers()` which filters `Toupcam_EnumV2` results by `TOUPCAM_FLAG_AUTOFOCUSER`. Filter wheels are integrated into cameras with the `TOUPCAM_FLAG_FILTERWHEEL` flag and controlled through the same camera handle.
 - **AAF API convention** (`Toupcam_AAF(handle, action, value, *out)`):
   - **SET**: `Toupcam_AAF(h, AAF_SETxxx, value, nullptr)` — passes value in third arg.
   - **GET**: `Toupcam_AAF(h, AAF_GETxxx, 0, &out)` — third arg is unused, output via pointer.
@@ -262,6 +262,17 @@ SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between
 - **Temperature units**: `AAF_GETTEMP` returns tenths of Celsius (e.g. `32` → `3.2 °C`). Divide by 10.0 before returning to ASCOM. INDI applies a 0.1 °C hysteresis when updating UI; we read on demand so the hysteresis is unnecessary on the driver side.
 - **No temp-comp action**: The AAF action set has no temp-comp control. `TempCompAvailable` returns false; `set_temp_comp(true)` throws `NotImplemented` (not `DriverException`).
 - **`Toupcam_get_FocusMotor` is deprecated** in the shipped SDK header. Do not use it for AAF focusers — use the `Toupcam_AAF` action interface instead. The non-deprecated `FocusMotor` API is for autofocus-equipped cameras (`TOUPCAM_FLAG_FOCUSMOTOR`), a different capability.
+- **Filter wheel via camera handle**: ToupTek filter wheels are integrated into cameras that have the `TOUPCAM_FLAG_FILTERWHEEL` flag. The filter wheel is controlled through the same camera handle via `TOUPCAM_OPTION_FILTERWHEEL_SLOT` and `TOUPCAM_OPTION_FILTERWHEEL_POSITION` options.
+- **Auto-direction**: Always use `direction=1` (auto). Moves where counterclockwise is shorter at the 0/N boundary (e.g., 0→6 on a 7-slot wheel) can time out (>30s).
+- **Position polling**: `get_filterwheel_position()` returns `-1` while the wheel is moving (per Alpaca spec). `set_position()` issues the move and returns immediately — the client polls `get_position()` to detect completion.
+- **Connection threading**: `connect()` and `disconnect()` are synchronous (block until complete) rather than async. The async approach caused ConformU `ConnectToDevice` failures because the HTTP response returned before the device was ready.
+- **Staged names/offsets survive disconnect**: `set_names()` and `set_focus_offsets()` work while disconnected — values are stored and resized to match the actual slot count on subsequent connect. Disconnect no longer clears these vectors.
+- **Handle lifecycle**: All SDK operations are performed inside a `mutex_` lock. The `handle_copy()` pattern was removed because it returned a raw pointer that could be closed by `disconnect()` on another thread.
+- **Post-open cleanup**: All initialization after `open_camera_by_id()` is wrapped in a single `try/catch(...)` that closes the handle on any exception.
+- **Filter wheel DeviceState** should only report `Position`; omit `Connected` for ConformU compatibility.
+- **Filter wheel Names** must be non-empty; default to `"Filter 1..N"` and allow setting names/offsets while disconnected.
+- **UniqueID stability**: `get_unique_id()` uses `TOUPTEK_FW_<device_number>` (not serial-based) so the ID is stable before and after connect.
+- ConformU 4.3.0 validated for **ToupTek GPCMOS01200KPF** integrated filter wheel on Linux arm64 and amd64 with 0 errors, 1 issue (0→6 hardware timeout).
 
 ### SynScan (SkyWatcher)
 
