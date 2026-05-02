@@ -11,6 +11,16 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ## [1.0.4] - UNRELEASED
 
+### Added
+- **ToupTek Filter Wheel Driver** (AlpacaCore)
+  - New filter wheel driver for cameras with integrated filter wheels (`TOUPCAM_FLAG_FILTERWHEEL`).
+  - Filter wheel controlled through camera handle via `TOUPCAM_OPTION_FILTERWHEEL_SLOT` and `TOUPCAM_OPTION_FILTERWHEEL_POSITION`.
+  - Names and focus offsets storable while disconnected, preserved across reconnects.
+  - Async `set_position()` and `get_position()` returning `-1` during motion (Alpaca spec compliant).
+  - Thread-safe handle lifecycle with mutex-guarded SDK operations.
+  - Catch2 unit tests (9 test cases, 42 assertions).
+  - ConformU 4.3.0 validated on Linux arm64: 0 errors, 1 issue (0→6 hardware timeout).
+
 ### Changed
 - **SynScan Telescope Driver** (AlpacaCore)
   - Auto-detection of SynScan mounts: `connectionType: "auto"` scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for SynScan hand controllers, probes each port with a firmware version query, and connects to the first responding mount. No manual port configuration required.
