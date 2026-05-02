@@ -144,6 +144,12 @@ public:
 
                 serial_number_ = sdk.get_serial_number(handle_);
 
+                // Warm up the SDK by reading the current position. The ToupTek
+                // SDK's filter wheel state machine needs an initial position
+                // query after opening the camera; without this, the first move
+                // command after connect consistently times out.
+                sdk.get_filterwheel_position(handle_);
+
                 // Preserve any names/offsets the client staged while
                 // disconnected; only pad/resize to match the actual slot count.
                 resize_names_to_slot_count_locked();
