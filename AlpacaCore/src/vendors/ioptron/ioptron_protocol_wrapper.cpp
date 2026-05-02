@@ -586,13 +586,6 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
                 candidates.push_back({ip, port});
             }
         }
-        // Also include the broadcast-1 address (often the gateway/mount on small WiFi nets)
-        uint32_t last_host = subnet.base | host_bits;
-        if (last_host != subnet.self) {
-            for (int port : PROBE_PORTS) {
-                candidates.push_back({last_host, port});
-            }
-        }
 
         ALPACA_LOG_INFO("iOptron", "Network discovery: scanning " +
                         std::to_string(candidates.size()) + " candidates on " + subnet.iface_name);

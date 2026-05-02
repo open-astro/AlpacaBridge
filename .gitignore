@@ -61,7 +61,8 @@ debian/*.substvars
 obj-*/
 
 # Test build directories
-build-test/
+AlpacaCore/build-test*/
+AlpacaHTTP/build-test*/
 
 # Claude Code local settings
 .claude/settings.local.json
