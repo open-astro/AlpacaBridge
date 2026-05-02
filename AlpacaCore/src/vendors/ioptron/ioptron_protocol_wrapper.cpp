@@ -25,6 +25,7 @@
 #include <cctype>
 #include <cstring>
 #include <ctime>
+#include <unordered_set>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -488,30 +489,83 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
 #ifndef _WIN32
     static constexpr int PROBE_PORTS[] = {8899, 4030};
     static constexpr int NUM_PROBE_PORTS = 2;
-    static constexpr int CONNECT_BATCH_SIZE = 64;
+    static constexpr int CONNECT_BATCH_SIZE = 256;
     static constexpr int CONNECT_TIMEOUT_MS = 1200;
     static constexpr int PROBE_TIMEOUT_MS = 2500;
     static constexpr int KNOWN_ADDR_TIMEOUT_MS = 2500;
     static constexpr uint32_t MAX_SCANNABLE_HOST_BITS = 255;
 
-    // --- Phase 1: Try well-known iOptron default addresses first ---
+    // --- Phase 1: Parallel probe of well-known iOptron default addresses ---
+    // All known addresses are connected concurrently so multiple iOptron WiFi
+    // modules on the host network are all discovered (mount_index > 0 needs
+    // every responding mount, not just the first).
     ALPACA_LOG_INFO("iOptron", "Network discovery: trying known iOptron default addresses...");
+    {
+        struct PendingConnect { int fd; std::string host; int port; };
+        std::vector<PendingConnect> pending;
+        pending.reserve(sizeof(KNOWN_IOPTRON_ADDRESSES) / sizeof(KNOWN_IOPTRON_ADDRESSES[0]));
 
-    for (const auto& addr : KNOWN_IOPTRON_ADDRESSES) {
-        ALPACA_LOG_INFO("iOptron", "  Probing " + std::string(addr.host) + ":" + std::to_string(addr.port) + "...");
-        auto found = try_known_address(addr.host, addr.port, KNOWN_ADDR_TIMEOUT_MS);
-        if (!found.model_code.empty()) {
-            std::string model = model_code_to_name(found.model_code);
-            ALPACA_LOG_INFO("iOptron", "Network discovery: found mount at " +
-                            found.host + ":" + std::to_string(found.tcp_port) +
-                            " (model " + found.model_code +
-                            (model.empty() ? "" : " / " + model) + ")");
-            results.push_back(found);
-            return results;
+        for (const auto& addr : KNOWN_IOPTRON_ADDRESSES) {
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) {
+                continue;
+            }
+
+            int flags = fcntl(fd, F_GETFL, 0);
+            fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+            sockaddr_in sin{};
+            std::memset(&sin, 0, sizeof(sin));
+            sin.sin_family = AF_INET;
+            sin.sin_port = htons(static_cast<uint16_t>(addr.port));
+            inet_pton(AF_INET, addr.host, &sin.sin_addr);
+
+            int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&sin), sizeof(sin));
+            if (rc == 0 || errno == EINPROGRESS) {
+                pending.push_back({fd, addr.host, addr.port});
+            } else {
+                close(fd);
+            }
+        }
+
+        if (!pending.empty()) {
+            std::vector<struct pollfd> pfds(pending.size());
+            for (std::size_t i = 0; i < pending.size(); ++i) {
+                pfds[i].fd = pending[i].fd;
+                pfds[i].events = POLLOUT;
+                pfds[i].revents = 0;
+            }
+            poll(pfds.data(), static_cast<nfds_t>(pfds.size()), KNOWN_ADDR_TIMEOUT_MS);
+
+            for (std::size_t i = 0; i < pending.size(); ++i) {
+                bool connected = false;
+                if (pfds[i].revents & POLLOUT) {
+                    int sock_err = 0;
+                    socklen_t len = sizeof(sock_err);
+                    getsockopt(pending[i].fd, SOL_SOCKET, SO_ERROR, &sock_err, &len);
+                    connected = (sock_err == 0);
+                }
+                close(pending[i].fd);
+                if (!connected) {
+                    continue;
+                }
+
+                std::string code = probe_ioptron_network(pending[i].host.c_str(),
+                                                         pending[i].port,
+                                                         PROBE_TIMEOUT_MS);
+                if (!code.empty()) {
+                    std::string model = model_code_to_name(code);
+                    ALPACA_LOG_INFO("iOptron", "Network discovery: found mount at " +
+                                    pending[i].host + ":" + std::to_string(pending[i].port) +
+                                    " (model " + code +
+                                    (model.empty() ? "" : " / " + model) + ")");
+                    results.push_back({pending[i].host, pending[i].port, code});
+                }
+            }
         }
     }
 
-    ALPACA_LOG_INFO("iOptron", "Network discovery: no mount found at known addresses, scanning subnets...");
+    ALPACA_LOG_INFO("iOptron", "Network discovery: scanning local subnets for additional mounts...");
 
     // --- Phase 2: Enumerate local subnets and scan ---
     auto subnets = get_local_subnets();
@@ -556,7 +610,6 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
                                     " (model " + found.model_code +
                                     (model.empty() ? "" : " / " + model) + ")");
                     results.push_back(found);
-                    return results;
                 }
             }
         }
@@ -596,7 +649,7 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
             int port;
         };
 
-        for (std::size_t batch_start = 0; batch_start < candidates.size() && results.empty();
+        for (std::size_t batch_start = 0; batch_start < candidates.size();
              batch_start += CONNECT_BATCH_SIZE) {
             std::size_t batch_end = std::min(batch_start + static_cast<std::size_t>(CONNECT_BATCH_SIZE),
                                              candidates.size());
@@ -674,9 +727,22 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
             }
         }
 
-        if (!results.empty()) {
-            break;
+    }
+
+    // Deduplicate by host:port — Phase 1 known addresses can overlap with the
+    // subnet scan when a known iOptron default IP also sits in a scanned /24.
+    if (results.size() > 1) {
+        std::unordered_set<std::string> seen;
+        seen.reserve(results.size());
+        std::vector<iOptronNetworkHostInfo> deduped;
+        deduped.reserve(results.size());
+        for (auto& r : results) {
+            std::string key = r.host + ":" + std::to_string(r.tcp_port);
+            if (seen.insert(key).second) {
+                deduped.push_back(std::move(r));
+            }
         }
+        results = std::move(deduped);
     }
 #endif
 
