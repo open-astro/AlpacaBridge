@@ -40,4 +40,13 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
     std::optional<double> site_elevation_m,
     std::optional<bool> sync_time_on_connect);
 
+std::unique_ptr<TelescopeDriver> create_synscan_telescope_auto(
+    int device_number,
+    int mount_index = 0,
+    SynScanVersion version = SynScanVersion::Auto,
+    std::optional<double> site_latitude_deg = std::nullopt,
+    std::optional<double> site_longitude_deg = std::nullopt,
+    std::optional<double> site_elevation_m = std::nullopt,
+    std::optional<bool> sync_time_on_connect = std::nullopt);
+
 } // namespace alpacacore::vendor::synscan

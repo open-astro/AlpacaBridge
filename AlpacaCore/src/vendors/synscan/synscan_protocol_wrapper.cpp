@@ -34,7 +34,218 @@
 #include <netdb.h>
 #include <errno.h>
 
+#ifndef _WIN32
+#include <filesystem>
+#endif
+
 namespace alpacacore::vendor::synscan {
+
+namespace {
+
+// Probe a serial port for a SynScan hand controller using the echo command (Kx).
+// Returns HC firmware version string (e.g. "04.42.00") on success, empty on failure.
+// SynScan V command returns 6 hex-ASCII digits (e.g. "042A00#"), unlike NexStar binary format.
+std::string probe_synscan_port(const std::string& port_path) {
+#ifndef _WIN32
+    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (fd < 0) {
+        return "";
+    }
+
+    struct termios tty{};
+    if (tcgetattr(fd, &tty) != 0) {
+        close(fd);
+        return "";
+    }
+
+    cfsetospeed(&tty, B9600);
+    cfsetispeed(&tty, B9600);
+    tty.c_cflag &= ~PARENB;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+    tty.c_cflag &= ~CRTSCTS;
+    tty.c_cflag |= CREAD | CLOCAL;
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
+    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    tty.c_oflag &= ~OPOST;
+    tty.c_oflag &= ~ONLCR;
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 20;
+
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
+        close(fd);
+        return "";
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    tcflush(fd, TCIOFLUSH);
+
+    const char echo_cmd[] = {'K', 0x42};
+    ssize_t written = write(fd, echo_cmd, 2);
+    if (written != 2) {
+        close(fd);
+        return "";
+    }
+
+    char resp[4] = {};
+    int total = 0;
+    auto start = std::chrono::steady_clock::now();
+    while (total < 2) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed > 3) {
+            break;
+        }
+        char ch = 0;
+        ssize_t r = read(fd, &ch, 1);
+        if (r == 1) {
+            resp[total++] = ch;
+            if (ch == '#') break;
+        } else if (r == 0) {
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    if (total < 2 || resp[0] != 0x42 || resp[1] != '#') {
+        close(fd);
+        return "";
+    }
+
+    // Echo confirmed — query firmware version with "V" command.
+    // SynScan returns 6 hex-ASCII digits + '#' (e.g. "042A00#" for 4.42.00).
+    tcflush(fd, TCIOFLUSH);
+    const char ver_cmd[] = {'V'};
+    written = write(fd, ver_cmd, 1);
+    if (written != 1) {
+        close(fd);
+        return "";
+    }
+
+    char ver_resp[8] = {};
+    total = 0;
+    start = std::chrono::steady_clock::now();
+    while (total < 7) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed > 3) {
+            break;
+        }
+        char ch = 0;
+        ssize_t r = read(fd, &ch, 1);
+        if (r == 1) {
+            ver_resp[total++] = ch;
+            if (ch == '#') break;
+        } else if (r == 0) {
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    // Distinguish SynScan from NexStar by response length.
+    // SynScan V: 6 hex-ASCII chars + '#' (7 bytes total).
+    // NexStar V: 2 binary bytes + '#' (3 bytes total).
+    bool is_synscan = (total == 7 && ver_resp[6] == '#');
+
+    close(fd);
+
+    if (is_synscan) {
+        // Parse "XXYYZZ" as version XX.YY.ZZ (each pair is hex)
+        std::string hex_str(ver_resp, 6);
+        bool all_hex = true;
+        for (char c : hex_str) {
+            if (!std::isxdigit(static_cast<unsigned char>(c))) {
+                all_hex = false;
+                break;
+            }
+        }
+        if (!all_hex) {
+            return "unknown";
+        }
+
+        auto parse_pair = [](const char* p) -> int {
+            int val = 0;
+            std::istringstream iss(std::string(p, 2));
+            iss >> std::hex >> val;
+            return val;
+        };
+        int major = parse_pair(ver_resp);
+        int minor = parse_pair(ver_resp + 2);
+        int patch = parse_pair(ver_resp + 4);
+
+        std::ostringstream oss;
+        oss << std::setw(2) << std::setfill('0') << major << "."
+            << std::setw(2) << std::setfill('0') << minor << "."
+            << std::setw(2) << std::setfill('0') << patch;
+        return oss.str();
+    }
+
+    if (total >= 2) {
+        return "unknown";
+    }
+
+    return "";
+#else
+    (void)port_path;
+    return "";
+#endif
+}
+
+} // anonymous namespace
+
+std::vector<SynScanPortInfo> enumerate_synscan_ports() {
+    std::vector<SynScanPortInfo> results;
+
+#ifndef _WIN32
+    const std::filesystem::path serial_by_id("/dev/serial/by-id");
+    if (!std::filesystem::exists(serial_by_id)) {
+        for (int i = 0; i < 10; ++i) {
+            std::string port = "/dev/ttyUSB" + std::to_string(i);
+            if (std::filesystem::exists(port)) {
+                ALPACA_LOG_INFO("SynScan", "Probing " + port + "...");
+                std::string fw = probe_synscan_port(port);
+                if (!fw.empty()) {
+                    ALPACA_LOG_INFO("SynScan", "Found SynScan mount on " + port +
+                                    " (HC firmware " + fw + ")");
+                    results.push_back({port, "", fw});
+                }
+            }
+        }
+        return results;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
+        if (!entry.is_symlink()) continue;
+        std::string name = entry.path().filename().string();
+
+        bool is_candidate = (name.find("Prolific") != std::string::npos) ||
+                            (name.find("PL2303") != std::string::npos) ||
+                            (name.find("067b") != std::string::npos) ||
+                            (name.find("FTDI") != std::string::npos) ||
+                            (name.find("CP210") != std::string::npos) ||
+                            (name.find("USB_Serial") != std::string::npos) ||
+                            (name.find("USB-Serial") != std::string::npos);
+        if (!is_candidate) continue;
+
+        std::string resolved = std::filesystem::canonical(entry.path()).string();
+        ALPACA_LOG_INFO("SynScan", "Probing " + resolved + " (" + name + ")...");
+
+        std::string fw = probe_synscan_port(resolved);
+        if (!fw.empty()) {
+            ALPACA_LOG_INFO("SynScan", "Found SynScan mount on " + resolved +
+                            " (HC firmware " + fw + ")");
+            results.push_back({resolved, name, fw});
+        }
+    }
+#endif
+
+    return results;
+}
 
 namespace {
 

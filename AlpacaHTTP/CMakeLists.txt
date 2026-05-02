@@ -12,7 +12,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(ALPACAHTTP_BUILD_TESTS "Build test suite" ON)
-option(ALPACAHTTP_USE_BOOST_BEAST "Use Boost.Beast for HTTP server" ON)
 option(ALPACAHTTP_ENABLE_DISCOVERY "Enable Alpaca Discovery" ON)
 
 # Find dependencies
@@ -108,11 +107,6 @@ else()
     endif()
 endif()
 
-if(ALPACAHTTP_USE_BOOST_BEAST)
-    find_package(Boost REQUIRED COMPONENTS system)
-    add_definitions(-DALPACAHTTP_USE_BOOST_BEAST)
-endif()
-
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -124,7 +118,6 @@ set(ALPACAHTTP_SOURCES
     src/core/json_utils.cpp
     src/http/router.cpp
     src/http/server.cpp
-    src/http/session.cpp
     src/util/threading.cpp
     src/util/logging_adapter.cpp
     src/util/error_mapping.cpp
@@ -170,13 +163,6 @@ target_link_libraries(alpacahttp
 # duplicate-symbol error that arises when both vendor libs are linked together.
 if(UNIX AND TARGET alpacacore_qhy AND TARGET alpacacore_zwo)
     target_link_options(alpacahttp PUBLIC "LINKER:--allow-multiple-definition")
-endif()
-
-if(ALPACAHTTP_USE_BOOST_BEAST)
-    target_link_libraries(alpacahttp
-        PUBLIC
-            Boost::system
-    )
 endif()
 
 # Install

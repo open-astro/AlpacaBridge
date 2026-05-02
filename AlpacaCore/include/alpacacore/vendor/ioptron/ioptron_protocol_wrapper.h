@@ -16,8 +16,27 @@
 #include <string>
 #include <memory>
 #include <chrono>
+#include <vector>
 
 namespace alpacacore::vendor::ioptron {
+
+struct iOptronPortInfo {
+    std::string port_path;
+    std::string device_id;
+    std::string model_code;
+};
+
+struct iOptronNetworkHostInfo {
+    std::string host;
+    int tcp_port = 0;
+    std::string model_code;
+};
+
+std::vector<iOptronPortInfo> enumerate_ioptron_ports();
+
+std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts();
+
+std::string model_code_to_name(const std::string& code);
 
 /**
  * @brief Connection type for iOptron mount.
@@ -479,6 +498,11 @@ public:
      * @param command RS-232 command (without # terminator)
      */
     void send_command_blind(const std::string& command);
+
+    /**
+     * @brief Drain any stale bytes from the serial/network input buffer.
+     */
+    void flush_input();
 
 private:
     iOptronProtocolWrapper();

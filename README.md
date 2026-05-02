@@ -9,11 +9,14 @@ AlpacaBridge is a complete ASCOM Alpaca server for Linux. Install it on a machin
 ## Features
 
 - **Turnkey Alpaca server** — installs as a systemd service, starts on boot
-- **ConformU-validated drivers** — pre-built support for ZWO cameras, iOptron mounts, and more (see [SUPPORTED-DRIVERS.md](SUPPORTED-DRIVERS.md))
+- **[ConformU-validated drivers](SUPPORTED-DRIVERS.md)** — cameras (ZWO, QHY, SVBONY, ToupTek, Player One), mounts (iOptron, SynScan, Celestron, ZWO), focusers (ZWO, Gemini), filter wheels, rotators, switches, and weather stations (WeeWX)
+- **Auto-detection** — USB and Wi-Fi devices are discovered automatically, no manual port configuration required
 - **Bundled vendor SDKs and udev rules** — plug in supported USB devices and go
 - **Web management UI** — configure devices from any browser on your network
 
 ## AlpacaBridge Overview
+
+AlpacaBridge runs on any Debian 13 machine — a Raspberry Pi at the mount, a mini PC in the observatory, or an off-the-shelf astronomy control unit like a ToupTek StellaVita, ZWO ASIAIR, or iOptron iMate repurposed with a fresh Debian install. See the [Wiki](https://github.com/open-astro/AlpacaBridge/wiki) for setup guides covering these devices.
 
 ScopeTrader covered the project launch and what it means for the Alpaca ecosystem: [OpenAstro AlpacaBridge Launches and Why It Matters](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/).
 
@@ -21,13 +24,13 @@ Watch a full install on a ToupTek StellaVita: [Installing AlpacaBridge on a Toup
 
 ## Supported platforms
 
-- **Debian 13 (Trixie)** on `amd64` (Intel/AMD 64-bit) or `arm64` (Raspberry Pi 3B+, 4 & 5)
+- **Debian 13 (Trixie)** on `amd64` (Intel/AMD 64-bit) or `arm64` (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi)
 
 ## Learn more
 
-- [Wiki](https://github.com/open-astro/AlpacaBridge/wiki) — user guides, configuration, and troubleshooting
+- [Wiki](https://github.com/open-astro/AlpacaBridge/wiki) — setup guides for Raspberry Pi, StellaVita, ASIAIR, iMate, and troubleshooting
 - [SUPPORTED-DRIVERS.md](SUPPORTED-DRIVERS.md) — validated driver matrix
-- [DEVELOPMENT.md](DEVELOPMENT.md) — building from source, writing drivers, running tests
+- [Development Guide](docs/development.md) — building from source, writing drivers, running tests
 
 ## Installation
 

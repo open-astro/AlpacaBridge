@@ -13,6 +13,21 @@
 #include "catch2_compat.h"
 
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
+#include <alpacacore/util/error_handling.h>
+#include <functional>
+
+namespace {
+
+void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+    }
+}
+
+} // namespace
 
 TEST_CASE("SVBONY Camera Driver - Defaults", "[svbony][camera][unit]") {
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0);
@@ -77,4 +92,28 @@ TEST_CASE("SVBONY Camera Driver - Sub-exposure not supported", "[svbony][camera]
 
     CHECK_THROWS_AS(driver->get_sub_exposure_duration(), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->set_sub_exposure_duration(1.0), alpacacore::AlpacaException);
+}
+
+TEST_CASE("SVBONY Camera Driver - ASCOM Error Codes", "[svbony][camera][unit]") {
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0);
+
+    require_alpaca_error([&]() { driver->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_gain(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_gain(100); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->start_exposure(1.0, true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->stop_exposure(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->abort_exposure(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->pulse_guide(0, 100); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_image_array(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("SVBONY Camera Driver - State Machine Contracts", "[svbony][camera][unit]") {
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0);
+
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    REQUIRE(driver->get_image_ready() == false);
+    REQUIRE(driver->get_is_pulse_guiding() == false);
+    REQUIRE(driver->get_can_abort_exposure() == true);
+    REQUIRE(driver->get_can_stop_exposure() == true);
 }

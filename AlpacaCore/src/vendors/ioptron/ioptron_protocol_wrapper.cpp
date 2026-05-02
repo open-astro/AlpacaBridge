@@ -25,17 +25,729 @@
 #include <cctype>
 #include <cstring>
 #include <ctime>
+#include <unordered_set>
 
 #include <unistd.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <errno.h>
+#include <poll.h>
+
+#ifndef _WIN32
+#include <filesystem>
+#endif
 
 namespace alpacacore::vendor::ioptron {
+
+namespace {
+
+// Probe a serial port for an iOptron mount by sending :MountInfo# and checking
+// for a valid 4-digit model code response.
+// iOptron returns exactly 4 ASCII digits with no '#' terminator.
+// Returns the model code (e.g. "0025") on success, empty string on failure.
+std::string probe_ioptron_port(const std::string& port_path) {
+#ifndef _WIN32
+    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (fd < 0) {
+        return "";
+    }
+
+    struct termios tty{};
+    if (tcgetattr(fd, &tty) != 0) {
+        close(fd);
+        return "";
+    }
+
+    cfsetospeed(&tty, B115200);
+    cfsetispeed(&tty, B115200);
+    tty.c_cflag &= ~PARENB;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+    tty.c_cflag &= ~CRTSCTS;
+    tty.c_cflag |= CREAD | CLOCAL;
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
+    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    tty.c_oflag &= ~OPOST;
+    tty.c_oflag &= ~ONLCR;
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 20;
+
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
+        close(fd);
+        return "";
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    tcflush(fd, TCIOFLUSH);
+
+    const char cmd[] = ":MountInfo#";
+    ssize_t written = write(fd, cmd, sizeof(cmd) - 1);
+    if (written != static_cast<ssize_t>(sizeof(cmd) - 1)) {
+        close(fd);
+        return "";
+    }
+
+    // iOptron :MountInfo# returns exactly 4 ASCII digit bytes, no terminator.
+    char resp[4] = {};
+    int total = 0;
+    auto start = std::chrono::steady_clock::now();
+    while (total < 4) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed > 3) {
+            break;
+        }
+        char ch = 0;
+        ssize_t r = read(fd, &ch, 1);
+        if (r == 1) {
+            resp[total++] = ch;
+        } else if (r == 0) {
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    close(fd);
+
+    if (total == 4) {
+        bool all_digit = true;
+        for (int i = 0; i < 4; ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(resp[i]))) {
+                all_digit = false;
+                break;
+            }
+        }
+        if (all_digit) {
+            return std::string(resp, 4);
+        }
+    }
+
+    return "";
+#else
+    (void)port_path;
+    return "";
+#endif
+}
+
+// Probe a TCP host:port for an iOptron mount by sending :MountInfo# over a
+// non-blocking socket with a short timeout. Returns the 4-digit model code on
+// success, empty string on failure.
+std::string probe_ioptron_network(const std::string& host, int port, int timeout_ms = 1500) {
+#ifndef _WIN32
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return "";
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    sockaddr_in addr{};
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        close(fd);
+        return "";
+    }
+
+    int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
+        close(fd);
+        return "";
+    }
+
+    if (rc < 0) {
+        struct pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        int poll_rc = poll(&pfd, 1, timeout_ms);
+        if (poll_rc <= 0) {
+            close(fd);
+            return "";
+        }
+        int sock_err = 0;
+        socklen_t len = sizeof(sock_err);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &sock_err, &len);
+        if (sock_err != 0) {
+            close(fd);
+            return "";
+        }
+    }
+
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+
+    struct timeval tv{};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    const char cmd[] = ":MountInfo#";
+    ssize_t written = write(fd, cmd, sizeof(cmd) - 1);
+    if (written != static_cast<ssize_t>(sizeof(cmd) - 1)) {
+        close(fd);
+        return "";
+    }
+
+    char resp[4] = {};
+    int total = 0;
+    auto start = std::chrono::steady_clock::now();
+    while (total < 4) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed > timeout_ms) {
+            break;
+        }
+        char ch = 0;
+        ssize_t r = read(fd, &ch, 1);
+        if (r == 1) {
+            resp[total++] = ch;
+        } else if (r == 0) {
+            break;
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
+            break;
+        }
+    }
+
+    close(fd);
+
+    if (total == 4) {
+        bool all_digit = true;
+        for (int i = 0; i < 4; ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(resp[i]))) {
+                all_digit = false;
+                break;
+            }
+        }
+        if (all_digit) {
+            return std::string(resp, 4);
+        }
+    }
+
+    return "";
+#else
+    (void)host;
+    (void)port;
+    (void)timeout_ms;
+    return "";
+#endif
+}
+
+struct LocalSubnet {
+    uint32_t base;
+    uint32_t mask;
+    uint32_t self;
+    std::string iface_name;
+};
+
+std::vector<LocalSubnet> get_local_subnets() {
+    std::vector<LocalSubnet> subnets;
+#ifndef _WIN32
+    struct ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) != 0) {
+        return subnets;
+    }
+
+    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+        if (ifa->ifa_flags & IFF_LOOPBACK) {
+            continue;
+        }
+        if (!(ifa->ifa_flags & IFF_UP)) {
+            continue;
+        }
+        if (!ifa->ifa_netmask) {
+            continue;
+        }
+
+        auto* sa = reinterpret_cast<sockaddr_in*>(ifa->ifa_addr);
+        auto* nm = reinterpret_cast<sockaddr_in*>(ifa->ifa_netmask);
+        uint32_t ip = ntohl(sa->sin_addr.s_addr);
+        uint32_t mask = ntohl(nm->sin_addr.s_addr);
+        uint32_t base = ip & mask;
+        std::string name = ifa->ifa_name ? ifa->ifa_name : "";
+
+        bool duplicate = false;
+        for (const auto& s : subnets) {
+            if (s.base == base && s.mask == mask) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            subnets.push_back({base, mask, ip, name});
+        }
+    }
+
+    freeifaddrs(ifaddr);
+#endif
+    return subnets;
+}
+
+struct KnownIOptronAddress {
+    const char* host;
+    int port;
+};
+
+// Well-known default IPs used by iOptron WiFi modules.
+// The mount acts as an AP and always assigns itself a fixed address.
+static constexpr KnownIOptronAddress KNOWN_IOPTRON_ADDRESSES[] = {
+    {"10.10.100.254", 8899},
+    {"10.10.100.254", 4030},
+    {"10.10.100.1",   8899},
+    {"10.10.100.1",   4030},
+    {"192.168.100.1",  8899},
+    {"192.168.100.1",  4030},
+};
+
+// Read default gateway for a given interface from /proc/net/route.
+// Returns the gateway IP in host byte order, or 0 if not found.
+uint32_t get_interface_gateway(const std::string& iface_name) {
+#ifndef _WIN32
+    FILE* fp = fopen("/proc/net/route", "r");
+    if (!fp) {
+        return 0;
+    }
+
+    char line[256];
+    // Skip header
+    if (!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), fp)) {
+        char iface[64];
+        unsigned int dest, gw;
+        if (sscanf(line, "%63s %x %x", iface, &dest, &gw) == 3) {
+            if (iface_name == iface && dest == 0 && gw != 0) {
+                fclose(fp);
+                return ntohl(gw);
+            }
+        }
+    }
+
+    fclose(fp);
+#else
+    (void)iface_name;
+#endif
+    return 0;
+}
+
+} // anonymous namespace
+
+std::string model_code_to_name(const std::string& code) {
+    // Current v3 protocol assignments (from INDI ioptronv3 driver).
+    // iOptron has reassigned some codes from earlier products:
+    //   0010: Cube II EQ → SkyHunter EQ
+    //   0011: SmartEQ Pro+ → SkyHunter AA
+    //   0025: CEM25 → HEM27
+    //   0030: iEQ30 Pro → HEM27-EC
+    if (code == "0010") return "SkyHunter EQ";
+    if (code == "0011") return "SkyHunter AA";
+    if (code == "0012") return "HAE16 EQ";
+    if (code == "0013") return "HAE16 AA";
+    if (code == "0014") return "HAE18 EQ";
+    if (code == "0015") return "HEM15";
+    if (code == "0022") return "HAE18 AA";
+    if (code == "0025") return "HEM27";
+    if (code == "0026") return "CEM26";
+    if (code == "0027") return "CEM26-EC";
+    if (code == "0028") return "GEM28";
+    if (code == "0029") return "GEM28-EC";
+    if (code == "0030") return "HEM27-EC";
+    if (code == "0031") return "HAE29 EQ";
+    if (code == "0032") return "HAE29-EC AA";
+    if (code == "0033") return "HAE29 AA";
+    if (code == "0034") return "HAE29-EC AA";
+    if (code == "0035") return "HAZ31";
+    if (code == "0036") return "HAE29C EQ";
+    if (code == "0037") return "HAE29C-EC EQ";
+    if (code == "0038") return "HAE29C AA";
+    if (code == "0039") return "HAE29C-EC EQ";
+    if (code == "0040") return "CEM40";
+    if (code == "0041") return "CEM40-EC";
+    if (code == "0043") return "GEM45";
+    if (code == "0045") return "HEM44-EC";
+    if (code == "0046") return "HEM44A";
+    if (code == "0047") return "HEM44A-EC";
+    if (code == "0048") return "HAE43 EQ";
+    if (code == "0049") return "HAE43-EC EQ";
+    if (code == "0050") return "HAE43 AA";
+    if (code == "0051") return "HAE43-EC AA";
+    if (code == "0052") return "HAZ46";
+    if (code == "0053") return "HAE43C EQ";
+    if (code == "0054") return "HAE43C-EC EQ";
+    if (code == "0055") return "HAE43C AA";
+    if (code == "0056") return "HAE43C-EC AA";
+    if (code == "0060") return "CEM60";
+    if (code == "0061") return "CEM60-EC";
+    if (code == "0062") return "HAE69 EQ";
+    if (code == "0063") return "HAZ69-EC EQ";
+    if (code == "0064") return "HAE69 AA";
+    if (code == "0065") return "HAE69-EC AA";
+    if (code == "0066") return "HAE69C EQ";
+    if (code == "0067") return "HAE69C-EC EQ";
+    if (code == "0068") return "HAE69C AA";
+    if (code == "0069") return "HAE69C-EC AA";
+    if (code == "0070") return "CEM70";
+    if (code == "0071") return "CEM70-EC";
+    if (code == "0072") return "CEM70-EC2";
+    if (code == "0073") return "HAZ71";
+    if (code == "0120") return "CEM120";
+    if (code == "0121") return "CEM120-EC";
+    if (code == "0122") return "CEM120-EC2";
+    if (code == "5010") return "Cube II AA";
+    if (code == "5035") return "AZ Mount Pro";
+    if (code == "5045") return "iEQ45 Pro AA";
+    return "";
+}
+
+std::vector<iOptronPortInfo> enumerate_ioptron_ports() {
+    std::vector<iOptronPortInfo> results;
+
+#ifndef _WIN32
+    const std::filesystem::path serial_by_id("/dev/serial/by-id");
+    if (!std::filesystem::exists(serial_by_id)) {
+        for (int i = 0; i < 10; ++i) {
+            std::string port = "/dev/ttyUSB" + std::to_string(i);
+            if (std::filesystem::exists(port)) {
+                ALPACA_LOG_INFO("iOptron", "Probing " + port + "...");
+                std::string code = probe_ioptron_port(port);
+                if (!code.empty()) {
+                    std::string name = model_code_to_name(code);
+                    ALPACA_LOG_INFO("iOptron", "Found iOptron mount on " + port +
+                                    " (model " + code + (name.empty() ? "" : " / " + name) + ")");
+                    results.push_back({port, "", code});
+                }
+            }
+        }
+        return results;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
+        if (!entry.is_symlink()) continue;
+        std::string name = entry.path().filename().string();
+
+        bool is_candidate = (name.find("Prolific") != std::string::npos) ||
+                            (name.find("PL2303") != std::string::npos) ||
+                            (name.find("067b") != std::string::npos) ||
+                            (name.find("FTDI") != std::string::npos) ||
+                            (name.find("CP210") != std::string::npos) ||
+                            (name.find("Silicon_Labs") != std::string::npos) ||
+                            (name.find("USB_Serial") != std::string::npos) ||
+                            (name.find("USB-Serial") != std::string::npos);
+        if (!is_candidate) continue;
+
+        std::string resolved = std::filesystem::canonical(entry.path()).string();
+        ALPACA_LOG_INFO("iOptron", "Probing " + resolved + " (" + name + ")...");
+
+        std::string code = probe_ioptron_port(resolved);
+        if (!code.empty()) {
+            std::string model = model_code_to_name(code);
+            ALPACA_LOG_INFO("iOptron", "Found iOptron mount on " + resolved +
+                            " (model " + code + (model.empty() ? "" : " / " + model) + ")");
+            results.push_back({resolved, name, code});
+        }
+    }
+#endif
+
+    return results;
+}
+
+// Try to connect + probe a single host:port in one step for the fast-path
+// known-address check. Returns model code or empty string.
+iOptronNetworkHostInfo try_known_address(const char* host, int port, int timeout_ms) {
+    std::string code = probe_ioptron_network(host, port, timeout_ms);
+    if (!code.empty()) {
+        return {host, port, code};
+    }
+    return {"", 0, ""};
+}
+
+std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
+    std::vector<iOptronNetworkHostInfo> results;
+
+#ifndef _WIN32
+    static constexpr int PROBE_PORTS[] = {8899, 4030};
+    static constexpr int NUM_PROBE_PORTS = 2;
+    static constexpr int CONNECT_BATCH_SIZE = 256;
+    static constexpr int CONNECT_TIMEOUT_MS = 1200;
+    static constexpr int PROBE_TIMEOUT_MS = 2500;
+    static constexpr int KNOWN_ADDR_TIMEOUT_MS = 2500;
+    static constexpr uint32_t MAX_SCANNABLE_HOST_BITS = 255;
+
+    // --- Phase 1: Parallel probe of well-known iOptron default addresses ---
+    // All known addresses are connected concurrently so multiple iOptron WiFi
+    // modules on the host network are all discovered (mount_index > 0 needs
+    // every responding mount, not just the first).
+    ALPACA_LOG_INFO("iOptron", "Network discovery: trying known iOptron default addresses...");
+    {
+        struct PendingConnect { int fd; std::string host; int port; };
+        std::vector<PendingConnect> pending;
+        pending.reserve(sizeof(KNOWN_IOPTRON_ADDRESSES) / sizeof(KNOWN_IOPTRON_ADDRESSES[0]));
+
+        for (const auto& addr : KNOWN_IOPTRON_ADDRESSES) {
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) {
+                continue;
+            }
+
+            int flags = fcntl(fd, F_GETFL, 0);
+            fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+            sockaddr_in sin{};
+            std::memset(&sin, 0, sizeof(sin));
+            sin.sin_family = AF_INET;
+            sin.sin_port = htons(static_cast<uint16_t>(addr.port));
+            inet_pton(AF_INET, addr.host, &sin.sin_addr);
+
+            int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&sin), sizeof(sin));
+            if (rc == 0 || errno == EINPROGRESS) {
+                pending.push_back({fd, addr.host, addr.port});
+            } else {
+                close(fd);
+            }
+        }
+
+        if (!pending.empty()) {
+            std::vector<struct pollfd> pfds(pending.size());
+            for (std::size_t i = 0; i < pending.size(); ++i) {
+                pfds[i].fd = pending[i].fd;
+                pfds[i].events = POLLOUT;
+                pfds[i].revents = 0;
+            }
+            poll(pfds.data(), static_cast<nfds_t>(pfds.size()), KNOWN_ADDR_TIMEOUT_MS);
+
+            for (std::size_t i = 0; i < pending.size(); ++i) {
+                bool connected = false;
+                if (pfds[i].revents & POLLOUT) {
+                    int sock_err = 0;
+                    socklen_t len = sizeof(sock_err);
+                    getsockopt(pending[i].fd, SOL_SOCKET, SO_ERROR, &sock_err, &len);
+                    connected = (sock_err == 0);
+                }
+                close(pending[i].fd);
+                if (!connected) {
+                    continue;
+                }
+
+                std::string code = probe_ioptron_network(pending[i].host.c_str(),
+                                                         pending[i].port,
+                                                         PROBE_TIMEOUT_MS);
+                if (!code.empty()) {
+                    std::string model = model_code_to_name(code);
+                    ALPACA_LOG_INFO("iOptron", "Network discovery: found mount at " +
+                                    pending[i].host + ":" + std::to_string(pending[i].port) +
+                                    " (model " + code +
+                                    (model.empty() ? "" : " / " + model) + ")");
+                    results.push_back({pending[i].host, pending[i].port, code});
+                }
+            }
+        }
+    }
+
+    ALPACA_LOG_INFO("iOptron", "Network discovery: scanning local subnets for additional mounts...");
+
+    // --- Phase 2: Enumerate local subnets and scan ---
+    auto subnets = get_local_subnets();
+    if (subnets.empty()) {
+        ALPACA_LOG_INFO("iOptron", "Network discovery: no local network interfaces found");
+        return results;
+    }
+
+    for (const auto& subnet : subnets) {
+        char self_str[INET_ADDRSTRLEN];
+        struct in_addr self_addr{};
+        self_addr.s_addr = htonl(subnet.self);
+        inet_ntop(AF_INET, &self_addr, self_str, sizeof(self_str));
+
+        char mask_str[INET_ADDRSTRLEN];
+        struct in_addr mask_addr{};
+        mask_addr.s_addr = htonl(subnet.mask);
+        inet_ntop(AF_INET, &mask_addr, mask_str, sizeof(mask_str));
+
+        uint32_t host_bits = ~subnet.mask;
+
+        ALPACA_LOG_INFO("iOptron", "Network discovery: interface " + subnet.iface_name +
+                        " addr=" + std::string(self_str) + " mask=" + std::string(mask_str) +
+                        " (" + std::to_string(host_bits > 1 ? host_bits - 1 : 0) + " scannable hosts)");
+
+        // Try the gateway address first — on mount WiFi networks, the mount IS the gateway
+        uint32_t gw = get_interface_gateway(subnet.iface_name);
+        if (gw != 0 && gw != subnet.self) {
+            struct in_addr gw_addr{};
+            gw_addr.s_addr = htonl(gw);
+            char gw_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &gw_addr, gw_str, sizeof(gw_str));
+
+            ALPACA_LOG_INFO("iOptron", "Network discovery: trying gateway " +
+                            std::string(gw_str) + " on " + subnet.iface_name);
+            for (int port : PROBE_PORTS) {
+                auto found = try_known_address(gw_str, port, KNOWN_ADDR_TIMEOUT_MS);
+                if (!found.model_code.empty()) {
+                    std::string model = model_code_to_name(found.model_code);
+                    ALPACA_LOG_INFO("iOptron", "Network discovery: found mount at gateway " +
+                                    found.host + ":" + std::to_string(found.tcp_port) +
+                                    " (model " + found.model_code +
+                                    (model.empty() ? "" : " / " + model) + ")");
+                    results.push_back(found);
+                }
+            }
+        }
+
+        if (host_bits < 2) {
+            continue;
+        }
+
+        if (host_bits > MAX_SCANNABLE_HOST_BITS) {
+            ALPACA_LOG_INFO("iOptron", "Network discovery: skipping large subnet on " +
+                            subnet.iface_name + " (" + std::to_string(host_bits) +
+                            " host bits, max scannable is " +
+                            std::to_string(MAX_SCANNABLE_HOST_BITS) + ")");
+            continue;
+        }
+
+        // Build list of (ip, port) candidates
+        struct Candidate { uint32_t ip; int port; };
+        std::vector<Candidate> candidates;
+        candidates.reserve(host_bits * NUM_PROBE_PORTS);
+        for (uint32_t i = 1; i < host_bits; ++i) {
+            uint32_t ip = subnet.base | i;
+            if (ip == subnet.self) {
+                continue;
+            }
+            for (int port : PROBE_PORTS) {
+                candidates.push_back({ip, port});
+            }
+        }
+
+        ALPACA_LOG_INFO("iOptron", "Network discovery: scanning " +
+                        std::to_string(candidates.size()) + " candidates on " + subnet.iface_name);
+
+        struct PendingConnect {
+            int fd;
+            std::string host;
+            int port;
+        };
+
+        for (std::size_t batch_start = 0; batch_start < candidates.size();
+             batch_start += CONNECT_BATCH_SIZE) {
+            std::size_t batch_end = std::min(batch_start + static_cast<std::size_t>(CONNECT_BATCH_SIZE),
+                                             candidates.size());
+
+            std::vector<PendingConnect> pending;
+            pending.reserve(batch_end - batch_start);
+
+            for (std::size_t ci = batch_start; ci < batch_end; ++ci) {
+                const auto& c = candidates[ci];
+                int fd = socket(AF_INET, SOCK_STREAM, 0);
+                if (fd < 0) {
+                    continue;
+                }
+
+                int flags = fcntl(fd, F_GETFL, 0);
+                fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+                sockaddr_in addr{};
+                std::memset(&addr, 0, sizeof(addr));
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons(static_cast<uint16_t>(c.port));
+                addr.sin_addr.s_addr = htonl(c.ip);
+
+                int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+                if (rc == 0 || errno == EINPROGRESS) {
+                    struct in_addr a{};
+                    a.s_addr = htonl(c.ip);
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &a, ip_str, sizeof(ip_str));
+                    pending.push_back({fd, std::string(ip_str), c.port});
+                } else {
+                    close(fd);
+                }
+            }
+
+            if (pending.empty()) {
+                continue;
+            }
+
+            std::vector<struct pollfd> pfds(pending.size());
+            for (std::size_t i = 0; i < pending.size(); ++i) {
+                pfds[i].fd = pending[i].fd;
+                pfds[i].events = POLLOUT;
+                pfds[i].revents = 0;
+            }
+
+            poll(pfds.data(), static_cast<nfds_t>(pfds.size()), CONNECT_TIMEOUT_MS);
+
+            for (std::size_t i = 0; i < pending.size(); ++i) {
+                bool connected = false;
+                if (pfds[i].revents & POLLOUT) {
+                    int sock_err = 0;
+                    socklen_t len = sizeof(sock_err);
+                    getsockopt(pending[i].fd, SOL_SOCKET, SO_ERROR, &sock_err, &len);
+                    connected = (sock_err == 0);
+                }
+                close(pending[i].fd);
+
+                if (!connected) {
+                    continue;
+                }
+
+                ALPACA_LOG_INFO("iOptron", "Network discovery: TCP open at " +
+                                pending[i].host + ":" + std::to_string(pending[i].port) +
+                                ", sending :MountInfo#...");
+                std::string code = probe_ioptron_network(pending[i].host, pending[i].port, PROBE_TIMEOUT_MS);
+                if (!code.empty()) {
+                    std::string model = model_code_to_name(code);
+                    ALPACA_LOG_INFO("iOptron", "Network discovery: found iOptron mount at " +
+                                    pending[i].host + ":" + std::to_string(pending[i].port) +
+                                    " (model " + code +
+                                    (model.empty() ? "" : " / " + model) + ")");
+                    results.push_back({pending[i].host, pending[i].port, code});
+                }
+            }
+        }
+
+    }
+
+    // Deduplicate by host:port — Phase 1 known addresses can overlap with the
+    // subnet scan when a known iOptron default IP also sits in a scanned /24.
+    if (results.size() > 1) {
+        std::unordered_set<std::string> seen;
+        seen.reserve(results.size());
+        std::vector<iOptronNetworkHostInfo> deduped;
+        deduped.reserve(results.size());
+        for (auto& r : results) {
+            std::string key = r.host + ":" + std::to_string(r.tcp_port);
+            if (seen.insert(key).second) {
+                deduped.push_back(std::move(r));
+            }
+        }
+        results = std::move(deduped);
+    }
+#endif
+
+    return results;
+}
 
 namespace {
 
@@ -191,20 +903,85 @@ public:
     
     void send_command_blind(const std::string& command) {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+
         if (!connected_) {
             throw AlpacaException("Not connected to mount");
         }
-        
+
         std::string full_command = command;
         if (full_command.empty() || full_command.back() != '#') {
             full_command += "#";
         }
-        
+
         ALPACA_LOG_TRACE("iOptron", "CMD " + full_command + " (blind)");
 
         if (!write_data(full_command)) {
             throw AlpacaException("Failed to send command to mount");
+        }
+
+        // Over TCP, "blind" commands still produce acknowledgment bytes.
+        // Drain them to prevent stale data from accumulating in the receive
+        // buffer, which overwhelms the mount's WiFi module on rapid-fire
+        // command sequences.
+        if (connection_type_ == ConnectionType::Network) {
+            drain_network_stale(50);
+        }
+    }
+
+    void drain_network_stale(int wait_ms) {
+#ifndef _WIN32
+        struct pollfd pfd{};
+        pfd.fd = socket_fd_;
+        pfd.events = POLLIN;
+        while (true) {
+            int ret = poll(&pfd, 1, wait_ms);
+            if (ret <= 0) break;
+            char ch;
+            ssize_t n = recv(socket_fd_, &ch, 1, 0);
+            if (n <= 0) break;
+            wait_ms = 0;
+        }
+#else
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(socket_handle_, &readfds);
+        timeval tv{};
+        tv.tv_sec = 0;
+        tv.tv_usec = wait_ms * 1000;
+        while (true) {
+            int ret = select(0, &readfds, nullptr, nullptr, &tv);
+            if (ret <= 0) break;
+            char ch;
+            int n = recv(socket_handle_, &ch, 1, 0);
+            if (n <= 0) break;
+            tv.tv_usec = 0;
+            FD_ZERO(&readfds);
+            FD_SET(socket_handle_, &readfds);
+        }
+#endif
+    }
+
+    void flush_input() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_) {
+            return;
+        }
+        if (connection_type_ == ConnectionType::Serial) {
+#ifndef _WIN32
+            if (serial_fd_ >= 0) {
+                tcflush(serial_fd_, TCIFLUSH);
+            }
+#else
+            if (serial_handle_ != INVALID_HANDLE_VALUE) {
+                PurgeComm(serial_handle_, PURGE_RXCLEAR);
+            }
+#endif
+        } else {
+            char discard[64];
+            for (int i = 0; i < 16; ++i) {
+                bool got = read_network_char(discard[0]);
+                if (!got) break;
+            }
         }
     }
 
@@ -599,18 +1376,22 @@ private:
 
     void configure_network_timeouts() {
         constexpr int kSocketTimeoutMs = 200;
+        int nodelay = 1;
 #ifdef _WIN32
         DWORD timeout = kSocketTimeoutMs;
         setsockopt(socket_handle_, SOL_SOCKET, SO_RCVTIMEO,
                    reinterpret_cast<const char*>(&timeout), sizeof(timeout));
         setsockopt(socket_handle_, SOL_SOCKET, SO_SNDTIMEO,
                    reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+        setsockopt(socket_handle_, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
 #else
         timeval timeout{};
         timeout.tv_sec = 0;
         timeout.tv_usec = kSocketTimeoutMs * 1000;
         setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 #endif
     }
 
@@ -715,19 +1496,30 @@ void iOptronProtocolWrapper::send_command_blind(const std::string& command) {
     pimpl_->send_command_blind(command);
 }
 
+void iOptronProtocolWrapper::flush_input() {
+    pimpl_->flush_input();
+}
+
 // Mount information queries
 MountInfo iOptronProtocolWrapper::get_mount_info() {
-    // Legacy helper retained for potential future use, but the current
-    // driver does not depend on mount-specific model information.
-    // We issue a single :MountInfo query (no retries) and return the
-    // raw response as the model_code; model_name and has_encoder are
-    // left at their defaults.
     MountInfo info;
     try {
-        std::string response = send_command(":MountInfo");
-        info.model_code = std::move(response);
+        std::string response = send_command(":MountInfo", false);
+        info.model_code = response;
+        info.model_name = model_code_to_name(response);
+        info.has_encoder = (response == "0027" || response == "0029" ||
+                            response == "0030" || response == "0032" ||
+                            response == "0034" || response == "0037" ||
+                            response == "0039" || response == "0041" ||
+                            response == "0045" || response == "0047" ||
+                            response == "0049" || response == "0051" ||
+                            response == "0054" || response == "0056" ||
+                            response == "0061" || response == "0063" ||
+                            response == "0065" || response == "0067" ||
+                            response == "0069" || response == "0071" ||
+                            response == "0072" || response == "0121" ||
+                            response == "0122");
     } catch (const std::exception&) {
-        // Swallow errors; callers should treat missing model info as non-fatal.
     }
     return info;
 }
@@ -950,7 +1742,7 @@ void iOptronProtocolWrapper::set_target_dec(double dec_degrees) {
 }
 
 bool iOptronProtocolWrapper::slew_to_ra_dec() {
-    // :MS1 returns "1" (accepted) or "0" (rejected). Read the response to keep the stream aligned.
+    flush_input();
     try {
         std::string response = send_command(":MS1", false);
         if (response == "0") {
@@ -973,6 +1765,7 @@ bool iOptronProtocolWrapper::slew_to_ra_dec() {
 }
 
 bool iOptronProtocolWrapper::slew_to_ra_dec_cw_up() {
+    flush_input();
     try {
         std::string response = send_command(":MS2", false);
         if (response == "0") {

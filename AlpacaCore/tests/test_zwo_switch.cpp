@@ -15,6 +15,20 @@
 
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <functional>
+
+namespace {
+
+void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+    }
+}
+
+} // namespace
 
 TEST_CASE("ZWO Dew Heater Switch Driver - Defaults", "[zwo][switch][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0);
@@ -71,4 +85,13 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Unsupported actions", "[zwo][switch][u
     CHECK_THROWS_AS(driver->command_blind("test", false), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->command_bool("test", false), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
+}
+
+TEST_CASE("ZWO Dew Heater Switch Driver - ASCOM Error Codes", "[zwo][switch][unit]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0);
+
+    require_alpaca_error([&]() { driver->get_switch_value(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_switch_value(0, 0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_switch(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_switch(0, false); }, alpacacore::AlpacaError::NotConnected);
 }

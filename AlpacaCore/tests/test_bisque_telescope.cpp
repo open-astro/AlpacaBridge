@@ -16,8 +16,22 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <functional>
 
 using alpacacore::DeviceType;
+
+namespace {
+
+void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+    }
+}
+
+} // namespace
 
 TEST_CASE("Bisque Telescope Driver - Defaults", "[bisque][telescope][unit]") {
     alpacacore::vendor::bisque::ConnectionInfo conn;
@@ -162,4 +176,102 @@ TEST_CASE("Bisque Telescope Driver - Axis Rate Ranges", "[bisque][telescope][uni
     REQUIRE(tertiary_ranges.empty());
 
     REQUIRE_THROWS(driver->get_axis_rate_range(2));
+}
+
+TEST_CASE("Bisque Telescope Driver - Target Coordinate Persistence", "[bisque][telescope][unit]") {
+    alpacacore::vendor::bisque::ConnectionInfo conn;
+    conn.host = "localhost";
+    conn.tcp_port = 3040;
+
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+
+    REQUIRE_NOTHROW(driver->set_target_right_ascension(12.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 12.0);
+
+    REQUIRE_NOTHROW(driver->set_target_declination(45.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 45.0);
+
+    REQUIRE_NOTHROW(driver->set_target_right_ascension(6.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 6.0);
+    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 45.0);
+
+    REQUIRE_NOTHROW(driver->set_target_right_ascension(0.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 0.0);
+    REQUIRE_NOTHROW(driver->set_target_right_ascension(23.999));
+    ALPACA_REQUIRE_APPROX(driver->get_target_right_ascension(), 23.999);
+
+    REQUIRE_NOTHROW(driver->set_target_declination(-90.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), -90.0);
+    REQUIRE_NOTHROW(driver->set_target_declination(90.0));
+    ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 90.0);
+}
+
+TEST_CASE("Bisque Telescope Driver - Site Property Validation", "[bisque][telescope][unit]") {
+    alpacacore::vendor::bisque::ConnectionInfo conn;
+    conn.host = "localhost";
+    conn.tcp_port = 3040;
+
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+
+    require_alpaca_error([&]() { driver->set_site_elevation(-300.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_elevation(10000.1); }, alpacacore::AlpacaError::InvalidValue);
+    REQUIRE_NOTHROW(driver->set_site_elevation(-300.0));
+    REQUIRE_NOTHROW(driver->set_site_elevation(10000.0));
+    ALPACA_REQUIRE_APPROX(driver->get_site_elevation(), 10000.0);
+
+    require_alpaca_error([&]() { driver->set_site_latitude(-90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_latitude(90.1); }, alpacacore::AlpacaError::InvalidValue);
+    REQUIRE_NOTHROW(driver->set_site_latitude(35.0));
+    ALPACA_REQUIRE_APPROX(driver->get_site_latitude(), 35.0);
+
+    require_alpaca_error([&]() { driver->set_site_longitude(-180.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_longitude(180.1); }, alpacacore::AlpacaError::InvalidValue);
+    REQUIRE_NOTHROW(driver->set_site_longitude(-106.0));
+    ALPACA_REQUIRE_APPROX(driver->get_site_longitude(), -106.0);
+}
+
+TEST_CASE("Bisque Telescope Driver - Telescope Properties", "[bisque][telescope][unit]") {
+    alpacacore::vendor::bisque::ConnectionInfo conn;
+    conn.host = "localhost";
+    conn.tcp_port = 3040;
+
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+
+    CHECK(driver->get_interface_version() >= 3);
+
+    auto eq = driver->get_equatorial_system();
+    CHECK((eq == alpacacore::EquatorialSystem::Topocentric ||
+           eq == alpacacore::EquatorialSystem::J2000 ||
+           eq == alpacacore::EquatorialSystem::Other));
+
+    auto align = driver->get_alignment_mode();
+    CHECK((align == alpacacore::AlignmentMode::AltAz ||
+           align == alpacacore::AlignmentMode::Polar ||
+           align == alpacacore::AlignmentMode::GermanPolar));
+
+    auto rates = driver->get_tracking_rates();
+    CHECK_FALSE(rates.empty());
+
+    CHECK(driver->get_slew_settle_time() >= 0);
+    require_alpaca_error([&]() { driver->set_slew_settle_time(-1); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+TEST_CASE("Bisque Telescope Driver - ASCOM Error Codes", "[bisque][telescope][unit]") {
+    alpacacore::vendor::bisque::ConnectionInfo conn;
+    conn.host = "localhost";
+    conn.tcp_port = 3040;
+
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
+
+    require_alpaca_error([&]() { driver->set_target_right_ascension(-0.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_declination(-90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
 }

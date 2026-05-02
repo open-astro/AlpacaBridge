@@ -60,5 +60,12 @@ debian/*.debhelper
 debian/*.substvars
 obj-*/
 
+# Test build directories
+AlpacaCore/build-test*/
+AlpacaHTTP/build-test*/
+
+# Claude Code local settings
+.claude/settings.local.json
+
 # SVBONY SDK auto-generated camera config files
 U2SM*.bin

@@ -93,3 +93,26 @@ TEST_CASE("WeeWX ObservingConditions Driver - Unsupported actions", "[weewx]") {
     CHECK_THROWS_AS(driver->command_bool("foo", false), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->command_string("foo", false), alpacacore::AlpacaException);
 }
+
+TEST_CASE("WeeWX ObservingConditions Driver - ASCOM Error Codes", "[weewx]") {
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = "http://localhost:9999/dummy";
+
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config);
+    REQUIRE(driver);
+
+    auto require_alpaca_error = [](const std::function<void()>& fn, int expected_code) {
+        try {
+            fn();
+            FAIL("Expected AlpacaException");
+        } catch (const alpacacore::AlpacaException& ex) {
+            REQUIRE(ex.error_code() == expected_code);
+        }
+    };
+
+    require_alpaca_error([&]() { (void)driver->get_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_humidity(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_dew_point(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_pressure(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_wind_speed(); }, alpacacore::AlpacaError::NotConnected);
+}
