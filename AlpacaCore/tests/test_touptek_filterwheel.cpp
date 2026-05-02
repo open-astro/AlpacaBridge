@@ -120,3 +120,39 @@ TEST_CASE("ToupTek Filter Wheel Driver - Reject invalid actions while disconnect
     REQUIRE_FALSE(driver->can_action("something"));
     require_alpaca_error([&]() { driver->action("something", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
 }
+
+TEST_CASE("ToupTek Filter Wheel Driver - State machine", "[touptek][filterwheel][unit]") {
+    auto driver = alpacacore::vendor::touptek::create_touptek_filterwheel(0, 0);
+
+    // Default state: disconnected, not connecting
+    REQUIRE(driver->get_connected() == false);
+    REQUIRE(driver->get_connecting() == false);
+
+    // Device state is empty when not connected
+    const auto state = driver->get_device_state();
+    REQUIRE(state.empty());
+
+    // Interface version is always available
+    REQUIRE(driver->get_interface_version() == 3);
+}
+
+TEST_CASE("ToupTek Filter Wheel Driver - Value range validation", "[touptek][filterwheel][unit]") {
+    auto driver = alpacacore::vendor::touptek::create_touptek_filterwheel(0, 0);
+
+    // Connected-only operations: verify NotConnected is thrown before value check
+    // (set_position validates range only after connection check)
+    require_alpaca_error([&]() { driver->set_position(-1); },
+                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_position(100); },
+                         alpacacore::AlpacaError::NotConnected);
+
+    // Unsupported methods: verify correct error codes
+    require_alpaca_error([&]() { driver->action("test", ""); },
+                         alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_bool("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+}
