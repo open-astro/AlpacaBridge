@@ -231,7 +231,10 @@ public:
             if (!handle_) {
                 throw AlpacaException("Filter wheel disconnected", AlpacaError::NotConnected);
             }
-            sdk.set_filterwheel_position(handle_, position, 0); // clockwise spinning (auto-direction has firmware bug for 0→N-1)
+            // Use auto-direction spinning so the firmware picks the shortest
+            // path for most moves. The 0→N-1 farthest move may time out (~30s)
+            // due to a firmware boundary bug, but all other moves are fast.
+            sdk.set_filterwheel_position(handle_, position, 1); // auto direction spinning
         }
         // Return immediately — the Alpaca spec requires Position Set to be
         // asynchronous. The client polls get_position() which returns -1 while
