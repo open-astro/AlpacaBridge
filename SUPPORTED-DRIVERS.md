@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-04-24
+## Updated 2026-05-01
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -210,7 +210,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| HEM27 series | USB/Serial, Wi-Fi | ✓ |  | [ConformU Validation](AlpacaCore/conformu/iOptron/HEM27) |
+| HEM27 series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/HEM27) |
 | HAE29 series | USB/Serial, Wi-Fi |  |  | [ConformU Validation](AlpacaCore/conformu/iOptron/HAE29) |
 
 
@@ -223,7 +223,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Mount identification**: On connect, the driver queries `:MountInfo#` and maps the model code to a name displayed in `Name` (e.g., "iOptron HEM27"), `UniqueID`, and server logs. 60+ models supported including CEM, GEM, HEM, HAE, HAZ, and SkyHunter series.
 - **Wi-Fi reliability**: Network (TCP) connections drain stale acknowledgment bytes from blind commands to prevent buffer accumulation on the mount's Wi-Fi module. `IsPulseGuiding` uses lock-free atomics to meet the ConformU fast response target over high-latency links.
 - **Tested firmware**: Driver tested on **HEM27** with main board firmware **V240121** and hand controller firmware **V241201**. Other firmware versions and models may work but have not been individually verified.
-- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on both USB and Wi-Fi (x64). ARM64 validation pending.
+- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on both USB and Wi-Fi, on Linux x64 and arm64.
 
 ### SynScan V3/V4
 
