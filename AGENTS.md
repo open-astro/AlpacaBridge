@@ -246,6 +246,27 @@ SDK locations: `AlpacaCore/external/SVBONY/lib/x64/`, `lib/armv8/`, headers unde
 - **Bin/ROI quirks**: ROI width must be a multiple of 8 and height a multiple of 2 (SDK requirement). The driver aligns down for SDK calls while preserving the requested values for the Alpaca interface. ROI updates and `FrameSpeedMode` writes are deferred to `start_exposure` because some SDK control writes take ~1.1 s and would otherwise blow ASCOM client timing budgets.
 - **`SVBRestoreDefaultParam`** is called immediately after `SVBOpenCamera` to clear any leftover state from a previous session, mirroring `indi-svbony`. Tolerate failure for older SDK builds that don't export the symbol.
 
+### ToupTek
+
+Devices: Camera, FilterWheel.
+
+SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/`. The SDK is a self-contained shared library (`libtoupcam.so`) with no libusb/libudev link dependency — `ldd` confirms only libc/libm/libpthread/librt/libdl.
+
+Connection types: USB only.
+
+- **Filter wheel via camera handle**: ToupTek filter wheels are integrated into cameras that have the `TOUPCAM_FLAG_FILTERWHEEL` flag. The filter wheel is controlled through the same camera handle via `TOUPCAM_OPTION_FILTERWHEEL_SLOT` and `TOUPCAM_OPTION_FILTERWHEEL_POSITION` options.
+- **Filter wheel slot count distinction**: `get_filterwheel_slot_count()` returns `-1` on SDK/transport failure, `0` for a genuine no-wheel device, and `> 0` for the actual slot count. Callers must check for negative returns and treat them as errors, not as "no slots".
+- **Clockwise-only direction**: The SDK supports `direction=0` (clockwise) and `direction=1` (auto). The auto-direction mode has a firmware bug on the 0→N-1 farthest move that causes ConformU timeouts (>30s per move). Always use `direction=0` (clockwise). Worst case on a 7-slot wheel is ~1.2s at ~0.2s/slot.
+- **Position polling**: `get_filterwheel_position()` returns `-1` while the wheel is moving (per Alpaca spec). `set_position()` issues the move and returns immediately — the client polls `get_position()` to detect completion.
+- **Connection threading**: `connect()` and `disconnect()` are synchronous (block until complete) rather than async. The async approach caused ConformU `ConnectToDevice` failures because the HTTP response returned before the device was ready.
+- **Staged names/offsets survive disconnect**: `set_names()` and `set_focus_offsets()` work while disconnected — values are stored and resized to match the actual slot count on subsequent connect. Disconnect no longer clears these vectors.
+- **Handle lifecycle**: All SDK operations (`get_filterwheel_position`, `set_filterwheel_position`, `get_serial_number`) are performed inside a `mutex_` lock. The `handle_copy()` pattern was removed because it returned a raw pointer that could be closed by `disconnect()` on another thread.
+- **Post-open cleanup**: All initialization after `open_camera_by_id()` is wrapped in a single `try/catch(...)` that closes the handle on any exception. This prevents handle leaks if `get_serial_number()` or slot count queries throw after the camera is opened.
+- **Filter wheel DeviceState** should only report `Position`; omit `Connected` for ConformU compatibility.
+- **Filter wheel Names** must be non-empty; default to `"Filter 1..N"` and allow setting names/offsets while disconnected.
+- **No SDK global init/release needed**: The ToupTek SDK does not require global init/release calls. The wrapper manages SDK access as a singleton without lifecycle hooks.
+- ConformU 4.3.0 validated for **ToupTek GPCMOS01200KPF** integrated filter wheel on Linux arm64 with 0 errors, 1 issue (30s timeout on 0→6 farthest clockwise move — physical hardware limit, not a code defect).
+
 ### SynScan (SkyWatcher)
 
 Devices: Telescope.
