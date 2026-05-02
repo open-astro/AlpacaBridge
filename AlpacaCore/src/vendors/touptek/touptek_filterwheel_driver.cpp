@@ -144,12 +144,6 @@ public:
 
                 serial_number_ = sdk.get_serial_number(handle_);
 
-                // Warm up the SDK by reading the current position. The ToupTek
-                // SDK's filter wheel state machine needs an initial position
-                // query after opening the camera; without this, the first move
-                // command after connect consistently times out.
-                sdk.get_filterwheel_position(handle_);
-
                 // Preserve any names/offsets the client staged while
                 // disconnected; only pad/resize to match the actual slot count.
                 resize_names_to_slot_count_locked();
@@ -237,34 +231,10 @@ public:
             if (!handle_) {
                 throw AlpacaException("Filter wheel disconnected", AlpacaError::NotConnected);
             }
-            // Always use auto-direction (direction=1) — it works for all moves
-            // including the first move after connect. However, when auto would
-            // pick the counterclockwise path (which has a firmware bug at the
-            // 0/N boundary), split the move into two clockwise-only segments
-            // via an intermediate position to avoid the bug entirely.
-            //
-            // Moves that auto-direction handles correctly:
-            //   direction=1, CW is shortest → firmware moves CW → ~0.2s/slot
-            // Moves that trigger the firmware bug:
-            //   direction=1, CCW is shortest → firmware moves CCW → hangs >30s
-            //
-            // Fix: if CCW would be the shortest path, go to the midpoint first
-            // (which auto-direction will handle CW), then to the target.
-            if (slot_count_ > 0) {
-                int cur = sdk.get_filterwheel_position(handle_);
-                if (cur >= 0) {
-                    int cw = (position - cur + slot_count_) % slot_count_;
-                    int ccw = (slot_count_ - cw) % slot_count_;
-                    if (ccw < cw) {
-                        // Auto would pick CCW (buggy). Move to a midpoint
-                        // where CW becomes the shortest path.
-                        int mid = (cur + cw / 2) % slot_count_;
-                        sdk.set_filterwheel_position(handle_, mid, 1);
-                        sdk.set_filterwheel_position(handle_, position, 1);
-                        return;
-                    }
-                }
-            }
+            // Use auto-direction spinning (direction=1). The SDK's auto-direction
+            // works correctly for all moves where clockwise is the shorter path;
+            // counterclockwise moves at the 0/N boundary (e.g., 0→6 on a 7-slot
+            // wheel) can time out due to a firmware bug.
             sdk.set_filterwheel_position(handle_, position, 1);
         }
         // Return immediately — the Alpaca spec requires Position Set to be
