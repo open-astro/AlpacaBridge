@@ -2,7 +2,7 @@
 17:34:42.942                                              
 17:34:42.942 Operating system is Debian GNU/Linux 13 (trixie), Processor is ARM 64bit, Application is 64bit.          
 17:34:42.942                                              
-17:34:42.943 Alpaca device: Sky-Watcher SynScan Mount (127.0.0.1:6800 Telescope/0)          
+17:34:42.943 Alpaca device: iOptron Telescope (127.0.0.1:6800 Telescope/0)
 17:34:42.943                                              
 17:34:42.944 CreateDevice                        INFO     Creating Alpaca device: Access service: Http, IP address: 127.0.0.1, IP Port: 6800, Alpaca device number: 0 (Not accepting user generated SSL certificates)
 17:34:42.948 CreateDevice                        INFO     Alpaca device created OK
