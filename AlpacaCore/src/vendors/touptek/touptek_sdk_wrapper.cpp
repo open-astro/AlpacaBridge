@@ -445,4 +445,64 @@ bool ToupTekSDKWrapper::is_guiding(HToupcam handle) {
     return false;
 }
 
+std::vector<ToupFocuserInfo> ToupTekSDKWrapper::enumerate_focusers() {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    ToupcamDeviceV2 arr[TOUPCAM_MAX]{};
+    unsigned count = Toupcam_EnumV2(arr);
+    std::vector<ToupFocuserInfo> result;
+    int focuser_index = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        if (!arr[i].model) continue;
+        unsigned long long flags = arr[i].model->flag;
+        if ((flags & TOUPCAM_FLAG_AUTOFOCUSER) == 0) {
+            continue;
+        }
+        ToupFocuserInfo info;
+        info.index = focuser_index++;
+        info.id = arr[i].id;
+        info.name = arr[i].displayname;
+        info.model_name = arr[i].model->name ? arr[i].model->name : "";
+        info.flags = flags;
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
+HToupcam ToupTekSDKWrapper::open_focuser_by_id(const std::string& id) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    HToupcam h = Toupcam_Open(id.empty() ? nullptr : id.c_str());
+    if (!h) {
+        throw AlpacaException("Toupcam_Open returned null (focuser not available)",
+                              AlpacaError::NotConnected);
+    }
+    return h;
+}
+
+void ToupTekSDKWrapper::close_focuser(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    if (handle) {
+        Toupcam_Close(handle);
+    }
+}
+
+void ToupTekSDKWrapper::aaf_set(HToupcam handle, int action, int value, const char* context) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(Toupcam_AAF(handle, action, value, nullptr), context);
+}
+
+int ToupTekSDKWrapper::aaf_get(HToupcam handle, int action, const char* context) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_AAF(handle, action, 0, &value), context);
+    return value;
+}
+
+int ToupTekSDKWrapper::aaf_range(HToupcam handle, int range_action, int target_action,
+                                  const char* context) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_AAF(handle, range_action, target_action, &value), context);
+    return value;
+}
+
 } // namespace alpacacore::vendor::touptek

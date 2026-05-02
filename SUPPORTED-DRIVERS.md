@@ -129,6 +129,20 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB/Serial (CH340/CH341 adapter). Auto-detection supported.
 - **Auto-detection**: Scans `/dev/serial/by-id/` for CH340/CH341 USB-serial devices and probes with firmware handshake. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
 
+### ToupTek
+
+| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|---------------|-----------------|--------|
+| AAF (Astro Auto Focuser) | USB | pending | pending | ConformU validation pending |
+
+### ToupTek Focuser Driver Notes
+
+- **SDK**: ToupTek toupcamsdk 2026-01-28 (shared with the ToupTek camera driver)
+- **Connection**: USB. Devices are enumerated via `Toupcam_EnumV2` and filtered by `TOUPCAM_FLAG_AUTOFOCUSER`.
+- **Configuration**: `focuserIndex` (0-based among AAF devices) or `focuserId` (opaque SDK id; overrides index).
+- **Capabilities**: Absolute positioning, halt, max-step query, on-board temperature (tenths of °C), backlash and reverse direction supported by the firmware. `StepSize` is not exposed because the AAF firmware does not report mechanically-valid microns-per-step for arbitrary focuser setups.
+- **Temperature compensation**: Not implemented — the AAF action set does not expose a temp-comp control.
+
 ### ZWO
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |

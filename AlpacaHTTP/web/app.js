@@ -719,6 +719,8 @@ function startEditDevice(device) {
         setFormValue('svbony-camera-index', config.cameraIndex);
     } else if (vendor === 'touptek') {
         setFormValue('touptek-camera-index', config.cameraIndex);
+        setFormValue('touptek-focuser-index', config.focuserIndex);
+        setFormValue('touptek-focuser-id', config.focuserId);
     } else if (vendor === 'playerone') {
         setFormValue('playerone-camera-index', config.cameraIndex);
     } else if (vendor === 'weewx') {
@@ -1277,8 +1279,9 @@ function updateVendorOptions() {
     }
     const touptekOption = vendorSelect.querySelector('option[value="touptek"]');
     if (touptekOption) {
-        touptekOption.disabled = !isCamera;
-        touptekOption.hidden = !isCamera;
+        const allowTouptek = isCamera || isFocuser;
+        touptekOption.disabled = !allowTouptek;
+        touptekOption.hidden = !allowTouptek;
     }
     const playerOneOption = vendorSelect.querySelector('option[value="playerone"]');
     if (playerOneOption) {
@@ -1318,7 +1321,7 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'svbony') {
         vendorSelect.value = '';
     }
-    if (!isCamera && vendorSelect.value === 'touptek') {
+    if (!isCamera && !isFocuser && vendorSelect.value === 'touptek') {
         vendorSelect.value = '';
     }
     if (!isCamera && vendorSelect.value === 'playerone') {
@@ -1366,6 +1369,7 @@ document.getElementById('vendor').addEventListener('change', function() {
     }
 
     updateZwoConfigFields();
+    updateTouptekConfigFields();
     updateAutoNumbering();
 });
 
@@ -1760,6 +1764,26 @@ function setFieldGroupEnabled(groupEl, enabled) {
     });
 }
 
+function updateTouptekConfigFields() {
+    const deviceTypeSelect = document.getElementById('device-type');
+    if (!deviceTypeSelect) {
+        return;
+    }
+    const cameraFields = document.getElementById('touptek-camera-fields');
+    const focuserFields = document.getElementById('touptek-focuser-fields');
+    const deviceType = normalizeDeviceType(deviceTypeSelect.value);
+    const isCamera = deviceType === 'camera';
+    const isFocuser = deviceType === 'focuser';
+    if (cameraFields) {
+        cameraFields.style.display = isCamera ? 'block' : 'none';
+        setFieldGroupEnabled(cameraFields, isCamera);
+    }
+    if (focuserFields) {
+        focuserFields.style.display = isFocuser ? 'block' : 'none';
+        setFieldGroupEnabled(focuserFields, isFocuser);
+    }
+}
+
 function updateZwoConfigFields() {
     const deviceTypeSelect = document.getElementById('device-type');
     const telescopeFields = document.getElementById('zwo-telescope-fields');
@@ -2010,8 +2034,18 @@ document.getElementById('device-form').addEventListener('submit', async function
         const svbonyCameraIndex = readOptionalNumber(formData, 'cameraIndex');
         deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
     } else if (deviceData.vendor === 'touptek') {
-        const touptekCameraIndex = readOptionalNumber(formData, 'cameraIndex');
-        deviceData.cameraIndex = touptekCameraIndex !== null ? touptekCameraIndex : 0;
+        if (normalizeDeviceType(deviceData.deviceType) === 'focuser') {
+            const touptekFocuserId = formData.get('focuserId');
+            if (touptekFocuserId && touptekFocuserId.trim() !== '') {
+                deviceData.focuserId = touptekFocuserId.trim();
+            } else {
+                const touptekFocuserIndex = readOptionalNumber(formData, 'focuserIndex');
+                deviceData.focuserIndex = touptekFocuserIndex !== null ? touptekFocuserIndex : 0;
+            }
+        } else {
+            const touptekCameraIndex = readOptionalNumber(formData, 'cameraIndex');
+            deviceData.cameraIndex = touptekCameraIndex !== null ? touptekCameraIndex : 0;
+        }
     } else if (deviceData.vendor === 'playerone') {
         const playerOneCameraIndex = readOptionalNumber(formData, 'cameraIndex');
         deviceData.cameraIndex = playerOneCameraIndex !== null ? playerOneCameraIndex : 0;
