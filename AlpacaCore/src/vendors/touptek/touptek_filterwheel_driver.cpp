@@ -29,7 +29,6 @@ public:
         , camera_index_(camera_index)
         , handle_(nullptr)
         , camera_name_()
-        , serial_number_()
         , slot_count_(0)
         , filter_names_()
         , focus_offsets_()
@@ -117,8 +116,6 @@ public:
             }
 
             camera_name_ = cinfo.name;
-            serial_number_.clear();
-
             ALPACA_LOG_INFO("ToupTek", "Opening camera for filter wheel access: " + cinfo.name);
 
             handle_ = sdk.open_camera_by_id(cinfo.id);
