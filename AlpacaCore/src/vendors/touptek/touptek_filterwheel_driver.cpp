@@ -129,12 +129,8 @@ public:
             // is always cleaned up if anything throws.
             try {
                 int slots = sdk.get_filterwheel_slot_count(handle_);
-                if (slots < 0) {
-                    sdk.close_camera(handle_);
-                    handle_ = nullptr;
-                    throw AlpacaException("Filter wheel slot count query failed (SDK error)",
-                                          AlpacaError::DriverException);
-                }
+                // throw_on_error in get_filterwheel_slot_count already handles
+                // SDK/transport failures, so slots >= 0 at this point.
                 if (slots == 0) {
                     sdk.close_camera(handle_);
                     handle_ = nullptr;
