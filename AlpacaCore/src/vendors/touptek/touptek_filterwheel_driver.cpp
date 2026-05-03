@@ -292,14 +292,6 @@ private:
         }
     }
 
-    int slot_count_locked() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (slot_count_ <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
-        }
-        return slot_count_;
-    }
-
 
 
     void preload_camera_info() {
