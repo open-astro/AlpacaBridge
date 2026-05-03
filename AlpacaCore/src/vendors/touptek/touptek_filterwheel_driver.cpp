@@ -61,10 +61,8 @@ public:
     DeviceType get_device_type() const override { return DeviceType::FilterWheel; }
 
     std::string get_unique_id() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!serial_number_.empty()) {
-            return "TOUPTEK_FW_SN_" + serial_number_;
-        }
+        // Use device_number-based ID for stability across connects.
+        // Serial-number-based IDs would change after connect, confusing clients.
         return "TOUPTEK_FW_" + std::to_string(device_number_);
     }
 
@@ -222,21 +220,22 @@ public:
 
     void set_position(int position) override {
         ensure_connected();
-        if (position < 0 || position >= slot_count_locked()) {
-            throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
-        }
         auto& sdk = ToupTekSDKWrapper::instance();
-        // Issue the move command while holding the mutex so disconnect() cannot
-        // close the handle concurrently.
+        // Hold the lock once for the slot-count check AND the SDK call,
+        // so disconnect() cannot close the handle between the two.
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!handle_) {
                 throw AlpacaException("Filter wheel disconnected", AlpacaError::NotConnected);
             }
-            // Use auto-direction spinning so the firmware picks the shortest
-            // path for most moves. The 0→N-1 farthest move may time out (~30s)
-            // due to a firmware boundary bug, but all other moves are fast.
-            sdk.set_filterwheel_position(handle_, position, 1); // auto direction spinning
+            if (position < 0 || position >= slot_count_) {
+                throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
+            }
+            // Use auto-direction spinning (direction=1). The SDK's auto-direction
+            // works correctly for all moves where clockwise is the shorter path;
+            // counterclockwise moves at the 0/N boundary (e.g., 0→6 on a 7-slot
+            // wheel) can time out due to a firmware bug.
+            sdk.set_filterwheel_position(handle_, position, 1);
         }
         // Return immediately — the Alpaca spec requires Position Set to be
         // asynchronous. The client polls get_position() which returns -1 while
