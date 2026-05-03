@@ -77,6 +77,52 @@ struct ToupGainRange {
 };
 
 /**
+ * Information about a ToupTek AAF (Astro Auto Focuser) device discovered via
+ * Toupcam_EnumV2. Identified by the TOUPCAM_FLAG_AUTOFOCUSER capability bit.
+ */
+struct ToupFocuserInfo {
+    int index{};
+    std::string id;          // opaque id from Toupcam_EnumV2, used for Toupcam_Open
+    std::string name;        // displayname
+    std::string model_name;  // model->name
+    unsigned long long flags{};
+};
+
+/**
+ * AAF (Astro Auto Focuser) action codes.
+ *
+ * Mirrors TOUPCAM_AAF_* in toupcam.h so driver code can avoid including the
+ * raw SDK header. The numeric values match the SDK definitions.
+ */
+namespace ToupAAF {
+    constexpr int SetPosition     = 0x01;
+    constexpr int GetPosition     = 0x02;
+    constexpr int SetZero         = 0x03;
+    constexpr int SetDirection    = 0x05;
+    constexpr int GetDirection    = 0x06;
+    constexpr int SetMaxIncrement = 0x07;
+    constexpr int GetMaxIncrement = 0x08;
+    constexpr int SetFine         = 0x09;
+    constexpr int GetFine         = 0x0a;
+    constexpr int SetCoarse       = 0x0b;
+    constexpr int GetCoarse       = 0x0c;
+    constexpr int SetBuzzer       = 0x0d;
+    constexpr int GetBuzzer       = 0x0e;
+    constexpr int SetBacklash     = 0x0f;
+    constexpr int GetBacklash     = 0x10;
+    constexpr int GetAmbientTemp  = 0x12;
+    constexpr int GetTemp         = 0x14; // tenths of Celsius
+    constexpr int IsMoving        = 0x16;
+    constexpr int Halt            = 0x17;
+    constexpr int SetMaxStep      = 0x1b;
+    constexpr int GetMaxStep      = 0x1c;
+    constexpr int GetStepSize     = 0x1e;
+    constexpr int RangeMin        = 0xfd;
+    constexpr int RangeMax        = 0xfe;
+    constexpr int RangeDef        = 0xff;
+}
+
+/**
  * Thin wrapper around the ToupTek SDK (toupcamsdk 20260128).
  *
  * - Singleton because the SDK global enumeration state is process-scoped.
@@ -167,6 +213,24 @@ public:
     void pulse_guide(HToupcam handle, ToupGuideDirection direction, unsigned duration_ms);
     // Returns true if the camera is currently guiding.
     bool is_guiding(HToupcam handle);
+
+    // AAF (Astro Auto Focuser) -----------------------------------------------
+    // Enumeration filters Toupcam_EnumV2 results by TOUPCAM_FLAG_AUTOFOCUSER.
+    std::vector<ToupFocuserInfo> enumerate_focusers();
+
+    // Open by Toupcam_EnumV2 id. Throws on failure.
+    HToupcam open_focuser_by_id(const std::string& id);
+
+    void close_focuser(HToupcam handle);
+
+    // Generic AAF write: Toupcam_AAF(handle, action, value, nullptr).
+    void aaf_set(HToupcam handle, int action, int value, const char* context);
+
+    // Generic AAF read: Toupcam_AAF(handle, action, 0, &out).
+    int aaf_get(HToupcam handle, int action, const char* context);
+
+    // AAF range query: Toupcam_AAF(handle, RANGEMAX|RANGEMIN|RANGEDEF, action, &out).
+    int aaf_range(HToupcam handle, int range_action, int target_action, const char* context);
 
 private:
     class Impl;

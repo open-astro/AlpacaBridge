@@ -43,6 +43,14 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Supported Drivers Documentation**: updated iOptron Driver Notes with auto-detection, mount identification, tested firmware details (HEM27, V240121/V241201), Wi-Fi reliability notes, and ConformU validation status (USB and Wi-Fi).
 
 ### Added
+- **ToupTek AAF Focuser Driver** (AlpacaCore): new `FocuserDriver` implementation for ToupTek Astro Auto Focuser devices, sharing the existing `toupcamsdk.20260128/` SDK with the camera driver.
+  - SDK wrapper extended with `enumerate_focusers()` (filters `Toupcam_EnumV2` results by `TOUPCAM_FLAG_AUTOFOCUSER`), `open_focuser_by_id()`, `close_focuser()`, and generic `aaf_set` / `aaf_get` / `aaf_range` helpers.
+  - `ToupAAF` action constants exposed in the wrapper header so driver code does not include `toupcam.h` directly.
+  - Async connect/disconnect, RAII cleanup, mutex-guarded device state. Capabilities: absolute positioning, halt, max-step query, on-board temperature (°C from tenths-of-°C firmware reading), backlash range, reverse direction. `StepSize` reports `PropertyNotImplemented`; `TempCompAvailable` is false (no AAF temp-comp action).
+  - `Toupcam_AAF` argument convention documented: SET = `(action, value, nullptr)`, GET = `(action, 0, &out)`, RANGE = `(RANGEMAX, GETxxx, &out)`.
+  - ConformU 4.3.0 validated for **ToupTek AAF** on Linux x64 and arm64 with 0 errors and 0 issues.
+- **ToupTek AAF Device Support** (AlpacaHTTP): router registration for `vendor=touptek deviceType=focuser` with `focuserIndex` / `focuserId` config; web UI extended so ToupTek is selectable for Camera and Focuser, with conditional camera/focuser fields and config persistence; routing test covers focuser registration, config round-trip, and removal.
+- **ToupTek Focuser Unit Tests**: 10 test cases, 53 assertions covering Defaults, Device metadata, Not-connected error code, Unsupported actions/methods, Absolute focuser semantics, Value range validation, State machine, and create-by-index/create-by-id factories.
 - **ASCOM Contract Tests** (AlpacaCore): added `require_alpaca_error` helper and ASCOM error code verification across all 12 driver test files (121 test cases, 897 assertions). Tests verify specific ASCOM error codes (NotConnected, InvalidValue, NotImplemented, ActionNotImplemented, ValueNotSet) without requiring hardware, replicating key ConformU checks at the unit test level.
   - Camera drivers (ZWO, QHY, SVBONY, ToupTek, Player One): ASCOM error codes and CameraState machine contracts
   - Telescope drivers (iOptron, SynScan, Celestron, Bisque, ZWO): ASCOM error codes, target coordinate persistence, site property validation, telescope property contracts

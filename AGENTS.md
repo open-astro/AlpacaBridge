@@ -246,6 +246,23 @@ SDK locations: `AlpacaCore/external/SVBONY/lib/x64/`, `lib/armv8/`, headers unde
 - **Bin/ROI quirks**: ROI width must be a multiple of 8 and height a multiple of 2 (SDK requirement). The driver aligns down for SDK calls while preserving the requested values for the Alpaca interface. ROI updates and `FrameSpeedMode` writes are deferred to `start_exposure` because some SDK control writes take ~1.1 s and would otherwise blow ASCOM client timing budgets.
 - **`SVBRestoreDefaultParam`** is called immediately after `SVBOpenCamera` to clear any leftover state from a previous session, mirroring `indi-svbony`. Tolerate failure for older SDK builds that don't export the symbol.
 
+### ToupTek
+
+Devices: Camera, Focuser (AAF — Astro Auto Focuser).
+
+SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between camera and focuser drivers).
+
+- **Single SDK, two device types**: Both camera and focuser drivers go through `ToupTekSDKWrapper`. Cameras enumerate via `enumerate_cameras()`, focusers via `enumerate_focusers()` which filters `Toupcam_EnumV2` results by `TOUPCAM_FLAG_AUTOFOCUSER`. Same `Toupcam_Open` is used for both — the device-class is determined entirely by the capability flag.
+- **AAF API convention** (`Toupcam_AAF(handle, action, value, *out)`):
+  - **SET**: `Toupcam_AAF(h, AAF_SETxxx, value, nullptr)` — passes value in third arg.
+  - **GET**: `Toupcam_AAF(h, AAF_GETxxx, 0, &out)` — third arg is unused, output via pointer.
+  - **RANGE-of-GET**: `Toupcam_AAF(h, AAF_RANGEMAX, AAF_GETxxx, &out)` — queries the upper bound of a GET property by passing the GET action code as the third arg. Used to discover MaxStep and Backlash range at connect time. Same pattern works for `RANGEMIN` and `RANGEDEF`.
+  - **HALT/SETZERO**: control actions, third arg is the new value (0 for halt; ticks for setzero/sync).
+- **`AAF_GETSTEPSIZE` is mechanically meaningful only for specific focuser configurations** — the driver does not expose it as ASCOM `StepSize`. It throws `PropertyNotImplemented` per the focuser ASCOM contract.
+- **Temperature units**: `AAF_GETTEMP` returns tenths of Celsius (e.g. `32` → `3.2 °C`). Divide by 10.0 before returning to ASCOM. INDI applies a 0.1 °C hysteresis when updating UI; we read on demand so the hysteresis is unnecessary on the driver side.
+- **No temp-comp action**: The AAF action set has no temp-comp control. `TempCompAvailable` returns false; `set_temp_comp(true)` throws `NotImplemented` (not `DriverException`).
+- **`Toupcam_get_FocusMotor` is deprecated** in the shipped SDK header. Do not use it for AAF focusers — use the `Toupcam_AAF` action interface instead. The non-deprecated `FocusMotor` API is for autofocus-equipped cameras (`TOUPCAM_FLAG_FOCUSMOTOR`), a different capability.
+
 ### SynScan (SkyWatcher)
 
 Devices: Telescope.

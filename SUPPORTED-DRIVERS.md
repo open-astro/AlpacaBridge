@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-05-01
+## Updated 2026-05-02
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -16,7 +16,7 @@ This document lists all hardware vendors and device types that are verified to w
   - **USB/Serial**: USB-to-serial adapter or direct serial connection
 
 - **Linux Notes**:
-  - **Debian 13 (Trixie)**: All drivers have been tested using Debian 13 on x64 and arm64 using ConformU v4.2.1
+  - **Debian 13 (Trixie)**: All drivers have been tested using Debian 13 on x64 and arm64 using ConformU v4.2.1 for original drivers or v4.3.0 with new drivers. As new ConformU versions are released this will be adjusted.
   - **Kernel 6.12.75-v8-16+ or higher.**: Note: kernel 6.12.75-v8-16+ is required to ensure ZWO EAF/EFW hardware compatibility. Without it, devices besides ZWO may or may not be recognized. Please check the kernel version.
 
 - **Wi-Fi / Mount Notes**:
@@ -128,6 +128,21 @@ This document lists all hardware vendors and device types that are verified to w
 - **Protocol**: MyFocuserPro2 serial protocol (no SDK required)
 - **Connection**: USB/Serial (CH340/CH341 adapter). Auto-detection supported.
 - **Auto-detection**: Scans `/dev/serial/by-id/` for CH340/CH341 USB-serial devices and probes with firmware handshake. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
+
+### ToupTek
+
+| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
+|--------------|------------|---------------|-----------------|--------|
+| AAF (Astro Auto Focuser) | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/AAF/) |
+
+### ToupTek Focuser Driver Notes
+
+- **SDK**: ToupTek toupcamsdk 2026-01-28 (shared with the ToupTek camera driver)
+- **Connection**: USB. Devices are enumerated via `Toupcam_EnumV2` and filtered by `TOUPCAM_FLAG_AUTOFOCUSER`.
+- **Configuration**: `focuserIndex` (0-based among AAF devices) or `focuserId` (opaque SDK id; overrides index).
+- **Capabilities**: Absolute positioning, halt, max-step query, on-board temperature (tenths of °C), backlash and reverse direction supported by the firmware. `StepSize` is not exposed because the AAF firmware does not report mechanically-valid microns-per-step for arbitrary focuser setups.
+- **Temperature compensation**: Not implemented — the AAF action set does not expose a temp-comp control.
+- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on Linux x64 and arm64.
 
 ### ZWO
 

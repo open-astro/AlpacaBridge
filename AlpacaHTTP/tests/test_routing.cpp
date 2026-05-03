@@ -347,6 +347,76 @@ int main() {
 #endif
     }
 
+    // --- ToupTek AAF focuser routing/config persistence test ---
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    {
+        nlohmann::json remove_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "focuser"},
+            {"deviceNumber", 9202}
+        };
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        nlohmann::json configure_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "focuser"},
+            {"deviceNumber", 9202},
+            {"focuserIndex", 0},
+            {"focuserId", "tp-aaf-routing-test"}
+        };
+
+        const auto configure_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        assert(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        assert(configured_json.value("ErrorNumber", -1) == 0);
+        assert(configured_json.contains("Value"));
+        assert(configured_json["Value"].is_array());
+
+        bool found_touptek_focuser = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Focuser" &&
+                entry.value("DeviceNumber", -1) == 9202) {
+                assert(entry.value("Vendor", "") == "touptek");
+                assert(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                assert(cfg.value("vendor", "") == "touptek");
+                assert(cfg.value("deviceType", "") == "focuser");
+                assert(cfg.value("focuserId", "") == "tp-aaf-routing-test");
+                found_touptek_focuser = true;
+                break;
+            }
+        }
+        assert(found_touptek_focuser);
+
+        nlohmann::json remove_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "focuser"},
+            {"deviceNumber", 9202}
+        };
+        const auto remove_response = route_request(
+            router,
+            "POST",
+            "/management/v1/removedevice",
+            remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        assert(remove_json.value("ErrorNumber", -1) == 0);
+#else
+        assert(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }

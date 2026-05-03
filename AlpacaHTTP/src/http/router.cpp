@@ -78,6 +78,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
+#include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
@@ -6726,6 +6727,32 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "touptek" && device_type_str == "focuser") {
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        std::unique_ptr<alpacacore::FocuserDriver> focuser;
+        std::string focuser_id = config.value("focuserId", "");
+        if (!focuser_id.empty()) {
+            focuser = alpacacore::vendor::touptek::create_touptek_focuser_by_id(
+                device_number, focuser_id);
+        } else {
+            int focuser_index = config.value("focuserIndex", 0);
+            focuser = alpacacore::vendor::touptek::create_touptek_focuser_by_index(
+                device_number, focuser_index);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(focuser.release()))) {
+            util::log_info("Registered ToupTek AAF focuser");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "playerone" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_PLAYERONE
         int camera_index = config.value("cameraIndex", 0);
@@ -6848,6 +6875,8 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
         copy_if_present("cameraIndex");
+        copy_if_present("focuserIndex");
+        copy_if_present("focuserId");
     } else if (vendor == "playerone") {
         copy_if_present("cameraIndex");
     } else if (vendor == "weewx") {
