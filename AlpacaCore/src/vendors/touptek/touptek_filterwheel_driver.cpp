@@ -136,14 +136,6 @@ public:
                 }
                 slot_count_ = slots;
 
-                serial_number_ = sdk.get_serial_number(handle_);
-
-                // Warm up the SDK by reading the current position. The ToupTek
-                // SDK's filter wheel state machine needs an initial position
-                // query after opening the camera; without this, the first move
-                // command after connect consistently times out.
-                sdk.get_filterwheel_position(handle_);
-
                 // Preserve any names/offsets the client staged while
                 // disconnected; only pad/resize to match the actual slot count.
                 resize_names_to_slot_count_locked();
@@ -167,7 +159,6 @@ public:
             handle_ = nullptr;
         }
         camera_name_.clear();
-        serial_number_.clear();
         slot_count_ = 0;
         // Preserve staged names/offsets so they survive reconnects.
         connected_.store(false);
@@ -180,7 +171,8 @@ public:
         }
         try {
             state.push_back({"Position", get_position()});
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ToupTek", "get_device_state: " + std::string(e.what()));
         }
         return state;
     }
@@ -270,7 +262,8 @@ public:
             validate_slot_count_locked(static_cast<int>(names.size()));
         }
         filter_names_ = names;
-        apply_default_names_locked();
+        // Default names are applied only at connect-time, not here, so
+        // clients can set empty names without silent rewriting.
     }
 
 private:
@@ -278,7 +271,6 @@ private:
     int camera_index_;
     HToupcam handle_;
     std::string camera_name_;
-    std::string serial_number_;
     int slot_count_;
     std::vector<std::string> filter_names_;
     std::vector<int> focus_offsets_;

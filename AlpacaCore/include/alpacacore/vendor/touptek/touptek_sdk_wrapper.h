@@ -244,8 +244,6 @@ public:
     // Set the filter wheel position. position: 0 to N-1.
     // direction: 0 = clockwise, 1 = auto direction.
     void set_filterwheel_position(HToupcam handle, int position, int direction = 0);
-    // Reset the filter wheel.
-    void reset_filterwheel(HToupcam handle);
 
 private:
     class Impl;

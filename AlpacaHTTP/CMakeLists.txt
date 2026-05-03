@@ -107,16 +107,6 @@ else()
     endif()
 endif()
 
-if(ALPACAHTTP_USE_BOOST_BEAST)
-    # Boost.System is header-only since Boost 1.73.
-    # Try finding it as a component first, then fall back to Boost::headers.
-    find_package(Boost QUIET COMPONENTS system)
-    if(NOT Boost_FOUND)
-        find_package(Boost REQUIRED)
-    endif()
-    add_definitions(-DALPACAHTTP_USE_BOOST_BEAST)
-endif()
-
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -173,16 +163,6 @@ target_link_libraries(alpacahttp
 # duplicate-symbol error that arises when both vendor libs are linked together.
 if(UNIX AND TARGET alpacacore_qhy AND TARGET alpacacore_zwo)
     target_link_options(alpacahttp PUBLIC "LINKER:--allow-multiple-definition")
-endif()
-
-if(ALPACAHTTP_USE_BOOST_BEAST)
-    if(TARGET Boost::system)
-        target_link_libraries(alpacahttp PUBLIC Boost::system)
-    elseif(TARGET Boost::headers)
-        target_link_libraries(alpacahttp PUBLIC Boost::headers)
-    else()
-        target_link_libraries(alpacahttp PUBLIC Boost::boost)
-    endif()
 endif()
 
 # Install

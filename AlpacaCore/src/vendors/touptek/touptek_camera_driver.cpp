@@ -18,12 +18,12 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <sstream>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -188,7 +188,11 @@ public:
                 }
             }
 
-            sdk.put_trigger_mode(handle_, 1); // software trigger
+            try {
+                sdk.put_trigger_mode(handle_, 1); // software trigger
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("ToupTek", "put_trigger_mode failed: " + std::string(e.what()));
+            }
 
             // Refresh frame dimensions and Bayer pattern from the open camera.
             int width = 0;

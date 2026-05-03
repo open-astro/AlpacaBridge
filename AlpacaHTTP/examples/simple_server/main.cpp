@@ -17,7 +17,6 @@
 #include <alpacacore/device_registry.h>
 #include <alpacacore/managementdriver.h>
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
-#include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <iostream>
 #include <csignal>
 #include <cstdlib>
@@ -69,7 +68,10 @@ int main(int argc, char* argv[]) {
     alpacahttp::util::log_info("HTTP port: " + std::to_string(config.http_port()));
     alpacahttp::util::log_info("Discovery enabled: " + std::string(config.discovery_enabled() ? "yes" : "no"));
 
-    // Register ToupTek camera + filter wheel devices.
+    // Register ToupTek filter wheel device.
+    // The filter wheel driver opens its own camera handle internally and
+    // cannot share the device with a separately registered camera driver
+    // (the ToupTek SDK forbids concurrent Toupcam_Open calls).
     // Accept an optional camera index from the command line (default: 0).
     int camera_index = 0;
     if (argc > 2) {
@@ -77,14 +79,11 @@ int main(int argc, char* argv[]) {
     }
     auto& registry = alpacacore::management::DeviceRegistry::instance();
     try {
-        auto camera = alpacacore::vendor::touptek::create_touptek_camera(camera_index, camera_index);
-        registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()));
-        alpacahttp::util::log_info("Registered ToupTek camera at index " + std::to_string(camera_index));
         auto filterwheel = alpacacore::vendor::touptek::create_touptek_filterwheel(camera_index, camera_index);
         registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(filterwheel.release()));
         alpacahttp::util::log_info("Registered ToupTek filter wheel at camera index " + std::to_string(camera_index));
     } catch (const std::exception& e) {
-        alpacahttp::util::log_warning("No ToupTek camera with filter wheel found: " + std::string(e.what()));
+        alpacahttp::util::log_warning("No ToupTek filter wheel found: " + std::string(e.what()));
         alpacahttp::util::log_warning("Run with a camera index argument to specify a different camera.");
     }
 

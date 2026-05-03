@@ -525,15 +525,13 @@ int ToupTekSDKWrapper::get_filterwheel_position(HToupcam handle) {
 
 void ToupTekSDKWrapper::set_filterwheel_position(HToupcam handle, int position, int direction) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    if (position < 0 || position > 255) {
+        throw AlpacaException("Filter wheel position out of valid range (0-255)",
+                              AlpacaError::InvalidValue);
+    }
     int value = (position & 0xff) | ((direction & 0x1) << 8);
     throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_POSITION, value),
                    "Toupcam_put_Option(FILTERWHEEL_POSITION)");
-}
-
-void ToupTekSDKWrapper::reset_filterwheel(HToupcam handle) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_POSITION, -1),
-                   "Toupcam_put_Option(FILTERWHEEL_POSITION, -1)");
 }
 
 
