@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-05-01
+## Updated 2026-05-02
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -133,7 +133,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
-| AAF (Astro Auto Focuser) | USB | pending | pending | ConformU validation pending |
+| AAF (Astro Auto Focuser) | USB | ✓ | pending | [ConformU Validation](AlpacaCore/conformu/ToupTek/AAF/) |
 
 ### ToupTek Focuser Driver Notes
 
@@ -142,6 +142,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Configuration**: `focuserIndex` (0-based among AAF devices) or `focuserId` (opaque SDK id; overrides index).
 - **Capabilities**: Absolute positioning, halt, max-step query, on-board temperature (tenths of °C), backlash and reverse direction supported by the firmware. `StepSize` is not exposed because the AAF firmware does not report mechanically-valid microns-per-step for arbitrary focuser setups.
 - **Temperature compensation**: Not implemented — the AAF action set does not expose a temp-comp control.
+- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on Linux x64. arm64 validation pending.
 
 ### ZWO
 
