@@ -16,7 +16,7 @@ This document lists all hardware vendors and device types that are verified to w
   - **USB/Serial**: USB-to-serial adapter or direct serial connection
 
 - **Linux Notes**:
-  - **Debian 13 (Trixie)**: All drivers have been tested using Debian 13 on x64 and arm64 using ConformU v4.2.1
+  - **Debian 13 (Trixie)**: All drivers have been tested using Debian 13 on x64 and arm64 using ConformU v4.2.1 for original drivers or v4.3.0 with new drivers. As new ConformU versions are released this will be adjusted.
   - **Kernel 6.12.75-v8-16+ or higher.**: Note: kernel 6.12.75-v8-16+ is required to ensure ZWO EAF/EFW hardware compatibility. Without it, devices besides ZWO may or may not be recognized. Please check the kernel version.
 
 - **Wi-Fi / Mount Notes**:
