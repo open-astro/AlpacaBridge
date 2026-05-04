@@ -72,7 +72,6 @@ int main(int argc, char* argv[]) {
     // The filter wheel driver opens its own camera handle internally and
     // cannot share the device with a separately registered camera driver
     // (the ToupTek SDK forbids concurrent Toupcam_Open calls).
-    // Accept an optional camera index from the command line (default: 0).
     int camera_index = 0;
     if (argc > 2) {
         camera_index = std::atoi(argv[2]);
@@ -84,7 +83,6 @@ int main(int argc, char* argv[]) {
         alpacahttp::util::log_info("Registered ToupTek filter wheel at camera index " + std::to_string(camera_index));
     } catch (const std::exception& e) {
         alpacahttp::util::log_warning("No ToupTek filter wheel found: " + std::string(e.what()));
-        alpacahttp::util::log_warning("Run with a camera index argument to specify a different camera.");
     }
 
     // Start discovery service
