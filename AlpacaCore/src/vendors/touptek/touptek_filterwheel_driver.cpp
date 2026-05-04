@@ -170,6 +170,8 @@ public:
             state.push_back({"Position", get_position()});
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("ToupTek", "get_device_state: " + std::string(e.what()));
+            // Report -1 so ConformU sees a value rather than an empty state.
+            state.push_back({"Position", -1});
         }
         return state;
     }
@@ -224,6 +226,8 @@ public:
             // works correctly for all moves where clockwise is the shorter path;
             // counterclockwise moves at the 0/N boundary (e.g., 0→6 on a 7-slot
             // wheel) can time out due to a firmware bug.
+            // Toupcam_put_Option(FILTERWHEEL_POSITION) returns immediately;
+            // the move continues asynchronously in firmware.
             sdk.set_filterwheel_position(handle_, position, 1);
         }
         // Return immediately — the Alpaca spec requires Position Set to be
@@ -301,6 +305,11 @@ private:
     void resize_names_to_slot_count_locked() {
         const auto slots = static_cast<std::size_t>(slot_count_);
         if (filter_names_.size() != slots) {
+            if (!filter_names_.empty()) {
+                ALPACA_LOG_WARN("ToupTek",
+                    "Resizing filter names from " + std::to_string(filter_names_.size()) +
+                    " to " + std::to_string(slots) + " slots");
+            }
             filter_names_.resize(slots);
         }
     }
@@ -309,6 +318,11 @@ private:
     void resize_offsets_to_slot_count_locked() {
         const auto slots = static_cast<std::size_t>(slot_count_);
         if (focus_offsets_.size() != slots) {
+            if (!focus_offsets_.empty()) {
+                ALPACA_LOG_WARN("ToupTek",
+                    "Resizing focus offsets from " + std::to_string(focus_offsets_.size()) +
+                    " to " + std::to_string(slots) + " slots");
+            }
             focus_offsets_.resize(slots);
         }
     }

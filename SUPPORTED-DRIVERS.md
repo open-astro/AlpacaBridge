@@ -115,6 +115,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: ToupTek toupcamsdk 2026-01-28 (build target)
 - **Connection**: USB (self-contained `libtoupcam.so`; no libusb/libudev link dependency)
 - **Enabled**: Filter wheel support is detected automatically via the `TOUPCAM_FLAG_FILTERWHEEL` flag when a camera is enumerated. Only cameras with an integrated filter wheel will expose this device.
+- **Mutual exclusivity with camera driver**: The ToupTek SDK does not allow concurrent `Toupcam_Open` calls against the same camera. A single camera-with-wheel can be exposed as either a Camera device or a FilterWheel device, but not both simultaneously.
 - **ConformU Verified**: This driver has passed ConformU validation on Linux arm64 and amd64 using ConformU v4.3.0.
 - **Known limitation — 0/N wrap-around timeout**: Long-distance moves that cross the 0/N boundary (e.g., 0→6 on the 7-slot GPCMOS01200KPF) can exceed ConformU's 30-second per-move timeout. The driver returns position `-1` during the move (spec-correct) and the move eventually completes. Users should prefer adjacent-slot moves or expect occasional delays on long jumps. This is a firmware timing characteristic, not a driver defect.
 

@@ -16,7 +16,6 @@
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <functional>
-#include <variant>
 #include <vector>
 
 namespace {

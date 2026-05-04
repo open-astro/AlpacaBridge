@@ -67,6 +67,7 @@ int main(int argc, char* argv[]) {
     alpacahttp::util::log_info("Starting AlpacaHTTP server...");
     alpacahttp::util::log_info("HTTP port: " + std::to_string(config.http_port()));
     alpacahttp::util::log_info("Discovery enabled: " + std::string(config.discovery_enabled() ? "yes" : "no"));
+    alpacahttp::util::log_info("Usage: " + std::string(argv[0]) + " [config-path] [camera-index]");
 
     // Register ToupTek filter wheel device.
     // The filter wheel driver opens its own camera handle internally and
