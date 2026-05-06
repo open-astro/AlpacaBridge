@@ -226,7 +226,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
 |--------------|------------|---------------|-----------------|--------|
 | HEM27 series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/HEM27) |
-| HAE29 series | USB/Serial, Wi-Fi |  |  | [ConformU Validation](AlpacaCore/conformu/iOptron/HAE29) |
+| HAE43 series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/HAE43) |
 
 
 ### iOptron Driver Notes
