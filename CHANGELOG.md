@@ -9,7 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [1.0.4] - UNRELEASED
+## [1.0.3] - 2026-05-07
+
+### Added
+- **ToupTek AAF Focuser Driver** (AlpacaCore): new `FocuserDriver` implementation for ToupTek Astro Auto Focuser devices, sharing the existing `toupcamsdk.20260128/` SDK with the camera driver.
+  - SDK wrapper extended with `enumerate_focusers()` (filters `Toupcam_EnumV2` results by `TOUPCAM_FLAG_AUTOFOCUSER`), `open_focuser_by_id()`, `close_focuser()`, and generic `aaf_set` / `aaf_get` / `aaf_range` helpers.
+  - `ToupAAF` action constants exposed in the wrapper header so driver code does not include `toupcam.h` directly.
+  - Async connect/disconnect, RAII cleanup, mutex-guarded device state. Capabilities: absolute positioning, halt, max-step query, on-board temperature (°C from tenths-of-°C firmware reading), backlash range, reverse direction. `StepSize` reports `PropertyNotImplemented`; `TempCompAvailable` is false (no AAF temp-comp action).
+  - `Toupcam_AAF` argument convention documented: SET = `(action, value, nullptr)`, GET = `(action, 0, &out)`, RANGE = `(RANGEMAX, GETxxx, &out)`.
+  - ConformU 4.3.0 validated for **ToupTek AAF** on Linux x64 and arm64 with 0 errors and 0 issues.
+- **ToupTek AAF Device Support** (AlpacaHTTP): router registration for `vendor=touptek deviceType=focuser` with `focuserIndex` / `focuserId` config; web UI extended so ToupTek is selectable for Camera and Focuser, with conditional camera/focuser fields and config persistence; routing test covers focuser registration, config round-trip, and removal.
+- **ToupTek Focuser Unit Tests**: 10 test cases, 53 assertions covering Defaults, Device metadata, Not-connected error code, Unsupported actions/methods, Absolute focuser semantics, Value range validation, State machine, and create-by-index/create-by-id factories.
+- **ASCOM Contract Tests** (AlpacaCore): added `require_alpaca_error` helper and ASCOM error code verification across all 12 driver test files (121 test cases, 897 assertions). Tests verify specific ASCOM error codes (NotConnected, InvalidValue, NotImplemented, ActionNotImplemented, ValueNotSet) without requiring hardware, replicating key ConformU checks at the unit test level.
+  - Camera drivers (ZWO, QHY, SVBONY, ToupTek, Player One): ASCOM error codes and CameraState machine contracts
+  - Telescope drivers (iOptron, SynScan, Celestron, Bisque, ZWO): ASCOM error codes, target coordinate persistence, site property validation, telescope property contracts
+  - Switch (ZWO), ObservingConditions (WeeWX): ASCOM error codes for disconnected operations
+- **Documentation** (docs/): consolidated `AlpacaCore/docs/` and root `DEVELOPMENT.md` into `docs/development.md`, `docs/architecture.md`, and `docs/troubleshooting.md`. Updated test requirements to 8 cases / 30+ assertions with ConformU-aligned contract test patterns.
+- **Claude Code Skills** (.claude/commands/): added `/commit`, `/submit-pr`, and `/driver-build` slash commands for guided development workflows
+- **Player One Camera Driver** (AlpacaCore)
+  - New vendor driver for Player One astronomy cameras with ASCOM Alpaca Camera API (ICameraV3) support.
+  - SDK wrapper singleton (`PlayerOneSDKWrapper`) over Player One Camera SDK v3.10.0 managing camera enumeration, lifecycle, and the generic `POAConfig` table (gain, offset, exposure, cooler, ST4 pulse guide, temperature, etc.).
+  - Exposure via single-frame software trigger with background thread, `POAImageReady` polling, abort support, and a 15 s deadline safety margin.
+  - Capability-gated cooler control (`POA_COOLER` / `POA_TARGET_TEMP` / `POA_COOLER_POWER`) so uncooled cameras accurately report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`.
+  - ST4 pulse guiding gated on `isHasST4Port`; pulse duration timed by the driver via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
+  - RAW8 / RAW16 / RGB24 / MONO8 image format support with format-aware `ImageArray` builders (RGB24 transposes the SDK's B,G,R pixel order to R,G,B and reports rank 3).
+  - SDK requires `width % 4 == 0` and `height % 2 == 0`; driver accepts any user-provided ROI and internally aligns the SDK call DOWN while returning the `ImageArray` at the user's exact `NumX × NumY` (trailing row/col zero-padded).
+  - Camera binding by index (`cameraIndex`) from the Player One SDK enumeration.
+  - Architecture-aware SDK selection: `lib/x64/` (Linux x86_64) and `lib/arm64/` (Linux ARM64).
+  - ConformU validated for **Player One Ceres 462M** on Linux arm64 with 0 errors and 0 issues; x64 validation pending.
+- **Player One Device Support** (AlpacaHTTP)
+  - Router registration and configuration support for Player One camera devices (`cameraIndex` binding).
+  - Web UI: Player One vendor selection and camera-index configuration field.
+- **Player One SDK** (AlpacaBridge)
+  - Player One Camera SDK v3.10.0 libraries included under `AlpacaCore/external/PlayerOne/`; `.gitignore` allowlist added.
+  - `libPlayerOneCamera.so` installed to `/usr/lib/alpacabridge/` (Debian package) and `/usr/local/lib/` (build scripts) so companion tools (e.g. SmartGuider) can `dlopen` the Player One SDK at runtime.
+  - `99-player_one_astronomy.rules` udev rule installed for Player One USB devices.
+- **Player One Unit Tests** (AlpacaCore)
+  - 6 test cases covering defaults, device metadata, disconnected throws, disconnected state, unsupported actions, and sub-exposure rejection.
+- **Celestron Telescope Driver** (AlpacaCore)
+  - ConformU validated for **Celestron CGX-L** on Linux x64 with 0 errors and 0 issues; arm64 validation pending.
 
 ### Changed
 - **SynScan Telescope Driver** (AlpacaCore)
@@ -40,68 +78,6 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **iOptron Device Support** (AlpacaHTTP)
   - Web UI: iOptron connection type selector with Auto-Detect (default), Serial, and Network options, matching the Celestron configuration pattern.
   - All iOptron web UI element IDs prefixed with `ioptron-` to avoid collisions with other vendor config sections.
-- **Supported Drivers Documentation**: updated iOptron Driver Notes with auto-detection, mount identification, tested firmware details (HEM27, V240121/V241201), Wi-Fi reliability notes, and ConformU validation status (USB and Wi-Fi).
-
-### Added
-- **ToupTek AAF Focuser Driver** (AlpacaCore): new `FocuserDriver` implementation for ToupTek Astro Auto Focuser devices, sharing the existing `toupcamsdk.20260128/` SDK with the camera driver.
-  - SDK wrapper extended with `enumerate_focusers()` (filters `Toupcam_EnumV2` results by `TOUPCAM_FLAG_AUTOFOCUSER`), `open_focuser_by_id()`, `close_focuser()`, and generic `aaf_set` / `aaf_get` / `aaf_range` helpers.
-  - `ToupAAF` action constants exposed in the wrapper header so driver code does not include `toupcam.h` directly.
-  - Async connect/disconnect, RAII cleanup, mutex-guarded device state. Capabilities: absolute positioning, halt, max-step query, on-board temperature (°C from tenths-of-°C firmware reading), backlash range, reverse direction. `StepSize` reports `PropertyNotImplemented`; `TempCompAvailable` is false (no AAF temp-comp action).
-  - `Toupcam_AAF` argument convention documented: SET = `(action, value, nullptr)`, GET = `(action, 0, &out)`, RANGE = `(RANGEMAX, GETxxx, &out)`.
-  - ConformU 4.3.0 validated for **ToupTek AAF** on Linux x64 and arm64 with 0 errors and 0 issues.
-- **ToupTek AAF Device Support** (AlpacaHTTP): router registration for `vendor=touptek deviceType=focuser` with `focuserIndex` / `focuserId` config; web UI extended so ToupTek is selectable for Camera and Focuser, with conditional camera/focuser fields and config persistence; routing test covers focuser registration, config round-trip, and removal.
-- **ToupTek Focuser Unit Tests**: 10 test cases, 53 assertions covering Defaults, Device metadata, Not-connected error code, Unsupported actions/methods, Absolute focuser semantics, Value range validation, State machine, and create-by-index/create-by-id factories.
-- **ASCOM Contract Tests** (AlpacaCore): added `require_alpaca_error` helper and ASCOM error code verification across all 12 driver test files (121 test cases, 897 assertions). Tests verify specific ASCOM error codes (NotConnected, InvalidValue, NotImplemented, ActionNotImplemented, ValueNotSet) without requiring hardware, replicating key ConformU checks at the unit test level.
-  - Camera drivers (ZWO, QHY, SVBONY, ToupTek, Player One): ASCOM error codes and CameraState machine contracts
-  - Telescope drivers (iOptron, SynScan, Celestron, Bisque, ZWO): ASCOM error codes, target coordinate persistence, site property validation, telescope property contracts
-  - Switch (ZWO), ObservingConditions (WeeWX): ASCOM error codes for disconnected operations
-- **Documentation** (docs/): consolidated `AlpacaCore/docs/` and root `DEVELOPMENT.md` into `docs/development.md`, `docs/architecture.md`, and `docs/troubleshooting.md`. Updated test requirements to 8 cases / 30+ assertions with ConformU-aligned contract test patterns.
-- **Claude Code Skills** (.claude/commands/): added `/commit`, `/submit-pr`, and `/driver-build` slash commands for guided development workflows
-
-### Changed
-- **Build System** (AlpacaHTTP): removed unused Boost.Beast option and empty `session.cpp` placeholder
-- **Platform Documentation**: added Raspberry Pi 3B+ to supported arm64 targets
-
-### Fixed
-- **iOptron Telescope Driver** (AlpacaCore)
-  - Fixed `:MountInfo#` response parsing: iOptron returns exactly 4 ASCII digit bytes with no `#` terminator, but the driver was waiting for a `#` and timing out silently. Changed to idle-timeout read mode (`require_hash_terminator=false`).
-  - Fixed model code table: iOptron reassigned model codes in the v3 protocol (e.g., code `0025` is HEM27, not CEM25). Replaced the stale Indigo-derived table with the current INDI v3 driver's authoritative mapping.
-  - Fixed stale serial buffer bytes contaminating `:MS1#`/`:MS2#` slew responses (e.g., `"1111"` instead of `"1"`). Added `flush_input()` (via `tcflush`/`PurgeComm`) before issuing slew commands.
-  - Fixed Wi-Fi timeout cascade during MoveAxis testing: rapid-fire blind commands accumulated stale acknowledgment bytes in the TCP receive buffer, overwhelming the mount's Wi-Fi module and causing subsequent GEP/GLS queries to timeout. Added `drain_network_stale()` using `poll()` (Linux) / `select()` (Windows) to consume pending bytes after each blind command.
-  - Fixed `SlewToTarget` DEC accuracy on Wi-Fi: `get_slewing()` had a position tolerance shortcut (60 arcseconds) that overrode the mount's GLS status register, declaring slews complete while the mount was still physically moving. ConformU measured 53.8" error. Removed the shortcut — slew completion now relies solely on the mount reporting stopped/tracking status.
-  - Fixed `strip_status_prefix()` to handle stale `0`/`1` bytes that accumulate before GEP position responses over TCP, finding the first `+`/`-` sign to locate the actual data start.
-- **Device Persistence** (AlpacaHTTP)
-  - Fixed stale device entries persisting across restarts: a single device failing to load on startup no longer prevents other devices from loading (individual try/catch per device).
-  - Fixed inability to remove failed devices: `handle_remove_device` now checks both the runtime registry and the persisted device list, so devices that failed to register can still be deleted.
-  - Fixed failed devices being invisible in the web UI: `handle_configured_devices` now includes persisted-but-unregistered devices marked with `LoadError: true`, displayed with a warning icon and red styling.
-
-## [1.0.3] - 2026-04-23
-
-### Added
-- **Player One Camera Driver** (AlpacaCore)
-  - New vendor driver for Player One astronomy cameras with ASCOM Alpaca Camera API (ICameraV3) support.
-  - SDK wrapper singleton (`PlayerOneSDKWrapper`) over Player One Camera SDK v3.10.0 managing camera enumeration, lifecycle, and the generic `POAConfig` table (gain, offset, exposure, cooler, ST4 pulse guide, temperature, etc.).
-  - Exposure via single-frame software trigger with background thread, `POAImageReady` polling, abort support, and a 15 s deadline safety margin.
-  - Capability-gated cooler control (`POA_COOLER` / `POA_TARGET_TEMP` / `POA_COOLER_POWER`) so uncooled cameras accurately report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`.
-  - ST4 pulse guiding gated on `isHasST4Port`; pulse duration timed by the driver via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
-  - RAW8 / RAW16 / RGB24 / MONO8 image format support with format-aware `ImageArray` builders (RGB24 transposes the SDK's B,G,R pixel order to R,G,B and reports rank 3).
-  - SDK requires `width % 4 == 0` and `height % 2 == 0`; driver accepts any user-provided ROI and internally aligns the SDK call DOWN while returning the `ImageArray` at the user's exact `NumX × NumY` (trailing row/col zero-padded).
-  - Camera binding by index (`cameraIndex`) from the Player One SDK enumeration.
-  - Architecture-aware SDK selection: `lib/x64/` (Linux x86_64) and `lib/arm64/` (Linux ARM64).
-  - ConformU validated for **Player One Ceres 462M** on Linux arm64 with 0 errors and 0 issues; x64 validation pending.
-- **Player One Device Support** (AlpacaHTTP)
-  - Router registration and configuration support for Player One camera devices (`cameraIndex` binding).
-  - Web UI: Player One vendor selection and camera-index configuration field.
-- **Player One SDK** (AlpacaBridge)
-  - Player One Camera SDK v3.10.0 libraries included under `AlpacaCore/external/PlayerOne/`; `.gitignore` allowlist added.
-  - `libPlayerOneCamera.so` installed to `/usr/lib/alpacabridge/` (Debian package) and `/usr/local/lib/` (build scripts) so companion tools (e.g. SmartGuider) can `dlopen` the Player One SDK at runtime.
-  - `99-player_one_astronomy.rules` udev rule installed for Player One USB devices.
-- **Player One Unit Tests** (AlpacaCore)
-  - 6 test cases covering defaults, device metadata, disconnected throws, disconnected state, unsupported actions, and sub-exposure rejection.
-- **Celestron Telescope Driver** (AlpacaCore)
-  - ConformU validated for **Celestron CGX-L** on Linux x64 with 0 errors and 0 issues; arm64 validation pending.
-
-### Changed
 - **Celestron Telescope Driver** (AlpacaCore)
   - Pulse guide rewritten to use native MC_AUX_GUIDE (0x26) hardware command instead of software-timed MoveAxis + sync. The firmware times the pulse internally — no sleep, encoder snapshotting, or sync_ra_dec_raw calls required.
   - `SideOfPier` now reports actual pier side via the HC `p` command (`W` → pierWest, `E` → pierEast) instead of always returning -1 (unknown).
@@ -117,12 +93,26 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Added model IDs for CGX (14), CGX-L (20), and Evolution (22).
   - Added implementation notes: RA slew offset compensation, post-slew tracking restoration via `T` command, and pulse guide position hold/correction pattern.
 - **External SDK directory**: renamed `AlpacaCore/external/Player One/` (space) → `AlpacaCore/external/PlayerOne/` (no space) so `debian/rules` Makefile variables and shell install scripts don't break on the embedded whitespace.
+- **Supported Drivers Documentation**: updated iOptron Driver Notes with auto-detection, mount identification, tested firmware details (HEM27, V240121/V241201), Wi-Fi reliability notes, and ConformU validation status (USB and Wi-Fi).
 - **Supported Drivers Documentation**: added Player One section between QHY and SVBONY with Ceres 462M entry, ConformU link, and driver notes (SDK version, tested model, cooling gating, dew-heater not-wired status, pulse guiding mechanism).
 - **Supported Drivers Documentation**: alphabetized vendors within the Camera Drivers section (Player One now precedes QHY).
 - **Web UI** (AlpacaHTTP): alphabetized vendor dropdown options and camera configuration `<div>` blocks in `index.html` so the Focuser group shows Gemini before ZWO and the Camera group shows Player One, QHY, SVBONY, ToupTek, ZWO in order.
 - **Web UI** (AlpacaHTTP): fixed vendor dropdown alphabetical order for Celestron telescope mount.
+- **Build System** (AlpacaHTTP): removed unused Boost.Beast option and empty `session.cpp` placeholder
+- **Platform Documentation**: added Raspberry Pi 3B+ to supported arm64 targets
 
 ### Fixed
+- **iOptron Telescope Driver** (AlpacaCore)
+  - Fixed `:MountInfo#` response parsing: iOptron returns exactly 4 ASCII digit bytes with no `#` terminator, but the driver was waiting for a `#` and timing out silently. Changed to idle-timeout read mode (`require_hash_terminator=false`).
+  - Fixed model code table: iOptron reassigned model codes in the v3 protocol (e.g., code `0025` is HEM27, not CEM25). Replaced the stale Indigo-derived table with the current INDI v3 driver's authoritative mapping.
+  - Fixed stale serial buffer bytes contaminating `:MS1#`/`:MS2#` slew responses (e.g., `"1111"` instead of `"1"`). Added `flush_input()` (via `tcflush`/`PurgeComm`) before issuing slew commands.
+  - Fixed Wi-Fi timeout cascade during MoveAxis testing: rapid-fire blind commands accumulated stale acknowledgment bytes in the TCP receive buffer, overwhelming the mount's Wi-Fi module and causing subsequent GEP/GLS queries to timeout. Added `drain_network_stale()` using `poll()` (Linux) / `select()` (Windows) to consume pending bytes after each blind command.
+  - Fixed `SlewToTarget` DEC accuracy on Wi-Fi: `get_slewing()` had a position tolerance shortcut (60 arcseconds) that overrode the mount's GLS status register, declaring slews complete while the mount was still physically moving. ConformU measured 53.8" error. Removed the shortcut — slew completion now relies solely on the mount reporting stopped/tracking status.
+  - Fixed `strip_status_prefix()` to handle stale `0`/`1` bytes that accumulate before GEP position responses over TCP, finding the first `+`/`-` sign to locate the actual data start.
+- **Device Persistence** (AlpacaHTTP)
+  - Fixed stale device entries persisting across restarts: a single device failing to load on startup no longer prevents other devices from loading (individual try/catch per device).
+  - Fixed inability to remove failed devices: `handle_remove_device` now checks both the runtime registry and the persisted device list, so devices that failed to register can still be deleted.
+  - Fixed failed devices being invisible in the web UI: `handle_configured_devices` now includes persisted-but-unregistered devices marked with `LoadError: true`, displayed with a warning icon and red styling.
 - **Celestron Telescope Driver** (AlpacaCore)
   - Fixed SideOfPier race condition in RA offset learning: async slew lambda now captures target RA at dispatch time so back-to-back slews don't corrupt the running-average residual.
 
