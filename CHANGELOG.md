@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [1.0.4] - UNRELEASED
+
+### Fixed
+- **Alpaca Discovery** (AlpacaHTTP): UDP discovery listener on port 32227 no longer tears itself down when the multicast group join fails. The ASCOM Alpaca discovery protocol primarily uses UDP broadcast to `255.255.255.255:32227` (which a socket bound to `INADDR_ANY:32227` already receives), so multicast-join failure is now logged as a warning and discovery continues serving broadcast/unicast probes. Fixes NINA "Discover Servers" returning zero results when AlpacaBridge runs on an RPi acting as its own Wi-Fi access point (NetworkManager `ipv4.method shared`), where `wlan0` has no default multicast route and `IP_ADD_MEMBERSHIP` fails. Externally-routed LAN setups are unaffected.
+
 ## [1.0.3] - 2026-05-07
 
 ### Added
