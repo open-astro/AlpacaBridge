@@ -72,17 +72,20 @@ void Discovery::run_discovery() {
         return;
     }
 
-    // Join multicast group
+    // Join multicast group. This is optional — the ASCOM Alpaca discovery
+    // protocol primarily uses UDP broadcast to 255.255.255.255:32227, which a
+    // socket bound to INADDR_ANY:32227 already receives. Multicast join can
+    // fail on AP/hotspot interfaces that lack a default multicast route; in
+    // that case we must NOT tear down the listener, or broadcast-based clients
+    // (NINA, PHD2 auto-discover) will see no server.
     struct ip_mreq mreq;
     mreq.imr_multiaddr.s_addr = inet_addr(ALPACA_DISCOVERY_MULTICAST_GROUP);
     mreq.imr_interface.s_addr = INADDR_ANY;
     const char* mreq_ptr = reinterpret_cast<const char*>(&mreq);
     if (setsockopt(socket_fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq_ptr, sizeof(mreq)) < 0) {
-        util::log_error("Failed to join multicast group");
-        util::socket_close(socket_fd_);
-        socket_fd_ = util::kInvalidSocket;
-        running_ = false;
-        return;
+        util::log_warning("Failed to join Alpaca multicast group " +
+                          std::string(ALPACA_DISCOVERY_MULTICAST_GROUP) +
+                          " (continuing with broadcast/unicast discovery only)");
     }
 
     util::log_info("Discovery service started on port " + std::to_string(ALPACA_DISCOVERY_PORT));
