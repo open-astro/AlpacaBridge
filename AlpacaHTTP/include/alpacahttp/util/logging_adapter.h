@@ -17,6 +17,7 @@
 #include <string>
 #include <functional>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace alpacahttp::util {
@@ -69,5 +70,15 @@ void delete_log_file(const std::string& name);
 
 // True if the provided basename matches the alpacabridge log file pattern.
 bool is_valid_log_filename(const std::string& name);
+
+// Persist the currently-active log level so it survives a server restart.
+// Stored in config/runtime_state.json relative to cwd; failures are logged at
+// warning level but do not throw — callers should never let a save error block
+// the user-visible operation that requested it.
+void save_runtime_log_level(alpacacore::logging::LogLevel level);
+
+// Read the persisted log level, if any. Returns nullopt when the state file
+// is missing, unreadable, or contains an unrecognized level.
+std::optional<alpacacore::logging::LogLevel> load_runtime_log_level();
 
 } // namespace alpacahttp::util

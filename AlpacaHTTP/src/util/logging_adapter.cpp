@@ -28,6 +28,7 @@
 #include <regex>
 #include <stdexcept>
 #include <system_error>
+#include <nlohmann/json.hpp>
 #include <pwd.h>
 #include <unistd.h>
 
@@ -370,6 +371,21 @@ void init_logging(const Config& config) {
     if (config.file_logging_enabled() && !selected.empty()) {
         log_info("File logging active in " + selected);
     }
+    // A user-chosen level (set via /management/v1/loglevel) overrides the
+    // default-yaml level on restart.
+    if (auto persisted = load_runtime_log_level()) {
+        alpacacore::logging::set_log_level(*persisted);
+        const char* name = "INFO";
+        switch (*persisted) {
+            case alpacacore::logging::LogLevel::Trace:    name = "TRACE"; break;
+            case alpacacore::logging::LogLevel::Debug:    name = "DEBUG"; break;
+            case alpacacore::logging::LogLevel::Info:     name = "INFO"; break;
+            case alpacacore::logging::LogLevel::Warn:     name = "WARNING"; break;
+            case alpacacore::logging::LogLevel::Error:    name = "ERROR"; break;
+            case alpacacore::logging::LogLevel::Critical: name = "CRITICAL"; break;
+        }
+        log_info(std::string("Restored persisted log level: ") + name);
+    }
 }
 
 void log_debug(const std::string& message) {
@@ -408,6 +424,106 @@ std::string get_log_history_text() {
 void set_external_log_sink(alpacacore::logging::LogSink sink) {
     std::lock_guard<std::mutex> lock(g_sink_mutex);
     g_external_sink = std::move(sink);
+}
+
+namespace {
+
+const std::filesystem::path kRuntimeStateFile =
+    std::filesystem::path("config") / "runtime_state.json";
+
+const char* core_level_to_persistent_string(alpacacore::logging::LogLevel level) {
+    switch (level) {
+        case alpacacore::logging::LogLevel::Trace:    return "TRACE";
+        case alpacacore::logging::LogLevel::Debug:    return "DEBUG";
+        case alpacacore::logging::LogLevel::Info:     return "INFO";
+        case alpacacore::logging::LogLevel::Warn:     return "WARNING";
+        case alpacacore::logging::LogLevel::Error:    return "ERROR";
+        case alpacacore::logging::LogLevel::Critical: return "CRITICAL";
+    }
+    return "INFO";
+}
+
+std::optional<alpacacore::logging::LogLevel> persistent_string_to_core_level(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    if (text == "TRACE")    return alpacacore::logging::LogLevel::Trace;
+    if (text == "DEBUG")    return alpacacore::logging::LogLevel::Debug;
+    if (text == "INFO")     return alpacacore::logging::LogLevel::Info;
+    if (text == "WARN" || text == "WARNING") return alpacacore::logging::LogLevel::Warn;
+    if (text == "ERROR")    return alpacacore::logging::LogLevel::Error;
+    if (text == "CRITICAL") return alpacacore::logging::LogLevel::Critical;
+    return std::nullopt;
+}
+
+} // namespace
+
+void save_runtime_log_level(alpacacore::logging::LogLevel level) {
+    try {
+        if (kRuntimeStateFile.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(kRuntimeStateFile.parent_path(), ec);
+        }
+
+        // Round-trip through any existing state so we don't blow away other
+        // fields a future revision might add.
+        nlohmann::json payload = nlohmann::json::object();
+        std::ifstream existing(kRuntimeStateFile);
+        if (existing) {
+            try {
+                existing >> payload;
+                if (!payload.is_object()) {
+                    payload = nlohmann::json::object();
+                }
+            } catch (...) {
+                payload = nlohmann::json::object();
+            }
+        }
+        payload["LogLevel"] = core_level_to_persistent_string(level);
+
+        const auto tmp_path = kRuntimeStateFile.string() + ".tmp";
+        {
+            std::ofstream out(tmp_path, std::ios::trunc);
+            if (!out) {
+                throw std::runtime_error("unable to open " + tmp_path + " for writing");
+            }
+            out << payload.dump(2);
+            out.flush();
+        }
+        std::error_code rename_ec;
+        std::filesystem::rename(tmp_path, kRuntimeStateFile, rename_ec);
+        if (rename_ec) {
+            std::filesystem::remove(tmp_path);
+            throw std::runtime_error("rename failed: " + rename_ec.message());
+        }
+    } catch (const std::exception& e) {
+        log_warning(std::string("Failed to persist log level: ") + e.what());
+    }
+}
+
+std::optional<alpacacore::logging::LogLevel> load_runtime_log_level() {
+    std::error_code ec;
+    if (!std::filesystem::exists(kRuntimeStateFile, ec)) {
+        return std::nullopt;
+    }
+    try {
+        std::ifstream in(kRuntimeStateFile);
+        if (!in) {
+            return std::nullopt;
+        }
+        nlohmann::json payload;
+        in >> payload;
+        if (!payload.is_object() || !payload.contains("LogLevel")) {
+            return std::nullopt;
+        }
+        const auto& level_node = payload["LogLevel"];
+        if (!level_node.is_string()) {
+            return std::nullopt;
+        }
+        return persistent_string_to_core_level(level_node.get<std::string>());
+    } catch (const std::exception& e) {
+        log_warning(std::string("Failed to read runtime log state: ") + e.what());
+        return std::nullopt;
+    }
 }
 
 } // namespace alpacahttp::util

@@ -5789,6 +5789,7 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
             }
 
             alpacacore::logging::set_log_level(*parsed_level);
+            util::save_runtime_log_level(*parsed_level);
             util::log_info("Log level set to " + log_level_to_string(*parsed_level));
             return send_payload(client_tx_id);
         }
