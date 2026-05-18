@@ -1176,9 +1176,12 @@ async function loadLogFiles() {
         }
         const text = await response.text();
         const payload = JSON.parse(text);
-        const inner = typeof payload.Value === 'string' ? JSON.parse(payload.Value) : payload.Value;
-        const directory = inner && inner.Directory ? inner.Directory : '';
-        const files = inner && Array.isArray(inner.Files) ? inner.Files : [];
+        if (payload.ErrorNumber !== 0) {
+            throw new Error(payload.ErrorMessage || `Server error ${payload.ErrorNumber}`);
+        }
+        const inner = parseResponseValue(payload.Value) || {};
+        const directory = inner.Directory || '';
+        const files = Array.isArray(inner.Files) ? inner.Files : [];
         renderLogFiles(directory, files);
     } catch (error) {
         listEl.innerHTML = '';
@@ -1224,7 +1227,7 @@ function renderLogFiles(directory, files) {
         viewBtn.type = 'button';
         viewBtn.className = 'btn btn-secondary';
         viewBtn.textContent = 'View';
-        viewBtn.addEventListener('click', () => viewLogFile(file.Name));
+        viewBtn.addEventListener('click', () => viewLogFile(file.Name, file.Size));
 
         const downloadBtn = document.createElement('button');
         downloadBtn.type = 'button';
@@ -1248,7 +1251,16 @@ function renderLogFiles(directory, files) {
     });
 }
 
-async function viewLogFile(filename) {
+const INLINE_VIEW_MAX_BYTES = 5 * 1024 * 1024;  // 5 MiB
+
+async function viewLogFile(filename, sizeBytes = null) {
+    if (Number.isFinite(sizeBytes) && sizeBytes > INLINE_VIEW_MAX_BYTES) {
+        clearLogFileViewer();
+        setLogFilesStatus(
+            `${filename} is ${formatLogFileSize(sizeBytes)} — too large to view inline. Use Download instead.`
+        );
+        return;
+    }
     setLogFilesStatus(`Loading ${filename}…`);
     try {
         const response = await fetch(`${API_BASE}${LOG_FILES_ENDPOINT}/${encodeURIComponent(filename)}`);

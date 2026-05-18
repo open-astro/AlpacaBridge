@@ -22,20 +22,23 @@ fi
 
 rm -rf "${CORE_DIR}/build" "${HTTP_DIR}/build"
 
-# Ensure /var/log/AlpacaBridge exists and is writable by the user the server
-# will run as. Without this, the file-logging sink falls back to
-# ~/.local/state/AlpacaBridge/logs. Runs unconditionally on Linux (independent
-# of ALPACA_INSTALL_UDEV_RULES); requires sudo for the mkdir/chown.
+# Try to create /var/log/AlpacaBridge so logs land in the standard path. Best
+# effort only: if sudo isn't available, the file-logging sink will fall back to
+# ~/.local/state/AlpacaBridge/logs on first run, so don't abort the build.
 if [[ "${OSTYPE:-}" == "linux"* ]]; then
   LOG_DIR="/var/log/AlpacaBridge"
   TARGET_USER="${SUDO_USER:-${USER:-$(id -un)}}"
   TARGET_GROUP="$(id -gn "${TARGET_USER}" 2>/dev/null || echo "${TARGET_USER}")"
-  if [[ ! -d "${LOG_DIR}" ]]; then
-    echo "Creating ${LOG_DIR} for AlpacaBridge logs..."
-    sudo mkdir -p "${LOG_DIR}"
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    if [[ ! -d "${LOG_DIR}" ]]; then
+      echo "Creating ${LOG_DIR} for AlpacaBridge logs..."
+      sudo mkdir -p "${LOG_DIR}"
+    fi
+    sudo chown "${TARGET_USER}:${TARGET_GROUP}" "${LOG_DIR}"
+    sudo chmod 0755 "${LOG_DIR}"
+  else
+    echo "Note: skipping ${LOG_DIR} setup (sudo unavailable). The server will use its user-state fallback log directory."
   fi
-  sudo chown "${TARGET_USER}:${TARGET_GROUP}" "${LOG_DIR}"
-  sudo chmod 0755 "${LOG_DIR}"
 fi
 
 if [[ "${INSTALL_UDEV_RULES}" == "ON" && "${OSTYPE:-}" == "linux"* ]]; then

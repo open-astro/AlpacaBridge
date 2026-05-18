@@ -164,6 +164,14 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 if (parse_bool_value(value, enabled)) {
                     file_logging_enabled_ = enabled;
                 }
+            } else if (key == "retention_days") {
+                try {
+                    int parsed = std::stoi(value);
+                    if (parsed < 0) parsed = 0;
+                    log_retention_days_ = parsed;
+                } catch (...) {
+                    // Keep default
+                }
             }
         } else if (current_section == "server") {
             if (key == "name") {
@@ -286,6 +294,17 @@ void Config::apply_environment_overrides() {
         bool enabled = file_logging_enabled_;
         if (parse_bool_value(file_log_env, enabled)) {
             file_logging_enabled_ = enabled;
+        }
+    }
+
+    const char* retention_env = std::getenv("ALPACAHTTP_LOG_RETENTION_DAYS");
+    if (retention_env) {
+        try {
+            int parsed = std::stoi(retention_env);
+            if (parsed < 0) parsed = 0;
+            log_retention_days_ = parsed;
+        } catch (...) {
+            // Keep value from yaml/default
         }
     }
 }

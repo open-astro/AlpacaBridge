@@ -31,13 +31,13 @@ void log_info(const std::string& message);
 void log_warning(const std::string& message);
 void log_error(const std::string& message);
 
-// Retrieve recent log history as plain text. The in-memory buffer grows
-// without bound until the process restarts; durable history lives in the
-// per-day files in the configured log directory.
-std::string get_log_history_text();
-
-// Optional external sink (e.g., stdout logger) layered on top of history capture.
+// Optional external sink (e.g., stdout logger) layered on top of disk capture.
 void set_external_log_sink(alpacacore::logging::LogSink sink);
+
+// Returns the basename of today's daily log file (alpacabridge-YYYY-MM-DD.log).
+// Useful for the legacy /management/v1/logs endpoint, which now serves the
+// current day's file rather than an in-memory buffer.
+std::string current_log_filename();
 
 // Convert AlpacaHTTP LogLevel to AlpacaCore LogLevel
 alpacacore::logging::LogLevel convert_log_level(LogLevel level);
@@ -64,12 +64,23 @@ std::vector<LogFileInfo> list_log_files();
 // validation or I/O failure. The `name` must be a basename only (no path).
 std::string read_log_file(const std::string& name);
 
-// Delete the named log file. Refuses to delete the file currently being written
-// to. Throws std::runtime_error on validation or I/O failure.
+// Delete the named log file. If the targeted file is today's active daily
+// file, its handle is closed first and the next log line will reopen (and
+// recreate) it. Throws std::runtime_error on validation or I/O failure.
 void delete_log_file(const std::string& name);
 
 // True if the provided basename matches the alpacabridge log file pattern.
 bool is_valid_log_filename(const std::string& name);
+
+// Configure how long daily log files are kept on disk before being auto-deleted.
+// `days > 0` enables cleanup; `0` disables it (keep forever). Cleanup runs once
+// at configure time and then on every day-rollover inside the file sink.
+void set_log_retention_days(int days);
+
+// Delete daily log files whose embedded date is older than retention_days
+// before today. Safe to call repeatedly; no-op when retention is disabled.
+// Returns the number of files removed.
+std::size_t prune_old_log_files();
 
 // Persist the currently-active log level so it survives a server restart.
 // Stored in config/runtime_state.json relative to cwd; failures are logged at

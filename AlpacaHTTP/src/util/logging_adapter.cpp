@@ -14,7 +14,6 @@
 #include <alpacahttp/config.h>
 #include <alpacacore/util/logging.h>
 #include <string>
-#include <deque>
 #include <mutex>
 #include <iostream>
 #include <iomanip>
@@ -36,8 +35,6 @@ namespace alpacahttp::util {
 
 namespace {
     std::mutex g_sink_mutex;
-    std::mutex g_history_mutex;
-    std::deque<std::string> g_log_history;
     alpacacore::logging::LogSink g_external_sink;
 
     // File-sink state
@@ -47,6 +44,7 @@ namespace {
     std::string g_log_file_name;  // basename currently being written to
     std::string g_log_file_date;  // YYYY-MM-DD of currently-open file
     bool g_file_logging_enabled = false;
+    int g_log_retention_days = 0;  // 0 = forever
 
     const std::regex kLogFilenameRegex(R"(^alpacabridge-(\d{4})-(\d{2})-(\d{2})\.log$)");
 
@@ -90,11 +88,6 @@ namespace {
                << "[" << component << "] "
                << message;
         return stream.str();
-    }
-
-    void append_log_history(std::string line) {
-        std::lock_guard<std::mutex> lock(g_history_mutex);
-        g_log_history.push_back(std::move(line));
     }
 
     // Try to use the directory at `path` for log writes. Returns true if the
@@ -158,14 +151,69 @@ namespace {
         }
     }
 
+    // Cutoff date (YYYY-MM-DD) for retention. Files with an embedded date
+    // strictly less than this string are eligible for deletion. retention=0
+    // returns an empty string and disables pruning.
+    std::string retention_cutoff_locked() {
+        if (g_log_retention_days <= 0) {
+            return "";
+        }
+        const auto now = std::chrono::system_clock::now() -
+                         std::chrono::hours(24) * g_log_retention_days;
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_buf{};
+        localtime_r(&time_t, &tm_buf);
+        std::ostringstream stream;
+        stream << std::put_time(&tm_buf, "%Y-%m-%d");
+        return stream.str();
+    }
+
+    std::size_t prune_old_files_locked() {
+        if (g_log_directory.empty()) {
+            return 0;
+        }
+        const std::string cutoff = retention_cutoff_locked();
+        if (cutoff.empty()) {
+            return 0;
+        }
+        std::error_code ec;
+        if (!std::filesystem::is_directory(g_log_directory, ec)) {
+            return 0;
+        }
+        std::size_t removed = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(g_log_directory, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file()) continue;
+            const std::string name = entry.path().filename().string();
+            std::smatch match;
+            if (!std::regex_match(name, match, kLogFilenameRegex)) continue;
+            // File's date is the YYYY-MM-DD captured by group 1..3 — but the
+            // entire YYYY-MM-DD substring is the chars after "alpacabridge-"
+            // and before ".log". Extract and compare lexicographically.
+            const std::string file_date = name.substr(13, 10);  // YYYY-MM-DD
+            if (file_date >= cutoff) continue;
+            if (g_log_file_name == name) continue;  // never prune today's file
+            std::error_code rm_ec;
+            if (std::filesystem::remove(entry.path(), rm_ec)) {
+                ++removed;
+            }
+        }
+        return removed;
+    }
+
     void write_to_file(const std::string& line) {
         std::lock_guard<std::mutex> lock(g_file_mutex);
         if (!g_file_logging_enabled || g_log_directory.empty()) {
             return;
         }
         const std::string today = current_local_date();
-        if (!g_log_file.is_open() || g_log_file_date != today) {
+        const bool day_changed = (g_log_file_date != today);
+        if (!g_log_file.is_open() || day_changed) {
             open_log_file_for_today_locked();
+            if (day_changed) {
+                // Take the opportunity to retire files past retention.
+                prune_old_files_locked();
+            }
         }
         if (g_log_file.is_open()) {
             g_log_file << line << '\n';
@@ -185,7 +233,6 @@ namespace {
                 std::cerr << line << std::endl;
             }
         }
-        append_log_history(line);
         write_to_file(line);
     }
 }
@@ -222,12 +269,12 @@ std::string configure_log_directory(const std::string& preferred, bool file_logg
         const auto fallback = user_state_fallback_directory();
         if (try_use_directory(fallback)) {
             chosen = fallback;
-            std::cerr << "[AlpacaHTTP] log directory '" << preferred
-                      << "' not writable, using fallback '" << fallback.string()
-                      << "'" << std::endl;
+            log_warning("Log directory '" + preferred +
+                        "' not writable; using fallback '" +
+                        fallback.string() + "'");
         } else {
-            std::cerr << "[AlpacaHTTP] no writable log directory available; "
-                         "file logging disabled" << std::endl;
+            log_warning("No writable log directory available; "
+                        "file logging disabled");
             return "";
         }
     }
@@ -325,6 +372,17 @@ std::string read_log_file(const std::string& name) {
         throw std::runtime_error("Log file not found");
     }
 
+    // Guard against pathological single-day log volumes (e.g., a runaway driver
+    // error loop) blowing up a single HTTP response into a multi-GB allocation.
+    // Callers can still read large files manually via the on-disk path.
+    constexpr std::uintmax_t kMaxReadBytes = 10ull * 1024 * 1024;  // 10 MiB
+    std::error_code size_ec;
+    const auto file_size = std::filesystem::file_size(path, size_ec);
+    if (!size_ec && file_size > kMaxReadBytes) {
+        throw std::runtime_error(
+            "Log file exceeds 10 MiB; download the file directly from disk");
+    }
+
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open log file");
@@ -366,10 +424,16 @@ void init_logging(const Config& config) {
     // Apply the configured log level before any components start logging
     alpacacore::logging::set_log_level(convert_log_level(config.log_level()));
     alpacacore::logging::set_log_sink(log_sink);
+    set_log_retention_days(config.log_retention_days());
     const std::string selected =
         configure_log_directory(config.log_directory(), config.file_logging_enabled());
     if (config.file_logging_enabled() && !selected.empty()) {
         log_info("File logging active in " + selected);
+        const std::size_t removed = prune_old_log_files();
+        if (removed > 0) {
+            log_info("Removed " + std::to_string(removed) +
+                     " log file(s) older than retention");
+        }
     }
     // A user-chosen level (set via /management/v1/loglevel) overrides the
     // default-yaml level on restart.
@@ -404,26 +468,24 @@ void log_error(const std::string& message) {
     alpacacore::logging::log(alpacacore::logging::LogLevel::Error, "AlpacaHTTP", message);
 }
 
-std::string get_log_history_text() {
-    std::lock_guard<std::mutex> lock(g_history_mutex);
-    if (g_log_history.empty()) {
-        return "";
-    }
-
-    std::ostringstream stream;
-    for (std::size_t i = 0; i < g_log_history.size(); ++i) {
-        stream << g_log_history[i];
-        if (i + 1 < g_log_history.size()) {
-            stream << "\n";
-        }
-    }
-    stream << "\n";
-    return stream.str();
-}
-
 void set_external_log_sink(alpacacore::logging::LogSink sink) {
     std::lock_guard<std::mutex> lock(g_sink_mutex);
     g_external_sink = std::move(sink);
+}
+
+std::string current_log_filename() {
+    return "alpacabridge-" + current_local_date() + ".log";
+}
+
+void set_log_retention_days(int days) {
+    if (days < 0) days = 0;
+    std::lock_guard<std::mutex> lock(g_file_mutex);
+    g_log_retention_days = days;
+}
+
+std::size_t prune_old_log_files() {
+    std::lock_guard<std::mutex> lock(g_file_mutex);
+    return prune_old_files_locked();
 }
 
 namespace {

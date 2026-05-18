@@ -5789,7 +5789,13 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
             }
 
             alpacacore::logging::set_log_level(*parsed_level);
-            util::save_runtime_log_level(*parsed_level);
+            try {
+                util::save_runtime_log_level(*parsed_level);
+            } catch (const std::exception& save_err) {
+                // Persistence is best-effort; failure must not block the API.
+                util::log_warning(std::string("Failed to persist log level: ") +
+                                  save_err.what());
+            }
             util::log_info("Log level set to " + log_level_to_string(*parsed_level));
             return send_payload(client_tx_id);
         }
@@ -5831,7 +5837,18 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
         return response;
     }
 
-    const std::string logs = util::get_log_history_text();
+    // Serve today's on-disk daily file. The in-memory history buffer was
+    // removed in favor of the durable per-day files in logging.directory.
+    const std::string today = util::current_log_filename();
+    std::string logs;
+    try {
+        logs = util::read_log_file(today);
+    } catch (const std::exception&) {
+        // No file yet today (e.g., file logging disabled or no log lines emitted
+        // since startup). Return an empty body — callers handle empty gracefully.
+        logs.clear();
+    }
+
     std::string format;
     if (request.has_query_param("format")) {
         format = request.get_query_param("format");
@@ -5842,7 +5859,8 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
     if (format == "plain" || format == "text") {
         response.set_content_type("text/plain");
         if (request.has_query_param("download")) {
-            response.set_header("Content-Disposition", "attachment; filename=\"alpacahttp-logs.txt\"");
+            response.set_header("Content-Disposition",
+                "attachment; filename=\"" + today + "\"");
         }
         response.set_body(logs);
         return response;
@@ -5872,7 +5890,6 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             "Unsupported HTTP method for log files endpoint"
         );
         response.set_body(err);
-        response.set_status(405, "Method Not Allowed");
         return response;
     }
 
@@ -5912,7 +5929,6 @@ Response Router::handle_log_file_item(const Request& request,
             "Invalid log file name"
         );
         response.set_body(err);
-        response.set_status(400, "Bad Request");
         return response;
     }
 
@@ -5935,7 +5951,6 @@ Response Router::handle_log_file_item(const Request& request,
                 std::string("Failed to read log file: ") + e.what()
             );
             response.set_body(err);
-            response.set_status(404, "Not Found");
             return response;
         }
     }
@@ -5959,7 +5974,6 @@ Response Router::handle_log_file_item(const Request& request,
                 std::string("Failed to delete log file: ") + e.what()
             );
             response.set_body(err);
-            response.set_status(404, "Not Found");
             return response;
         }
     }
@@ -5971,7 +5985,6 @@ Response Router::handle_log_file_item(const Request& request,
         "Unsupported HTTP method for log file endpoint"
     );
     response.set_body(err);
-    response.set_status(405, "Method Not Allowed");
     return response;
 }
 

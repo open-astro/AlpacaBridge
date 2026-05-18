@@ -259,6 +259,9 @@ case "${1:-}" in
     stop_service
     install_udev_rules
     build_projects
+    # Refresh the unit file so update installs pick up service-unit changes
+    # (e.g. new LogsDirectory directives) and re-assert log directory ownership.
+    write_service_unit
     start_service
     ;;
   uninstall)

@@ -812,7 +812,7 @@ h2 {
     max-height: 460px;
     overflow: auto;
     white-space: pre-wrap;
-    word-break: break-word;
+    overflow-wrap: anywhere;
     font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
     font-size: 0.85em;
     line-height: 1.4;
