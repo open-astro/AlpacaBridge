@@ -35,6 +35,35 @@ git log @{u}..HEAD --oneline 2>/dev/null || echo "NO_UPSTREAM"
 
 - If there are unpushed commits or no upstream tracking branch, note this — the branch will need to be pushed in Step 4.
 
+### ConformU report validation (HARD BLOCK)
+
+If this branch adds or modifies any ConformU files under `AlpacaCore/conformu/**`, every report must pass before the PR can be submitted. Merging a failing report misleads downstream consumers of `SUPPORTED-DRIVERS.md` into thinking a driver is validated on arm64.
+
+Find the reports on this branch:
+
+```bash
+git diff --name-only main..HEAD | grep -E '^AlpacaCore/conformu/.*\.(json|txt)$'
+```
+
+If the list is empty, skip the rest of this subsection.
+
+For each file in the list:
+
+- **JSON reports** (`*.json`) — **fail** if any of `ErrorCount`, `IssueCount`, `TimingIssuesCount` is non-zero:
+  ```bash
+  jq -r '{ErrorCount, IssueCount, TimingIssuesCount}' <file>
+  ```
+- **Text logs** (`*.txt`) — **fail** if any of these are true:
+  - `grep -E "OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET" <file>` matches
+  - `grep "took longer than its target response time" <file>` matches
+  - The file does NOT contain `Congratulations, no errors, warnings or issues found`
+
+If any file fails, **STOP**. Do NOT push. Do NOT open the PR. Tell the user exactly which file and which counts/lines failed:
+
+> "ConformU report `<file>` shows Errors=N, Issues=N, TimingIssues=N (or matching grep lines). The driver is not validated. Fix the driver, re-run ConformU until clean, replace the report on this branch, and try again. PR is blocked until every ConformU report on this branch passes. See `/driver-build` Step 10 for the full pass criteria."
+
+Do NOT offer to open the PR "anyway", as a draft, or with a TODO. This block exists because a green-looking PR with a failing ConformU report is the worst-case outcome — it gets merged and misadvertises the driver as validated.
+
 ## Step 2 — Detect repository setup
 
 Determine whether the user is a direct contributor or working from a fork:
@@ -80,7 +109,7 @@ Read the full diff and all commit messages. Understand:
 Review the branch contents and warn the user about anything that's missing:
 
 - [ ] **Unit tests**: Does the branch include Catch2 tests? (required for all driver code)
-- [ ] **ConformU results**: If this is a driver PR, is an arm64 ConformU report included?
+- [ ] **ConformU results**: If this is a driver PR, is an arm64 ConformU report included AND clean (verified in Step 1 — errors=0, issues=0, timing issues=0)?
 - [ ] **CHANGELOG.md**: Is there an entry under `## [x.x.x] - UNRELEASED`?
 - [ ] **SUPPORTED-DRIVERS.md**: If this adds or validates a driver, is the table updated?
 - [ ] **AGENTS.md**: Were lessons learned captured?

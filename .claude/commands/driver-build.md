@@ -527,10 +527,36 @@ arm64 is not just Raspberry Pi — the project supports a growing range of arm64
 
 1. Build AlpacaBridge with the new driver enabled.
 2. Start AlpacaBridge with the new driver configured and connected to real hardware.
-3. Run ConformU against the device. Target: **0 errors, 0 issues**.
-4. Save the ConformU results log to `AlpacaCore/conformu/<vendor>/<model>/Linux-arm64.txt`.
+3. Run ConformU against the device. Target: **0 errors, 0 issues, 0 timing issues**.
+4. **Verify the Timing Summary** at the end of the ConformU log — this is a separate pass criterion from the main "no errors, warnings or issues found" message. A clean run MUST satisfy all of:
+   - No `OUTSIDE FAST RESPONSE TIME TARGET` lines
+   - No `OUTSIDE STANDARD RESPONSE TIME TARGET` lines
+   - No `OUTSIDE EXTENDED RESPONSE TIME TARGET` lines
+   - No trailing `N member(s) took longer than its target response time.` summary line
+   - If a JSON report (`conform.report.txt`) is produced, `"TimingIssuesCount": 0`
+
+   Per-spec response time targets (reported in the Timing Summary header):
+   - **FAST** — 0.1 seconds (configuration and state reporting members, e.g. `Name`, `Connected`, `CanXxx`, position reads)
+   - **STANDARD** — 1.0 second (property writes and asynchronous initiators, e.g. `Tracking Write`, `SlewToCoordinatesAsync`)
+   - **EXTENDED** — 600.0 seconds (synchronous methods, `ImageArray`, `ImageArrayVariant`)
+
+   Quick check after a run:
+   ```bash
+   grep -E "OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET|took longer than its target response time" <conformu.log>
+   grep '"TimingIssuesCount"' <conform.report.txt>   # if JSON report is produced
+   ```
+   Both must return either nothing or `"TimingIssuesCount": 0`.
+
+   If any member exceeds its target, treat it as a failure. Common root causes (see "Common ConformU failure patterns" below for the full list):
+   - Slow SDK control writes — defer to start of operation or cache
+   - Network I/O while holding the driver mutex — release before I/O, re-acquire after
+   - Repeated round-trips for cached values (RA/Dec, capabilities) — add a short TTL cache
+   - First-call SDK warm-up on `Name`/identity reads — warm up at connect
+
+5. Save the ConformU results to `AlpacaCore/conformu/<vendor>/<model>/Linux-arm64.txt`.
    - If the device supports multiple connection types, save separate results: `Linux-arm64-usb.txt`, `Linux-arm64-wifi.txt`.
-5. If ConformU reveals failures, fix them and re-run until clean.
+   - If ConformU also produced a JSON report, save it alongside the text log (e.g. `Linux-arm64.report.json`) so the timing data is preserved.
+6. If ConformU reveals failures (errors, issues, OR timing issues), fix them and re-run until clean.
 
 ### After validation — update SUPPORTED-DRIVERS.md (MANDATORY)
 
