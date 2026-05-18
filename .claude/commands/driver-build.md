@@ -182,11 +182,9 @@ Every new `.h`, `.hpp`, `.cpp` file must include the SSPL v1 license header. Cop
 - Use `double` for floating-point protocol values (never `long double`).
 - License headers must remain SSPL v1 and unmodified.
 
-### Architecture targets
-- 64-bit only. Must build on both **arm64** (ARMv8) and **amd64** (x86_64). No 32-bit support.
-- arm64 targets include Raspberry Pi 4/5, Rockchip-based SBCs, OrangePi, and embedded astronomy computers (e.g. iOptron iMate). Do not assume Raspberry Pi — test portability across arm64 SoCs.
-- Use explicit serialization for wire data — no struct pointer casts on byte buffers.
-- Use `memcpy` or per-field reads for alignment safety.
+### Architecture target
+- **Linux arm64 only.** Targets include Raspberry Pi 3B+/4/5, Rockchip-based SBCs, OrangePi, and embedded astronomy computers (e.g. iOptron iMate). Do not assume Raspberry Pi — test portability across arm64 SoCs.
+- 64-bit only. No 32-bit, no amd64/x86_64.
 
 ## Step 3 — Implement the driver
 
@@ -284,18 +282,19 @@ Update `AlpacaCore/CMakeLists.txt`:
 Create `AlpacaCore/src/vendors/<vendor>/CMakeLists.txt` for the vendor target.
 
 If the vendor has an SDK with libraries:
-- Store under `AlpacaCore/external/<VENDOR>/` with arch subdirs (`lib/linux/armv8/`, `lib/linux/amd64/` — check existing vendor SDKs for the exact naming convention used, some use `x64` or `x86_64`).
+- Store the arm64 subset only under `AlpacaCore/external/<VENDOR>/` (commonly `lib/linux/armv8/`, `lib/linux/arm64/`, or `lib/armv8/` — check existing vendor SDKs for the exact naming the upstream uses).
+- Do not commit x86_64/x64/amd64 SDK binaries — AlpacaBridge is arm64-only and they would only bloat the repo.
 - Add `!external/<VENDOR>/**` to `AlpacaCore/.gitignore`.
 - If using pkg-config, prefer imported targets.
 
 ### SDK cleanup (MANDATORY before committing)
 
-Vendor SDKs ship with files we don't need that bloat the repo. After the user places the SDK in `AlpacaCore/external/<VENDOR>/`, audit the contents and remove everything that isn't required for the Linux amd64/arm64 build.
+Vendor SDKs ship with files we don't need that bloat the repo. After the user places the SDK in `AlpacaCore/external/<VENDOR>/`, audit the contents and remove everything that isn't required for the Linux arm64 build.
 
 Scan the SDK directory and **remove**:
 - **Windows files**: `*.dll`, `*.lib`, `*.exp`, `*.pdb`, `*.exe`, any `win/`, `win32/`, `win64/`, `windows/` directories
 - **macOS files**: `*.dylib`, `*.framework`, any `mac/`, `macos/`, `osx/` directories
-- **32-bit libraries**: any `x86/`, `i386/`, `armv6/`, `armv7/`, `armhf/` directories (we are 64-bit only)
+- **Non-arm64 Linux libraries**: any `x64/`, `x86_64/`, `amd64/`, `linux64/`, `x86/`, `i386/`, `armv6/`, `armv7/`, `armhf/` directories (we are arm64 only)
 - **Demo/sample apps**: `demo/`, `sample/`, `example/`, `test/` directories, pre-built demo binaries
 - **IDE project files**: `*.sln`, `*.vcxproj`, `*.xcodeproj`, `*.xcworkspace`
 - **Documentation we don't need**: `*.pdf`, `*.doc`, `*.docx`, `*.chm` (unless it's the protocol spec we're using — ask the user)
@@ -304,8 +303,7 @@ Scan the SDK directory and **remove**:
 - **Obsolete SDK versions**: if the SDK ships multiple versions, keep only the one we're building against
 
 **Keep**:
-- Linux amd64 libraries (`.a`, `.so`, `.so.*`)
-- Linux arm64 libraries (`.a`, `.so`, `.so.*`)
+- Linux arm64/armv8 libraries (`.a`, `.so`, `.so.*`)
 - C/C++ header files (`*.h`, `*.hpp`) needed for compilation
 - Udev rules (`*.rules`)
 - Firmware files if required by the device (e.g. QHY `.img`/`.HEX` files)
@@ -319,12 +317,11 @@ After cleanup, list what was removed and what was kept, and confirm with the use
 **Camera vendors MUST ship .so in the .deb — non-negotiable.** Non-camera vendors also ship .so if the SDK provides one.
 
 Checklist:
-1. Store `.a` and `.so` under `AlpacaCore/external/<VENDOR>/` per architecture.
-2. Ship both amd64 and arm64 `.so` files (64-bit only — no 32-bit).
-3. Add `!external/<VENDOR>/**` to `AlpacaCore/.gitignore` before committing SDK files.
-4. Update `debian/rules` — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/`.
-5. Update `build_and_run.sh` — copy `.so*` to `/usr/local/lib/`, run `ldconfig`.
-6. Update `install_alpaca_service.sh` — same as `build_and_run.sh`, keep in sync.
+1. Store `.a` and `.so` under `AlpacaCore/external/<VENDOR>/` in the arm64 subdir the upstream SDK uses.
+2. Add `!external/<VENDOR>/**` to `AlpacaCore/.gitignore` before committing SDK files.
+3. Update `debian/rules` — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/`.
+4. Update `build_and_run.sh` — copy `.so*` to `/usr/local/lib/`, run `ldconfig`.
+5. Update `install_alpaca_service.sh` — same as `build_and_run.sh`, keep in sync.
 
 ## Step 6 — AlpacaHTTP integration
 
@@ -516,30 +513,24 @@ After the driver builds and unit tests pass, the user MUST run ConformU against 
 
 ### Required validation matrix
 
-Every driver must be validated on **both** platforms:
+Every driver must be validated on **arm64**:
 
 | Platform | Architecture | Example hardware |
 |----------|-------------|-----------------|
-| Linux amd64 | 64-bit x86 | Intel NUC, desktop PC |
 | Linux arm64 | 64-bit ARMv8 | Raspberry Pi 4/5, OrangePi, Rockchip SBCs, iOptron iMate |
 
-**64-bit only** — no 32-bit (x86, armv7, armhf) support. Do not build or test on 32-bit platforms.
+**arm64 only** — no amd64/x86_64, no 32-bit (x86, armv7, armhf).
 
 arm64 is not just Raspberry Pi — the project supports a growing range of arm64 SBCs and embedded astronomy computers. See the wiki for the current list: https://github.com/open-astro/AlpacaBridge/wiki
 
-A driver with only one platform validated is **not ready for release**. If the user only has access to one platform, note the gap in `SUPPORTED-DRIVERS.md` and mark the missing platform as "pending".
-
 ### Validation steps
 
-For **each platform** (amd64 and arm64):
-
-1. Build AlpacaBridge with the new driver enabled on that platform.
+1. Build AlpacaBridge with the new driver enabled.
 2. Start AlpacaBridge with the new driver configured and connected to real hardware.
 3. Run ConformU against the device. Target: **0 errors, 0 issues**.
-4. Save the ConformU results log to `AlpacaCore/conformu/<vendor>/<model>/Linux-<arch>.txt`.
-   - Use consistent naming: `Linux-amd64.txt`, `Linux-arm64.txt`.
+4. Save the ConformU results log to `AlpacaCore/conformu/<vendor>/<model>/Linux-arm64.txt`.
    - If the device supports multiple connection types, save separate results: `Linux-arm64-usb.txt`, `Linux-arm64-wifi.txt`.
-5. If ConformU reveals failures, fix them and re-run until clean on **both platforms**.
+5. If ConformU reveals failures, fix them and re-run until clean.
 
 ### After validation — update SUPPORTED-DRIVERS.md (MANDATORY)
 
@@ -549,7 +540,7 @@ Read the current `SUPPORTED-DRIVERS.md` and add or update the entry for the new 
    - Model name
    - Connection type (USB, Wi-Fi, Serial, TCP)
    - ConformU link (relative path to the results file)
-   - Validated platforms (Linux amd64, Linux arm64)
+   - Validated platform (Linux arm64)
    - ConformU version used
 
 2. **Driver Notes section** — add or update the vendor's driver notes with:
@@ -668,7 +659,7 @@ After the driver is implemented, tested, and validated, update `AGENTS.md` with 
 - Any timing or threading issue that was discovered
 - Any protocol ambiguity that was resolved by testing
 - Any SDK bug or undocumented behavior
-- Any architecture-specific issue (amd64 vs arm64 differences)
+- Any arm64-specific issue (SBC firmware quirk, kernel version requirement, etc.)
 
 ### How to update
 

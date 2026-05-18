@@ -40,6 +40,12 @@ require_linux() {
     echo "This script is intended for Linux (arm64)."
     exit 1
   fi
+  local arch
+  arch="$(uname -m)"
+  if [[ "${arch}" != "aarch64" && "${arch}" != "arm64" ]]; then
+    echo "AlpacaBridge supports Linux arm64 only. Detected: ${arch}"
+    exit 1
+  fi
 }
 
 detect_parallel() {
@@ -78,17 +84,8 @@ install_udev_rules() {
   fi
 
   # QHY cameras require firmware files that the udev rules load via fxload.
-  # Detect architecture and install from the matching SDK directory.
-  local arch
-  arch="$(uname -m)"
-  local qhy_sdk_dir=""
-  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
-    qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_Arm64_25.09.29"
-  elif [[ "${arch}" == "x86_64" ]]; then
-    qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux64_25.09.29"
-  fi
-
-  if [[ -n "${qhy_sdk_dir}" && -d "${qhy_sdk_dir}/lib/firmware/qhy" ]]; then
+  local qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_Arm64_25.09.29"
+  if [[ -d "${qhy_sdk_dir}/lib/firmware/qhy" ]]; then
     echo "Installing QHY firmware files from ${qhy_sdk_dir}/lib/firmware/qhy"
     sudo mkdir -p /lib/firmware/qhy
     sudo cp -a "${qhy_sdk_dir}/lib/firmware/qhy/." /lib/firmware/qhy/
@@ -110,52 +107,32 @@ install_udev_rules() {
   fi
 
   # Install ZWO ASI Camera shared library (used by SmartGuider via zwoasi)
-  local zwo_camera_lib_dir=""
-  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
-    zwo_camera_lib_dir="${CORE_DIR}/external/ZWO/ASI_Camera_SDK/lib/linux/armv8"
-  elif [[ "${arch}" == "x86_64" ]]; then
-    zwo_camera_lib_dir="${CORE_DIR}/external/ZWO/ASI_Camera_SDK/lib/linux/x64"
-  fi
-  if [[ -n "${zwo_camera_lib_dir}" && -f "${zwo_camera_lib_dir}/libASICamera2.so" ]]; then
+  local zwo_camera_lib_dir="${CORE_DIR}/external/ZWO/ASI_Camera_SDK/lib/linux/armv8"
+  if [[ -f "${zwo_camera_lib_dir}/libASICamera2.so" ]]; then
     echo "Installing ZWO ASI Camera shared library to /usr/local/lib"
     sudo cp -a "${zwo_camera_lib_dir}/libASICamera2.so"* /usr/local/lib/
     sudo ldconfig
   fi
 
   # Install SVBONY Camera shared library
-  local svbony_lib_dir=""
-  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
-    svbony_lib_dir="${CORE_DIR}/external/SVBONY/lib/armv8"
-  elif [[ "${arch}" == "x86_64" ]]; then
-    svbony_lib_dir="${CORE_DIR}/external/SVBONY/lib/x64"
-  fi
-  if [[ -n "${svbony_lib_dir}" && -f "${svbony_lib_dir}/libSVBCameraSDK.so" ]]; then
+  local svbony_lib_dir="${CORE_DIR}/external/SVBONY/lib/armv8"
+  if [[ -f "${svbony_lib_dir}/libSVBCameraSDK.so" ]]; then
     echo "Installing SVBONY Camera shared library to /usr/local/lib"
     sudo cp -a "${svbony_lib_dir}/libSVBCameraSDK.so"* /usr/local/lib/
     sudo ldconfig
   fi
 
   # Install ToupTek Camera shared library (used by companion guiding software)
-  local touptek_lib_dir=""
-  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
-    touptek_lib_dir="${CORE_DIR}/external/ToupTek/toupcamsdk.20260128/linux/arm64/glibc"
-  elif [[ "${arch}" == "x86_64" ]]; then
-    touptek_lib_dir="${CORE_DIR}/external/ToupTek/toupcamsdk.20260128/linux/x64"
-  fi
-  if [[ -n "${touptek_lib_dir}" && -f "${touptek_lib_dir}/libtoupcam.so" ]]; then
+  local touptek_lib_dir="${CORE_DIR}/external/ToupTek/toupcamsdk.20260128/linux/arm64/glibc"
+  if [[ -f "${touptek_lib_dir}/libtoupcam.so" ]]; then
     echo "Installing ToupTek Camera shared library to /usr/local/lib"
     sudo cp -a "${touptek_lib_dir}/libtoupcam.so"* /usr/local/lib/
     sudo ldconfig
   fi
 
   # Install Player One Camera shared library (SmartGuider dlopens this directly)
-  local playerone_lib_dir=""
-  if [[ "${arch}" == "aarch64" || "${arch}" == "arm64" ]]; then
-    playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64"
-  elif [[ "${arch}" == "x86_64" ]]; then
-    playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/x64"
-  fi
-  if [[ -n "${playerone_lib_dir}" && -f "${playerone_lib_dir}/libPlayerOneCamera.so" ]]; then
+  local playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64"
+  if [[ -f "${playerone_lib_dir}/libPlayerOneCamera.so" ]]; then
     echo "Installing Player One Camera shared library to /usr/local/lib"
     sudo cp -a "${playerone_lib_dir}/libPlayerOneCamera.so"* /usr/local/lib/
     sudo ldconfig

@@ -11,9 +11,8 @@ ConformU (ASCOM Universal Device Conformance Checker) is used to verify that Alp
 
 Test results are organized by vendor/driver:
 - Each subdirectory contains ConformU test output files for a specific driver
-- Test files typically include:
-  - `ascom.conformu.*.txt` - Detailed test execution log
-  - `conform.report.txt` - Summary report of test results
+- Files are named `Linux-arm64.txt` (or `Linux-arm64-<transport>.txt` for drivers tested over multiple connection types, e.g. USB vs Wi-Fi)
+- AlpacaBridge is arm64-only; amd64/x64 ConformU reports are no longer produced or retained
 
 ## Current Test Results
 

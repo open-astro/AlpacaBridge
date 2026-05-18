@@ -57,7 +57,7 @@ If the changes include **driver code**, **ConformU results**, or **new device su
    - A new row in the appropriate device type table (Camera, Telescope, Focuser, etc.) with model, connection type, platform checkmarks, and ConformU validation link
    - A **Driver Notes** section below the table with SDK version, connection details, and any quirks
 3. If **ConformU results** are being committed for an existing driver, update:
-   - Platform checkmarks (✓) for newly validated platforms (x64, ARMv8)
+   - Platform checkmark (✓) for arm64
    - The ConformU validation link if a new report directory was added
    - Driver Notes with any new firmware or validation details
 4. Update the `## Updated YYYY-MM-DD` date at the top to today's date
@@ -66,7 +66,7 @@ If the changes include **driver code**, **ConformU results**, or **new device su
 
 Table row format:
 ```
-| Model Name | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/Vendor/Model/) |
+| Model Name | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Vendor/Model/) |
 ```
 
 Driver Notes format:
@@ -75,7 +75,7 @@ Driver Notes format:
 
 - **SDK**: Vendor SDK vX.Y.Z (build target)
 - **Connection**: USB / Wi-Fi / Serial (details)
-- **Tested model**: Model on Linux arm64/x64
+- **Tested model**: Model on Linux arm64
 ```
 
 ## Step 4 — Update CHANGELOG.md

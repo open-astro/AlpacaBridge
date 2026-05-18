@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-05-02
+## Updated 2026-05-18
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -16,34 +16,34 @@ This document lists all hardware vendors and device types that are verified to w
   - **USB/Serial**: USB-to-serial adapter or direct serial connection
 
 - **Linux Notes**:
-  - **Debian 13 (Trixie)**: All drivers have been tested using Debian 13 on x64 and arm64 using ConformU v4.2.1 for original drivers or v4.3.0 with new drivers. As new ConformU versions are released this will be adjusted.
+  - **Debian 13 (Trixie) on arm64**: AlpacaBridge is built and validated on arm64 only (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate). All drivers have been tested using Debian 13 on arm64 with ConformU v4.2.1 (original drivers) or v4.3.0 (newer drivers). As new ConformU versions are released this will be adjusted.
   - **Kernel 6.12.75-v8-16+ or higher.**: Note: kernel 6.12.75-v8-16+ is required to ensure ZWO EAF/EFW hardware compatibility. Without it, devices besides ZWO may or may not be recognized. Please check the kernel version.
 
 - **Wi-Fi / Mount Notes**:
-  - **Debian 13 (Trixie)**: Wi-Fi has been tested from Raspberry Pi to the mount. Due to the limited Wi-Fi power management on the Raspberry Pi, it is highly recommended to disable low power mode if you opt to connect via Wi-Fi to the mount. Even with a NUC running Debian 13, it is recommended to use a USB connection to the mount when possible, as commands are much quicker and more reliable.
+  - **Debian 13 (Trixie)**: Wi-Fi has been tested from Raspberry Pi to the mount. Due to the limited Wi-Fi power management on the Raspberry Pi, it is highly recommended to disable low power mode if you opt to connect via Wi-Fi to the mount. A USB connection to the mount is recommended when possible, as commands are much quicker and more reliable.
 
 ## Camera Drivers
 
 ### Player One
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| Ceres 462M | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Ceres%20462M/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Ceres 462M | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Ceres%20462M/) |
 
 ### Player One Driver Notes
 
 - **SDK**: Player One Camera SDK v3.10.0 (build target)
 - **Connection**: USB (requires udev rules `99-player_one_astronomy.rules`)
-- **Tested model**: Ceres 462M (uncooled) on Linux arm64. x64 validation pending.
+- **Tested model**: Ceres 462M (uncooled) on Linux arm64.
 - **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control paths (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) are implemented but untested against physical cooled hardware.
 - **Dew Heater**: Not exposed. The SDK advertises `POA_HEATER_POWER` on cooled models, but we do not currently have a cooled Player One camera available to implement and validate the Switch device. Will be added when hardware is available.
 - **Pulse guiding**: Capability-gated on `isHasST4Port`. Driver times the pulse duration via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
 
 ### QHY
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| QHY268C | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/QHY268C/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| QHY268C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/QHY268C/) |
 
 ### QHY Driver Notes
 
@@ -53,9 +53,9 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### SVBONY
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| SV905C2 | USB | ✓ |  ✓ | [ConformU Validation](AlpacaCore/conformu/SVBONY/SV905C2/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| SV905C2 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/SVBONY/SV905C2/) |
 
 ### SVBONY Driver Notes
 
@@ -64,29 +64,29 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### ToupTek
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| GPCMOS01200KPF | USB | ✓ | ✓  | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS01200KPF/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| GPCMOS01200KPF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS01200KPF/) |
 
 ### ToupTek Driver Notes
 
 - **SDK**: ToupTek toupcamsdk 2026-01-28 (build target)
 - **Connection**: USB (self-contained `libtoupcam.so`; no libusb/libudev link dependency)
-- **Tested model**: GPCMOS01200KPF (guide camera) on Linux x64. Other ToupTek models sharing the same SDK are expected to work but have not been individually ConformU-verified.
+- **Tested model**: GPCMOS01200KPF (guide camera) on Linux arm64. Other ToupTek models sharing the same SDK are expected to work but have not been individually ConformU-verified.
 - **Dew Heater**: Not supported. The ToupTek SDK exposes `TOUPCAM_FLAG_HEAT` / `TOUPCAM_OPTION_HEAT` for anti-fog heating on cooled cameras, but we do not currently have a cooled ToupTek camera available to implement and validate the Switch device. Will be added when hardware is available.
 - **Cooling (TEC)**: Capability-gated on the SDK's `TOUPCAM_FLAG_TEC` / `TOUPCAM_FLAG_TEC_ONOFF` flags. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control paths are implemented but untested against physical cooled hardware.
 
 ### ZWO
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| ASI120MM Mini | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI120MM%20Mini/) |
-| ASI174MM Mini | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI174MM%20Mini/) |
-| ASI2600MC Pro | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MC%20Pro/) |
-| ASI2600MM Pro | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MM%20Pro/) |
-| ASI290MM Mini | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI290MM%20Mini/) |
-| ASI462MM | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI462MM/) |
-| ASI662MC | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI662MC/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| ASI120MM Mini | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI120MM%20Mini/) |
+| ASI174MM Mini | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI174MM%20Mini/) |
+| ASI2600MC Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MC%20Pro/) |
+| ASI2600MM Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MM%20Pro/) |
+| ASI290MM Mini | USB |  | pending arm64 re-validation |
+| ASI462MM | USB |  | pending arm64 re-validation |
+| ASI662MC | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI662MC/) |
 
 ### ZWO Driver Notes
 
@@ -106,9 +106,9 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### ZWO
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| EFW | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EFW/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| EFW | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EFW/) |
 
 ### ZWO FilterWheel Driver Notes
 
@@ -119,9 +119,9 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### Gemini
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| Gemini Automatic Astro Focuser Pro | USB/Serial | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro%20Focuser%20Pro/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Gemini Automatic Astro Focuser Pro | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro%20Focuser%20Pro/) |
 
 ### Gemini Focuser Driver Notes
 
@@ -131,9 +131,9 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### ToupTek
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| AAF (Astro Auto Focuser) | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/AAF/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| AAF (Astro Auto Focuser) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/AAF/) |
 
 ### ToupTek Focuser Driver Notes
 
@@ -142,13 +142,13 @@ This document lists all hardware vendors and device types that are verified to w
 - **Configuration**: `focuserIndex` (0-based among AAF devices) or `focuserId` (opaque SDK id; overrides index).
 - **Capabilities**: Absolute positioning, halt, max-step query, on-board temperature (tenths of °C), backlash and reverse direction supported by the firmware. `StepSize` is not exposed because the AAF firmware does not report mechanically-valid microns-per-step for arbitrary focuser setups.
 - **Temperature compensation**: Not implemented — the AAF action set does not expose a temp-comp control.
-- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on Linux x64 and arm64.
+- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on Linux arm64.
 
 ### ZWO
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| EAF | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAF/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| EAF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAF/) |
 
 ### ZWO Focuser Driver Notes
 
@@ -160,9 +160,9 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### WeeWX
 
-| Source | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------|------------|---------------|-----------------|--------|
-| WeeWX HTTP JSON | HTTP(S) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/WeeWX/) |
+| Source | Connection | Linux<br>(arm64) | Status |
+|--------|------------|------------------|--------|
+| WeeWX HTTP JSON | HTTP(S) | ✓ | [ConformU Validation](AlpacaCore/conformu/WeeWX/) |
 
 ### WeeWX ObservingConditions Driver Notes
 
@@ -174,9 +174,9 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### ZWO
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| CAA | USB | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/CAA/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| CAA | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/CAA/) |
 
 ### ZWO Rotator Driver Notes
 
@@ -191,10 +191,10 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### ZWO
 
-| Device Type | Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|-------------|--------------|------------|---------------|-----------------|--------|
-| Dew Heater | ASI2600MC Pro | USB (via Camera) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/) |
-| Dew Heater | ASI2600MM Pro | USB (via Camera) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/) |
+| Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
+|-------------|--------------|------------|------------------|--------|
+| Dew Heater | ASI2600MC Pro | USB (via Camera) | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/) |
+| Dew Heater | ASI2600MM Pro | USB (via Camera) | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/) |
 
 ### ZWO Switch Driver Notes
 
@@ -205,9 +205,9 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### Celestron
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| CGX-L | USB/Serial (hand controller) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| CGX-L | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/) |
 
 ### Celestron Driver Notes
 
@@ -223,10 +223,10 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### iOptron
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| HEM27 series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/HEM27) |
-| HAE43 series | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/HAE43) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| HEM27 series | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/HEM27) |
+| HAE43 series | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/HAE43) |
 
 
 ### iOptron Driver Notes
@@ -238,13 +238,13 @@ This document lists all hardware vendors and device types that are verified to w
 - **Mount identification**: On connect, the driver queries `:MountInfo#` and maps the model code to a name displayed in `Name` (e.g., "iOptron HEM27"), `UniqueID`, and server logs. 60+ models supported including CEM, GEM, HEM, HAE, HAZ, and SkyHunter series.
 - **Wi-Fi reliability**: Network (TCP) connections drain stale acknowledgment bytes from blind commands to prevent buffer accumulation on the mount's Wi-Fi module. `IsPulseGuiding` uses lock-free atomics to meet the ConformU fast response target over high-latency links.
 - **Tested firmware**: Driver tested on **HEM27** with main board firmware **V240121** and hand controller firmware **V241201**. Other firmware versions and models may work but have not been individually verified.
-- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on both USB and Wi-Fi, on Linux x64 and arm64.
+- **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on both USB and Wi-Fi, on Linux arm64.
 
 ### SynScan V3/V4
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| Sky-Watcher HEQ5 PRO | USB/Serial (hand controller) | ✓ | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/Sky-Watcher%20HEQ5%20PRO/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Sky-Watcher HEQ5 PRO | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/Sky-Watcher%20HEQ5%20PRO/) |
 
 ### SynScan Driver Notes
 
@@ -257,14 +257,15 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### ZWO
 
-| Model Series | Connection | Linux<br>(x64) | Linux<br>(ARMv8) | Status |
-|--------------|------------|---------------|-----------------|--------|
-| AM3 | USB/Serial, Wi-Fi | ✓ | ✓ | [ConformU](AlpacaCore/conformu/ZWO/AM3/) |
-| AM5 | USB/Serial, Wi-Fi |  |  | [ConformU](AlpacaCore/conformu/ZWO/AM5/) |
-| AM5N | USB/Serial, Wi-Fi |  |  | [ConformU](AlpacaCore/conformu/ZWO/AM5N/) |
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| AM3 | USB/Serial, Wi-Fi | ✓ | [ConformU](AlpacaCore/conformu/ZWO/AM3/) |
+| AM5 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
+| AM5N | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
+| AM7 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
 
 ### ZWO Telescope (ASI Mount) Driver Notes
 
 - **Protocol**: ZWO Mount Serial Communication Protocol (see `AlpacaCore/external/ZWO/AM/ZWO_Mount_Protocol.md`)
 - **Connection**: Serial over USB or network (TCP). **Tested and working with USB and WiFi**. PulseGuide and slew behavior validated over both USB and WiFi; timing tuned for high-latency (WiFi) connections.
-- **Tested firmware**: Driver tested on ZWO **firmware 1.8.8***. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
+- **Tested firmware**: Driver tested on ZWO **firmware 1.8.8\***. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
