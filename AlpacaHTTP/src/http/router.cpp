@@ -5840,14 +5840,33 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
     // Serve today's on-disk daily file. The in-memory history buffer was
     // removed in favor of the durable per-day files in logging.directory.
     const std::string today = util::current_log_filename();
+    const std::string log_directory = util::get_log_directory();
     std::string logs;
-    try {
-        logs = util::read_log_file(today);
-    } catch (const std::exception&) {
-        // No file yet today (e.g., file logging disabled or no log lines emitted
-        // since startup). Return an empty body — callers handle empty gracefully.
-        logs.clear();
+    bool have_logs = false;
+
+    if (!log_directory.empty()) {
+        const std::filesystem::path path =
+            std::filesystem::path(log_directory) / today;
+        std::error_code exists_ec;
+        if (std::filesystem::exists(path, exists_ec)) {
+            try {
+                logs = util::read_log_file(today);
+                have_logs = true;
+            } catch (const std::exception& e) {
+                // Real failure (size cap, permission denied, etc.) — surface
+                // to the client rather than silently returning an empty body.
+                response.set_content_type("application/json");
+                AlpacaResponse err = make_error_response(
+                    client_tx_id, server_tx_id,
+                    util::ErrorCode::DRIVER_ERROR,
+                    std::string("Failed to read log file: ") + e.what()
+                );
+                response.set_body(err);
+                return response;
+            }
+        }
     }
+    (void)have_logs;  // empty-body path is intentional when no file exists yet
 
     std::string format;
     if (request.has_query_param("format")) {
@@ -5893,22 +5912,34 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
         return response;
     }
 
-    nlohmann::json payload;
-    payload["Directory"] = util::get_log_directory();
-    nlohmann::json files = nlohmann::json::array();
-    for (const auto& info : util::list_log_files()) {
-        nlohmann::json entry;
-        entry["Name"] = info.name;
-        entry["Size"] = info.size;
-        entry["Modified"] = info.modified_unix;
-        files.push_back(std::move(entry));
-    }
-    payload["Files"] = std::move(files);
+    try {
+        nlohmann::json payload;
+        payload["Directory"] = util::get_log_directory();
+        nlohmann::json files = nlohmann::json::array();
+        for (const auto& info : util::list_log_files()) {
+            nlohmann::json entry;
+            entry["Name"] = info.name;
+            entry["Size"] = info.size;
+            entry["Modified"] = info.modified_unix;
+            files.push_back(std::move(entry));
+        }
+        payload["Files"] = std::move(files);
 
-    AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-    alpaca_response.value = payload.dump();
-    response.set_body(alpaca_response);
-    return response;
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = payload.dump();
+        response.set_body(alpaca_response);
+        return response;
+    } catch (const std::exception& e) {
+        // Catch here so the Alpaca error envelope carries the caller's
+        // ClientTransactionID rather than the route()-level fallback of 0.
+        AlpacaResponse err = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::DRIVER_ERROR,
+            std::string("Failed to list log files: ") + e.what()
+        );
+        response.set_body(err);
+        return response;
+    }
 }
 
 Response Router::handle_log_file_item(const Request& request,
@@ -5945,9 +5976,12 @@ Response Router::handle_log_file_item(const Request& request,
             return response;
         } catch (const std::exception& e) {
             response.set_content_type("application/json");
+            // DRIVER_ERROR is the right runtime-failure code here: the
+            // endpoint exists (so NOT_IMPLEMENTED would be misleading); the
+            // failure is "file missing", "size cap exceeded", or generic I/O.
             AlpacaResponse err = make_error_response(
                 client_tx_id, server_tx_id,
-                util::ErrorCode::NOT_IMPLEMENTED,
+                util::ErrorCode::DRIVER_ERROR,
                 std::string("Failed to read log file: ") + e.what()
             );
             response.set_body(err);
