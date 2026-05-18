@@ -31,7 +31,7 @@ Common build and runtime issues for AlpacaBridge.
 
 **Solution**:
 1. Verify vendor SDK libraries are in the correct location
-2. Check that the SDK library matches your platform (x64 or arm64)
+2. Check that the SDK library is arm64 (`.a`/`.so` under the vendor's armv8 or arm64 subdir)
 3. Ensure CMake found the SDK correctly (check CMake output)
 4. Verify the library file exists and is the correct format (`.a` for static, `.so` for shared)
 

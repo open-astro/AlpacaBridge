@@ -80,7 +80,7 @@ Read the full diff and all commit messages. Understand:
 Review the branch contents and warn the user about anything that's missing:
 
 - [ ] **Unit tests**: Does the branch include Catch2 tests? (required for all driver code)
-- [ ] **ConformU results**: If this is a driver PR, are ConformU reports included for both amd64 and arm64?
+- [ ] **ConformU results**: If this is a driver PR, is an arm64 ConformU report included?
 - [ ] **CHANGELOG.md**: Is there an entry under `## [x.x.x] - UNRELEASED`?
 - [ ] **SUPPORTED-DRIVERS.md**: If this adds or validates a driver, is the table updated?
 - [ ] **AGENTS.md**: Were lessons learned captured?
@@ -119,7 +119,7 @@ Build the body from the branch's commits and diffs. Use this structure:
 ## Summary
 - Bullet points summarizing what this PR does (1-4 bullets)
 - Include vendor, device model, and key technical details
-- Reference ConformU results if applicable (e.g., "0 errors, 0 issues on x64 and arm64")
+- Reference ConformU results if applicable (e.g., "0 errors, 0 issues on arm64")
 
 ## Changes
 Group by component using bold tags:
@@ -132,7 +132,6 @@ Group by component using bold tags:
 
 ## Test plan
 - [ ] Unit tests pass (`cd build && ctest`)
-- [ ] ConformU 4.3.0 passes on Linux x64
 - [ ] ConformU 4.3.0 passes on Linux arm64
 - [ ] Web UI configuration works in browser
 - [ ] Device connects and operates correctly
@@ -140,7 +139,6 @@ Group by component using bold tags:
 
 ## ConformU results
 (If applicable — link to the report files in the branch)
-- **x64**: `AlpacaCore/conformu/Vendor/Model/amd64/`
 - **arm64**: `AlpacaCore/conformu/Vendor/Model/arm64/`
 ```
 

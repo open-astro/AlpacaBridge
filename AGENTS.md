@@ -33,17 +33,11 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 - Core/driver layers should avoid heavy framework dependencies.
 - License headers must remain SSPL v1 and unmodified in all source files.
 
-## Target Architectures
+## Target Architecture
 
-- All drivers must build and run on both **arm64** (ARMv8, e.g. Raspberry Pi 4/5) and **amd64** (x86_64).
-- When writing driver code, account for architecture differences:
-  - **Endianness**: both targets are little-endian today, but do not assume byte order — use explicit serialization when packing/unpacking wire data.
-  - **Alignment**: arm64 is stricter — do not cast arbitrary byte buffers to struct pointers; use `memcpy` or per-field reads.
-  - **Data type sizes**: use fixed-width types (`int32_t`, `uint16_t`, etc.) for hardware registers, protocol fields, and SDK structs. Do not assume `int`, `long`, or pointer sizes.
-  - **Vendor SDK libraries**: must be provided for both architectures under `AlpacaCore/external/<VENDOR>/lib/linux/armv8/` and `lib/linux/x64/`. If a vendor only ships one architecture, document the gap and guard the build with an architecture check in CMake.
-  - **Floating-point**: avoid `long double` (80-bit on x64, 128-bit on arm64). Use `double` for all floating-point protocol values.
-- CMake, `debian/rules`, `build_and_run.sh`, and `install_alpaca_service.sh` all detect the host architecture at build/install time — keep them in sync when adding architecture-dependent paths.
-- Test on both architectures before declaring a driver ConformU-validated. ConformU results are stored per-architecture in `AlpacaCore/conformu/`.
+- **Linux arm64 only** (ARMv8 — Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate). amd64/x86_64 is no longer supported, built, packaged, or validated. CMake, `debian/rules`, `build_and_run.sh`, and `install_alpaca_service.sh` all hard-fail on non-arm64 hosts.
+- When writing driver code, follow fixed-width integer practices for protocol/SDK structs (`int32_t`, `uint16_t`, etc.) and avoid `long double`. The wider portability concerns (endianness, alignment) no longer matter for our build target, but using fixed-width types still makes wire-protocol code easier to read and harder to misread.
+- ConformU validation is performed on arm64 only. Historical amd64/x64 ConformU reports have been deleted from `AlpacaCore/conformu/`.
 
 ## Driver Implementation Rules
 
@@ -79,14 +73,13 @@ Non-camera vendors (focusers, mounts, switches, rotators) also ship their `.so` 
 
 ### Mandatory Checklist — New Vendor SDK with `.so`
 
-Do **all** of the following when adding a new vendor SDK. Skipping any step will either silently break companion projects (steps 1–2), break CI / clean clones (step 3), or break runtime loading on installed systems (steps 4–6).
+Do **all** of the following when adding a new vendor SDK. Skipping any step will either silently break companion projects (step 1), break CI / clean clones (step 2), or break runtime loading on installed systems (steps 3–5).
 
-1. **Store** both static (`.a`) and shared (`.so`) libraries under `AlpacaCore/external/<VENDOR>/` in the architecture-appropriate subdirectory (e.g. `lib/linux/armv8/`, `lib/linux/x64/`, or whatever structure the upstream SDK uses — document the exact path in the vendor-specific notes section below).
-2. **Ship both architectures**: x64 and arm64 `.so` files must both be present in the tree. If upstream only ships one architecture, document the gap and guard the CMake build with an architecture check.
-3. **Allowlist in `.gitignore`**: add `!external/<VENDOR>/**` to `AlpacaCore/.gitignore` **before** committing the SDK files. The global `*.so` ignore rule will silently drop the library from the commit otherwise. Verify with `git check-ignore -v <path-to-.so>` — the output must show the `!external/<VENDOR>/**` rule winning.
-4. **`debian/rules`** — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/` in `override_dh_auto_install`, alongside existing QHY/ZWO/SVBONY entries. Add a per-arch `<VENDOR>_LIB_DIR` variable at the top of the file if the path differs by architecture.
-5. **`build_and_run.sh`** — detect architecture, copy `.so*` to `/usr/local/lib/`, run `ldconfig`. Add inside the udev rules block alongside existing QHY/ZWO/SVBONY install logic.
-6. **`install_alpaca_service.sh`** — same as `build_and_run.sh`, inside the `install_udev_rules()` function. Keep the two scripts in sync — they must install the same set of vendor libraries.
+1. **Store** static (`.a`) and shared (`.so`) libraries under `AlpacaCore/external/<VENDOR>/` in the arm64 subdirectory the upstream SDK uses (commonly `lib/linux/armv8/`, `lib/linux/arm64/`, or `lib/armv8/`). Document the exact path in the vendor-specific notes section below. Do not commit x86_64/x64 SDK binaries — AlpacaBridge is arm64-only and they would only bloat the repo.
+2. **Allowlist in `.gitignore`**: add `!external/<VENDOR>/**` to `AlpacaCore/.gitignore` **before** committing the SDK files. The global `*.so` ignore rule will silently drop the library from the commit otherwise. Verify with `git check-ignore -v <path-to-.so>` — the output must show the `!external/<VENDOR>/**` rule winning.
+3. **`debian/rules`** — copy `.so*` to `$(STAGING)/usr/lib/alpacabridge/` in `override_dh_auto_install`, alongside existing QHY/ZWO/SVBONY entries. Add a `<VENDOR>_LIB_DIR` variable at the top of the file pointing at the arm64 SDK path.
+4. **`build_and_run.sh`** — copy `.so*` to `/usr/local/lib/`, run `ldconfig`. Add inside the udev rules block alongside existing QHY/ZWO/SVBONY install logic.
+5. **`install_alpaca_service.sh`** — same as `build_and_run.sh`, inside the `install_udev_rules()` function. Keep the two scripts in sync — they must install the same set of vendor libraries.
 
 ### Dynamic Linker Registration
 
@@ -226,7 +219,7 @@ SDK locations: `AlpacaCore/external/ZWO/ASI_Camera_SDK/`, `EAF/`, `EFW/`, `CAA/`
 
 Devices: Camera.
 
-SDK locations: `AlpacaCore/external/QHY/sdk_Arm64_25.09.29/`, `sdk_linux64_25.09.29/`.
+SDK location: `AlpacaCore/external/QHY/sdk_Arm64_25.09.29/`.
 
 - Camera IDs are strings (`char[32]`), not integers — use `std::optional<std::string>` for camera_id and `std::optional<int>` for camera_index.
 - `GetQHYCCDSingleFrame()` blocks until the frame is ready; run it in a background thread and use an exposure status enum (Idle/Working/Success/Failed) to communicate results.
@@ -234,15 +227,15 @@ SDK locations: `AlpacaCore/external/QHY/sdk_Arm64_25.09.29/`, `sdk_linux64_25.09
 - Guide direction convention differs from Alpaca: QHY uses EAST=0, NORTH=1, SOUTH=2, WEST=3 vs Alpaca North=0, South=1, East=2, West=3 — map explicitly.
 - After changing readout mode, refresh chip info and reset ROI — sensor dimensions can change per mode.
 - SDK global lifecycle (`InitQHYCCDResource` / `ReleaseQHYCCDResource`) is managed as a singleton in the wrapper; include `#define __CPP_MODE__ 1` before `#include <qhyccd.h>` in the wrapper `.cpp` only.
-- Cameras require firmware files (`/lib/firmware/qhy/*.img` / `*.HEX`) in addition to udev rules. The udev rules call `fxload` to load firmware on plug-in, after which the device re-enumerates with a different USB product ID. Install firmware from `AlpacaCore/external/QHY/sdk_<arch>_*/lib/firmware/qhy/` to `/lib/firmware/qhy/` using the architecture-matching SDK directory.
-- The system `fxload` from apt does **not** support `-t fx3` (FX3-based cameras) and will exit 255 silently — always install the QHY SDK's own `fxload` binary from `sdk_<arch>_*/sbin/fxload` to `/sbin/fxload` instead.
+- Cameras require firmware files (`/lib/firmware/qhy/*.img` / `*.HEX`) in addition to udev rules. The udev rules call `fxload` to load firmware on plug-in, after which the device re-enumerates with a different USB product ID. Install firmware from `AlpacaCore/external/QHY/sdk_Arm64_25.09.29/lib/firmware/qhy/` to `/lib/firmware/qhy/`.
+- The system `fxload` from apt does **not** support `-t fx3` (FX3-based cameras) and will exit 255 silently — always install the QHY SDK's own `fxload` binary from `sdk_Arm64_25.09.29/sbin/fxload` to `/sbin/fxload` instead.
 - Re-enumeration in VMs: after `fxload` fires, the camera disconnects as `1618:c268` (Cypress WestBridge) and reconnects with its operational product ID. VMware and similar hypervisors will not automatically pass through the re-enumerated device unless the USB filter covers the entire QHYCCD vendor ID (`1618`). Test QHY cameras on bare metal or RPi rather than VMs where possible.
 
 ### SVBONY
 
 Devices: Camera.
 
-SDK locations: `AlpacaCore/external/SVBONY/lib/x64/`, `lib/armv8/`, headers under `external/SVBONY/include/`.
+SDK location: `AlpacaCore/external/SVBONY/lib/armv8/`, headers under `external/SVBONY/include/`.
 
 - **Control warm-up at connect (SV905C2 quirk)**: After `SVBOpenCamera`, `SVBSetControlValue(SVB_GAIN, ...)` returns `SVB_ERROR_GENERAL_ERROR` indefinitely on SV905C2 — regardless of value, regardless of `bAuto` flag, regardless of whether `SVBStartVideoCapture` is active, and `SVBRestoreDefaultParam` does not clear the state. The driver works around this by iterating every writable control reported by `SVBGetControlCaps` and writing each to its `default_value` during the connect path (after `SVBSetROIFormat` / `SVBSetOutputImageType`). Once any `SVBSetControlValue` call has landed, subsequent client gain writes succeed. Failures during the warm-up are tolerated and logged at DEBUG. Do not remove the warm-up loop in `set_connected` without re-running ConformU against an SV905C2 — the failure is silent until a client tries to set gain. Likely related to SDK readme entries `v1.13.1: Fixup ASCOM software to support SV905C2` and `v1.13.2: Optimize gain settings of SV905C2`.
 - **Auto control writes**: `disable_auto_if_needed` reads the current value/auto flag and only writes back if currently auto, since some SVBONY models reject manual writes while auto is active with the same `SVB_ERROR_GENERAL_ERROR`.
@@ -281,7 +274,7 @@ Connection types: Serial (USB serial) only. Default 9600 baud, 8N1. Protocol ver
 - **GEM pier-side DEC direction flip**: DEC motor direction is inverted when the mount's pointing state is 'W' (west), matching the physical axis reversal on German equatorial mounts. This affects pulse guide and MoveAxis DEC commands.
 - **Position override accumulation**: Instead of reading back noisy mount positions after tiny guide pulses, the driver accumulates expected `rate × duration` deltas directly into the target coordinate frame. All consecutive pulse guide directions (N/S/E/W) operate in the same coordinate baseline, eliminating drift between reads.
 - **RA tracking restoration**: The stop thread re-issues `set_tracking_mode()` after stopping an RA-axis pulse to counteract the variable-rate stop command killing sidereal tracking. Without this, the mount stops tracking after every RA pulse guide.
-- ConformU 4.3.0 validated for **Sky-Watcher HEQ5 PRO** on Linux x64 with 0 errors and 0 issues.
+- ConformU 4.3.0 validated for **Sky-Watcher HEQ5 PRO** on Linux arm64 with 0 errors and 0 issues.
 
 ### iOptron
 
@@ -299,7 +292,7 @@ Connection types: Serial (USB serial, 115200 baud default per v3.10 spec) and Ne
 - **Serial buffer flush**: Stale bytes from previous command responses can contaminate `:MS1#`/`:MS2#` slew responses (e.g., `"1111"` instead of `"1"`). The driver calls `flush_input()` (via `tcflush`/`PurgeComm`) before issuing slew commands.
 - **Pulse guiding**: Uses native iOptron pulse guide commands (`:ZS#`, `:ZQ#`, `:ZE#`, `:ZC#` for N/S/E/W with duration in ms). Hardware-timed by the mount.
 - **`:GEP#` response format**: sign + 8 RA digits + sign + 8 DEC digits + 1 side_of_pier digit + 1 pointing_state digit. No `#` terminator on some firmware versions — use idle-timeout read.
-- ConformU 4.3.0 validated for **iOptron HEM27** on Linux x64 with 0 errors and 0 issues.
+- ConformU 4.3.0 validated for **iOptron HEM27** on Linux arm64 with 0 errors and 0 issues.
 
 ### Celestron (NexStar)
 
@@ -325,7 +318,7 @@ Connection types: Serial (RS-232 on hand control base) and Network (WiFi bridge 
 - **Post-slew tracking restoration**: Re-issues the top-level `T` set-tracking-mode command rather than a per-axis variable-rate passthrough, keeping the HC's internal tracking state coherent with the LCD readout.
 - **Site/time write skip when aligned**: `SiteLatitude`, `SiteLongitude`, and `UTCDate` writes are silently skipped (log warn, return success) when the mount is aligned, matching INDI's UpdateLocation/UpdateTime pattern. Writing these after alignment corrupts the HC's pointing model. Preserves ConformU property round-trip tests.
 - **Pier-safety gate**: Accepts either a successful `SyncToCoordinates` in the current driver session OR HC-reported alignment (`J` command). HC workflow: power on → Switch Position → Location → Last Alignment → "CGX-L Ready".
-- ConformU 4.3.0 validated for **Celestron CGX-L** on Linux x64 with 0 errors and 0 issues.
+- ConformU 4.3.0 validated for **Celestron CGX-L** on Linux arm64 with 0 errors and 0 issues.
 - The NexStar serial protocol is nearly identical to SynScan — both derive from the same Celestron protocol family. The driver implementation follows the same pattern but with separate namespace and branding.
 
 ### Bisque (Paramount / TheSkyX)

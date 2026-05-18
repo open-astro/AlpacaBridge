@@ -14,7 +14,7 @@ Homepage: https://github.com/open-astro/AlpacaBridge
 Rules-Requires-Root: no
 
 Package: alpacabridge
-Architecture: any
+Architecture: arm64
 Depends: ${shlibs:Depends}, ${misc:Depends},
          libusb-1.0-0,
          libudev1,

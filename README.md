@@ -24,7 +24,7 @@ Watch a full install on a ToupTek StellaVita: [Installing AlpacaBridge on a Toup
 
 ## Supported platforms
 
-- **Debian 13 (Trixie)** on `amd64` (Intel/AMD 64-bit) or `arm64` (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi)
+- **Debian 13 (Trixie)** on `arm64` (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate)
 
 ## Learn more
 

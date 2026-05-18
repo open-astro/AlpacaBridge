@@ -4,8 +4,8 @@ This guide covers building AlpacaBridge from source, running tests, and contribu
 
 ## Supported platforms
 
-- **Debian 13 (Trixie)** on `amd64` (Intel/AMD 64-bit) and `arm64` (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi)
-- Linux 64-bit only — no 32-bit, Windows, or macOS
+- **Debian 13 (Trixie)** on `arm64` (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate) — the only supported architecture
+- Linux arm64 only — no amd64/x86_64, no 32-bit, no Windows or macOS
 
 ## Prerequisites
 
@@ -234,7 +234,7 @@ Guided driver implementation assistant. Walks through building, extending, or fi
 - Creates feature branch (`driver/<vendor>-<device>`)
 - Guides through the 3-layer architecture, SDK cleanup, auto-detection, CMake setup
 - Enforces Catch2 tests (8 cases, 30+ assertions) and ASCOM Alpaca API compliance
-- Validates with ConformU 4.3.0 on both amd64 and arm64
+- Validates with ConformU 4.3.0 on arm64
 - Updates AGENTS.md with lessons learned
 
 ### `/commit`

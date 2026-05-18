@@ -234,10 +234,10 @@ AlpacaBridge/
 
 ## Platform support
 
-- **Debian 13 (Trixie)** on amd64 and arm64
-- arm64 targets: Raspberry Pi 3B+/4/5, Rockchip SBCs, and OrangePi
-- 64-bit only — no 32-bit support
-- Platform-specific code is handled in CMake where needed
+- **Debian 13 (Trixie)** on arm64 — the only supported architecture
+- arm64 targets: Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate
+- 64-bit only — no 32-bit, no amd64/x86_64
+- Build scripts and CMake hard-fail on non-arm64 hosts
 
 ## Further reading
 
