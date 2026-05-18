@@ -615,18 +615,24 @@
                                 <button class="btn btn-secondary" type="button" onclick="downloadLogs()">Download Logs</button>
                             </div>
                         </div>
-                        <div class="log-history">
-                            <div class="log-history-row">
+                        <div class="log-files">
+                            <div class="log-files-header">
                                 <div>
-                                    <h4>Log history retention</h4>
-                                    <p>Keep all log lines in memory until restart.</p>
+                                    <h4>Stored log files</h4>
+                                    <p>Daily files saved to disk for long-term review.</p>
+                                    <p id="log-files-directory" class="log-files-directory"></p>
                                 </div>
-                                <label class="switch">
-                                    <input id="log-history-toggle" type="checkbox">
-                                    <span class="slider round"></span>
-                                </label>
+                                <button id="log-files-refresh" class="btn btn-secondary" type="button">Refresh</button>
                             </div>
-                            <p id="log-history-status" class="log-status">Detecting log history limit...</p>
+                            <p id="log-files-status" class="log-status">Loading log files...</p>
+                            <div id="log-files-list" class="log-files-list"></div>
+                            <div id="log-file-viewer" class="log-file-viewer hidden">
+                                <div class="log-file-viewer-header">
+                                    <span id="log-file-viewer-title" class="log-file-viewer-title"></span>
+                                    <button id="log-file-viewer-close" class="btn btn-secondary" type="button">Close</button>
+                                </div>
+                                <pre id="log-file-viewer-body" class="log-file-viewer-body"></pre>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -639,6 +645,6 @@
         </div>
     </div>
 
-    <script src="/web/app.js?v=11"></script>
+    <script src="/web/app.js?v=14"></script>
 </body>
 </html>

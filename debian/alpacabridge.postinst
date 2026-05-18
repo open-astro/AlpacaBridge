@@ -33,6 +33,15 @@ case "$1" in
         fi
         chown -R alpacabridge:alpacabridge /etc/alpacabridge
 
+        # Create log directory. systemd LogsDirectory= handles this when the
+        # service starts, but having it pre-created lets the binary write logs
+        # immediately on first start (and supports non-systemd execution).
+        if [ ! -d /var/log/AlpacaBridge ]; then
+            mkdir -p /var/log/AlpacaBridge
+        fi
+        chown alpacabridge:alpacabridge /var/log/AlpacaBridge
+        chmod 0755 /var/log/AlpacaBridge
+
         # Register bundled vendor shared libraries (QHY, ZWO) with the dynamic linker
         ldconfig
 

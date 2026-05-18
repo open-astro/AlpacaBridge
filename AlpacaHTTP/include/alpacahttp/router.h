@@ -90,7 +90,10 @@ private:
     Response handle_restart(const Request& request, std::uint32_t server_tx_id);
     Response handle_log_level(const Request& request, std::uint32_t server_tx_id);
     Response handle_logs(const Request& request, std::uint32_t server_tx_id);
-    Response handle_log_history(const Request& request, std::uint32_t server_tx_id);
+    Response handle_log_files_list(const Request& request, std::uint32_t server_tx_id);
+    Response handle_log_file_item(const Request& request,
+                                  const std::string& filename,
+                                  std::uint32_t server_tx_id);
     Response handle_static_file(const Request& request);
     Response handle_setup(const Request& request, std::uint32_t server_tx_id);
 

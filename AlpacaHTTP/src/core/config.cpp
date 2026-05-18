@@ -155,8 +155,23 @@ void Config::load_config_from_yaml(const std::string& config_path) {
         } else if (current_section == "logging") {
             if (key == "level") {
                 log_level_ = parse_log_level(value);
-            } else if (key == "history_limit") {
-                parse_size_value(value, log_history_limit_);
+            } else if (key == "directory") {
+                if (!value.empty()) {
+                    log_directory_ = value;
+                }
+            } else if (key == "file_enabled") {
+                bool enabled = file_logging_enabled_;
+                if (parse_bool_value(value, enabled)) {
+                    file_logging_enabled_ = enabled;
+                }
+            } else if (key == "retention_days") {
+                try {
+                    int parsed = std::stoi(value);
+                    if (parsed < 0) parsed = 0;
+                    log_retention_days_ = parsed;
+                } catch (...) {
+                    // Keep default
+                }
             }
         } else if (current_section == "server") {
             if (key == "name") {
@@ -269,18 +284,27 @@ void Config::apply_environment_overrides() {
         }
     }
 
-    const char* log_history_env = std::getenv("ALPACAHTTP_LOG_HISTORY_LIMIT");
-    if (log_history_env) {
-        std::string limit_str = log_history_env;
-        std::transform(limit_str.begin(), limit_str.end(), limit_str.begin(), ::tolower);
-        if (limit_str == "unlimited" || limit_str == "none") {
-            log_history_limit_ = 0;
-        } else {
-            try {
-                log_history_limit_ = static_cast<std::size_t>(std::stoull(limit_str));
-            } catch (...) {
-                // Invalid value, use default
-            }
+    const char* log_dir_env = std::getenv("ALPACAHTTP_LOG_DIRECTORY");
+    if (log_dir_env && *log_dir_env) {
+        log_directory_ = log_dir_env;
+    }
+
+    const char* file_log_env = std::getenv("ALPACAHTTP_FILE_LOGGING");
+    if (file_log_env) {
+        bool enabled = file_logging_enabled_;
+        if (parse_bool_value(file_log_env, enabled)) {
+            file_logging_enabled_ = enabled;
+        }
+    }
+
+    const char* retention_env = std::getenv("ALPACAHTTP_LOG_RETENTION_DAYS");
+    if (retention_env) {
+        try {
+            int parsed = std::stoi(retention_env);
+            if (parsed < 0) parsed = 0;
+            log_retention_days_ = parsed;
+        } catch (...) {
+            // Keep value from yaml/default
         }
     }
 }

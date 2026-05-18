@@ -11,6 +11,8 @@ Group=alpacabridge
 WorkingDirectory=/etc/alpacabridge
 ExecStart=/usr/bin/alpacabridge
 Environment=LD_LIBRARY_PATH=/usr/lib/alpacabridge
+LogsDirectory=AlpacaBridge
+LogsDirectoryMode=0755
 Restart=on-failure
 RestartSec=3
 

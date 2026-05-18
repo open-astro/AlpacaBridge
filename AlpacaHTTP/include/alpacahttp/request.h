@@ -23,6 +23,7 @@ enum class HttpMethod {
     GET,
     POST,
     PUT,
+    DELETE_,
     UNKNOWN
 };
 

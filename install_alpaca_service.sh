@@ -210,12 +210,22 @@ User=${user}
 Group=${group}
 WorkingDirectory=${HTTP_DIR}
 ExecStart=${HTTP_DIR}/build/alpacahttp_server
+LogsDirectory=AlpacaBridge
+LogsDirectoryMode=0755
 Restart=on-failure
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT
+
+  # Ensure the log directory exists with correct ownership even if the binary
+  # is run outside systemd (e.g., manual invocation during development).
+  if [[ ! -d /var/log/AlpacaBridge ]]; then
+    sudo mkdir -p /var/log/AlpacaBridge
+  fi
+  sudo chown "${user}:${group}" /var/log/AlpacaBridge
+  sudo chmod 0755 /var/log/AlpacaBridge
 
   sudo systemctl daemon-reload
 }
@@ -249,6 +259,9 @@ case "${1:-}" in
     stop_service
     install_udev_rules
     build_projects
+    # Refresh the unit file so update installs pick up service-unit changes
+    # (e.g. new LogsDirectory directives) and re-assert log directory ownership.
+    write_service_unit
     start_service
     ;;
   uninstall)
