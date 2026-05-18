@@ -2,7 +2,7 @@
 const API_BASE = '';
 const LOGGING_ENDPOINT = '/management/v1/loglevel';
 const LOGS_ENDPOINT = '/management/v1/logs';
-const LOG_HISTORY_ENDPOINT = '/management/v1/loghistory';
+const LOG_FILES_ENDPOINT = '/management/v1/logfiles';
 const QUIET_LOG_LEVEL = 'WARNING';
 const LOG_LEVEL_ORDER = ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
 const FILTERWHEEL_CUSTOM_VALUE = '__custom__';
@@ -35,8 +35,6 @@ const ALPACA_DEVICE_ORDER = [
     'dome',
     'switch'
 ];
-let lastLogHistoryLimit = 2000;
-
 FILTERWHEEL_PRESET_OPTIONS.forEach(option => {
     FILTERWHEEL_PRESET_LOOKUP.set(normalizeFilterName(option.value), option.value);
     (option.aliases || []).forEach(alias => {
@@ -88,13 +86,6 @@ function setLogControlsDisabled(disabled) {
     getLogLevelToggles().forEach(toggle => {
         toggle.disabled = disabled;
     });
-}
-
-function setLogHistoryControlsDisabled(disabled) {
-    const toggle = document.getElementById('log-history-toggle');
-    if (toggle) {
-        toggle.disabled = disabled;
-    }
 }
 
 function ensureLogLevelToggles(supportedLevels) {
@@ -187,60 +178,6 @@ async function requestLogLevelUpdate(desiredLevel) {
         await loadLogSettings();
     } finally {
         setLogControlsDisabled(false);
-    }
-}
-
-async function requestLogHistoryUpdate(limit) {
-    const statusEl = document.getElementById('log-history-status');
-    if (!statusEl) {
-        return;
-    }
-
-    setLogHistoryControlsDisabled(true);
-    statusEl.textContent = 'Updating log history...';
-
-    try {
-        const response = await fetch(API_BASE + LOG_HISTORY_ENDPOINT, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({limit})
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const text = await response.text();
-        let data;
-        try {
-            data = JSON.parse(text);
-        } catch (e) {
-            throw new Error('Invalid JSON response from server');
-        }
-
-        if (data.ErrorNumber !== 0) {
-            throw new Error(data.ErrorMessage || 'Unknown server error');
-        }
-
-        const payload = parseResponseValue(data.Value) || {};
-        const nextLimit = Number(payload.Limit);
-        const unlimited = payload.Unlimited === true || nextLimit === 0;
-        if (!unlimited && Number.isFinite(nextLimit) && nextLimit > 0) {
-            lastLogHistoryLimit = nextLimit;
-        }
-
-        const toggle = document.getElementById('log-history-toggle');
-        if (toggle) {
-            toggle.checked = unlimited;
-        }
-        statusEl.textContent = unlimited
-            ? 'Log history: unlimited (stored until restart)'
-            : `Log history: last ${lastLogHistoryLimit} lines`;
-    } catch (error) {
-        statusEl.textContent = `Failed to update log history: ${error.message}`;
-        await loadLogHistorySettings();
-    } finally {
-        setLogHistoryControlsDisabled(false);
     }
 }
 
@@ -1006,7 +943,7 @@ async function updateServerLocation() {
 function refreshServerInfo() {
     loadServerInfo();
     loadLogSettings();
-    loadLogHistorySettings();
+    loadLogFiles();
 }
 
 // Shutdown server
@@ -1111,61 +1048,6 @@ async function loadLogSettings() {
     }
 }
 
-async function loadLogHistorySettings() {
-    const statusEl = document.getElementById('log-history-status');
-    if (!statusEl) {
-        return;
-    }
-
-    setLogHistoryControlsDisabled(true);
-    statusEl.textContent = 'Loading log history settings...';
-
-    try {
-        const response = await fetch(API_BASE + LOG_HISTORY_ENDPOINT);
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const text = await response.text();
-        let data;
-        try {
-            data = JSON.parse(text);
-        } catch (e) {
-            throw new Error('Invalid JSON response from server');
-        }
-
-        if (data.ErrorNumber !== 0) {
-            throw new Error(data.ErrorMessage || 'Unknown server error');
-        }
-
-        const payload = parseResponseValue(data.Value) || {};
-        const limit = Number(payload.Limit);
-        const unlimited = payload.Unlimited === true || limit === 0;
-        if (!unlimited && Number.isFinite(limit) && limit > 0) {
-            lastLogHistoryLimit = limit;
-        }
-
-        const toggle = document.getElementById('log-history-toggle');
-        if (toggle) {
-            toggle.checked = unlimited;
-        }
-
-        statusEl.textContent = unlimited
-            ? 'Log history: unlimited (stored until restart)'
-            : `Log history: last ${lastLogHistoryLimit} lines`;
-    } catch (error) {
-        statusEl.textContent = `Unable to load log history settings: ${error.message}`;
-    } finally {
-        setLogHistoryControlsDisabled(false);
-    }
-}
-
-async function handleLogHistoryToggleChange(event) {
-    const isUnlimited = event.target.checked;
-    const nextLimit = isUnlimited ? 0 : (lastLogHistoryLimit || 2000);
-    await requestLogHistoryUpdate(nextLimit);
-}
-
 async function handleLogLevelToggleChange(event) {
     const selectedLevel = normalizeLogLevel(event.target.dataset.level);
     const selectedIndex = getLogLevelIndex(selectedLevel);
@@ -1222,6 +1104,207 @@ async function downloadLogs() {
                 statusEl.textContent = previousStatus;
             }, 4000);
         }
+    }
+}
+
+// Log file management (on-disk daily files)
+function formatLogFileSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) {
+        return '–';
+    }
+    if (bytes < 1024) {
+        return `${bytes} B`;
+    }
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let value = bytes / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+    }
+    return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatLogFileTimestamp(epochSeconds) {
+    if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) {
+        return '–';
+    }
+    try {
+        return new Date(epochSeconds * 1000).toLocaleString();
+    } catch (err) {
+        return '–';
+    }
+}
+
+function setLogFilesStatus(text) {
+    const statusEl = document.getElementById('log-files-status');
+    if (statusEl) {
+        statusEl.textContent = text;
+    }
+}
+
+function setLogFileViewer(filename, contents) {
+    const viewer = document.getElementById('log-file-viewer');
+    const title = document.getElementById('log-file-viewer-title');
+    const body = document.getElementById('log-file-viewer-body');
+    if (!viewer || !body) return;
+    if (title) {
+        title.textContent = filename;
+    }
+    body.textContent = contents;
+    viewer.classList.remove('hidden');
+    body.scrollTop = body.scrollHeight;
+}
+
+function clearLogFileViewer() {
+    const viewer = document.getElementById('log-file-viewer');
+    const body = document.getElementById('log-file-viewer-body');
+    const title = document.getElementById('log-file-viewer-title');
+    if (body) body.textContent = '';
+    if (title) title.textContent = '';
+    if (viewer) viewer.classList.add('hidden');
+}
+
+async function loadLogFiles() {
+    const listEl = document.getElementById('log-files-list');
+    if (!listEl) return;
+    setLogFilesStatus('Loading log files…');
+    try {
+        const response = await fetch(API_BASE + LOG_FILES_ENDPOINT);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const text = await response.text();
+        const payload = JSON.parse(text);
+        const inner = typeof payload.Value === 'string' ? JSON.parse(payload.Value) : payload.Value;
+        const directory = inner && inner.Directory ? inner.Directory : '';
+        const files = inner && Array.isArray(inner.Files) ? inner.Files : [];
+        renderLogFiles(directory, files);
+    } catch (error) {
+        listEl.innerHTML = '';
+        setLogFilesStatus(`Failed to load log files: ${error.message}`);
+    }
+}
+
+function renderLogFiles(directory, files) {
+    const listEl = document.getElementById('log-files-list');
+    const dirEl = document.getElementById('log-files-directory');
+    if (dirEl) {
+        dirEl.textContent = directory ? `Directory: ${directory}` : 'File logging is disabled.';
+    }
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    if (!files.length) {
+        setLogFilesStatus(directory
+            ? 'No log files yet — they appear here once the server writes some.'
+            : 'No log files (file logging is disabled).');
+        return;
+    }
+    setLogFilesStatus(`${files.length} log file${files.length === 1 ? '' : 's'} on disk.`);
+
+    files.forEach(file => {
+        const row = document.createElement('div');
+        row.className = 'log-file-row';
+
+        const info = document.createElement('div');
+        info.className = 'log-file-info';
+        const nameEl = document.createElement('div');
+        nameEl.className = 'log-file-name';
+        nameEl.textContent = file.Name;
+        const metaEl = document.createElement('div');
+        metaEl.className = 'log-file-meta';
+        metaEl.textContent = `${formatLogFileSize(file.Size)} • ${formatLogFileTimestamp(file.Modified)}`;
+        info.appendChild(nameEl);
+        info.appendChild(metaEl);
+
+        const actions = document.createElement('div');
+        actions.className = 'log-file-actions';
+
+        const viewBtn = document.createElement('button');
+        viewBtn.type = 'button';
+        viewBtn.className = 'btn btn-secondary';
+        viewBtn.textContent = 'View';
+        viewBtn.addEventListener('click', () => viewLogFile(file.Name));
+
+        const downloadBtn = document.createElement('button');
+        downloadBtn.type = 'button';
+        downloadBtn.className = 'btn btn-secondary';
+        downloadBtn.textContent = 'Download';
+        downloadBtn.addEventListener('click', () => downloadLogFile(file.Name));
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'btn btn-danger';
+        deleteBtn.textContent = 'Delete';
+        deleteBtn.addEventListener('click', () => deleteLogFile(file.Name));
+
+        actions.appendChild(viewBtn);
+        actions.appendChild(downloadBtn);
+        actions.appendChild(deleteBtn);
+
+        row.appendChild(info);
+        row.appendChild(actions);
+        listEl.appendChild(row);
+    });
+}
+
+async function viewLogFile(filename) {
+    setLogFilesStatus(`Loading ${filename}…`);
+    try {
+        const response = await fetch(`${API_BASE}${LOG_FILES_ENDPOINT}/${encodeURIComponent(filename)}`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const contents = await response.text();
+        setLogFileViewer(filename, contents || '(file is empty)');
+        setLogFilesStatus(`Viewing ${filename}`);
+    } catch (error) {
+        setLogFilesStatus(`Failed to load ${filename}: ${error.message}`);
+    }
+}
+
+async function downloadLogFile(filename) {
+    setLogFilesStatus(`Downloading ${filename}…`);
+    try {
+        const response = await fetch(
+            `${API_BASE}${LOG_FILES_ENDPOINT}/${encodeURIComponent(filename)}?download=1`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+        setLogFilesStatus(`Downloaded ${filename}`);
+    } catch (error) {
+        setLogFilesStatus(`Failed to download ${filename}: ${error.message}`);
+    }
+}
+
+async function deleteLogFile(filename) {
+    if (!confirm(`Delete log file ${filename}? This cannot be undone.`)) {
+        return;
+    }
+    setLogFilesStatus(`Deleting ${filename}…`);
+    try {
+        const response = await fetch(
+            `${API_BASE}${LOG_FILES_ENDPOINT}/${encodeURIComponent(filename)}`,
+            { method: 'DELETE' });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const viewerTitle = document.getElementById('log-file-viewer-title');
+        if (viewerTitle && viewerTitle.textContent === filename) {
+            clearLogFileViewer();
+        }
+        await loadLogFiles();
+    } catch (error) {
+        setLogFilesStatus(`Failed to delete ${filename}: ${error.message}`);
     }
 }
 
@@ -2277,7 +2360,7 @@ document.addEventListener('DOMContentLoaded', function() {
     loadDevices();
     loadServerInfo();
     loadLogSettings();
-    loadLogHistorySettings();
+    loadLogFiles();
     updateVendorOptions();
 
     document.querySelectorAll('.section-toggle').forEach(button => {
@@ -2291,8 +2374,12 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    const logHistoryToggle = document.getElementById('log-history-toggle');
-    if (logHistoryToggle) {
-        logHistoryToggle.addEventListener('change', handleLogHistoryToggleChange);
+    const refreshLogFiles = document.getElementById('log-files-refresh');
+    if (refreshLogFiles) {
+        refreshLogFiles.addEventListener('click', loadLogFiles);
+    }
+    const closeLogViewer = document.getElementById('log-file-viewer-close');
+    if (closeLogViewer) {
+        closeLogViewer.addEventListener('click', clearLogFileViewer);
     }
 });

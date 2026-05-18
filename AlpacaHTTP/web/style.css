@@ -681,32 +681,6 @@ h2 {
     justify-content: flex-end;
 }
 
-.log-history {
-    margin-top: 16px;
-    padding-top: 14px;
-    border-top: 1px solid #e0e0e0;
-}
-
-.log-history-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    flex-wrap: wrap;
-}
-
-.log-history-row h4 {
-    margin: 0 0 6px;
-    color: #333;
-    font-size: 1em;
-}
-
-.log-history-row p {
-    margin: 0;
-    color: #666;
-    font-size: 0.9em;
-}
-
 .log-level-toggle {
     display: flex;
     align-items: center;
@@ -722,6 +696,127 @@ h2 {
 .log-level-toggle input {
     width: 16px;
     height: 16px;
+}
+
+.log-files {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid #e0e0e0;
+}
+
+.log-files-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.log-files-header h4 {
+    margin: 0 0 6px;
+    color: #333;
+    font-size: 1em;
+}
+
+.log-files-header p {
+    margin: 0;
+    color: #666;
+    font-size: 0.9em;
+}
+
+.log-files-directory {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-size: 0.85em;
+    color: #555;
+    margin-top: 4px !important;
+}
+
+.log-files-list {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.log-file-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    background: #fff;
+    flex-wrap: wrap;
+}
+
+.log-file-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1 1 220px;
+}
+
+.log-file-name {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-weight: 600;
+    color: #333;
+    word-break: break-all;
+}
+
+.log-file-meta {
+    color: #666;
+    font-size: 0.85em;
+}
+
+.log-file-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.log-file-viewer {
+    margin-top: 14px;
+    border: 1px solid #d0d0d0;
+    border-radius: 6px;
+    background: #1e1e1e;
+    color: #f1f1f1;
+    overflow: hidden;
+}
+
+.log-file-viewer.hidden {
+    display: none;
+}
+
+.log-file-viewer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    background: #2a2a2a;
+    border-bottom: 1px solid #3a3a3a;
+}
+
+.log-file-viewer-title {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    color: #f1f1f1;
+    font-size: 0.95em;
+    word-break: break-all;
+}
+
+.log-file-viewer-body {
+    margin: 0;
+    padding: 12px;
+    max-height: 460px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-size: 0.85em;
+    line-height: 1.4;
+    color: #f1f1f1;
 }
 
 .info-box pre {

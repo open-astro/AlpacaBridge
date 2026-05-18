@@ -16,6 +16,8 @@
 #include <alpacacore/util/logging.h>
 #include <string>
 #include <functional>
+#include <cstdint>
+#include <vector>
 
 namespace alpacahttp::util {
 
@@ -28,15 +30,44 @@ void log_info(const std::string& message);
 void log_warning(const std::string& message);
 void log_error(const std::string& message);
 
-// Retrieve recent log history as plain text.
+// Retrieve recent log history as plain text. The in-memory buffer grows
+// without bound until the process restarts; durable history lives in the
+// per-day files in the configured log directory.
 std::string get_log_history_text();
-void set_log_history_limit(std::size_t limit);
-std::size_t get_log_history_limit();
 
 // Optional external sink (e.g., stdout logger) layered on top of history capture.
 void set_external_log_sink(alpacacore::logging::LogSink sink);
 
 // Convert AlpacaHTTP LogLevel to AlpacaCore LogLevel
 alpacacore::logging::LogLevel convert_log_level(LogLevel level);
+
+// On-disk log file management.
+struct LogFileInfo {
+    std::string name;        // file basename only (no path)
+    std::uint64_t size = 0;  // in bytes
+    std::int64_t modified_unix = 0; // last-modified epoch seconds
+};
+
+// Configure the directory that on-disk log files are written to. Falls back to a
+// user-writable directory if the configured path cannot be opened for writing.
+// Returns the directory that was actually selected.
+std::string configure_log_directory(const std::string& preferred, bool file_logging_enabled);
+
+// Returns the directory currently used for on-disk logging (empty if disabled).
+std::string get_log_directory();
+
+// List the log files currently stored in the log directory.
+std::vector<LogFileInfo> list_log_files();
+
+// Read the contents of a named log file. Throws std::runtime_error on
+// validation or I/O failure. The `name` must be a basename only (no path).
+std::string read_log_file(const std::string& name);
+
+// Delete the named log file. Refuses to delete the file currently being written
+// to. Throws std::runtime_error on validation or I/O failure.
+void delete_log_file(const std::string& name);
+
+// True if the provided basename matches the alpacabridge log file pattern.
+bool is_valid_log_filename(const std::string& name);
 
 } // namespace alpacahttp::util

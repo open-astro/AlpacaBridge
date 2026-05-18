@@ -12,7 +12,8 @@ discovery:
 # Logging settings
 logging:
   level: WARNING  # DEBUG, INFO, WARNING, ERROR
-  history_limit: 2000  # 0 = unlimited, Env: ALPACAHTTP_LOG_HISTORY_LIMIT
+  file_enabled: true  # Write logs to disk in addition to stderr. Env: ALPACAHTTP_FILE_LOGGING
+  directory: /var/log/AlpacaBridge  # Daily files: alpacabridge-YYYY-MM-DD.log. Env: ALPACAHTTP_LOG_DIRECTORY. Falls back to $XDG_STATE_HOME/AlpacaBridge/logs (or ~/.local/state/AlpacaBridge/logs) if not writable.
 
 # Server information
 server:

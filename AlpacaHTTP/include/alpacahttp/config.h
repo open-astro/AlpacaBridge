@@ -43,7 +43,8 @@ public:
     const std::string& manufacturer() const { return manufacturer_; }
     const std::string& location() const { return location_; }
     std::size_t thread_pool_size() const { return thread_pool_size_; }
-    std::size_t log_history_limit() const { return log_history_limit_; }
+    const std::string& log_directory() const { return log_directory_; }
+    bool file_logging_enabled() const { return file_logging_enabled_; }
     const std::string& config_path() const { return config_path_; }
 
     // Device enable/disable
@@ -61,7 +62,8 @@ public:
         if (size > 256) size = 256;
         thread_pool_size_ = size;
     }
-    void set_log_history_limit(std::size_t limit) { log_history_limit_ = limit; }
+    void set_log_directory(const std::string& dir) { log_directory_ = dir; }
+    void set_file_logging_enabled(bool enabled) { file_logging_enabled_ = enabled; }
 
 private:
     std::uint16_t http_port_ = 6800;
@@ -71,7 +73,8 @@ private:
     std::string manufacturer_ = "OpenAstro.net";
     std::string location_ = "";
     std::size_t thread_pool_size_ = 32;  // Default: 32 concurrent requests (supports multiple devices + clients)
-    std::size_t log_history_limit_ = 2000;  // 0 = unlimited
+    std::string log_directory_ = "/var/log/AlpacaBridge";
+    bool file_logging_enabled_ = true;
     std::string config_path_;
 
     // Device enable/disable map: "devicetype:number" -> enabled

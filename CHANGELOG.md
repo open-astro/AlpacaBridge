@@ -11,6 +11,16 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ## [1.0.4] - UNRELEASED
 
+### Added
+- **On-disk logging** (AlpacaHTTP): server now writes every log line to a daily file `/var/log/AlpacaBridge/alpacabridge-YYYY-MM-DD.log` in addition to stderr and the in-memory buffer. Thread-safe append sink with automatic day-rollover and a writability probe that falls back to `$XDG_STATE_HOME/AlpacaBridge/logs` (or `~/.local/state/AlpacaBridge/logs`) when the configured directory is not writable. Configurable via new `logging.directory` and `logging.file_enabled` keys in `config/default.yaml` and env vars `ALPACAHTTP_LOG_DIRECTORY` / `ALPACAHTTP_FILE_LOGGING`.
+- **Log file management API** (AlpacaHTTP): three new management endpoints — `GET /management/v1/logfiles` (list daily files with size/modified time), `GET /management/v1/logfiles/{name}[?download=1]` (read inline or as attachment), `DELETE /management/v1/logfiles/{name}` (delete). Filenames are validated against the `alpacabridge-YYYY-MM-DD.log` pattern to prevent path traversal. HTTP parser extended with `DELETE` method support.
+- **Web portal log file panel** (AlpacaHTTP): new "Stored log files" section under Logging shows each daily file with size and modified time, plus per-row **View** (dark-theme inline viewer), **Download**, and **Delete** (confirm-prompted) buttons. Auto-loads on page open and on the Refresh button.
+- **Deb packaging** (debian/): `alpacabridge.service` adds `LogsDirectory=AlpacaBridge` so systemd creates and chowns `/var/log/AlpacaBridge` on every service start; `alpacabridge.postinst` also pre-creates the directory for non-systemd execution.
+- **Dev install scripts**: `install_alpaca_service.sh` mirrors the systemd `LogsDirectory=` line and pre-creates `/var/log/AlpacaBridge` with the invoking user's ownership; `build_and_run.sh` unconditionally creates and chowns `/var/log/AlpacaBridge` on Linux so dev runs write to the standard path instead of the home-dir fallback.
+
+### Removed
+- **In-memory log retention toggle** (AlpacaHTTP): removed the "Log history retention" web UI control, the `/management/v1/loghistory` management endpoint, the `logging.history_limit` YAML key, and the `ALPACAHTTP_LOG_HISTORY_LIMIT` env var. The in-memory buffer now grows unbounded until restart; durable history lives in the per-day on-disk files.
+
 ### Fixed
 - **Alpaca Discovery** (AlpacaHTTP): UDP discovery listener on port 32227 no longer tears itself down when the multicast group join fails. The ASCOM Alpaca discovery protocol primarily uses UDP broadcast to `255.255.255.255:32227` (which a socket bound to `INADDR_ANY:32227` already receives), so multicast-join failure is now logged as a warning and discovery continues serving broadcast/unicast probes. Fixes NINA "Discover Servers" returning zero results when AlpacaBridge runs on an RPi acting as its own Wi-Fi access point (NetworkManager `ipv4.method shared`), where `wlan0` has no default multicast route and `IP_ADD_MEMBERSHIP` fails. Externally-routed LAN setups are unaffected.
 

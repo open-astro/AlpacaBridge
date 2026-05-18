@@ -137,6 +137,8 @@ HttpMethod Request::parse_method(std::string_view method_str) {
         return HttpMethod::POST;
     } else if (method_str == "PUT") {
         return HttpMethod::PUT;
+    } else if (method_str == "DELETE") {
+        return HttpMethod::DELETE_;
     }
     return HttpMethod::UNKNOWN;
 }

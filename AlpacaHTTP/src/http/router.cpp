@@ -770,14 +770,6 @@ nlohmann::json make_log_level_payload() {
     return payload;
 }
 
-nlohmann::json make_log_history_payload() {
-    nlohmann::json payload;
-    const auto limit = alpacahttp::util::get_log_history_limit();
-    payload["Limit"] = limit;
-    payload["Unlimited"] = (limit == 0);
-    return payload;
-}
-
 void append_int(std::string& out, std::int64_t value) {
     out.append(std::to_string(value));
 }
@@ -1306,10 +1298,21 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "logs";
         return match;
     }
-    if (path == "/management/v1/loghistory" || path == "/management/loghistory") {
+    if (path == "/management/v1/logfiles" || path == "/management/logfiles") {
         match.is_management = true;
-        match.management_endpoint = "loghistory";
+        match.management_endpoint = "logfiles";
         return match;
+    }
+    {
+        static const std::regex kLogfileItemRegex(
+            R"(^/management/(?:v1/)?logfiles/([^/?]+)/?$)");
+        std::smatch logfile_match;
+        if (std::regex_match(path, logfile_match, kLogfileItemRegex)) {
+            match.is_management = true;
+            match.management_endpoint = "logfile";
+            match.method_name = logfile_match[1].str();
+            return match;
+        }
     }
     if (path == "/management/v1/shutdown" || path == "/management/shutdown") {
         match.is_management = true;
@@ -1353,8 +1356,10 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_log_level(request, server_tx_id);
     } else if (match.management_endpoint == "logs") {
         return handle_logs(request, server_tx_id);
-    } else if (match.management_endpoint == "loghistory") {
-        return handle_log_history(request, server_tx_id);
+    } else if (match.management_endpoint == "logfiles") {
+        return handle_log_files_list(request, server_tx_id);
+    } else if (match.management_endpoint == "logfile") {
+        return handle_log_file_item(request, match.method_name, server_tx_id);
     } else if (match.management_endpoint == "shutdown") {
         return handle_shutdown(request, server_tx_id);
     } else if (match.management_endpoint == "restart") {
@@ -5849,7 +5854,8 @@ Response Router::handle_logs(const Request& request, std::uint32_t server_tx_id)
     return response;
 }
 
-Response Router::handle_log_history(const Request& request, std::uint32_t server_tx_id) {
+
+Response Router::handle_log_files_list(const Request& request, std::uint32_t server_tx_id) {
     Response response;
     response.set_content_type("application/json");
 
@@ -5858,117 +5864,116 @@ Response Router::handle_log_history(const Request& request, std::uint32_t server
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    auto send_payload = [&](std::uint32_t ctx_id) {
-        AlpacaResponse alpaca_response(ctx_id, server_tx_id);
-        alpaca_response.value = make_log_history_payload().dump();
-        response.set_body(alpaca_response);
-        return response;
-    };
-
-    try {
-        if (request.method() == HttpMethod::GET) {
-            return send_payload(client_tx_id);
-        }
-
-        if (request.method() == HttpMethod::POST || request.method() == HttpMethod::PUT) {
-            if (request.body().empty()) {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::VALUE_NOT_SET,
-                    "Missing request body"
-                );
-                response.set_body(err);
-                return response;
-            }
-
-            auto json_opt = parse_json(request.body());
-            if (!json_opt) {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::INVALID_VALUE,
-                    "Invalid JSON payload"
-                );
-                response.set_body(err);
-                return response;
-            }
-
-            const auto& body = *json_opt;
-            auto body_client_tx = extract_client_transaction_id(body);
-            if (body_client_tx != 0) {
-                client_tx_id = body_client_tx;
-            }
-
-            bool has_limit = false;
-            std::size_t limit = util::get_log_history_limit();
-
-            if (body.contains("Unlimited") || body.contains("unlimited")) {
-                bool unlimited = false;
-                if (body.contains("Unlimited")) {
-                    unlimited = body["Unlimited"].get<bool>();
-                } else {
-                    unlimited = body["unlimited"].get<bool>();
-                }
-                limit = unlimited ? 0 : limit;
-                has_limit = true;
-            }
-
-            if (body.contains("Limit") || body.contains("limit")) {
-                const auto& value = body.contains("Limit") ? body["Limit"] : body["limit"];
-                if (value.is_string()) {
-                    std::string text = value.get<std::string>();
-                    std::transform(text.begin(), text.end(), text.begin(),
-                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                    if (text == "unlimited" || text == "none") {
-                        limit = 0;
-                    } else {
-                        limit = static_cast<std::size_t>(std::stoull(text));
-                    }
-                } else if (value.is_number_unsigned()) {
-                    limit = value.get<std::size_t>();
-                } else if (value.is_number_integer()) {
-                    auto signed_limit = value.get<long long>();
-                    if (signed_limit < 0) {
-                        throw std::invalid_argument("Log history limit must be >= 0");
-                    }
-                    limit = static_cast<std::size_t>(signed_limit);
-                } else {
-                    throw std::invalid_argument("Log history limit must be a number or string");
-                }
-                has_limit = true;
-            }
-
-            if (!has_limit) {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::VALUE_NOT_SET,
-                    "Request must include 'limit' or 'unlimited'"
-                );
-                response.set_body(err);
-                return response;
-            }
-
-            util::set_log_history_limit(limit);
-            util::log_info("Log history limit set to " + std::to_string(limit));
-            return send_payload(client_tx_id);
-        }
-
+    if (request.method() != HttpMethod::GET) {
         AlpacaResponse err = make_error_response(
             client_tx_id, server_tx_id,
             util::ErrorCode::INVALID_OPERATION,
-            "Unsupported HTTP method for log history endpoint"
+            "Unsupported HTTP method for log files endpoint"
         );
         response.set_body(err);
-        return response;
-    } catch (const std::exception& e) {
-        AlpacaResponse err = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::DRIVER_ERROR,
-            "Failed to update log history limit: " + std::string(e.what())
-        );
-        response.set_body(err);
+        response.set_status(405, "Method Not Allowed");
         return response;
     }
+
+    nlohmann::json payload;
+    payload["Directory"] = util::get_log_directory();
+    nlohmann::json files = nlohmann::json::array();
+    for (const auto& info : util::list_log_files()) {
+        nlohmann::json entry;
+        entry["Name"] = info.name;
+        entry["Size"] = info.size;
+        entry["Modified"] = info.modified_unix;
+        files.push_back(std::move(entry));
+    }
+    payload["Files"] = std::move(files);
+
+    AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+    alpaca_response.value = payload.dump();
+    response.set_body(alpaca_response);
+    return response;
 }
+
+Response Router::handle_log_file_item(const Request& request,
+                                      const std::string& filename,
+                                      std::uint32_t server_tx_id) {
+    Response response;
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (!util::is_valid_log_filename(filename)) {
+        response.set_content_type("application/json");
+        AlpacaResponse err = make_error_response(
+            client_tx_id, server_tx_id,
+            util::ErrorCode::INVALID_VALUE,
+            "Invalid log file name"
+        );
+        response.set_body(err);
+        response.set_status(400, "Bad Request");
+        return response;
+    }
+
+    if (request.method() == HttpMethod::GET) {
+        try {
+            const std::string contents = util::read_log_file(filename);
+            response.set_content_type("text/plain");
+            if (request.has_query_param("download")) {
+                response.set_header(
+                    "Content-Disposition",
+                    "attachment; filename=\"" + filename + "\"");
+            }
+            response.set_body(contents);
+            return response;
+        } catch (const std::exception& e) {
+            response.set_content_type("application/json");
+            AlpacaResponse err = make_error_response(
+                client_tx_id, server_tx_id,
+                util::ErrorCode::NOT_IMPLEMENTED,
+                std::string("Failed to read log file: ") + e.what()
+            );
+            response.set_body(err);
+            response.set_status(404, "Not Found");
+            return response;
+        }
+    }
+
+    if (request.method() == HttpMethod::DELETE_) {
+        try {
+            util::delete_log_file(filename);
+            util::log_info("Deleted log file " + filename);
+            response.set_content_type("application/json");
+            AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+            nlohmann::json payload;
+            payload["Deleted"] = filename;
+            alpaca_response.value = payload.dump();
+            response.set_body(alpaca_response);
+            return response;
+        } catch (const std::exception& e) {
+            response.set_content_type("application/json");
+            AlpacaResponse err = make_error_response(
+                client_tx_id, server_tx_id,
+                util::ErrorCode::DRIVER_ERROR,
+                std::string("Failed to delete log file: ") + e.what()
+            );
+            response.set_body(err);
+            response.set_status(404, "Not Found");
+            return response;
+        }
+    }
+
+    response.set_content_type("application/json");
+    AlpacaResponse err = make_error_response(
+        client_tx_id, server_tx_id,
+        util::ErrorCode::INVALID_OPERATION,
+        "Unsupported HTTP method for log file endpoint"
+    );
+    response.set_body(err);
+    response.set_status(405, "Method Not Allowed");
+    return response;
+}
+
 Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx_id) {
     Response response;
     response.set_content_type("application/json");
