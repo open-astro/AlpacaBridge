@@ -30,7 +30,7 @@ Ask the following **one at a time**, waiting for each answer before moving on. I
 
 3. **ASCOM device type** — Camera, CoverCalibrator, Dome, FilterWheel, Focuser, ObservingConditions, Rotator, SafetyMonitor, Switch, Telescope. Needed to build the Alpaca URI path segment (`camera`, `telescope`, etc. — lowercase).
 
-4. **Connection transport** — USB, Wi-Fi, Serial, or TCP. Used as the filename suffix and as the connection cell in `SUPPORTED-DRIVERS.md`. The on-disk suffix is lowercase (`usb`, `wifi`, `serial`, `tcp`). The table cell uses display form (`USB`, `Wi-Fi`, `Serial`, `TCP`).
+4. **Connection transport** — USB, Wi-Fi, Serial, TCP, or GPIO. Used as the filename suffix and as the connection cell in `SUPPORTED-DRIVERS.md`. The on-disk suffix is lowercase (`usb`, `wifi`, `serial`, `tcp`, `gpio`). The table cell uses display form (`USB`, `Wi-Fi`, `Serial`, `TCP`, `Local GPIO (libgpiod v2)`). Use `GPIO` for devices that AlpacaBridge controls via on-board Linux GPIO lines on the host SBC (e.g. ZWO ASIair Pro 12V power switch on a Raspberry Pi 4).
    - If the device only supports one transport, omit the suffix — file is `Linux-arm64.txt`.
    - If the device supports multiple and this run only tests one, use the suffix — file is `Linux-arm64-<transport>.txt`. Existing reports already exist for the same device — those other transports stay untouched.
 
@@ -309,7 +309,7 @@ AlpacaCore/conformu/<Vendor>/<Model>/
 
 Filenames:
 - Single transport: `Linux-arm64.txt` + `Linux-arm64.report.json`
-- Multiple transports: `Linux-arm64-<transport>.txt` + `Linux-arm64-<transport>.report.json` (lowercase: `usb`, `wifi`, `serial`, `tcp`)
+- Multiple transports: `Linux-arm64-<transport>.txt` + `Linux-arm64-<transport>.report.json` (lowercase: `usb`, `wifi`, `serial`, `tcp`, `gpio`)
 
 Always save BOTH the text log and the JSON report (the JSON preserves the timing data even after a fresh ConformU release changes the text format).
 
