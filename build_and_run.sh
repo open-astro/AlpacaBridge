@@ -16,13 +16,11 @@
 #                                    ccache + ninja-build via apt the first
 #                                    time they are missing (uses sudo).
 #   ALPACACORE_ENABLE_ALL_VENDORS    default ON
-#   ALPACAHTTP_USE_BOOST_BEAST       default OFF
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_DIR="${ROOT_DIR}/AlpacaCore"
 HTTP_DIR="${ROOT_DIR}/AlpacaHTTP"
-HTTP_BEAST="${ALPACAHTTP_USE_BOOST_BEAST:-OFF}"
 CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
 INSTALL_UDEV_RULES="${ALPACA_INSTALL_UDEV_RULES:-ON}"
 INSTALL_ACCELERATORS="${ALPACA_INSTALL_ACCELERATORS:-ON}"
@@ -247,7 +245,6 @@ echo "== AlpacaHTTP =="
 cmake -S "${HTTP_DIR}" -B "${HTTP_DIR}/build" \
   "${CMAKE_GENERATOR_ARGS[@]}" \
   "${COMPILER_LAUNCHER_ARGS[@]}" \
-  -DALPACAHTTP_USE_BOOST_BEAST="${HTTP_BEAST}" \
   -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}" \
   -DALPACAHTTP_BUILD_TESTS=OFF \
   -DALPACACORE_BUILD_TESTS=OFF
