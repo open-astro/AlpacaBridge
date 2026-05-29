@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-05-18
+## Updated 2026-05-29
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -195,12 +195,13 @@ This document lists all hardware vendors and device types that are verified to w
 |-------------|--------------|------------|------------------|--------|
 | Dew Heater | ASI2600MC Pro | USB (via Camera) | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/) |
 | Dew Heater | ASI2600MM Pro | USB (via Camera) | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/Dew%20Heater%20Switch/) |
-| ASIair Pro 12V Power | ASIair Pro (Pi 4) | Local GPIO (libgpiod v2) | Pending re-image | ConformU pending |
+| ASIair Pro 12V Power | ASIair Pro (Pi 4) | Local GPIO (libgpiod v2) | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASIair%20Pro/) |
 
 ### ZWO Switch Driver Notes
 
 - **Device Type: Dew Heater** (`switchType: dewheater`) — exposed when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Bind to a camera via `cameraIndex` or `cameraId`.
 - **Device Type: ASIair Pro 12V Power** (`switchType: asiair`) — controls the four on-board 12V DC outputs directly via Linux GPIO using libgpiod v2. Default Pi 4 ASIair Pro layout: Port 1 = GPIO 12, Port 2 = GPIO 13, Port 3 = GPIO 26, Port 4 = GPIO 18 on `/dev/gpiochip0`. All ports default to boolean on/off; mark a port `"pwm": true` in the config to expose it as a 0–100% software PWM channel (default 1 kHz, configurable via `pwmFrequencyHz`). Requires the AlpacaBridge daemon to run on the ASIair Pro itself with the stock pigpiod-based ZWO daemons disabled; the driver requires arm64 so the stock Raspbian Buster armv7l OS must be re-imaged with Raspberry Pi OS 64-bit (Bookworm or Trixie) before this driver can be deployed. **Step-by-step setup**: see [AlpacaCore/PowerPorts.md](AlpacaCore/PowerPorts.md).
+- **ASIair Pro ConformU**: 4.3.0 — 0 errors, 0 issues, 0 timing issues on Linux arm64 (Debian 13 Trixie, kernel 6.18.29+rpt-rpi-v8). Tested with a mixed config (2 boolean ports + 2 PWM ports) so both code paths were exercised in a single run. Slowest member 21 ms (well under STANDARD 1 s target).
 
 ## Telescope Drivers
 
