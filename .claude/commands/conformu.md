@@ -133,8 +133,7 @@ Create a temp working directory and invoke the conformance subcommand:
 TMPDIR=$(mktemp -d /tmp/conformu-XXXXXX)
 <path-to-conformu>/conformu conformance \
   "http://<host>:<port>/api/v1/<type>/<n>" \
-  -n "$TMPDIR/conformu.txt" \
-  -r "$TMPDIR/conform.report.json"
+  -n "$TMPDIR/conformu.txt"
 ```
 
 Stream output to the user as it runs. ConformU can take minutes (especially for cameras and telescopes). Do not interrupt unless the user says so.
@@ -143,46 +142,36 @@ If the run errors out before producing a log (e.g. SIGSEGV, missing .NET runtime
 
 ## Step 4 — Validate results (HARD GATE)
 
-Validation must check **all four** signals. A pass requires all four to be clean. This mirrors `/driver-build` Step 10 and the `/commit` hard-block.
+Validation reads the ConformU text log only. A pass requires both assertions clean. This mirrors `/driver-build` Step 10 and the `/commit` hard-block.
 
-### 4a. JSON report counts (preferred — most reliable)
-
-```bash
-jq -r '{ErrorCount, IssueCount, ConfigurationAlertCount, TimingIssuesCount}' "$TMPDIR/conform.report.json"
-```
-
-**Fail** if `ErrorCount`, `IssueCount`, or `TimingIssuesCount` is non-zero. `ConfigurationAlertCount` is informational — report it but do NOT block on it.
-
-### 4b. Text log — pass message present
+### 4a. Text log — pass message present
 
 ```bash
 grep -q "Congratulations, no errors, warnings or issues found" "$TMPDIR/conformu.txt"
 ```
 
-**Fail** if absent.
+**Fail** if absent. This assertion is ConformU's own confirmation that every member returned `ErrorCount=0`, `IssueCount=0`, and `WarningCount=0` — no separate count files are needed to derive it.
 
-### 4c. Text log — no timing violations
+### 4b. Text log — no timing violations
 
 ```bash
 grep -nE "OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET" "$TMPDIR/conformu.txt"
 grep -n "took longer than its target response time" "$TMPDIR/conformu.txt"
 ```
 
-**Fail** if either grep matches.
+**Fail** if either grep matches. A clean run also emits `Congratulations, all members returned within their target response times!!` — its presence is a positive signal but its absence alone is not a failure (the two greps above are authoritative).
 
-### 4d. Show a summary table
+### 4c. Show a summary table
 
-Regardless of pass/fail, show the user a concise summary:
+Regardless of pass/fail, show the user a concise summary derived from the text log:
 
 ```
 ConformU 4.3.0 — <vendor> <model> (<type>) over <transport>
-  Errors:           0
-  Issues:           0
-  ConfigAlerts:     0
-  TimingIssues:     0
-  Slowest member:   Name (0.409s, target 0.1s)   ← only if any timing issue
-  Pass message:     Present
-  Verdict:          PASS / FAIL
+  Errors / Issues / Warnings:  0 / 0 / 0    (from pass message)
+  Timing violations:           0            (no OUTSIDE … RESPONSE TIME TARGET lines)
+  Slowest member:              Name (0.409s, target 0.1s)   ← only if any timing issue
+  Pass message:                Present
+  Verdict:                     PASS / FAIL
 ```
 
 The slowest-member line is helpful even on a pass — call it out if any member came within 80% of its target (`grep "(FAST)\|(STANDARD)\|(EXTENDED)"` and pick the closest-to-limit row).
@@ -308,18 +297,17 @@ AlpacaCore/conformu/<Vendor>/<Model>/
 - Some vendors group by SDK family (e.g. `ZWO/ASI/`, `ZWO/EAF/`). Check existing subdirs under the vendor before creating a new top-level model dir; ask the user if a grouping subdir applies.
 
 Filenames:
-- Single transport: `Linux-arm64.txt` + `Linux-arm64.report.json`
-- Multiple transports: `Linux-arm64-<transport>.txt` + `Linux-arm64-<transport>.report.json` (lowercase: `usb`, `wifi`, `serial`, `tcp`, `gpio`)
-
-Always save BOTH the text log and the JSON report (the JSON preserves the timing data even after a fresh ConformU release changes the text format).
+- Single transport: `Linux-arm64.txt`
+- Multiple transports: `Linux-arm64-<transport>.txt` (lowercase: `usb`, `wifi`, `serial`, `tcp`, `gpio`)
 
 ```bash
 mkdir -p "AlpacaCore/conformu/<Vendor>/<Model>"
-cp "$TMPDIR/conformu.txt"          "AlpacaCore/conformu/<Vendor>/<Model>/Linux-arm64[-<transport>].txt"
-cp "$TMPDIR/conform.report.json"   "AlpacaCore/conformu/<Vendor>/<Model>/Linux-arm64[-<transport>].report.json"
+cp "$TMPDIR/conformu.txt" "AlpacaCore/conformu/<Vendor>/<Model>/Linux-arm64[-<transport>].txt"
 ```
 
-If a file with the same name already exists, show the user the diff in counts (old vs new) and ask whether to overwrite. Overwriting a passing result with another passing result is usually fine (e.g. re-validating against a newer ConformU); overwriting a passing result for a different transport is a mistake.
+The text log alone is sufficient: it carries the `Congratulations, no errors, warnings or issues found` assertion (covers Errors / Issues / Warnings) and any `OUTSIDE … RESPONSE TIME TARGET` lines (covers timing). Do **not** generate or save a JSON report — the `-r` flag was dropped from the ConformU invocation in Step 3 precisely so the text log is the single source of truth and there is no parallel JSON to drift out of sync.
+
+If a file with the same name already exists, show the user the new pass message and any timing lines vs the old, and ask whether to overwrite. Overwriting a passing result with another passing result is usually fine (e.g. re-validating against a newer ConformU); overwriting a passing result for a different transport is a mistake.
 
 ## Step 7 — Update SUPPORTED-DRIVERS.md
 
