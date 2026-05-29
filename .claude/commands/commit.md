@@ -48,7 +48,49 @@ For each changed file, briefly note what was modified. Group changes by category
 - **Large binary files**: files over 10MB that aren't vendor SDK libraries
 - **Unrelated changes**: files modified that don't belong to this logical change — suggest splitting into separate commits
 
-## Step 3 — Update SUPPORTED-DRIVERS.md (if applicable)
+## Step 3 — Validate ConformU reports (HARD BLOCK)
+
+If any files in this commit (staged or about to be added) live under `AlpacaCore/conformu/`, parse each one and refuse to proceed if it reports failures. This is non-negotiable — committing a failing ConformU log poisons `SUPPORTED-DRIVERS.md` and misleads other contributors into thinking the driver is validated.
+
+### Find ConformU files in scope
+
+```bash
+{ git diff --cached --name-only --diff-filter=AM; \
+  git diff --name-only --diff-filter=AM; \
+  git ls-files -o --exclude-standard; } \
+  | sort -u | grep -E '^AlpacaCore/conformu/.*\.(json|txt)$'
+```
+
+If the list is empty, skip the rest of this step.
+
+### JSON report check (preferred when available)
+
+For each `*.json` in the list (typically `conform.report.json` or `<platform>.report.json`):
+
+```bash
+ERR=$(jq -r '.ErrorCount // 0' <file>)
+ISS=$(jq -r '.IssueCount // 0' <file>)
+TIM=$(jq -r '.TimingIssuesCount // 0' <file>)
+```
+
+**Fail** if any of `ERR`, `ISS`, or `TIM` is non-zero.
+
+### Text log check (always run, even if JSON also exists)
+
+For each `*.txt` in the list, **fail** if any of these are true:
+- `grep -E "OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET" <file>` matches → timing issue
+- `grep "took longer than its target response time" <file>` matches → timing issue summary
+- The file does NOT contain `Congratulations, no errors, warnings or issues found` → errors or issues
+
+### On failure — STOP
+
+Refuse to stage, refuse to commit the ConformU files, and tell the user exactly what failed:
+
+> "ConformU report `<file>` failed validation: Errors=N, Issues=N, TimingIssues=N (or matching grep lines). The driver is not validated. Fix the driver, re-run ConformU until clean, replace the report, and try again. See `/driver-build` Step 10 for the full pass criteria."
+
+Do NOT commit. Do NOT offer to commit "anyway" or "as a WIP". This block exists because a passing-looking commit makes future debugging much harder and falsely advertises the driver as validated in `SUPPORTED-DRIVERS.md` updates that follow.
+
+## Step 4 — Update SUPPORTED-DRIVERS.md (if applicable)
 
 If the changes include **driver code**, **ConformU results**, or **new device support**, check whether `SUPPORTED-DRIVERS.md` needs updating:
 
@@ -78,7 +120,7 @@ Driver Notes format:
 - **Tested model**: Model on Linux arm64
 ```
 
-## Step 4 — Update CHANGELOG.md
+## Step 5 — Update CHANGELOG.md
 
 Every commit that changes code or adds features should have a corresponding `CHANGELOG.md` entry. The project uses [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
@@ -119,7 +161,7 @@ Use component-tagged bullet points matching the project style:
 - **Don't duplicate**: if an entry for this driver/feature already exists in UNRELEASED, update it rather than adding a new one
 - If the current UNRELEASED section already has the right version number, add to it — don't create a new one
 
-## Step 5 — Stage the right files
+## Step 6 — Stage the right files
 
 Stage files that belong together in one logical commit. Prefer specific file paths over `git add -A` or `git add .`.
 
@@ -135,7 +177,7 @@ If changes span multiple logical units (e.g., driver code + ConformU results + d
 4. **Documentation** — CHANGELOG, AGENTS.md, SUPPORTED-DRIVERS.md
 5. **SDK addition** — external/ SDK files (often a large commit on its own)
 
-## Step 6 — Write the commit message
+## Step 7 — Write the commit message
 
 Draft a commit message following the project's conventions observed in the git history.
 
@@ -193,7 +235,7 @@ Avoid:
 - Messages that don't say what vendor/device was affected
 - Messages longer than 72 characters on the summary line
 
-## Step 7 — Commit
+## Step 8 — Commit
 
 Present the staged files and draft message to the user for approval. Then commit:
 
@@ -208,7 +250,7 @@ EOF
 
 After committing, run `git status` to confirm the working tree is clean (or show what's left unstaged).
 
-## Step 8 — Follow-up suggestions
+## Step 9 — Follow-up suggestions
 
 After the commit, suggest next steps if appropriate:
 - "There are more unstaged changes — want to commit those separately?"
