@@ -248,41 +248,56 @@ alpacacore::logging::LogLevel convert_log_level(LogLevel level) {
 }
 
 std::string configure_log_directory(const std::string& preferred, bool file_logging_enabled) {
-    std::lock_guard<std::mutex> lock(g_file_mutex);
+    // We must NOT call log_warning while holding g_file_mutex: log_warning
+    // routes through log_sink -> write_to_file, which re-acquires the same
+    // mutex on the same thread and self-deadlocks on a non-recursive
+    // std::mutex (manifests as a futex_wait hang during startup whenever
+    // the preferred log directory is unwritable). Capture any warning
+    // message into a local string under the lock, release, then emit.
+    std::string pending_warning;
+    std::string result;
+    {
+        std::lock_guard<std::mutex> lock(g_file_mutex);
 
-    if (g_log_file.is_open()) {
-        g_log_file.close();
-    }
-    g_log_file_name.clear();
-    g_log_file_date.clear();
-    g_log_directory.clear();
-    g_file_logging_enabled = false;
+        if (g_log_file.is_open()) {
+            g_log_file.close();
+        }
+        g_log_file_name.clear();
+        g_log_file_date.clear();
+        g_log_directory.clear();
+        g_file_logging_enabled = false;
 
-    if (!file_logging_enabled) {
-        return "";
-    }
-
-    std::filesystem::path chosen;
-    if (!preferred.empty() && try_use_directory(preferred)) {
-        chosen = preferred;
-    } else {
-        const auto fallback = user_state_fallback_directory();
-        if (try_use_directory(fallback)) {
-            chosen = fallback;
-            log_warning("Log directory '" + preferred +
-                        "' not writable; using fallback '" +
-                        fallback.string() + "'");
-        } else {
-            log_warning("No writable log directory available; "
-                        "file logging disabled");
+        if (!file_logging_enabled) {
             return "";
         }
-    }
 
-    g_log_directory = chosen;
-    g_file_logging_enabled = true;
-    open_log_file_for_today_locked();
-    return g_log_directory.string();
+        std::filesystem::path chosen;
+        if (!preferred.empty() && try_use_directory(preferred)) {
+            chosen = preferred;
+        } else {
+            const auto fallback = user_state_fallback_directory();
+            if (try_use_directory(fallback)) {
+                chosen = fallback;
+                pending_warning = "Log directory '" + preferred +
+                                  "' not writable; using fallback '" +
+                                  fallback.string() + "'";
+            } else {
+                pending_warning = "No writable log directory available; "
+                                  "file logging disabled";
+            }
+        }
+
+        if (!chosen.empty()) {
+            g_log_directory = chosen;
+            g_file_logging_enabled = true;
+            open_log_file_for_today_locked();
+            result = g_log_directory.string();
+        }
+    }
+    if (!pending_warning.empty()) {
+        log_warning(pending_warning);
+    }
+    return result;
 }
 
 std::string get_log_directory() {
