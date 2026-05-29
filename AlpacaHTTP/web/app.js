@@ -1477,6 +1477,11 @@ if (ioptronConnectionType) {
     });
 }
 
+const zwoSwitchTypeSelect = document.getElementById('zwo-switch-type');
+if (zwoSwitchTypeSelect) {
+    zwoSwitchTypeSelect.addEventListener('change', updateZwoConfigFields);
+}
+
 const synscanConnectionType = document.getElementById('synscan-connection-type');
 if (synscanConnectionType) {
     synscanConnectionType.addEventListener('change', function() {
@@ -1904,7 +1909,9 @@ function updateZwoConfigFields() {
     }
     switchTypeGroup.style.display = isSwitch ? 'block' : 'none';
 
-    const showCameraFields = isCamera || isSwitch;
+    const switchTypeSelect = document.getElementById('zwo-switch-type');
+    const switchTypeValue = switchTypeSelect ? switchTypeSelect.value : 'dewheater';
+    const showCameraFields = isCamera || (isSwitch && switchTypeValue !== 'asiair');
     if (cameraFields) {
         cameraFields.style.display = showCameraFields ? 'block' : 'none';
         setFieldGroupEnabled(cameraFields, showCameraFields);

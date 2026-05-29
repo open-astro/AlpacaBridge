@@ -205,15 +205,27 @@ When adding a test file for a new vendor device:
 
 ### ZWO
 
-Devices: Camera, FilterWheel, Focuser (EAF), Rotator, Switch (dew heater), Telescope (AM mount).
+Devices: Camera, FilterWheel, Focuser (EAF), Rotator, Switch (dew heater, ASIair Pro 12V power), Telescope (AM mount).
 
-SDK locations: `AlpacaCore/external/ZWO/ASI_Camera_SDK/`, `EAF/`, `EFW/`, `CAA/`, `AM/`.
+SDK locations: `AlpacaCore/external/ZWO/ASI_Camera_SDK/`, `EAF/`, `EFW/`, `CAA/`, `AM/`. The ASIair Pro switch driver does not use an SDK — it talks directly to the on-board Pi 4 GPIO via libgpiod v2.
 
 - ROI sizing rules: width must be a multiple of 8 and height a multiple of 2 after binning. Keep requested sizes for Alpaca, align effective sizes down for SDK calls, and pad outputs if needed.
 - Dew heater is exposed as an Alpaca Switch device (not a camera action) and is camera-dependent.
 - ST4 pulse guiding should be enabled only when the SDK reports `has_st4_port`.
 - PulseGuide: do not apply permanent RA/Dec offsets based on expected guide motion. If synthetic offsets are needed, keep them temporary and clear after the pulse completes to avoid double-counting mount motion.
 - The ZWO and QHY SDKs both statically link libusb, causing duplicate symbol issues. The ZWO vendor `CMakeLists.txt` handles this — do not link both vendor static libs into the same binary without resolving the conflict.
+
+#### ZWO ASIair Pro Switch (12V power ports via on-board GPIO)
+
+- **Hardware reality**: ASIair Pro is a Raspberry Pi 4 (BCM2711) with a custom HAT exposing four 12V DC outputs. The stock ZWO firmware enables them at boot via `/boot/config.txt` under `[all]`: `gpio=18,12,13,26=op,dh,pu` (all four configured as output, default-high, pull-up). The boot-time `dh` flag is why all four DC ports come up powered as soon as the Pi boots — gear plugged in is "live" before any userspace runs.
+- **Port-to-GPIO mapping** (Pi 4 ASIair Pro): Port 1 = GPIO 12, Port 2 = GPIO 13, Port 3 = GPIO 26, Port 4 = GPIO 18 on `/dev/gpiochip0`. Confirmed against the stock app via direct probe. Note: the order in `/boot/config.txt` (18,12,13,26) is *not* the port order.
+- **Persistent state shape**: The stock ZWO `zwoair_imager` binary persists per-port settings in `~/.ZWO/ASIAIR_imager.xml` under the XPath `setting2/imager/gpio/port_N/` (zero-indexed: `port_0`..`port_3`). Each port has an `is_pwm` boolean flag. No per-port GPIO pin number is stored — the port-index→GPIO mapping is hard-coded in the stock binary. The AlpacaBridge driver makes the mapping configurable via `ports: [{gpio: N, pwm: bool}]` in the device config so it can be reused on other arm64 SBCs (e.g. RK3568-based ASIair Plus) with different wiring.
+- **App role abstraction is cosmetic**: the ASIair mobile app lets users assign a *role* to each port (Mount / Camera / Focuser / Dew Heater / Flat Panel / Other). Roles "Dew Heater" and "Flat Panel" enable software PWM dimming; the others are plain on/off. Under the hood every port can do either — the "role" is just a UI tag that sets the `is_pwm` flag. The AlpacaBridge driver does not model roles; it exposes 4 ASCOM Switch channels and lets users name them however they want.
+- **PWM mechanism**: Stock app uses pigpio's DMA-based software PWM at 40 kHz. AlpacaBridge uses **libgpiod v2** with per-port worker threads doing userspace soft-PWM (default 1 kHz, configurable). The lower frequency keeps the driver portable across non-RPi arm64 SBCs (DMA-based PWM is BCM-specific). Dew heaters are resistive thermal loads and don't care about audible PWM frequency — sub-1-kHz works fine.
+- **libgpiod version**: The driver targets libgpiod **v2** (`libgpiod-dev (>= 2.0)`, `libgpiod3` runtime). The v2 API uses a single `gpiod_line_request*` that owns all four lines together and routes value get/set through `gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_ACTIVE/INACTIVE)`. Do **not** port back to v1's per-line `gpiod_line_request_output` API — that would block Trixie and the upcoming RPi OS 2025 base. If you need to support older Bullseye/Bookworm hosts, install libgpiod 2.x from backports rather than dual-targeting.
+- **OS architecture gate**: AlpacaBridge is arm64-only. The factory stock ASIair Pro ships **32-bit Raspbian Buster armv7l** — our `.deb` will not install on the stock OS. Deployment requires re-imaging with Raspberry Pi OS 64-bit (Bookworm or Trixie). Once re-imaged, the stock `zwoair_imager` / `pigpiod` daemons must be disabled because they hold the GPIO lines via pigpio and would prevent libgpiod from claiming them (EBUSY on `gpiod_chip_request_lines`).
+- **Default-on power-up surprise**: Because the kernel cmdline drives all four GPIO lines HIGH at boot before the AlpacaBridge daemon starts, gear plugged into the DC ports gets a few seconds of unmanaged 12V before the driver claims the lines. Users who want a different boot state must either edit `/boot/config.txt` to omit specific pins from the `gpio=` directive, or live with the brief default-on window. Document this in the install notes for users moving from stock ASIair to AlpacaBridge.
+- **Coexistence with stock app is not supported**: libgpiod and pigpio cannot share GPIO line ownership. The stock `pigpiod` daemon (started by `/etc/rc.local → /home/pi/ASIAIR/asiair.sh`) must be disabled, and the stock `zwoair_imager` must not run. There is no way to run AlpacaBridge alongside the stock ASIair app on the same device.
 
 ### QHY
 

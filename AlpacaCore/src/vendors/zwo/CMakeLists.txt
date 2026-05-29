@@ -56,6 +56,8 @@ if(ALPACACORE_ENABLE_ZWO)
         zwo_sdk_wrapper.cpp
         zwo_camera_driver.cpp
         zwo_switch_driver.cpp
+        zwo_asiair_protocol_wrapper.cpp
+        zwo_asiair_switch_driver.cpp
         zwo_eaf_wrapper.cpp
         zwo_focuser_driver.cpp
         zwo_efw_wrapper.cpp
@@ -83,6 +85,26 @@ if(ALPACACORE_ENABLE_ZWO)
         if(PkgConfig_FOUND)
             pkg_check_modules(LIBUSB QUIET IMPORTED_TARGET libusb-1.0)
             pkg_check_modules(LIBUDEV QUIET IMPORTED_TARGET libudev)
+            pkg_check_modules(LIBGPIOD QUIET IMPORTED_TARGET libgpiod>=2.0)
+        endif()
+
+        if(LIBGPIOD_FOUND)
+            target_include_directories(alpacacore_zwo PRIVATE ${LIBGPIOD_INCLUDE_DIRS})
+            target_compile_options(alpacacore_zwo PRIVATE ${LIBGPIOD_CFLAGS_OTHER})
+            if(TARGET PkgConfig::LIBGPIOD)
+                target_link_libraries(alpacacore_zwo PRIVATE PkgConfig::LIBGPIOD)
+            else()
+                target_link_libraries(alpacacore_zwo PRIVATE ${LIBGPIOD_LIBRARIES})
+            endif()
+        else()
+            find_library(LIBGPIOD_LIBRARY NAMES gpiod libgpiod)
+            find_path(LIBGPIOD_INCLUDE_DIR NAMES gpiod.h)
+            if(LIBGPIOD_LIBRARY AND LIBGPIOD_INCLUDE_DIR)
+                target_include_directories(alpacacore_zwo PRIVATE ${LIBGPIOD_INCLUDE_DIR})
+                target_link_libraries(alpacacore_zwo PRIVATE ${LIBGPIOD_LIBRARY})
+            else()
+                message(FATAL_ERROR "libgpiod (>=2.0) not found; install it (e.g. apt install libgpiod-dev).")
+            endif()
         endif()
 
         if(LIBUSB_FOUND)
