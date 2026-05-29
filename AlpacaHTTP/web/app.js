@@ -698,6 +698,40 @@ function startEditDevice(device) {
     setFormValue('rotator-id', config.rotatorId);
     setFormValue('zwo-switch-type', config.switchType);
 
+    // Populate the ASIair Pro Switch per-port table from the saved config.
+    // When the saved device omits ports/gpioChip/pwmFrequencyHz (one-click
+    // default flow), the HTML's pre-filled defaults remain in place.
+    if (vendor === 'zwo' && config.switchType === 'asiair') {
+        if (config.gpioChip !== undefined && config.gpioChip !== null) {
+            setFormValue('asiair-gpio-chip', config.gpioChip);
+        }
+        if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
+            setFormValue('asiair-pwm-frequency', config.pwmFrequencyHz);
+        }
+        if (Array.isArray(config.ports)) {
+            for (let i = 0; i < 4; i += 1) {
+                const port = config.ports[i];
+                if (!port) continue;
+                if (port.name !== undefined && port.name !== null) {
+                    setFormValue('asiair-port-name-' + i, port.name);
+                }
+                if (port.gpio !== undefined && port.gpio !== null) {
+                    setFormValue('asiair-port-gpio-' + i, port.gpio);
+                }
+                const pwmCheckbox = document.getElementById('asiair-port-pwm-' + i);
+                if (pwmCheckbox) {
+                    pwmCheckbox.checked = port.pwm === true;
+                }
+            }
+        }
+    }
+    // Trigger the visibility update so the ASIair section actually appears
+    // when editing an asiair-typed switch (vs. dewheater).
+    const zwoSwitchTypeEl = document.getElementById('zwo-switch-type');
+    if (zwoSwitchTypeEl) {
+        zwoSwitchTypeEl.dispatchEvent(new Event('change'));
+    }
+
     const messageDiv = document.getElementById('form-message');
     if (messageDiv) {
         messageDiv.style.display = 'none';
