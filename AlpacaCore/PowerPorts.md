@@ -38,9 +38,11 @@ onto the ASIair Pro's microSD card before continuing.
 
 ```bash
 sudo apt update
-sudo apt install -y libgpiod3 libusb-1.0-0 libudev1 libcurl4
+sudo apt install -y libgpiod3 libgpiod-dev gpiod libusb-1.0-0 libudev1 libcurl4
 sudo usermod -aG gpio "$USER"
 ```
+
+> `libgpiod3` is the runtime shared library AlpacaBridge links against. `libgpiod-dev` is needed if you build from source on the device (and is harmless to install on a `.deb`-only target). `gpiod` provides the `gpioget` / `gpioinfo` command-line tools used by the verification step below.
 
 Log out and log back in (or reboot) so the new group membership applies. Verify with:
 
@@ -74,7 +76,8 @@ Open `http://<your-asiair-ip>:11111/` in a browser:
 3. **Vendor**: ZWO
 4. **Switch Type**: **ASIair Pro 12V Power Switch**
 5. **Device Number**: 0 (or any unique number)
-6. Submit
+6. **Power Ports** table appears with the four ports pre-filled to the Pi 4 ASIair Pro defaults. Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. Rename channels in the **Channel name** column if you want NINA to label them by role (e.g. "Mount", "Dew Heater"). Leave **GPIO chip device** and **PWM frequency** at their defaults unless you know you need to override them.
+7. Submit
 
 Or `POST` the equivalent JSON to the management API:
 
