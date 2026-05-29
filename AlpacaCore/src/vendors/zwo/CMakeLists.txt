@@ -56,6 +56,8 @@ if(ALPACACORE_ENABLE_ZWO)
         zwo_sdk_wrapper.cpp
         zwo_camera_driver.cpp
         zwo_switch_driver.cpp
+        zwo_asiair_protocol_wrapper.cpp
+        zwo_asiair_switch_driver.cpp
         zwo_eaf_wrapper.cpp
         zwo_focuser_driver.cpp
         zwo_efw_wrapper.cpp
@@ -83,6 +85,46 @@ if(ALPACACORE_ENABLE_ZWO)
         if(PkgConfig_FOUND)
             pkg_check_modules(LIBUSB QUIET IMPORTED_TARGET libusb-1.0)
             pkg_check_modules(LIBUDEV QUIET IMPORTED_TARGET libudev)
+            pkg_check_modules(LIBGPIOD QUIET IMPORTED_TARGET libgpiod>=2.0)
+        endif()
+
+        if(LIBGPIOD_FOUND)
+            target_include_directories(alpacacore_zwo PRIVATE ${LIBGPIOD_INCLUDE_DIRS})
+            target_compile_options(alpacacore_zwo PRIVATE ${LIBGPIOD_CFLAGS_OTHER})
+            if(TARGET PkgConfig::LIBGPIOD)
+                target_link_libraries(alpacacore_zwo PRIVATE PkgConfig::LIBGPIOD)
+            else()
+                target_link_libraries(alpacacore_zwo PRIVATE ${LIBGPIOD_LIBRARIES})
+            endif()
+        else()
+            find_library(LIBGPIOD_LIBRARY NAMES gpiod libgpiod)
+            find_path(LIBGPIOD_INCLUDE_DIR NAMES gpiod.h)
+            if(LIBGPIOD_LIBRARY AND LIBGPIOD_INCLUDE_DIR)
+                # The pkg-config branch above enforces libgpiod >= 2.0 via
+                # pkg_check_modules. The find_library fallback has no such
+                # version metadata, so probe for a v2-only symbol
+                # (gpiod_chip_request_lines) before accepting the library.
+                # v1 headers don't declare it; linking against v1 would
+                # otherwise fail with cryptic compiler/linker errors later
+                # in the build.
+                include(CheckSymbolExists)
+                set(CMAKE_REQUIRED_INCLUDES "${LIBGPIOD_INCLUDE_DIR}")
+                set(CMAKE_REQUIRED_LIBRARIES "${LIBGPIOD_LIBRARY}")
+                check_symbol_exists(gpiod_chip_request_lines "gpiod.h" LIBGPIOD_V2_OK)
+                unset(CMAKE_REQUIRED_INCLUDES)
+                unset(CMAKE_REQUIRED_LIBRARIES)
+                if(NOT LIBGPIOD_V2_OK)
+                    message(FATAL_ERROR
+                        "libgpiod found at ${LIBGPIOD_LIBRARY} but appears to be < 2.0 "
+                        "(missing gpiod_chip_request_lines). Install libgpiod-dev (>= 2.0) "
+                        "— e.g. apt install libgpiod-dev on Debian Trixie. On older "
+                        "Bullseye/Bookworm hosts you may need backports.")
+                endif()
+                target_include_directories(alpacacore_zwo PRIVATE ${LIBGPIOD_INCLUDE_DIR})
+                target_link_libraries(alpacacore_zwo PRIVATE ${LIBGPIOD_LIBRARY})
+            else()
+                message(FATAL_ERROR "libgpiod (>=2.0) not found; install it (e.g. apt install libgpiod-dev).")
+            endif()
         endif()
 
         if(LIBUSB_FOUND)

@@ -698,6 +698,40 @@ function startEditDevice(device) {
     setFormValue('rotator-id', config.rotatorId);
     setFormValue('zwo-switch-type', config.switchType);
 
+    // Populate the ASIair Pro Switch per-port table from the saved config.
+    // When the saved device omits ports/gpioChip/pwmFrequencyHz (one-click
+    // default flow), the HTML's pre-filled defaults remain in place.
+    if (vendor === 'zwo' && config.switchType === 'asiair') {
+        if (config.gpioChip !== undefined && config.gpioChip !== null) {
+            setFormValue('asiair-gpio-chip', config.gpioChip);
+        }
+        if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
+            setFormValue('asiair-pwm-frequency', config.pwmFrequencyHz);
+        }
+        if (Array.isArray(config.ports)) {
+            for (let i = 0; i < 4; i += 1) {
+                const port = config.ports[i];
+                if (!port) continue;
+                if (port.name !== undefined && port.name !== null) {
+                    setFormValue('asiair-port-name-' + i, port.name);
+                }
+                if (port.gpio !== undefined && port.gpio !== null) {
+                    setFormValue('asiair-port-gpio-' + i, port.gpio);
+                }
+                const pwmCheckbox = document.getElementById('asiair-port-pwm-' + i);
+                if (pwmCheckbox) {
+                    pwmCheckbox.checked = port.pwm === true;
+                }
+            }
+        }
+    }
+    // Trigger the visibility update so the ASIair section actually appears
+    // when editing an asiair-typed switch (vs. dewheater).
+    const zwoSwitchTypeEl = document.getElementById('zwo-switch-type');
+    if (zwoSwitchTypeEl) {
+        zwoSwitchTypeEl.dispatchEvent(new Event('change'));
+    }
+
     const messageDiv = document.getElementById('form-message');
     if (messageDiv) {
         messageDiv.style.display = 'none';
@@ -1477,6 +1511,11 @@ if (ioptronConnectionType) {
     });
 }
 
+const zwoSwitchTypeSelect = document.getElementById('zwo-switch-type');
+if (zwoSwitchTypeSelect) {
+    zwoSwitchTypeSelect.addEventListener('change', updateZwoConfigFields);
+}
+
 const synscanConnectionType = document.getElementById('synscan-connection-type');
 if (synscanConnectionType) {
     synscanConnectionType.addEventListener('change', function() {
@@ -1904,10 +1943,19 @@ function updateZwoConfigFields() {
     }
     switchTypeGroup.style.display = isSwitch ? 'block' : 'none';
 
-    const showCameraFields = isCamera || isSwitch;
+    const switchTypeSelect = document.getElementById('zwo-switch-type');
+    const switchTypeValue = switchTypeSelect ? switchTypeSelect.value : 'dewheater';
+    const isAsiairSwitch = isSwitch && switchTypeValue === 'asiair';
+    const showCameraFields = isCamera || (isSwitch && !isAsiairSwitch);
     if (cameraFields) {
         cameraFields.style.display = showCameraFields ? 'block' : 'none';
         setFieldGroupEnabled(cameraFields, showCameraFields);
+    }
+
+    const asiairFields = document.getElementById('zwo-asiair-fields');
+    if (asiairFields) {
+        asiairFields.style.display = isAsiairSwitch ? 'block' : 'none';
+        setFieldGroupEnabled(asiairFields, isAsiairSwitch);
     }
     if (filterwheelFields) {
         filterwheelFields.style.display = isFilterWheel ? 'block' : 'none';
@@ -2058,6 +2106,32 @@ document.getElementById('device-form').addEventListener('submit', async function
             const switchType = formData.get('switchType');
             if (switchType) {
                 deviceData.switchType = switchType;
+            }
+            if (deviceData.vendor === 'zwo' && switchType === 'asiair') {
+                const gpioChip = formData.get('asiairGpioChip');
+                if (gpioChip) {
+                    deviceData.gpioChip = gpioChip;
+                }
+                const pwmFreq = Number.parseInt(formData.get('asiairPwmFrequency'), 10);
+                if (!Number.isNaN(pwmFreq)) {
+                    deviceData.pwmFrequencyHz = pwmFreq;
+                }
+                const ports = [];
+                for (let i = 0; i < 4; i += 1) {
+                    const name = formData.get('asiairPortName' + i);
+                    const gpio = Number.parseInt(formData.get('asiairPortGpio' + i), 10);
+                    if (Number.isNaN(gpio)) {
+                        continue;
+                    }
+                    ports.push({
+                        name: name || ('Port ' + (i + 1)),
+                        gpio: gpio,
+                        pwm: formData.get('asiairPortPwm' + i) === 'on',
+                    });
+                }
+                if (ports.length > 0) {
+                    deviceData.ports = ports;
+                }
             }
         }
         if (normalizedType === 'camera' || normalizedType === 'switch') {

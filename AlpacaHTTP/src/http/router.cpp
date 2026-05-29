@@ -57,6 +57,7 @@
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
+#include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
@@ -6647,15 +6648,52 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #ifdef ALPACACORE_ENABLE_ZWO
         std::string switch_type = config.value("switchType", "dewheater");
         switch_type = to_lower_copy(switch_type);
-        if (switch_type != "dewheater") {
-            error_message = "ZWO switchType must be 'dewheater'";
+        if (switch_type != "dewheater" && switch_type != "asiair") {
+            error_message = "ZWO switchType must be 'dewheater' or 'asiair'";
+            return false;
+        }
+
+        std::unique_ptr<alpacacore::SwitchDriver> sw;
+
+        if (switch_type == "asiair") {
+            auto asiair_config = alpacacore::vendor::zwo::default_asiair_pro_config();
+            asiair_config.gpio_chip_path = config.value("gpioChip", asiair_config.gpio_chip_path);
+            asiair_config.pwm_frequency_hz = config.value("pwmFrequencyHz", asiair_config.pwm_frequency_hz);
+            if (config.contains("ports") && config["ports"].is_array() && !config["ports"].empty()) {
+                std::vector<alpacacore::vendor::zwo::AsiairPortConfig> ports;
+                ports.reserve(config["ports"].size());
+                for (const auto& p : config["ports"]) {
+                    if (!p.contains("gpio") || !p["gpio"].is_number_integer()) {
+                        error_message = "ASIair port entry requires integer 'gpio'";
+                        return false;
+                    }
+                    const int gpio_value = p["gpio"].get<int>();
+                    if (gpio_value < 0 || gpio_value > 63) {
+                        error_message = "ASIair port 'gpio' must be in [0, 63]";
+                        return false;
+                    }
+                    alpacacore::vendor::zwo::AsiairPortConfig pc;
+                    pc.name = p.value("name", std::string("Port ") + std::to_string(ports.size() + 1));
+                    pc.gpio_line = static_cast<std::uint32_t>(gpio_value);
+                    pc.pwm_enabled = p.value("pwm", false);
+                    ports.push_back(std::move(pc));
+                }
+                asiair_config.ports = std::move(ports);
+            }
+            sw = alpacacore::vendor::zwo::create_zwo_asiair_switch(device_number, asiair_config);
+
+            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+                util::log_info("Registered ZWO ASIair Pro switch");
+                return true;
+            }
+
+            error_message = "Failed to register device. Device may already exist.";
             return false;
         }
 
         int camera_id = config.value("cameraId", -1);
         int camera_index = config.value("cameraIndex", -1);
 
-        std::unique_ptr<alpacacore::SwitchDriver> sw;
         if (camera_id >= 0) {
             sw = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(device_number, camera_id);
         } else if (camera_index >= 0) {

@@ -362,9 +362,56 @@
                     <div id="zwo-switch-type-group" class="form-group" style="display: none;">
                         <label for="zwo-switch-type">Switch Type:</label>
                         <select id="zwo-switch-type" name="switchType">
-                            <option value="dewheater">Dew Heater</option>
+                            <option value="dewheater">Dew Heater (Camera-attached)</option>
+                            <option value="asiair">ASIair Pro 12V Power Switch</option>
                         </select>
-                        <small>Available when Device Type is Switch.</small>
+                        <small>Dew Heater uses a ZWO camera's built-in anti-dew heater. ASIair Pro controls the four 12V DC ports via on-board GPIO (Pi 4 ASIair Pro hardware).</small>
+                    </div>
+
+                    <div id="zwo-asiair-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="asiair-gpio-chip">GPIO Chip Device:</label>
+                            <input type="text" id="asiair-gpio-chip" name="asiairGpioChip" value="/dev/gpiochip0">
+                            <small>Path to the libgpiod character device. Default <code>/dev/gpiochip0</code> matches the Pi 4 ASIair Pro.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="asiair-pwm-frequency">PWM Frequency (Hz):</label>
+                            <input type="number" id="asiair-pwm-frequency" name="asiairPwmFrequency" value="1000" min="1" max="100000">
+                            <small>Software PWM frequency for any port marked PWM below. 1000 Hz is fine for dew heaters and flat panels.</small>
+                        </div>
+                        <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
+                        <small style="color: #666;">Defaults match the Pi 4 ASIair Pro physical labels. Tick <em>PWM</em> for dew-heater / flat-panel use (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off.</small>
+                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                            <thead>
+                                <tr>
+                                    <th style="text-align: left; padding: 4px; color: #333;">Channel name</th>
+                                    <th style="text-align: left; padding: 4px; color: #333;">GPIO</th>
+                                    <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-0" name="asiairPortName0" value="Port 1" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-0" name="asiairPortGpio0" value="12" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-0" name="asiairPortPwm0"></td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-1" name="asiairPortName1" value="Port 2" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-1" name="asiairPortGpio1" value="13" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-1" name="asiairPortPwm1"></td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-2" name="asiairPortName2" value="Port 3" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-2" name="asiairPortGpio2" value="26" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-2" name="asiairPortPwm2"></td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-port-name-3" name="asiairPortName3" value="Port 4" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-3" name="asiairPortGpio3" value="18" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-3" name="asiairPortPwm3"></td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
 
                     <div id="zwo-camera-fields">
