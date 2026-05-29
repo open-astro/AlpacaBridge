@@ -379,14 +379,14 @@
                             <input type="number" id="asiair-pwm-frequency" name="asiairPwmFrequency" value="1000" min="1" max="100000">
                             <small>Software PWM frequency for any port marked PWM below. 1000 Hz is fine for dew heaters and flat panels.</small>
                         </div>
-                        <p style="margin: 12px 0 4px 0;"><strong>Power Ports</strong></p>
-                        <small>Defaults match the Pi 4 ASIair Pro physical labels. Tick <em>PWM</em> for dew-heater / flat-panel use (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off.</small>
-                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse;">
+                        <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
+                        <small style="color: #666;">Defaults match the Pi 4 ASIair Pro physical labels. Tick <em>PWM</em> for dew-heater / flat-panel use (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off.</small>
+                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
                             <thead>
                                 <tr>
-                                    <th style="text-align: left; padding: 4px;">Channel name</th>
-                                    <th style="text-align: left; padding: 4px;">GPIO</th>
-                                    <th style="text-align: left; padding: 4px;">PWM</th>
+                                    <th style="text-align: left; padding: 4px; color: #333;">Channel name</th>
+                                    <th style="text-align: left; padding: 4px; color: #333;">GPIO</th>
+                                    <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
                                 </tr>
                             </thead>
                             <tbody>
