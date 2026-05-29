@@ -288,27 +288,68 @@ private:
         std::atomic<int>* duty = &state.value;
         std::atomic<bool>* stop = &state.stop;
         state.worker = std::thread([request, offset, duty, stop, period_us]() {
+            // Cache the last value driven onto the line. Lets us skip the
+            // kernel ioctl on steady-state 0% / 100% duty cycles
+            // (otherwise we'd write the same value every period_us — at
+            // 1 kHz that's 1000 wasted syscalls per second per port).
+            // -1 = nothing written yet; force the first write.
+            int last_written = -1;
+            auto write_line = [&](gpiod_line_value v) -> bool {
+                const int desired = (v == GPIOD_LINE_VALUE_ACTIVE) ? 1 : 0;
+                if (desired == last_written) {
+                    return true;
+                }
+                if (::gpiod_line_request_set_value(request, offset, v) != 0) {
+                    const int err = errno;
+                    ALPACA_LOG_ERROR(kLogCategory,
+                                     "ASIair PWM worker: gpiod_line_request_set_value failed on GPIO " +
+                                         std::to_string(offset) + ": " + strerror_safe(err) +
+                                         "; aborting worker thread");
+                    stop->store(true);
+                    return false;
+                }
+                last_written = desired;
+                return true;
+            };
             while (!stop->load()) {
                 const int d = duty->load();
                 if (d <= 0) {
-                    ::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_INACTIVE);
+                    if (!write_line(GPIOD_LINE_VALUE_INACTIVE)) break;
                     std::this_thread::sleep_for(std::chrono::microseconds(period_us));
                     continue;
                 }
                 if (d >= 100) {
-                    ::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_ACTIVE);
+                    if (!write_line(GPIOD_LINE_VALUE_ACTIVE)) break;
                     std::this_thread::sleep_for(std::chrono::microseconds(period_us));
                     continue;
                 }
                 const std::uint32_t on_us = static_cast<std::uint32_t>(
                     (static_cast<std::uint64_t>(d) * period_us) / 100u);
                 const std::uint32_t off_us = period_us - on_us;
-                ::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_ACTIVE);
+                // Mid-duty: cache is invalidated because we toggle every period.
+                last_written = -1;
+                if (::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_ACTIVE) != 0) {
+                    const int err = errno;
+                    ALPACA_LOG_ERROR(kLogCategory,
+                                     "ASIair PWM worker: gpiod_line_request_set_value(ACTIVE) failed on GPIO " +
+                                         std::to_string(offset) + ": " + strerror_safe(err) +
+                                         "; aborting worker thread");
+                    stop->store(true);
+                    break;
+                }
                 std::this_thread::sleep_for(std::chrono::microseconds(on_us));
                 if (stop->load()) {
                     break;
                 }
-                ::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_INACTIVE);
+                if (::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_INACTIVE) != 0) {
+                    const int err = errno;
+                    ALPACA_LOG_ERROR(kLogCategory,
+                                     "ASIair PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
+                                         std::to_string(offset) + ": " + strerror_safe(err) +
+                                         "; aborting worker thread");
+                    stop->store(true);
+                    break;
+                }
                 std::this_thread::sleep_for(std::chrono::microseconds(off_us));
             }
         });

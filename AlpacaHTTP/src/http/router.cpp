@@ -6667,9 +6667,14 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                         error_message = "ASIair port entry requires integer 'gpio'";
                         return false;
                     }
+                    const int gpio_value = p["gpio"].get<int>();
+                    if (gpio_value < 0 || gpio_value > 63) {
+                        error_message = "ASIair port 'gpio' must be in [0, 63]";
+                        return false;
+                    }
                     alpacacore::vendor::zwo::AsiairPortConfig pc;
                     pc.name = p.value("name", std::string("Port ") + std::to_string(ports.size() + 1));
-                    pc.gpio_line = static_cast<std::uint32_t>(p["gpio"].get<int>());
+                    pc.gpio_line = static_cast<std::uint32_t>(gpio_value);
                     pc.pwm_enabled = p.value("pwm", false);
                     ports.push_back(std::move(pc));
                 }

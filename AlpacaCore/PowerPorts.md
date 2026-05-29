@@ -129,6 +129,21 @@ The defaults match the Pi 4 ASIair Pro wiring. For non-default deployments (diff
 | `ports[].gpio` | integer | BCM GPIO line number. |
 | `ports[].pwm` | boolean | `true` for analog 0–100% (dew heater, flat panel). `false` for boolean on/off. |
 
+### Disconnect behavior — important for unattended observatories
+
+When the ASCOM client (or the AlpacaBridge Web UI) disconnects the device, the driver releases its hold on the four GPIO lines but **does not drive them LOW first**. The lines stay in whatever state they were last in.
+
+Combined with the `gpio=18,12,13,26=op,dh,pu` boot directive in `/boot/firmware/config.txt`, which configures the lines as outputs with default-high and pull-up enabled, this means **released lines stay HIGH**. The 12V outputs remain powered after disconnect — your camera, mount, and dew heaters keep getting voltage.
+
+This is intentional and consistent with the boot-time default-on behavior the line was designed for: gear is supposed to be powered as soon as the Pi has booted, and remain powered through driver lifecycle events.
+
+If you want a port OFF when you disconnect:
+
+1. Toggle the port OFF in your client (NINA, Web UI, etc.) **before** disconnecting the Switch device.
+2. Then disconnect — the port stays OFF because the line was already driven LOW before the release.
+
+For an unattended shutdown sequence (e.g. observatory close-up), set all four ports to OFF in NINA, then disconnect, then issue your shutdown. The released lines keep their LOW state until the next reboot (when the kernel `gpio=` directive drives them HIGH again).
+
 ### Coexistence with the stock ZWO app
 
 Not supported. The stock `zwoair_imager` claims the GPIO via `pigpiod`, and AlpacaBridge's libgpiod request will fail with `EBUSY`. If you ever boot back into the factory ASIair OS, AlpacaBridge cannot run; conversely, the stock ZWO app does not run on the re-imaged 64-bit OS.
