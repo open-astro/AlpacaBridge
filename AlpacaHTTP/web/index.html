@@ -364,8 +364,9 @@
                         <select id="zwo-switch-type" name="switchType">
                             <option value="dewheater">Dew Heater (Camera-attached)</option>
                             <option value="asiair">ASIair Pro 12V Power Switch</option>
+                            <option value="asiair-plus-rk3568">ASIair Plus 12V Power Switch (RK3568)</option>
                         </select>
-                        <small>Dew Heater uses a ZWO camera's built-in anti-dew heater. ASIair Pro controls the four 12V DC ports via on-board GPIO (Pi 4 ASIair Pro hardware).</small>
+                        <small>Dew Heater uses a ZWO camera's built-in anti-dew heater. ASIair Pro controls the four 12V DC ports via on-board libgpiod (Pi 4 hardware). ASIair Plus (RK3568) controls them via ZWO's pwm_gpio kernel module (Rockchip hardware).</small>
                     </div>
 
                     <div id="zwo-asiair-fields" style="display: none;">
@@ -409,6 +410,47 @@
                                     <td style="padding: 4px;"><input type="text" id="asiair-port-name-3" name="asiairPortName3" value="Port 4" style="width: 100%;"></td>
                                     <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-3" name="asiairPortGpio3" value="18" min="0" max="63" style="width: 60px;"></td>
                                     <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-3" name="asiairPortPwm3"></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div id="zwo-asiair-plus-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="asiair-plus-device-path">Power Control Device:</label>
+                            <input type="text" id="asiair-plus-device-path" name="asiairPlusDevicePath" value="/dev/pwm-gpio-misc">
+                            <small>Path to the ZWO <code>pwm_gpio.ko</code> kernel module's character device. Default <code>/dev/pwm-gpio-misc</code> is correct for stock ASIair Plus (RK3568) hardware.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="asiair-plus-pwm-frequency">PWM Frequency (Hz):</label>
+                            <input type="number" id="asiair-plus-pwm-frequency" name="asiairPlusPwmFrequency" value="1000" min="1" max="100000">
+                            <small>Hardware PWM frequency for any port marked PWM below. The RK3568 kernel hrtimer was empirically validated from 100 Hz to 100 kHz; 1000 Hz works well for dew heaters and flat panels.</small>
+                        </div>
+                        <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
+                        <small style="color: #666;">The ASIair Plus exposes four 12V DC ports through ZWO's kernel module. The kernel index for each port is fixed (DC1=4, DC2=5, DC3=6, DC4=7) so only the channel name and PWM mode are configurable here.</small>
+                        <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                            <thead>
+                                <tr>
+                                    <th style="text-align: left; padding: 4px; color: #333;">Channel name</th>
+                                    <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-0" name="asiairPlusPortName0" value="Port 1" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-0" name="asiairPlusPortPwm0"></td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-1" name="asiairPlusPortName1" value="Port 2" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-1" name="asiairPlusPortPwm1"></td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-2" name="asiairPlusPortName2" value="Port 3" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-2" name="asiairPlusPortPwm2"></td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 4px;"><input type="text" id="asiair-plus-port-name-3" name="asiairPlusPortName3" value="Port 4" style="width: 100%;"></td>
+                                    <td style="padding: 4px;"><input type="checkbox" id="asiair-plus-port-pwm-3" name="asiairPlusPortPwm3"></td>
                                 </tr>
                             </tbody>
                         </table>

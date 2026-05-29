@@ -725,6 +725,31 @@ function startEditDevice(device) {
             }
         }
     }
+    // Populate the ASIair Plus (RK3568) per-port table from the saved config.
+    // The kernel module fixes the per-port hardware mapping, so only the
+    // device path, PWM frequency, channel names and per-port PWM flags are
+    // configurable here.
+    if (vendor === 'zwo' && config.switchType === 'asiair-plus-rk3568') {
+        if (config.devicePath !== undefined && config.devicePath !== null) {
+            setFormValue('asiair-plus-device-path', config.devicePath);
+        }
+        if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
+            setFormValue('asiair-plus-pwm-frequency', config.pwmFrequencyHz);
+        }
+        if (Array.isArray(config.ports)) {
+            for (let i = 0; i < 4; i += 1) {
+                const port = config.ports[i];
+                if (!port) continue;
+                if (port.name !== undefined && port.name !== null) {
+                    setFormValue('asiair-plus-port-name-' + i, port.name);
+                }
+                const pwmCheckbox = document.getElementById('asiair-plus-port-pwm-' + i);
+                if (pwmCheckbox) {
+                    pwmCheckbox.checked = port.pwm === true;
+                }
+            }
+        }
+    }
     // Trigger the visibility update so the ASIair section actually appears
     // when editing an asiair-typed switch (vs. dewheater).
     const zwoSwitchTypeEl = document.getElementById('zwo-switch-type');
@@ -1946,7 +1971,8 @@ function updateZwoConfigFields() {
     const switchTypeSelect = document.getElementById('zwo-switch-type');
     const switchTypeValue = switchTypeSelect ? switchTypeSelect.value : 'dewheater';
     const isAsiairSwitch = isSwitch && switchTypeValue === 'asiair';
-    const showCameraFields = isCamera || (isSwitch && !isAsiairSwitch);
+    const isAsiairPlusSwitch = isSwitch && switchTypeValue === 'asiair-plus-rk3568';
+    const showCameraFields = isCamera || (isSwitch && !isAsiairSwitch && !isAsiairPlusSwitch);
     if (cameraFields) {
         cameraFields.style.display = showCameraFields ? 'block' : 'none';
         setFieldGroupEnabled(cameraFields, showCameraFields);
@@ -1956,6 +1982,12 @@ function updateZwoConfigFields() {
     if (asiairFields) {
         asiairFields.style.display = isAsiairSwitch ? 'block' : 'none';
         setFieldGroupEnabled(asiairFields, isAsiairSwitch);
+    }
+
+    const asiairPlusFields = document.getElementById('zwo-asiair-plus-fields');
+    if (asiairPlusFields) {
+        asiairPlusFields.style.display = isAsiairPlusSwitch ? 'block' : 'none';
+        setFieldGroupEnabled(asiairPlusFields, isAsiairPlusSwitch);
     }
     if (filterwheelFields) {
         filterwheelFields.style.display = isFilterWheel ? 'block' : 'none';
@@ -2132,6 +2164,25 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (ports.length > 0) {
                     deviceData.ports = ports;
                 }
+            }
+            if (deviceData.vendor === 'zwo' && switchType === 'asiair-plus-rk3568') {
+                const devicePath = formData.get('asiairPlusDevicePath');
+                if (devicePath) {
+                    deviceData.devicePath = devicePath;
+                }
+                const plusPwmFreq = Number.parseInt(formData.get('asiairPlusPwmFrequency'), 10);
+                if (!Number.isNaN(plusPwmFreq)) {
+                    deviceData.pwmFrequencyHz = plusPwmFreq;
+                }
+                const plusPorts = [];
+                for (let i = 0; i < 4; i += 1) {
+                    const name = formData.get('asiairPlusPortName' + i);
+                    plusPorts.push({
+                        name: name || ('Port ' + (i + 1)),
+                        pwm: formData.get('asiairPlusPortPwm' + i) === 'on',
+                    });
+                }
+                deviceData.ports = plusPorts;
             }
         }
         if (normalizedType === 'camera' || normalizedType === 'switch') {

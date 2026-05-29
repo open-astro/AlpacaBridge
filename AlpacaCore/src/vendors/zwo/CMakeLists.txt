@@ -58,6 +58,8 @@ if(ALPACACORE_ENABLE_ZWO)
         zwo_switch_driver.cpp
         zwo_asiair_protocol_wrapper.cpp
         zwo_asiair_switch_driver.cpp
+        zwo_asiair_plus_protocol_wrapper.cpp
+        zwo_asiair_plus_switch_driver.cpp
         zwo_eaf_wrapper.cpp
         zwo_focuser_driver.cpp
         zwo_efw_wrapper.cpp
@@ -76,6 +78,7 @@ if(ALPACACORE_ENABLE_ZWO)
         ${ZWO_EAF_INCLUDE}
         ${ZWO_EFW_INCLUDE}
         ${ZWO_CAA_INCLUDE}
+        ${ALPACACORE_ROOT}/external/ZWO/asiair-plus
     )
 
     target_link_libraries(alpacacore_zwo PRIVATE ${ZWO_LIB_PATH} ${ZWO_EAF_LIB_PATH} ${ZWO_EFW_LIB_PATH} ${ZWO_CAA_LIB_PATH})

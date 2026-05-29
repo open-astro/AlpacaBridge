@@ -8,7 +8,7 @@ Pick the section that matches your hardware.
 |----|----|----|----|
 | [ZWO ASIair Pro](#zwo-asiair-pro-raspberry-pi-4) | Available | Raspberry Pi 4 (BCM2711) | libgpiod v2 |
 | [ZWO ASIair Plus (Pi CM4)](#zwo-asiair-plus-raspberry-pi-cm4) | Pending hardware | Raspberry Pi CM4 | libgpiod v2 |
-| [ZWO ASIair Plus (RK3568)](#zwo-asiair-plus-rockchip-rk3568) | Pending hardware | Rockchip RK3568 | libgpiod v2 |
+| [ZWO ASIair Plus (RK3568)](#zwo-asiair-plus-rockchip-rk3568) | Available — ConformU pending | Rockchip RK3568 | ZWO `pwm_gpio.ko` ioctl |
 | [ToupTek StellaVita](#touptek-stellavita-raspberry-pi-cm4) | Pending hardware | Raspberry Pi CM4 | TBD |
 | [iOptron iMate](#ioptron-imate) | Pending hardware | TBD | TBD |
 
@@ -158,7 +158,100 @@ Not supported. The stock `zwoair_imager` claims the GPIO via `pigpiod`, and Alpa
 
 ## ZWO ASIair Plus (Rockchip RK3568)
 
-*Pending hardware validation. The RK3568 variant uses kernel IIO ADC channels (`/sys/bus/iio/devices/iio:device0/in_voltage*_raw`) for current/voltage telemetry instead of I²C. GPIO mapping and the libgpiod chip path will be documented after first ConformU validation.*
+Four 12V DC outputs controlled through ZWO's custom `pwm_gpio.ko` kernel module, which registers a misc-device character node at `/dev/pwm-gpio-misc` and exposes per-port boolean and **hardware** PWM (via Linux hrtimer) through a small set of ioctls. This is fundamentally different from the Pi 4 ASIair Pro — there is no `gpiochip` involved on the user-facing side, and PWM is kernel-side hrtimer rather than userspace soft-PWM.
+
+| Port label | Kernel ioctl index | Default mode |
+|----|----|----|
+| Port 1 | 4 | boolean (on/off) |
+| Port 2 | 5 | boolean (on/off) |
+| Port 3 | 6 | boolean (on/off) |
+| Port 4 | 7 | boolean (on/off) |
+
+### 1. Use a compatible OS image
+
+The ASIair Plus RK3568 ships with ZWO's heavily customised stock OS. AlpacaBridge requires **Debian 13 (Trixie) on aarch64** with the original ZWO kernel (4.19.219) — specifically, the `pwm_gpio.ko` module **must** remain loaded, because it owns the device-tree `airplus-gpios` node and is the only way to drive the four DC ports.
+
+If you've reflashed the device, do it with a tool that preserves the kernel + ZWO kernel modules (e.g. the project tracked at `rk-flashtool`). Standard mainline RK3568 distros do **not** ship `pwm_gpio.ko` and will leave the ports unmanageable.
+
+### 2. Install runtime dependencies and the gpio-group rule
+
+```bash
+sudo apt update
+sudo apt install -y libusb-1.0-0 libudev1 libcurl4
+sudo groupadd -f gpio
+sudo usermod -aG gpio "$USER"
+```
+
+The udev rule shipped with AlpacaBridge (`/etc/udev/rules.d/99-zwo-asiair-plus.rules`) grants the `gpio` group `0660` access to `/dev/pwm-gpio-misc`. Without it, only root can open the device — and AlpacaBridge intentionally runs unprivileged. The rule is installed automatically by `build_and_run.sh` (or by the `.deb` postinst).
+
+After adding yourself to the `gpio` group, log out and back in (or `newgrp gpio`) so membership applies.
+
+### 3. Install AlpacaBridge
+
+Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:11111`.
+
+### 4. Add the Switch device
+
+Open `http://<your-asiair-plus-ip>:11111/` in a browser:
+
+1. **Configure** tab → **Add Device**
+2. **Device Type**: Switch
+3. **Vendor**: ZWO
+4. **Switch Type**: **ASIair Plus 12V Power Switch (RK3568)**
+5. **Device Number**: 0
+6. The **Power Ports** table is simpler than the Pro's — only the channel name and PWM checkbox are configurable per port. The kernel module fixes the ioctl index for each port (DC1=4, DC2=5, DC3=6, DC4=7), so there's no GPIO-line field. Tick **PWM** on any port you intend to use with a dew heater or flat panel.
+7. Submit
+
+Or via the management API:
+
+```json
+{
+  "deviceType": "switch",
+  "deviceNumber": 0,
+  "vendor": "zwo",
+  "switchType": "asiair-plus-rk3568"
+}
+```
+
+### 5. Verify
+
+Connect the device from the **Devices** tab. From a second SSH session you can confirm the kernel module is being driven by inspecting `/proc/modules`:
+
+```bash
+grep pwm_gpio /proc/modules        # should show non-zero refcount while connected
+sudo cat /sys/kernel/debug/gpio    # shows the airplus-gpios assignments
+```
+
+### Advanced configuration
+
+For non-default deployments (e.g. you've remapped the device node), the full config schema is:
+
+```json
+{
+  "deviceType": "switch",
+  "deviceNumber": 0,
+  "vendor": "zwo",
+  "switchType": "asiair-plus-rk3568",
+  "devicePath": "/dev/pwm-gpio-misc",
+  "pwmFrequencyHz": 1000,
+  "ports": [
+    { "name": "Mount Power",  "pwm": false },
+    { "name": "Camera Power", "pwm": false },
+    { "name": "Flat Panel",   "pwm": true  },
+    { "name": "Dew Heater",   "pwm": true  }
+  ]
+}
+```
+
+The PWM frequency was empirically validated against the ZWO kernel hrtimer from 100 Hz to 100 kHz (every readback exactly matched the requested `period_ns`/`duty_ns`), so any value in 1–100,000 Hz is supported.
+
+### Disconnect behavior
+
+Identical to the ASIair Pro driver: `close()` releases our fd without driving the lines LOW first, so released ports stay in their last-driven state. The kernel module retains per-port mode + level across opens, so a disconnect from the ASCOM client does **not** power-cycle anything. Set each port OFF in your client before disconnecting if you want a cold release.
+
+### What about the USB power ports and the button?
+
+The same `pwm_gpio.ko` module also controls the two USB2 ports, two USB3 ports, the two status LEDs, and the physical button (ioctl indices 0, 1, 2, 8, 9, 10, 11). They are **not** exposed by the v1 AlpacaBridge Switch driver — the v1 surface is 4 DC ports only, matching the four-channel ASCOM Switch interface most clients expect. Extending the driver to control them is straightforward (the kernel ioctls are identical) — track interest in `AGENTS.md`.
 
 ---
 
