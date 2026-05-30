@@ -733,9 +733,11 @@ function startEditDevice(device) {
         if (config.devicePath !== undefined && config.devicePath !== null) {
             setFormValue('asiair-plus-device-path', config.devicePath);
         }
-        if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
-            setFormValue('asiair-plus-pwm-frequency', config.pwmFrequencyHz);
-        }
+        // pwmFrequencyHz was previously surfaced here as a user-editable
+        // field. It's now auto-managed by the wrapper (defaults to 20 kHz
+        // for inaudible soft-PWM) and intentionally not shown in the UI.
+        // The persisted value, if any, is still passed through by the
+        // router so power users can set it via direct JSON edits.
         if (Array.isArray(config.ports)) {
             for (let i = 0; i < 4; i += 1) {
                 const port = config.ports[i];
@@ -2170,10 +2172,10 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (devicePath) {
                     deviceData.devicePath = devicePath;
                 }
-                const plusPwmFreq = Number.parseInt(formData.get('asiairPlusPwmFrequency'), 10);
-                if (!Number.isNaN(plusPwmFreq)) {
-                    deviceData.pwmFrequencyHz = plusPwmFreq;
-                }
+                // pwmFrequencyHz is no longer collected from the form — the
+                // driver auto-sets it to 20 kHz (above audible range) for
+                // soft-PWM. Any value already in the persisted config still
+                // takes effect via the router, but the UI doesn't surface it.
                 const plusPorts = [];
                 for (let i = 0; i < 4; i += 1) {
                     const name = formData.get('asiairPlusPortName' + i);

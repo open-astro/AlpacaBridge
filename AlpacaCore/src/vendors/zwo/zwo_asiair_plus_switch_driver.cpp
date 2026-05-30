@@ -34,7 +34,15 @@ constexpr const char* kLogCategory = "ZWO_ASIAIR_PLUS";
 AsiairPlusSwitchConfig default_asiair_plus_rk3568_config() {
     AsiairPlusSwitchConfig cfg;
     cfg.device_path = "/dev/pwm-gpio-misc";
-    cfg.pwm_frequency_hz = 1000;
+    // Userspace soft-PWM frequency. 20 kHz is above the audible range for
+    // virtually all adults, which avoids the coil/inductor whine that LED
+    // panels and dew heaters produce when switched at 1–5 kHz. It's also
+    // still within reach of nanosleep-based timing on the RK3568 — the
+    // 50 µs period gives the scheduler enough headroom to stay accurate.
+    // Exposed as a tunable in the protocol wrapper API but no longer
+    // surfaced in the Web UI; power users can override via the
+    // pwmFrequencyHz field in the persisted JSON.
+    cfg.pwm_frequency_hz = 20000;
     cfg.ports = {
         {"Port 1", false},
         {"Port 2", false},

@@ -421,11 +421,6 @@
                             <input type="text" id="asiair-plus-device-path" name="asiairPlusDevicePath" value="/dev/pwm-gpio-misc">
                             <small>Path to the ZWO <code>pwm_gpio.ko</code> kernel module's character device. Default <code>/dev/pwm-gpio-misc</code> is correct for stock ASIair Plus (RK3568) hardware.</small>
                         </div>
-                        <div class="form-group">
-                            <label for="asiair-plus-pwm-frequency">PWM Frequency (Hz):</label>
-                            <input type="number" id="asiair-plus-pwm-frequency" name="asiairPlusPwmFrequency" value="1000" min="1" max="100000">
-                            <small>Hardware PWM frequency for any port marked PWM below. The RK3568 kernel hrtimer was empirically validated from 100 Hz to 100 kHz; 1000 Hz works well for dew heaters and flat panels.</small>
-                        </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
                         <small style="color: #666;">The ASIair Plus exposes four 12V DC ports through ZWO's kernel module. The kernel index for each port is fixed (DC1=4, DC2=5, DC3=6, DC4=7) so only the channel name and PWM mode are configurable here.</small>
                         <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
