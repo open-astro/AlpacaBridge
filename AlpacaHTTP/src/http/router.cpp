@@ -6986,6 +6986,21 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
         copy_if_present("switchType");
+        // ASIair Pro (Pi 4, libgpiod) and ASIair Plus (RK3568, pwm_gpio.ko)
+        // both persist per-port configuration. Without these the user's
+        // PWM-mode toggles and channel renames silently revert after save
+        // because sanitize_device_config strips anything not allowlisted.
+        const std::string switch_type = config.value("switchType", "");
+        if (switch_type == "asiair" || switch_type == "asiair-plus-rk3568") {
+            copy_if_present("pwmFrequencyHz");
+            copy_if_present("ports");
+        }
+        if (switch_type == "asiair") {
+            copy_if_present("gpioChip");
+        }
+        if (switch_type == "asiair-plus-rk3568") {
+            copy_if_present("devicePath");
+        }
         copy_if_present("filterwheelIndex");
         copy_if_present("filterwheelId");
         copy_if_present("filterNames");
