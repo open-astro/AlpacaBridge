@@ -136,30 +136,29 @@ public:
             // alone, and only push writes to the kernel when the ASCOM
             // client actively calls SetSwitch / SetSwitchValue.
             //
-            // We *do* read each port's current level so our cached values
-            // start out matching reality — that way the client UI shows
-            // the actual current physical state, not a default.
-            for (std::size_t i = 0; i < ports_.size(); ++i) {
-                const int kernel_idx = kernel_index_for(i);
-                gpio_level_t lvl{};
-                lvl.index = kernel_idx;
-                if (::ioctl(fd_, PWM_GPIO_GET_LEVEL, &lvl) == 0) {
-                    const auto& cfg = ports_[i];
-                    if (cfg.pwm_enabled) {
-                        // We can't read the duty cycle in a mode-agnostic
-                        // way (GET_CONFIG only returns valid period/duty
-                        // when the port is in PWM mode). Best-effort:
-                        // HIGH -> 100% duty, LOW -> 0% duty. The user's
-                        // next SetSwitchValue will overwrite this with
-                        // an accurate value anyway.
-                        port_states_[i]->value.store(lvl.level != 0 ? 100 : 0);
-                    } else {
-                        port_states_[i]->value.store(lvl.level != 0 ? 1 : 0);
-                    }
-                }
-                // If GET_LEVEL fails, keep the constructor's optimistic
-                // default ("on") — better than silently flipping to off.
-            }
+            // We do NOT call PWM_GPIO_GET_LEVEL here. Empirically (probed
+            // across all 12 kernel indices on a freshly-booted device with
+            // physically-powered DC ports and a lit network LED), GET_LEVEL
+            // returns 0 for **every** index — including ones that are
+            // definitely outputting HIGH. The ioctl appears to read back
+            // the kernel module's "last-written via SET_LEVEL" cache, not
+            // the actual pin state, and that cache initializes to 0 at
+            // module load regardless of what pinctrl drove the pads to.
+            //
+            // So reading GET_LEVEL into our wrapper's cache would silently
+            // flip the UI to "all off" on the first connect after a fresh
+            // boot, even though the gear is powered. Better to keep the
+            // constructor's optimistic default — value=1 for boolean
+            // ports, value=100 for PWM ports — which matches the typical
+            // boot-time behavior of all four DC ports being live. If the
+            // user has actively toggled a port via this wrapper instance,
+            // that set_value() write already updated the cache, so the
+            // cache is correct for the lifetime of the wrapper.
+            //
+            // Cost: if AlpacaBridge restarts mid-session with some ports
+            // physically off, the first reconnect will briefly show those
+            // ports as ON in the UI until the user toggles them. That's
+            // accepted — the alternative is a worse first-impression bug.
         } catch (...) {
             ::close(fd_);
             fd_ = -1;
