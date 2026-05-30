@@ -34,15 +34,23 @@ constexpr const char* kLogCategory = "ZWO_ASIAIR_PLUS";
 AsiairPlusSwitchConfig default_asiair_plus_rk3568_config() {
     AsiairPlusSwitchConfig cfg;
     cfg.device_path = "/dev/pwm-gpio-misc";
-    // Userspace soft-PWM frequency. 20 kHz is above the audible range for
-    // virtually all adults, which avoids the coil/inductor whine that LED
-    // panels and dew heaters produce when switched at 1–5 kHz. It's also
-    // still within reach of nanosleep-based timing on the RK3568 — the
-    // 50 µs period gives the scheduler enough headroom to stay accurate.
-    // Exposed as a tunable in the protocol wrapper API but no longer
-    // surfaced in the Web UI; power users can override via the
-    // pwmFrequencyHz field in the persisted JSON.
-    cfg.pwm_frequency_hz = 20000;
+    // Userspace soft-PWM frequency. 1 kHz is the highest frequency that
+    // Linux `nanosleep`/`sleep_until` can hold accurately on the RK3568
+    // without burning a CPU core in a busy-wait loop. We attempted 20 kHz
+    // (above audible range) but the scheduler couldn't deliver 50 µs
+    // intervals — wakeups arrived 50–100 µs late, which collapsed the
+    // duty cycle (a requested 90% looked like 10–20% on a real load) and
+    // dropped the effective switching frequency to ~50–100 Hz, producing
+    // visible flicker. So we trade audible whine (LED panels and dew
+    // heaters do buzz at 1 kHz) for accurate dimming. In typical
+    // observatory use the device sits with the gear and any whine is
+    // drowned out by mount slewing, fans, and ambient outdoor noise.
+    //
+    // Power users who want silent PWM can override via the
+    // pwmFrequencyHz field in registered_devices.json; values 8–20 kHz
+    // work if the wrapper is enhanced with a hybrid sleep+spin loop
+    // (the spin burns one CPU core but stays cycle-accurate).
+    cfg.pwm_frequency_hz = 1000;
     cfg.ports = {
         {"Port 1", false},
         {"Port 2", false},
