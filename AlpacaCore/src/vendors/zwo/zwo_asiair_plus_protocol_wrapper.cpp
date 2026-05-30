@@ -115,30 +115,50 @@ public:
         }
         fd_ = fd;
         try {
-            // Drive the master-enable line LOW so the four DC ports downstream
-            // can deliver voltage. The master-enable signal at kernel index 3
-            // (GPIO0_B7) is **active-low** per the reverse-engineered device
-            // tree inventory: it boots at level=0 (enabled) and a level=1
-            // write disables all four DC ports simultaneously. Earlier
-            // versions of this wrapper drove it HIGH and inadvertently
-            // disabled the master switch on every connect, which made the
-            // gear plugged into the DC ports go dark even though our cached
-            // per-port values said ON. We explicitly write LOW here so the
-            // active state is restored even if a previous (buggy) session
-            // left index 3 HIGH.
-            gpio_level_t master{};
-            master.index = kKernelIndexMasterEnable;
-            master.level = 0;
-            if (::ioctl(fd_, PWM_GPIO_SET_LEVEL, &master) != 0) {
-                const int err = errno;
-                throw AlpacaException("PWM_GPIO_SET_LEVEL(master enable) failed: " +
-                                          strerror_safe(err),
-                                      AlpacaError::DriverException);
-            }
-            // Configure each DC port: mode + initial value.
+            // Connect-time policy: read-only, do NOT touch any kernel-side
+            // state. We learned the hard way (twice) that any write here
+            // risks power-cycling gear plugged into the DC ports if our
+            // model of the kernel module's semantics is even slightly off:
+            //
+            //   1. Driving the master-enable line (kernel index 3) to
+            //      either polarity caused all four DC ports to physically
+            //      go dark on connect, even though GET_LEVEL on the ports
+            //      kept reading 1 and our cache reported ON to clients.
+            //   2. Calling SET_MODE/SET_LEVEL on the DC ports themselves
+            //      at connect time produced the same symptom — likely
+            //      because the kernel module's mode-change path has a
+            //      brief transient that real gear noticed.
+            //
+            // The kernel module is opaque (closed source, reverse-
+            // engineered headers only) and the inventory comments are
+            // ambiguous about polarity. The safe move is to leave whatever
+            // boot or previous-client state the ports are in completely
+            // alone, and only push writes to the kernel when the ASCOM
+            // client actively calls SetSwitch / SetSwitchValue.
+            //
+            // We *do* read each port's current level so our cached values
+            // start out matching reality — that way the client UI shows
+            // the actual current physical state, not a default.
             for (std::size_t i = 0; i < ports_.size(); ++i) {
-                const int initial = port_states_[i]->value.load();
-                apply_port_locked(i, initial);
+                const int kernel_idx = kernel_index_for(i);
+                gpio_level_t lvl{};
+                lvl.index = kernel_idx;
+                if (::ioctl(fd_, PWM_GPIO_GET_LEVEL, &lvl) == 0) {
+                    const auto& cfg = ports_[i];
+                    if (cfg.pwm_enabled) {
+                        // We can't read the duty cycle in a mode-agnostic
+                        // way (GET_CONFIG only returns valid period/duty
+                        // when the port is in PWM mode). Best-effort:
+                        // HIGH -> 100% duty, LOW -> 0% duty. The user's
+                        // next SetSwitchValue will overwrite this with
+                        // an accurate value anyway.
+                        port_states_[i]->value.store(lvl.level != 0 ? 100 : 0);
+                    } else {
+                        port_states_[i]->value.store(lvl.level != 0 ? 1 : 0);
+                    }
+                }
+                // If GET_LEVEL fails, keep the constructor's optimistic
+                // default ("on") — better than silently flipping to off.
             }
         } catch (...) {
             ::close(fd_);
