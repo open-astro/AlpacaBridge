@@ -115,13 +115,20 @@ public:
         }
         fd_ = fd;
         try {
-            // Drive the master-enable line HIGH so the four DC ports downstream
-            // can deliver voltage. The kernel module already configured it for
-            // output via the airplus-gpios pinctrl entry, so we only need to
-            // set the level.
+            // Drive the master-enable line LOW so the four DC ports downstream
+            // can deliver voltage. The master-enable signal at kernel index 3
+            // (GPIO0_B7) is **active-low** per the reverse-engineered device
+            // tree inventory: it boots at level=0 (enabled) and a level=1
+            // write disables all four DC ports simultaneously. Earlier
+            // versions of this wrapper drove it HIGH and inadvertently
+            // disabled the master switch on every connect, which made the
+            // gear plugged into the DC ports go dark even though our cached
+            // per-port values said ON. We explicitly write LOW here so the
+            // active state is restored even if a previous (buggy) session
+            // left index 3 HIGH.
             gpio_level_t master{};
             master.index = kKernelIndexMasterEnable;
-            master.level = 1;
+            master.level = 0;
             if (::ioctl(fd_, PWM_GPIO_SET_LEVEL, &master) != 0) {
                 const int err = errno;
                 throw AlpacaException("PWM_GPIO_SET_LEVEL(master enable) failed: " +
