@@ -12,6 +12,11 @@
 #                                    things look genuinely wrong.
 #   ALPACA_INSTALL_UDEV_RULES=ON|OFF  default ON
 #   ALPACA_ADD_DIALOUT=ON|OFF         default ON
+#   ALPACA_ADD_GPIO=ON|OFF             default ON. When ON, ensures the gpio
+#                                    group exists (creates it if missing) and
+#                                    adds the current user to it. Required for
+#                                    libgpiod-based and pwm_gpio.ko-based
+#                                    drivers (ASIair Pro, ASIair Plus RK3568).
 #   ALPACA_INSTALL_ACCELERATORS=ON|OFF default ON. When ON, auto-installs
 #                                    ccache + ninja-build via apt the first
 #                                    time they are missing (uses sudo).
@@ -25,6 +30,7 @@ CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
 INSTALL_UDEV_RULES="${ALPACA_INSTALL_UDEV_RULES:-ON}"
 INSTALL_ACCELERATORS="${ALPACA_INSTALL_ACCELERATORS:-ON}"
 ADD_DIALOUT="${ALPACA_ADD_DIALOUT:-ON}"
+ADD_GPIO="${ALPACA_ADD_GPIO:-ON}"
 CLEAN="${CLEAN:-0}"
 
 if [[ ! -d "${CORE_DIR}" ]]; then
@@ -198,6 +204,33 @@ run_system_setup() {
       sudo usermod -aG dialout "${USER}"
       echo "You must log out and back in (or run: newgrp dialout) for the change to take effect."
     fi
+  fi
+
+  if [[ "${ADD_GPIO}" == "ON" ]]; then
+    # The gpio group ships pre-created on Raspberry Pi OS but not on stock
+    # Debian / Ubuntu — make sure it exists before our udev rules try to
+    # chgrp device nodes to it (otherwise the GROUP= directive silently
+    # falls back to root and the daemon hits EACCES at open time).
+    if ! getent group gpio >/dev/null; then
+      echo "Creating gpio group (required for libgpiod and pwm_gpio kernel-module drivers)."
+      sudo groupadd -f gpio
+    fi
+    if id -nG | tr ' ' '\n' | grep -q '^gpio$'; then
+      echo "User ${USER} is already in the gpio group."
+    else
+      echo "Adding ${USER} to the gpio group (required for ZWO ASIair Pro / Plus power switches)."
+      sudo usermod -aG gpio "${USER}"
+      echo "You must log out and back in (or run: newgrp gpio) for the change to take effect."
+    fi
+    # Fix up existing device nodes that the kernel module / udev created
+    # before this gpio-group setup so the user doesn't have to wait for the
+    # next module reload / device hot-plug.
+    for node in /dev/pwm-gpio-misc /dev/gpiochip*; do
+      if [[ -e "${node}" ]]; then
+        sudo chgrp gpio "${node}" 2>/dev/null || true
+        sudo chmod 0660 "${node}" 2>/dev/null || true
+      fi
+    done
   fi
 }
 
