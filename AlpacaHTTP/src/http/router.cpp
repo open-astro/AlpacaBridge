@@ -79,6 +79,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
+#include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
@@ -6833,6 +6834,27 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(focuser.release()))) {
             util::log_info("Registered ToupTek AAF focuser");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
+        return false;
+#endif
+    }
+
+    if (vendor == "touptek" && device_type_str == "filterwheel") {
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        int camera_index = config.value("cameraIndex", 0);
+
+        auto filterwheel = alpacacore::vendor::touptek::create_touptek_filterwheel(
+            device_number, camera_index);
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(filterwheel.release()))) {
+            util::log_info("Registered ToupTek filter wheel (camera index " +
+                           std::to_string(camera_index) + ")");
             return true;
         }
 

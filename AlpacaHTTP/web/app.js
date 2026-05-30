@@ -1408,7 +1408,7 @@ function updateVendorOptions() {
     }
     const touptekOption = vendorSelect.querySelector('option[value="touptek"]');
     if (touptekOption) {
-        const allowTouptek = isCamera || isFocuser;
+        const allowTouptek = isCamera || isFocuser || isFilterWheel;
         touptekOption.disabled = !allowTouptek;
         touptekOption.hidden = !allowTouptek;
     }
@@ -1450,7 +1450,7 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'svbony') {
         vendorSelect.value = '';
     }
-    if (!isCamera && !isFocuser && vendorSelect.value === 'touptek') {
+    if (!isCamera && !isFocuser && !isFilterWheel && vendorSelect.value === 'touptek') {
         vendorSelect.value = '';
     }
     if (!isCamera && vendorSelect.value === 'playerone') {
@@ -1908,9 +1908,12 @@ function updateTouptekConfigFields() {
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
     const isCamera = deviceType === 'camera';
     const isFocuser = deviceType === 'focuser';
+    const isFilterWheel = deviceType === 'filterwheel';
     if (cameraFields) {
-        cameraFields.style.display = isCamera ? 'block' : 'none';
-        setFieldGroupEnabled(cameraFields, isCamera);
+        // ToupTek filter wheel uses cameraIndex to select the camera with integrated filter wheel
+        const showCameraFields = isCamera || isFilterWheel;
+        cameraFields.style.display = showCameraFields ? 'block' : 'none';
+        setFieldGroupEnabled(cameraFields, showCameraFields);
     }
     if (focuserFields) {
         focuserFields.style.display = isFocuser ? 'block' : 'none';
