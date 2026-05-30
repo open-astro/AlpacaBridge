@@ -261,91 +261,47 @@ private:
         // gpiod_set_raw_value, hrtimer_*, pinctrl_select_state) — see
         // AGENTS.md for the full forensic write-up.
 
-        if (cfg.pwm_enabled) {
-            // PWM path. NOTE: empirically the kernel module accepts every
-            // PWM ioctl (SET_MODE+ENABLE+SET_CONFIG) and GET_CONFIG echoes
-            // back the period/duty we wrote — but on stock Debian with the
-            // out-of-tree pwm_gpio.ko we observed no physical dimming of a
-            // load on any DC port at any duty cycle. The kernel module
-            // imports hrtimer_* symbols, so it *can* PWM in principle; on
-            // ZWO's own ASIair OS the zwoair_imager / zwoair_guider daemons
-            // presumably engage some additional setup we haven't identified
-            // (possibly via pinctrl_select_state to mux the pad to a PWM
-            // controller). We send the documented sequence anyway so that
-            // (a) anyone who reverse-engineers the missing piece can wire
-            // it up without changing the driver, and (b) if ZWO ships a
-            // future kernel that fixes it, this just starts working.
-            // Until then, ASCOM clients see the config persisted and the
-            // value reported but the gear stays at full brightness.
-            work_mode_t mode{};
-            mode.index = kernel_idx;
-            mode.mode = PWM_GPIO_MODE_PWM;
-            if (::ioctl(fd_, PWM_GPIO_SET_MODE, &mode) != 0) {
-                const int err = errno;
-                throw AlpacaException(
-                    "PWM_GPIO_SET_MODE(PWM) failed on kernel index " +
-                        std::to_string(kernel_idx) + ": " + strerror_safe(err),
-                    AlpacaError::DriverException);
-            }
-            int enable_arg = kernel_idx;
-            if (::ioctl(fd_, PWM_GPIO_ENABLE, &enable_arg) != 0) {
-                const int err = errno;
-                throw AlpacaException(
-                    "PWM_GPIO_ENABLE failed on kernel index " +
-                        std::to_string(kernel_idx) + ": " + strerror_safe(err),
-                    AlpacaError::DriverException);
-            }
-            const int period_ns = static_cast<int>(1000000000u / pwm_frequency_hz_);
-            const int duty_ns =
-                static_cast<int>((static_cast<std::uint64_t>(value) * period_ns) / 100u);
-            pwm_param_t params{};
-            params.index = kernel_idx;
-            params.period_ns = period_ns;
-            params.duty_ns = duty_ns;
-            if (::ioctl(fd_, PWM_GPIO_SET_CONFIG, &params) != 0) {
-                const int err = errno;
-                throw AlpacaException(
-                    "PWM_GPIO_SET_CONFIG failed on kernel index " +
-                        std::to_string(kernel_idx) + ": " + strerror_safe(err),
-                    AlpacaError::DriverException);
-            }
-        } else {
-            // Boolean GPIO path. Confirmed working end-to-end after adding
-            // ENABLE: physically toggling a 12V load (verified with a flat
-            // panel on DC port 2 / kernel index 5) produces the expected
-            // on/off transition. Active-high: SET_LEVEL(1) drives the pad
-            // HIGH which powers the gear, SET_LEVEL(0) drives LOW which
-            // cuts power. Kernel-side direction visible in
-            // /sys/kernel/debug/gpio flips from "in hi" to "out hi"/"out lo"
-            // after the ENABLE call lands.
-            work_mode_t mode{};
-            mode.index = kernel_idx;
-            mode.mode = PWM_GPIO_MODE_GPIO;
-            if (::ioctl(fd_, PWM_GPIO_SET_MODE, &mode) != 0) {
-                const int err = errno;
-                throw AlpacaException(
-                    "PWM_GPIO_SET_MODE(GPIO) failed on kernel index " +
-                        std::to_string(kernel_idx) + ": " + strerror_safe(err),
-                    AlpacaError::DriverException);
-            }
-            int enable_arg = kernel_idx;
-            if (::ioctl(fd_, PWM_GPIO_ENABLE, &enable_arg) != 0) {
-                const int err = errno;
-                throw AlpacaException(
-                    "PWM_GPIO_ENABLE failed on kernel index " +
-                        std::to_string(kernel_idx) + ": " + strerror_safe(err),
-                    AlpacaError::DriverException);
-            }
-            gpio_level_t level{};
-            level.index = kernel_idx;
-            level.level = value != 0 ? 1 : 0;
-            if (::ioctl(fd_, PWM_GPIO_SET_LEVEL, &level) != 0) {
-                const int err = errno;
-                throw AlpacaException(
-                    "PWM_GPIO_SET_LEVEL failed on kernel index " +
-                        std::to_string(kernel_idx) + ": " + strerror_safe(err),
-                    AlpacaError::DriverException);
-            }
+        // Every port — including PWM-configured ports — currently uses the
+        // boolean GPIO path. The kernel module's PWM mode is broken
+        // end-to-end on stock Debian: SET_MODE(PWM) puts the pad into a
+        // non-driven state (observed live with a flat-panel load on Port 2,
+        // gear physically went dark the moment we sent SET_MODE(PWM)), and
+        // subsequent SET_CONFIG calls have no visible effect at any duty
+        // cycle even with ENABLE between them. Going through that path
+        // would produce inverted-looking behavior in NINA (toggle ON would
+        // appear to turn the load off because SET_MODE(PWM) drops the pad).
+        // Until the missing piece is identified, PWM-configured ports
+        // behave as binary switches with threshold > 0 → on. The persisted
+        // config still records the PWM flag, so this auto-upgrades to real
+        // PWM as soon as we fix the SET_MODE(PWM) path.
+        (void)cfg; // pwm_enabled is intentionally unused on this code path
+        work_mode_t mode{};
+        mode.index = kernel_idx;
+        mode.mode = PWM_GPIO_MODE_GPIO;
+        if (::ioctl(fd_, PWM_GPIO_SET_MODE, &mode) != 0) {
+            const int err = errno;
+            throw AlpacaException(
+                "PWM_GPIO_SET_MODE(GPIO) failed on kernel index " +
+                    std::to_string(kernel_idx) + ": " + strerror_safe(err),
+                AlpacaError::DriverException);
+        }
+        int enable_arg = kernel_idx;
+        if (::ioctl(fd_, PWM_GPIO_ENABLE, &enable_arg) != 0) {
+            const int err = errno;
+            throw AlpacaException(
+                "PWM_GPIO_ENABLE failed on kernel index " +
+                    std::to_string(kernel_idx) + ": " + strerror_safe(err),
+                AlpacaError::DriverException);
+        }
+        gpio_level_t level{};
+        level.index = kernel_idx;
+        level.level = value != 0 ? 1 : 0;
+        if (::ioctl(fd_, PWM_GPIO_SET_LEVEL, &level) != 0) {
+            const int err = errno;
+            throw AlpacaException(
+                "PWM_GPIO_SET_LEVEL failed on kernel index " +
+                    std::to_string(kernel_idx) + ": " + strerror_safe(err),
+                AlpacaError::DriverException);
         }
     }
 
