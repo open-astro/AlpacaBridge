@@ -206,32 +206,47 @@ run_system_setup() {
     fi
   fi
 
-  if [[ "${ADD_GPIO}" == "ON" ]]; then
-    # The gpio group ships pre-created on Raspberry Pi OS but not on stock
-    # Debian / Ubuntu — make sure it exists before our udev rules try to
-    # chgrp device nodes to it (otherwise the GROUP= directive silently
-    # falls back to root and the daemon hits EACCES at open time).
-    if ! getent group gpio >/dev/null; then
-      echo "Creating gpio group (required for libgpiod and pwm_gpio kernel-module drivers)."
-      sudo groupadd -f gpio
-    fi
-    if id -nG | tr ' ' '\n' | grep -q '^gpio$'; then
-      echo "User ${USER} is already in the gpio group."
-    else
-      echo "Adding ${USER} to the gpio group (required for ZWO ASIair Pro / Plus power switches)."
-      sudo usermod -aG gpio "${USER}"
-      echo "You must log out and back in (or run: newgrp gpio) for the change to take effect."
-    fi
-    # Fix up existing device nodes that the kernel module / udev created
-    # before this gpio-group setup so the user doesn't have to wait for the
-    # next module reload / device hot-plug.
-    for node in /dev/pwm-gpio-misc /dev/gpiochip*; do
-      if [[ -e "${node}" ]]; then
-        sudo chgrp gpio "${node}" 2>/dev/null || true
-        sudo chmod 0660 "${node}" 2>/dev/null || true
-      fi
-    done
+}
+
+# Group membership and device-node ownership are per-user / per-system
+# state, not per-vendor-SDK-file state, so this block intentionally lives
+# OUTSIDE run_system_setup and the hash-stamp gate above. It runs on every
+# invocation. Each step is idempotent (no-op when already in the desired
+# state) and only escalates to sudo when an actual change is required.
+ensure_gpio_group() {
+  if [[ "${ADD_GPIO}" != "ON" ]]; then
+    return 0
   fi
+  if [[ "${OSTYPE:-}" != "linux"* ]]; then
+    return 0
+  fi
+  # The gpio group ships pre-created on Raspberry Pi OS but not on stock
+  # Debian / Ubuntu — make sure it exists before our udev rules try to
+  # chgrp device nodes to it (otherwise the GROUP= directive silently
+  # falls back to root and the daemon hits EACCES at open time).
+  if ! getent group gpio >/dev/null; then
+    echo "Creating gpio group (required for libgpiod and pwm_gpio kernel-module drivers)."
+    sudo groupadd -f gpio
+  fi
+  if id -nG | tr ' ' '\n' | grep -q '^gpio$'; then
+    : # already a member, nothing to do
+  else
+    echo "Adding ${USER} to the gpio group (required for ZWO ASIair Pro / Plus power switches)."
+    sudo usermod -aG gpio "${USER}"
+    echo "You must log out and back in (or run: newgrp gpio) for the change to take effect."
+  fi
+  # Fix up existing device nodes that the kernel module / udev created
+  # before this gpio-group setup so the user doesn't have to wait for the
+  # next module reload / device hot-plug. Only chgrp/chmod when the node
+  # is not already gpio:0660, so we don't sudo on every no-op run.
+  for node in /dev/pwm-gpio-misc /dev/gpiochip*; do
+    [[ -e "${node}" ]] || continue
+    current="$(stat -c '%G %a' "${node}" 2>/dev/null || echo '')"
+    if [[ "${current}" != "gpio 660" ]]; then
+      sudo chgrp gpio "${node}" 2>/dev/null || true
+      sudo chmod 0660 "${node}" 2>/dev/null || true
+    fi
+  done
 }
 
 if [[ "${INSTALL_UDEV_RULES}" == "ON" && "${OSTYPE:-}" == "linux"* ]]; then
@@ -259,6 +274,11 @@ if [[ "${INSTALL_UDEV_RULES}" == "ON" && "${OSTYPE:-}" == "linux"* ]]; then
     echo "${setup_hash}" > "${SETUP_STAMP}"
   fi
 fi
+
+# gpio group + device-node fixups always run, independent of the udev-rule
+# install stamp above — group membership and node ownership are per-system
+# state that the SDK-file hash can't track.
+ensure_gpio_group
 
 # ---------------------------------------------------------------------------
 # Build (incremental by default)
