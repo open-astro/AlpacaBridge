@@ -293,9 +293,31 @@ private:
                     std::to_string(kernel_idx) + ": " + strerror_safe(err),
                 AlpacaError::DriverException);
         }
+        // **Polarity at the SET_LEVEL ioctl is INVERTED from typical gpiod
+        // semantics on this hardware.** Empirically verified by reading
+        // /sys/kernel/debug/gpio and physically observing a 12V flat
+        // panel on Port 2:
+        //
+        //   SET_LEVEL(0) -> line resolves to `in hi`  (input, pulled high
+        //                    externally) -> panel physically **ON**.
+        //   SET_LEVEL(1) -> line resolves to `out lo` (output, driven low)
+        //                    -> panel physically **OFF**.
+        //
+        // I.e. the kernel module's "level=0" releases the line and the
+        // external pull-up powers the gear; "level=1" actively drives the
+        // pad low and cuts power. This is non-standard — most gpiod-based
+        // chips treat level=1 as drive-high — and the cause is probably a
+        // bug or quirk in the closed-source pwm_gpio.ko's level-argument
+        // interpretation (possibly: level=1 maps internally to
+        // gpiod_direction_output_raw(0), level=0 maps to
+        // gpiod_direction_input). Either way, the empirical mapping is
+        // what we have to live with on stock Debian. Don't "fix" this by
+        // flipping it back — the previous polarity produced the inverted-
+        // feeling NINA behavior the user reported on 2026-05-30
+        // ("when I flip it on it goes off").
         gpio_level_t level{};
         level.index = kernel_idx;
-        level.level = value != 0 ? 1 : 0;
+        level.level = value != 0 ? 0 : 1;
         if (::ioctl(fd_, PWM_GPIO_SET_LEVEL, &level) != 0) {
             const int err = errno;
             throw AlpacaException(
