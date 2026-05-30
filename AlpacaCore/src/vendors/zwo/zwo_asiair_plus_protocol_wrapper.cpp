@@ -241,10 +241,42 @@ private:
     void apply_port_locked(std::size_t index, int value) {
         const int kernel_idx = kernel_index_for(index);
         const auto& cfg = ports_[index];
+
+        // The kernel module reverse-engineering yielded a non-obvious required
+        // sequence (proved empirically: /sys/kernel/debug/gpio direction stayed
+        // as "in" until PWM_GPIO_ENABLE was called, even after SET_MODE):
+        //
+        //   1. SET_MODE  — pick GPIO or PWM mode
+        //   2. ENABLE    — internally calls gpiod_direction_output_raw, which
+        //                  flips the line from input (boot default) to output.
+        //                  Without this, SET_LEVEL/SET_CONFIG writes succeed
+        //                  silently at the ioctl level but the kernel module
+        //                  logs "NOT in GPIO OUTPUT mode" via printk and
+        //                  refuses to touch the pad.
+        //   3. SET_LEVEL or SET_CONFIG — actually write the value.
+        //
+        // This applies on EVERY transition (mode change OR re-enabling after a
+        // DISABLE). The kernel module symbol table confirms it uses standard
+        // gpiod_* APIs (devm_gpio_request_one, gpiod_direction_output_raw,
+        // gpiod_set_raw_value, hrtimer_*, pinctrl_select_state) — see
+        // AGENTS.md for the full forensic write-up.
+
         if (cfg.pwm_enabled) {
-            // PWM mode: set mode then push the period/duty derived from the
-            // configured pwmFrequencyHz. The kernel hrtimer accepts nanosecond
-            // values directly.
+            // PWM path. NOTE: empirically the kernel module accepts every
+            // PWM ioctl (SET_MODE+ENABLE+SET_CONFIG) and GET_CONFIG echoes
+            // back the period/duty we wrote — but on stock Debian with the
+            // out-of-tree pwm_gpio.ko we observed no physical dimming of a
+            // load on any DC port at any duty cycle. The kernel module
+            // imports hrtimer_* symbols, so it *can* PWM in principle; on
+            // ZWO's own ASIair OS the zwoair_imager / zwoair_guider daemons
+            // presumably engage some additional setup we haven't identified
+            // (possibly via pinctrl_select_state to mux the pad to a PWM
+            // controller). We send the documented sequence anyway so that
+            // (a) anyone who reverse-engineers the missing piece can wire
+            // it up without changing the driver, and (b) if ZWO ships a
+            // future kernel that fixes it, this just starts working.
+            // Until then, ASCOM clients see the config persisted and the
+            // value reported but the gear stays at full brightness.
             work_mode_t mode{};
             mode.index = kernel_idx;
             mode.mode = PWM_GPIO_MODE_PWM;
@@ -252,6 +284,14 @@ private:
                 const int err = errno;
                 throw AlpacaException(
                     "PWM_GPIO_SET_MODE(PWM) failed on kernel index " +
+                        std::to_string(kernel_idx) + ": " + strerror_safe(err),
+                    AlpacaError::DriverException);
+            }
+            int enable_arg = kernel_idx;
+            if (::ioctl(fd_, PWM_GPIO_ENABLE, &enable_arg) != 0) {
+                const int err = errno;
+                throw AlpacaException(
+                    "PWM_GPIO_ENABLE failed on kernel index " +
                         std::to_string(kernel_idx) + ": " + strerror_safe(err),
                     AlpacaError::DriverException);
             }
@@ -270,7 +310,14 @@ private:
                     AlpacaError::DriverException);
             }
         } else {
-            // Boolean mode: ensure the port is in GPIO mode, then set level.
+            // Boolean GPIO path. Confirmed working end-to-end after adding
+            // ENABLE: physically toggling a 12V load (verified with a flat
+            // panel on DC port 2 / kernel index 5) produces the expected
+            // on/off transition. Active-high: SET_LEVEL(1) drives the pad
+            // HIGH which powers the gear, SET_LEVEL(0) drives LOW which
+            // cuts power. Kernel-side direction visible in
+            // /sys/kernel/debug/gpio flips from "in hi" to "out hi"/"out lo"
+            // after the ENABLE call lands.
             work_mode_t mode{};
             mode.index = kernel_idx;
             mode.mode = PWM_GPIO_MODE_GPIO;
@@ -278,6 +325,14 @@ private:
                 const int err = errno;
                 throw AlpacaException(
                     "PWM_GPIO_SET_MODE(GPIO) failed on kernel index " +
+                        std::to_string(kernel_idx) + ": " + strerror_safe(err),
+                    AlpacaError::DriverException);
+            }
+            int enable_arg = kernel_idx;
+            if (::ioctl(fd_, PWM_GPIO_ENABLE, &enable_arg) != 0) {
+                const int err = errno;
+                throw AlpacaException(
+                    "PWM_GPIO_ENABLE failed on kernel index " +
                         std::to_string(kernel_idx) + ": " + strerror_safe(err),
                     AlpacaError::DriverException);
             }

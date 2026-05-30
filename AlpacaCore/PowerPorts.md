@@ -163,7 +163,9 @@ Not supported. The stock `zwoair_imager` claims the GPIO via `pigpiod`, and Alpa
 
 ## ZWO ASIair Plus (Rockchip RK3568)
 
-Four 12V DC outputs controlled through ZWO's custom `pwm_gpio.ko` kernel module, which registers a misc-device character node at `/dev/pwm-gpio-misc` and exposes per-port boolean and **hardware** PWM (via Linux hrtimer) through a small set of ioctls. This is fundamentally different from the Pi 4 ASIair Pro — there is no `gpiochip` involved on the user-facing side, and PWM is kernel-side hrtimer rather than userspace soft-PWM.
+Four 12V DC outputs controlled through ZWO's custom `pwm_gpio.ko` kernel module, which registers a misc-device character node at `/dev/pwm-gpio-misc` and exposes per-port boolean and PWM control through a small set of ioctls. This is fundamentally different from the Pi 4 ASIair Pro — there is no `gpiochip` involved on the user-facing side.
+
+> **Limitation: PWM dimming is not yet functional on stock Debian.** The boolean on/off path is fully working (verified end-to-end with a 12V flat-panel load on Port 2: the AlpacaBridge driver toggles the port via `SET_MODE(GPIO) + ENABLE + SET_LEVEL`, the gear physically powers on and off as expected). The PWM path is implemented and the kernel module accepts every `SET_MODE(PWM) + ENABLE + SET_CONFIG` call without error (reading the config back via `GET_CONFIG` echoes the exact period/duty we wrote), **but the load shows no visible duty-cycle response at any frequency** on a stock Debian 13 install with the original `pwm_gpio.ko`. The kernel module's hrtimer-driven toggle path appears to need additional setup that ZWO's own ASIair OS daemons perform — we've not yet identified the missing piece. PWM-enabled ports therefore behave as **always-on** until this is resolved. Tick the PWM checkbox in the UI only if you're OK with that for now — boolean ports work perfectly and cover the common case (cameras, mounts, focusers).
 
 | Port label | Kernel ioctl index | Default mode |
 |----|----|----|
