@@ -24,10 +24,12 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -165,22 +167,60 @@ public:
             throw;
         }
         open_ = true;
+
+        // Soft-PWM workers: spawn one thread per pwm_enabled port. Each
+        // thread runs pwm_loop() which (a) initializes the kernel-side port
+        // for GPIO output on its first iteration, (b) drives SET_LEVEL at
+        // the configured frequency with the requested duty cycle, and
+        // (c) idles cheaply when the duty is 0 or 100. The thread will
+        // briefly contend on mutex_ to issue each ioctl — the constructor
+        // exits this critical section before the thread can acquire it,
+        // so there's no startup deadlock. Boolean ports get no thread;
+        // their writes still go through apply_port_locked() synchronously
+        // from set_value().
+        for (std::size_t i = 0; i < ports_.size(); ++i) {
+            if (!ports_[i].pwm_enabled) {
+                continue;
+            }
+            port_states_[i]->stop_pwm.store(false);
+            port_states_[i]->pwm_thread =
+                std::thread(&Impl::pwm_loop, this, i);
+        }
     }
 
     void close() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!open_) {
-            return;
+        // Phase 1 (under mutex_): mark closed and signal all PWM workers to
+        // exit. We cannot join() while holding mutex_ because each worker
+        // also acquires mutex_ during its ioctl writes — joining under the
+        // mutex would deadlock against any worker currently waiting on it.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!open_) {
+                return;
+            }
+            open_ = false;
+            for (auto& state : port_states_) {
+                state->stop_pwm.store(true, std::memory_order_release);
+            }
         }
-        // Mirror the ASIair Pro disconnect policy: leave each port in its
-        // last-set state. The kernel module retains the per-port mode +
-        // level across file-descriptor opens, so simply releasing our fd
-        // does not power-cycle any port.
+
+        // Phase 2 (no mutex held): wait for every worker to wind down. Each
+        // worker checks stop_pwm at the top of every cycle, so the maximum
+        // delay is one PWM period plus one idle-sleep interval (20 ms for
+        // static-value ports). At 1 kHz that's ~21 ms per port.
+        for (auto& state : port_states_) {
+            if (state->pwm_thread.joinable()) {
+                state->pwm_thread.join();
+            }
+        }
+
+        // Phase 3 (under mutex_ again): close the fd now that no worker can
+        // touch it.
+        std::lock_guard<std::mutex> lock(mutex_);
         if (fd_ >= 0) {
             ::close(fd_);
             fd_ = -1;
         }
-        open_ = false;
     }
 
     bool is_open() const {
@@ -214,13 +254,32 @@ public:
                                       AlpacaError::InvalidValue);
             }
         }
+
+        if (cfg.pwm_enabled) {
+            // PWM port: hand off to the worker thread by updating the
+            // atomic. The worker reads this on every cycle and adjusts the
+            // duty (or switches to static-on / static-off for 100 / 0).
+            // We still check open_ so the caller gets the same
+            // NotConnected error they'd get from a boolean path.
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!open_) {
+                    throw AlpacaException("ASIair Plus device is not open",
+                                          AlpacaError::NotConnected);
+                }
+            }
+            port_states_[index]->value.store(value, std::memory_order_release);
+            return;
+        }
+
+        // Boolean port: synchronous SET_MODE + ENABLE + SET_LEVEL.
         std::lock_guard<std::mutex> lock(mutex_);
         if (!open_) {
             throw AlpacaException("ASIair Plus device is not open",
                                   AlpacaError::NotConnected);
         }
         apply_port_locked(index, value);
-        port_states_[index]->value.store(value);
+        port_states_[index]->value.store(value, std::memory_order_release);
     }
 
     std::string device_path() const { return device_path_; }
@@ -228,8 +287,122 @@ public:
 
 private:
     struct PortState {
+        // Desired value, written by set_value(), read by the PWM thread (and
+        // by get_value() over the public API). 0..1 for boolean ports, 0..100
+        // for PWM ports.
         std::atomic<int> value{0};
+
+        // Stop signal for the PWM worker thread. Set by close()/destructor;
+        // checked by pwm_loop() at every iteration.
+        std::atomic<bool> stop_pwm{false};
+
+        // The PWM worker thread. Joinable only while the port is connected
+        // AND the port is pwm_enabled. Boolean ports never start one.
+        std::thread pwm_thread;
     };
+
+    // Soft-PWM worker loop. Runs for the entire connected lifetime of a
+    // pwm_enabled port. Bypasses the kernel module's broken PWM mode and
+    // generates the duty cycle in userspace using SET_LEVEL ioctls — the
+    // same approach the kernel module's own hrtimer callback would have
+    // taken if we could trigger it. Reads the desired duty from
+    // port_states_[index]->value on every cycle so set_value() updates take
+    // effect immediately without any signalling.
+    void pwm_loop(std::size_t index) {
+        using clock_t = std::chrono::steady_clock;
+        const int kernel_idx = kernel_index_for(index);
+        auto& state = *port_states_[index];
+
+        // Period of one PWM cycle. Constant for the lifetime of this thread
+        // (the wrapper takes pwm_frequency_hz_ at construction and doesn't
+        // mutate it).
+        const auto period_ns = std::chrono::nanoseconds(
+            1000000000ULL / static_cast<unsigned long long>(pwm_frequency_hz_));
+
+        // Track whether the kernel-side port has had its initial SET_MODE +
+        // ENABLE pair sent. We only need to do that once per connect — every
+        // subsequent SET_LEVEL works without re-sending mode/enable. Doing
+        // them on every toggle would triple the ioctl count and add jitter.
+        bool initialized = false;
+
+        // Last logical level we wrote (true = panel ON, false = OFF). Used to
+        // skip redundant ioctls while value sits at a static endpoint (0 or
+        // 100) and to keep our cache consistent with the pad state.
+        int last_level = -1;  // -1 = not yet written
+
+        // Acquire-mutex helper that handles fd validity + initial setup.
+        // Returns false if the wrapper has been closed (then the thread
+        // should exit). Holds mutex_ only across the ioctl(s) — never during
+        // sleeps.
+        auto write_level_locked = [&](bool logical_on) -> bool {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!open_ || fd_ < 0) {
+                return false;
+            }
+            if (!initialized) {
+                work_mode_t mode{};
+                mode.index = kernel_idx;
+                mode.mode = PWM_GPIO_MODE_GPIO;
+                if (::ioctl(fd_, PWM_GPIO_SET_MODE, &mode) != 0) {
+                    return false;
+                }
+                int enable_arg = kernel_idx;
+                if (::ioctl(fd_, PWM_GPIO_ENABLE, &enable_arg) != 0) {
+                    return false;
+                }
+                initialized = true;
+            }
+            gpio_level_t lvl{};
+            lvl.index = kernel_idx;
+            // Polarity inverted (see apply_port_locked for the long story).
+            lvl.level = logical_on ? 0 : 1;
+            return ::ioctl(fd_, PWM_GPIO_SET_LEVEL, &lvl) == 0;
+        };
+
+        while (!state.stop_pwm.load(std::memory_order_acquire)) {
+            int duty = state.value.load(std::memory_order_acquire);
+            if (duty < 0) duty = 0;
+            if (duty > 100) duty = 100;
+
+            if (duty == 0) {
+                if (last_level != 0) {
+                    if (!write_level_locked(false)) break;
+                    last_level = 0;
+                }
+                // Idle poll: re-check value periodically without burning CPU.
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                continue;
+            }
+            if (duty == 100) {
+                if (last_level != 1) {
+                    if (!write_level_locked(true)) break;
+                    last_level = 1;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                continue;
+            }
+
+            // 0 < duty < 100: active PWM cycle.
+            const auto on_ns =
+                std::chrono::nanoseconds(period_ns.count() * duty / 100);
+            const auto off_ns = period_ns - on_ns;
+
+            // Use absolute wakeup targets (`sleep_until`) instead of
+            // `sleep_for` so timing skew from ioctl latency doesn't drift
+            // the duty cycle over many cycles.
+            const auto t_on_end = clock_t::now() + on_ns;
+            if (!write_level_locked(true)) break;
+            last_level = 1;
+            std::this_thread::sleep_until(t_on_end);
+
+            if (state.stop_pwm.load(std::memory_order_acquire)) break;
+
+            const auto t_cycle_end = t_on_end + off_ns;
+            if (!write_level_locked(false)) break;
+            last_level = 0;
+            std::this_thread::sleep_until(t_cycle_end);
+        }
+    }
 
     void validate_index(std::size_t index) const {
         if (index >= ports_.size()) {
