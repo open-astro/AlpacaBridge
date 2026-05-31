@@ -1,5 +1,5 @@
 // AlpacaCore
-// Copyright (c) 2025 Joey Troy and contributors
+// Copyright (c) 2025-2026 Joey Troy and contributors
 //
 // This file is part of AlpacaCore.
 //
