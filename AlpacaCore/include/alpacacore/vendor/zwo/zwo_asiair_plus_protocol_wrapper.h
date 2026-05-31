@@ -34,9 +34,17 @@ struct AsiairPlusPortConfig {
 // indices 4, 5, 6, 7. We expose them as wrapper indices 0..3 so the driver
 // layer has a consistent surface across ASIair Pro and ASIair Plus.
 //
-// Master enable (kernel index 3) is driven HIGH on open() so the per-port
-// switches downstream can deliver voltage. On close() we leave each port in
-// its last-set state — mirroring the Pi-4 ASIair Pro disconnect policy.
+// open() is **read-only**: it opens /dev/pwm-gpio-misc and writes no
+// kernel-side state. The first ioctl write happens lazily on the user's
+// first SetSwitch / SetSwitchValue call. Earlier revisions of this wrapper
+// drove kernel index 3 (master enable) at open(); both polarities caused
+// every DC port to physically drop to 0 V on every ASCOM connect, because
+// the kernel module's master-enable semantics are non-obvious and any
+// init-time write also collides with whatever state the previous client
+// (or stock ZWO daemon) left behind. The accepted policy is therefore:
+// open() observes nothing, writes nothing; close() leaves each port in
+// its last-set state — same disconnect policy as the Pi 4 ASIair Pro
+// driver, but with a strict read-only connect contract on top.
 class AsiairPlusProtocolWrapper {
 public:
     AsiairPlusProtocolWrapper(std::string device_path,
