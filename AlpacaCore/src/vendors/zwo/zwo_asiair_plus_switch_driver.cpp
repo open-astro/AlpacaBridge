@@ -34,23 +34,45 @@ constexpr const char* kLogCategory = "ZWO_ASIAIR_PLUS";
 AsiairPlusSwitchConfig default_asiair_plus_rk3568_config() {
     AsiairPlusSwitchConfig cfg;
     cfg.device_path = "/dev/pwm-gpio-misc";
-    // Userspace soft-PWM frequency. 1 kHz is the highest frequency that
-    // Linux `nanosleep`/`sleep_until` can hold accurately on the RK3568
-    // without burning a CPU core in a busy-wait loop. We attempted 20 kHz
-    // (above audible range) but the scheduler couldn't deliver 50 µs
-    // intervals — wakeups arrived 50–100 µs late, which collapsed the
-    // duty cycle (a requested 90% looked like 10–20% on a real load) and
-    // dropped the effective switching frequency to ~50–100 Hz, producing
-    // visible flicker. So we trade audible whine (LED panels and dew
-    // heaters do buzz at 1 kHz) for accurate dimming. In typical
-    // observatory use the device sits with the gear and any whine is
-    // drowned out by mount slewing, fans, and ambient outdoor noise.
+    // Userspace soft-PWM frequency. Empirically tuned on real hardware
+    // sweeping 80 Hz to 20 kHz against a USB-powered LED tracing pad
+    // plugged into DC port 2. 200 Hz is the chosen default — see the
+    // detailed reasoning below.
     //
-    // Power users who want silent PWM can override via the
-    // pwmFrequencyHz field in registered_devices.json; values 8–20 kHz
-    // work if the wrapper is enhanced with a hybrid sleep+spin loop
-    // (the spin burns one CPU core but stays cycle-accurate).
-    cfg.pwm_frequency_hz = 1000;
+    // Frequency sweep results (lower = quieter, but watch the load):
+    //   1 kHz – 20 kHz  – Audible whine from the ASIair Plus's own
+    //                     MOSFET driver. Human ear sensitivity peaks at
+    //                     2–4 kHz so this band is the worst for
+    //                     perceived loudness. 20 kHz also breaks duty
+    //                     accuracy on stock Linux nanosleep (50 µs
+    //                     phases are below scheduler precision).
+    //   500 Hz          – Noticeably quieter than 1 kHz, no flicker.
+    //   200 Hz          – Quieter still, no flicker, stable across
+    //                     every retest. CHOSEN DEFAULT.
+    //   100 Hz          – Sometimes quieter, sometimes shows slight
+    //                     flicker depending on scheduler load.
+    //    80–60 Hz       – Cascaded-PWM interference and load instability
+    //                     (see next paragraph).
+    //
+    // Important caveat documented for future-you: the load we tested
+    // against was an HSK A4 LED tracing pad, which has its OWN internal
+    // touch-dimming PWM controller. Our PWM cascaded onto the pad's
+    // internal PWM produced interference patterns that drove the
+    // flicker thresholds higher than they would be for a passive LED
+    // panel. Real ASCOM CoverCalibrator-style flat panels (passive LED,
+    // no internal MCU — Geoptik, Lacerta, EvoStar EFLAT, etc.) should
+    // tolerate this PWM cleanly. Don't re-tune the default downward
+    // just because someone reports flicker at 200 Hz unless you've
+    // verified the load doesn't have its own switching circuit.
+    //
+    // Hardware constraint: the RK3568 has 16 hardware PWM peripherals
+    // (pwm0..pwm15) but NONE of them have pinctrl entries for the
+    // airplus-gpios pins on GPIO bank 4 (GPIO4_C2/C3/C5/C6). So
+    // hardware PWM is not an option on this board — software PWM via
+    // the kernel module ioctl is the only path. ZWO's own stock daemon
+    // takes the same approach (confirmed from the extracted
+    // zwoair_imager binary).
+    cfg.pwm_frequency_hz = 200;
     cfg.ports = {
         {"Port 1", false},
         {"Port 2", false},
