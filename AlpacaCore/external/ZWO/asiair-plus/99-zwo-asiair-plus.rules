@@ -1,0 +1,12 @@
+# /etc/udev/rules.d/99-zwo-asiair-plus.rules
+#
+# Grant read/write access to ZWO ASIair Plus (RK3568) power-control device
+# to members of the gpio group. The stock /dev/pwm-gpio-misc node is created
+# by ZWO's pwm_gpio.ko kernel module with root-only permissions; this rule
+# relaxes those so the AlpacaBridge daemon (running as an unprivileged
+# system user) can drive the four 12V DC ports without root.
+#
+# After this rule lands, add the AlpacaBridge user to the gpio group:
+#   sudo usermod -aG gpio <user>
+# Log out and back in (or run `newgrp gpio`) for membership to take effect.
+KERNEL=="pwm-gpio-misc", MODE="0660", GROUP="gpio"

@@ -34,6 +34,7 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_rotator.cpp)
     list(APPEND TEST_SOURCES test_zwo_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_asiair_switch.cpp)
+    list(APPEND TEST_SOURCES test_zwo_asiair_plus_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_telescope.cpp)
 endif()
 

@@ -58,6 +58,7 @@
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
+#include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
@@ -6648,12 +6649,45 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #ifdef ALPACACORE_ENABLE_ZWO
         std::string switch_type = config.value("switchType", "dewheater");
         switch_type = to_lower_copy(switch_type);
-        if (switch_type != "dewheater" && switch_type != "asiair") {
-            error_message = "ZWO switchType must be 'dewheater' or 'asiair'";
+        if (switch_type != "dewheater" && switch_type != "asiair" &&
+            switch_type != "asiair-plus-rk3568") {
+            error_message =
+                "ZWO switchType must be 'dewheater', 'asiair', or 'asiair-plus-rk3568'";
             return false;
         }
 
         std::unique_ptr<alpacacore::SwitchDriver> sw;
+
+        if (switch_type == "asiair-plus-rk3568") {
+            auto plus_config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+            plus_config.device_path =
+                config.value("devicePath", plus_config.device_path);
+            plus_config.pwm_frequency_hz =
+                config.value("pwmFrequencyHz", plus_config.pwm_frequency_hz);
+            if (config.contains("ports") && config["ports"].is_array() &&
+                !config["ports"].empty()) {
+                std::vector<alpacacore::vendor::zwo::AsiairPlusPortConfig> ports;
+                ports.reserve(config["ports"].size());
+                for (const auto& p : config["ports"]) {
+                    alpacacore::vendor::zwo::AsiairPlusPortConfig pc;
+                    pc.name = p.value("name",
+                                      std::string("Port ") + std::to_string(ports.size() + 1));
+                    pc.pwm_enabled = p.value("pwm", false);
+                    ports.push_back(std::move(pc));
+                }
+                plus_config.ports = std::move(ports);
+            }
+            sw = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(device_number,
+                                                                       plus_config);
+
+            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+                util::log_info("Registered ZWO ASIair Plus (RK3568) switch");
+                return true;
+            }
+
+            error_message = "Failed to register device. Device may already exist.";
+            return false;
+        }
 
         if (switch_type == "asiair") {
             auto asiair_config = alpacacore::vendor::zwo::default_asiair_pro_config();
@@ -6952,6 +6986,21 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
         copy_if_present("switchType");
+        // ASIair Pro (Pi 4, libgpiod) and ASIair Plus (RK3568, pwm_gpio.ko)
+        // both persist per-port configuration. Without these the user's
+        // PWM-mode toggles and channel renames silently revert after save
+        // because sanitize_device_config strips anything not allowlisted.
+        const std::string switch_type = config.value("switchType", "");
+        if (switch_type == "asiair" || switch_type == "asiair-plus-rk3568") {
+            copy_if_present("pwmFrequencyHz");
+            copy_if_present("ports");
+        }
+        if (switch_type == "asiair") {
+            copy_if_present("gpioChip");
+        }
+        if (switch_type == "asiair-plus-rk3568") {
+            copy_if_present("devicePath");
+        }
         copy_if_present("filterwheelIndex");
         copy_if_present("filterwheelId");
         copy_if_present("filterNames");
