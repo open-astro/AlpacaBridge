@@ -25,7 +25,7 @@ namespace alpacacore::vendor::zwo {
 
 struct AsiairPlusSwitchConfig {
     std::string device_path = "/dev/pwm-gpio-misc";
-    std::uint32_t pwm_frequency_hz = 1000;
+    std::uint32_t pwm_frequency_hz = 50;
     std::vector<AsiairPlusPortConfig> ports;
 };
 

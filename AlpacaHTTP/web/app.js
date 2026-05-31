@@ -734,9 +734,9 @@ function startEditDevice(device) {
             setFormValue('asiair-plus-device-path', config.devicePath);
         }
         // pwmFrequencyHz was previously surfaced here as a user-editable
-        // field. It's now auto-managed by the wrapper (defaults to 200 Hz,
-        // empirically tuned as the quietest stable point on real hardware
-        // — see the comment block in default_asiair_plus_rk3568_config())
+        // field. It's now auto-managed by the wrapper (defaults to 50 Hz,
+        // matching what ZWO's stock zwoair_imager daemon actually uses —
+        // see the comment block in default_asiair_plus_rk3568_config())
         // and intentionally not shown in the UI. The persisted value, if
         // any, is still passed through by the router so power users can
         // set it via direct JSON edits.
@@ -2175,10 +2175,10 @@ document.getElementById('device-form').addEventListener('submit', async function
                     deviceData.devicePath = devicePath;
                 }
                 // pwmFrequencyHz is no longer collected from the form — the
-                // driver auto-sets it to 200 Hz (the quietest stable point
-                // on real hardware) for soft-PWM. Any value already in the
-                // persisted config still takes effect via the router, but
-                // the UI doesn't surface it.
+                // driver auto-sets it to 50 Hz (matching what ZWO's stock
+                // daemon actually uses) for soft-PWM. Any value already in
+                // the persisted config still takes effect via the router,
+                // but the UI doesn't surface it.
                 const plusPorts = [];
                 for (let i = 0; i < 4; i += 1) {
                     const name = formData.get('asiairPlusPortName' + i);
