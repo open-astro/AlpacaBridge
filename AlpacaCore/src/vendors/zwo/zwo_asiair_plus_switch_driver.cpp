@@ -99,13 +99,13 @@ public:
             wrapper_.close();
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(kLogCategory,
-                            std::string("Error during ASIair Plus switch destruction: ") + e.what());
+                            std::string("Error during ASIAIR Plus switch destruction: ") + e.what());
         }
     }
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "ZWO ASIair Plus Switch (RK3568)"; }
+    std::string get_name() const override { return "ZWO ASIAIR Plus Switch (RK3568)"; }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
@@ -114,11 +114,11 @@ public:
     }
 
     std::string get_description() const override {
-        return "ZWO ASIair Plus (RK3568) 12V power switch (" + config_.device_path + ")";
+        return "ZWO ASIAIR Plus (RK3568) 12V power switch (" + config_.device_path + ")";
     }
 
     std::string get_driver_info() const override {
-        return "AlpacaCore ZWO ASIair Plus Switch";
+        return "AlpacaCore ZWO ASIAIR Plus Switch";
     }
 
     std::string get_driver_version() const override { return "1.0.0"; }
@@ -261,7 +261,7 @@ public:
         validate_id(id);
         const auto& p = config_.ports[static_cast<std::size_t>(id)];
         const std::string mode = p.pwm_enabled ? "PWM 0-100%" : "on/off";
-        return "ASIair Plus DC port " + std::to_string(id + 1) + " (" + mode + ")";
+        return "ASIAIR Plus DC port " + std::to_string(id + 1) + " (" + mode + ")";
     }
 
     double get_min_switch_value(int id) const override {
@@ -282,7 +282,7 @@ public:
 private:
     void ensure_connected() const {
         if (!wrapper_.is_open()) {
-            throw AlpacaException("ASIair Plus switch not connected", AlpacaError::NotConnected);
+            throw AlpacaException("ASIAIR Plus switch not connected", AlpacaError::NotConnected);
         }
     }
 
@@ -312,7 +312,7 @@ private:
                 set_connected(connect);
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR(kLogCategory,
-                                 std::string("ASIair Plus connection task failed: ") + e.what());
+                                 std::string("ASIAIR Plus connection task failed: ") + e.what());
             }
             connecting_.store(false);
         });

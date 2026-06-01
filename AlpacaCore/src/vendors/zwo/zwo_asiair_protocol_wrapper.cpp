@@ -67,10 +67,10 @@ public:
         , open_(false)
     {
         if (ports_.empty()) {
-            throw AlpacaException("ASIair port configuration is empty", AlpacaError::InvalidValue);
+            throw AlpacaException("ASIAIR port configuration is empty", AlpacaError::InvalidValue);
         }
         if (pwm_frequency_hz_ == 0 || pwm_frequency_hz_ > 100000) {
-            throw AlpacaException("ASIair PWM frequency out of supported range (1..100000 Hz)",
+            throw AlpacaException("ASIAIR PWM frequency out of supported range (1..100000 Hz)",
                                   AlpacaError::InvalidValue);
         }
         port_states_.reserve(ports_.size());
@@ -87,7 +87,7 @@ public:
             close();
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(kLogCategory,
-                            std::string("Error during ASIair wrapper destruction: ") + e.what());
+                            std::string("Error during ASIAIR wrapper destruction: ") + e.what());
         }
     }
 
@@ -302,7 +302,7 @@ private:
                 if (::gpiod_line_request_set_value(request, offset, v) != 0) {
                     const int err = errno;
                     ALPACA_LOG_ERROR(kLogCategory,
-                                     "ASIair PWM worker: gpiod_line_request_set_value failed on GPIO " +
+                                     "ASIAIR PWM worker: gpiod_line_request_set_value failed on GPIO " +
                                          std::to_string(offset) + ": " + strerror_safe(err) +
                                          "; aborting worker thread");
                     stop->store(true);
@@ -331,7 +331,7 @@ private:
                 if (::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_ACTIVE) != 0) {
                     const int err = errno;
                     ALPACA_LOG_ERROR(kLogCategory,
-                                     "ASIair PWM worker: gpiod_line_request_set_value(ACTIVE) failed on GPIO " +
+                                     "ASIAIR PWM worker: gpiod_line_request_set_value(ACTIVE) failed on GPIO " +
                                          std::to_string(offset) + ": " + strerror_safe(err) +
                                          "; aborting worker thread");
                     stop->store(true);
@@ -344,7 +344,7 @@ private:
                 if (::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_INACTIVE) != 0) {
                     const int err = errno;
                     ALPACA_LOG_ERROR(kLogCategory,
-                                     "ASIair PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
+                                     "ASIAIR PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
                                          std::to_string(offset) + ": " + strerror_safe(err) +
                                          "; aborting worker thread");
                     stop->store(true);

@@ -701,7 +701,8 @@ function startEditDevice(device) {
     // Populate the ASIair Pro Switch per-port table from the saved config.
     // When the saved device omits ports/gpioChip/pwmFrequencyHz (one-click
     // default flow), the HTML's pre-filled defaults remain in place.
-    if (vendor === 'zwo' && config.switchType === 'asiair') {
+    if (vendor === 'zwo' &&
+        (config.switchType === 'asiair' || config.switchType === 'asiair-plus-picm4')) {
         if (config.gpioChip !== undefined && config.gpioChip !== null) {
             setFormValue('asiair-gpio-chip', config.gpioChip);
         }
@@ -1974,7 +1975,8 @@ function updateZwoConfigFields() {
 
     const switchTypeSelect = document.getElementById('zwo-switch-type');
     const switchTypeValue = switchTypeSelect ? switchTypeSelect.value : 'dewheater';
-    const isAsiairSwitch = isSwitch && switchTypeValue === 'asiair';
+    const isAsiairSwitch = isSwitch &&
+        (switchTypeValue === 'asiair' || switchTypeValue === 'asiair-plus-picm4');
     const isAsiairPlusSwitch = isSwitch && switchTypeValue === 'asiair-plus-rk3568';
     const showCameraFields = isCamera || (isSwitch && !isAsiairSwitch && !isAsiairPlusSwitch);
     if (cameraFields) {
@@ -2143,7 +2145,8 @@ document.getElementById('device-form').addEventListener('submit', async function
             if (switchType) {
                 deviceData.switchType = switchType;
             }
-            if (deviceData.vendor === 'zwo' && switchType === 'asiair') {
+            if (deviceData.vendor === 'zwo' &&
+                (switchType === 'asiair' || switchType === 'asiair-plus-picm4')) {
                 const gpioChip = formData.get('asiairGpioChip');
                 if (gpioChip) {
                     deviceData.gpioChip = gpioChip;

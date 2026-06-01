@@ -26,13 +26,13 @@ struct AsiairPlusPortConfig {
     bool pwm_enabled;
 };
 
-// Protocol wrapper for the ZWO ASIair Plus (Rockchip RK3568 variant).
+// Protocol wrapper for the ZWO ASIAIR Plus (Rockchip RK3568 variant).
 //
-// The ASIair Plus ships with a custom ZWO kernel module (pwm_gpio.ko) that
+// The ASIAIR Plus ships with a custom ZWO kernel module (pwm_gpio.ko) that
 // owns the device tree's "airplus-gpios" node and registers a misc device
 // at /dev/pwm-gpio-misc. The four 12V DC power ports are at kernel ioctl
 // indices 4, 5, 6, 7. We expose them as wrapper indices 0..3 so the driver
-// layer has a consistent surface across ASIair Pro and ASIair Plus.
+// layer has a consistent surface across ASIAIR Pro and ASIAIR Plus.
 //
 // open() is **read-only**: it opens /dev/pwm-gpio-misc and writes no
 // kernel-side state. The first ioctl write happens lazily on the user's
@@ -43,7 +43,7 @@ struct AsiairPlusPortConfig {
 // init-time write also collides with whatever state the previous client
 // (or stock ZWO daemon) left behind. The accepted policy is therefore:
 // open() observes nothing, writes nothing; close() leaves each port in
-// its last-set state — same disconnect policy as the Pi 4 ASIair Pro
+// its last-set state — same disconnect policy as the Pi 4 ASIAIR Pro
 // driver, but with a strict read-only connect contract on top.
 class AsiairPlusProtocolWrapper {
 public:

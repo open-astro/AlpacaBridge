@@ -29,7 +29,7 @@ struct AsiairPlusSwitchConfig {
     std::vector<AsiairPlusPortConfig> ports;
 };
 
-// Returns the default ASIair Plus RK3568 layout: 4 boolean ports labelled
+// Returns the default ASIAIR Plus RK3568 layout: 4 boolean ports labelled
 // "Port 1".."Port 4", PWM frequency 1000 Hz, opening /dev/pwm-gpio-misc.
 // The four wrapper indices (0..3) map internally to the kernel module's
 // DC-port ioctl indices (4..7).
