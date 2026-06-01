@@ -363,10 +363,11 @@
                         <label for="zwo-switch-type">Switch Type:</label>
                         <select id="zwo-switch-type" name="switchType">
                             <option value="dewheater">Dew Heater (Camera-attached)</option>
-                            <option value="asiair">ASIair Pro 12V Power Switch</option>
-                            <option value="asiair-plus-rk3568">ASIair Plus 12V Power Switch (RK3568)</option>
+                            <option value="asiair">ASIAIR Pro 12V Power Switch</option>
+                            <option value="asiair-plus-picm4">ASIAIR Plus 12V Power Switch (Pi CM4)</option>
+                            <option value="asiair-plus-rk3568">ASIAIR Plus 12V Power Switch (RK3568)</option>
                         </select>
-                        <small>Dew Heater uses a ZWO camera's built-in anti-dew heater. ASIair Pro controls the four 12V DC ports via on-board libgpiod (Pi 4 hardware). ASIair Plus (RK3568) controls them via ZWO's pwm_gpio kernel module (Rockchip hardware).</small>
+                        <small>Dew Heater uses a ZWO camera's built-in anti-dew heater. ASIAIR Pro and ASIAIR Plus (Pi CM4) both control the four 12V DC ports via on-board libgpiod (Raspberry Pi hardware, GPIO 12/13/26/18) &mdash; pick either; they share the same driver and defaults. ASIAIR Plus (RK3568) controls them via ZWO's pwm_gpio kernel module (Rockchip hardware).</small>
                     </div>
 
                     <div id="zwo-asiair-fields" style="display: none;">

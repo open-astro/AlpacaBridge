@@ -64,13 +64,13 @@ public:
             wrapper_.close();
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(kLogCategory,
-                            std::string("Error during ASIair switch destruction: ") + e.what());
+                            std::string("Error during ASIAIR switch destruction: ") + e.what());
         }
     }
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "ZWO ASIair Pro Switch"; }
+    std::string get_name() const override { return "ZWO ASIAIR Pro Switch"; }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
@@ -79,11 +79,11 @@ public:
     }
 
     std::string get_description() const override {
-        return "ZWO ASIair Pro 12V power switch (" + config_.gpio_chip_path + ")";
+        return "ZWO ASIAIR Pro 12V power switch (" + config_.gpio_chip_path + ")";
     }
 
     std::string get_driver_info() const override {
-        return "AlpacaCore ZWO ASIair Pro Switch";
+        return "AlpacaCore ZWO ASIAIR Pro Switch";
     }
 
     std::string get_driver_version() const override { return "1.0.0"; }
@@ -226,7 +226,7 @@ public:
         validate_id(id);
         const auto& p = config_.ports[static_cast<std::size_t>(id)];
         const std::string mode = p.pwm_enabled ? "PWM 0-100%" : "on/off";
-        return "ASIair power port on GPIO " + std::to_string(p.gpio_line) + " (" + mode + ")";
+        return "ASIAIR power port on GPIO " + std::to_string(p.gpio_line) + " (" + mode + ")";
     }
 
     double get_min_switch_value(int id) const override {
@@ -247,7 +247,7 @@ public:
 private:
     void ensure_connected() const {
         if (!wrapper_.is_open()) {
-            throw AlpacaException("ASIair switch not connected", AlpacaError::NotConnected);
+            throw AlpacaException("ASIAIR switch not connected", AlpacaError::NotConnected);
         }
     }
 
@@ -277,7 +277,7 @@ private:
                 set_connected(connect);
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR(kLogCategory,
-                                 std::string("ASIair connection task failed: ") + e.what());
+                                 std::string("ASIAIR connection task failed: ") + e.what());
             }
             connecting_.store(false);
         });

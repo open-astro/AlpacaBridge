@@ -30,7 +30,7 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
 
 } // namespace
 
-TEST_CASE("ZWO ASIair Plus Switch Driver - Defaults", "[zwo][switch][asiair-plus][unit]") {
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - Defaults", "[zwo][switch][asiair-plus][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(
         0, alpacacore::vendor::zwo::default_asiair_plus_rk3568_config());
 
@@ -38,11 +38,11 @@ TEST_CASE("ZWO ASIair Plus Switch Driver - Defaults", "[zwo][switch][asiair-plus
     REQUIRE(driver->get_device_type() == alpacacore::DeviceType::Switch);
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE_FALSE(driver->get_connected());
-    REQUIRE(driver->get_name() == "ZWO ASIair Plus Switch (RK3568)");
+    REQUIRE(driver->get_name() == "ZWO ASIAIR Plus Switch (RK3568)");
     REQUIRE(driver->get_max_switch() == 4);
 }
 
-TEST_CASE("ZWO ASIair Plus Switch Driver - Device metadata",
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - Device metadata",
           "[zwo][switch][asiair-plus][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(
         3, alpacacore::vendor::zwo::default_asiair_plus_rk3568_config());
@@ -51,14 +51,14 @@ TEST_CASE("ZWO ASIair Plus Switch Driver - Device metadata",
 
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_description() ==
-          "ZWO ASIair Plus (RK3568) 12V power switch (/dev/pwm-gpio-misc)");
-    CHECK(driver->get_driver_info() == "AlpacaCore ZWO ASIair Plus Switch");
+          "ZWO ASIAIR Plus (RK3568) 12V power switch (/dev/pwm-gpio-misc)");
+    CHECK(driver->get_driver_info() == "AlpacaCore ZWO ASIAIR Plus Switch");
     CHECK(driver->get_driver_version() == "1.0.0");
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "ZWO_ASIAIR_PLUS_RK3568_3");
 }
 
-TEST_CASE("ZWO ASIair Plus Switch Driver - Not connected throws",
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - Not connected throws",
           "[zwo][switch][asiair-plus][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(
         0, alpacacore::vendor::zwo::default_asiair_plus_rk3568_config());
@@ -77,7 +77,7 @@ TEST_CASE("ZWO ASIair Plus Switch Driver - Not connected throws",
                          alpacacore::AlpacaError::NotConnected);
 }
 
-TEST_CASE("ZWO ASIair Plus Switch Driver - Unsupported actions",
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - Unsupported actions",
           "[zwo][switch][asiair-plus][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(
         0, alpacacore::vendor::zwo::default_asiair_plus_rk3568_config());
@@ -91,7 +91,7 @@ TEST_CASE("ZWO ASIair Plus Switch Driver - Unsupported actions",
     CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 }
 
-TEST_CASE("ZWO ASIair Plus Switch Driver - Per-port metadata",
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - Per-port metadata",
           "[zwo][switch][asiair-plus][unit]") {
     auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
     cfg.ports[3].pwm_enabled = true; // mark Port 4 (DC port 4) as a PWM channel
@@ -117,17 +117,17 @@ TEST_CASE("ZWO ASIair Plus Switch Driver - Per-port metadata",
     CHECK(driver->get_max_switch_value(2) == Catch::Approx(1.0));
     CHECK(driver->get_max_switch_value(3) == Catch::Approx(100.0));
 
-    CHECK(driver->get_switch_description(0) == "ASIair Plus DC port 1 (on/off)");
-    CHECK(driver->get_switch_description(1) == "ASIair Plus DC port 2 (on/off)");
-    CHECK(driver->get_switch_description(2) == "ASIair Plus DC port 3 (on/off)");
-    CHECK(driver->get_switch_description(3) == "ASIair Plus DC port 4 (PWM 0-100%)");
+    CHECK(driver->get_switch_description(0) == "ASIAIR Plus DC port 1 (on/off)");
+    CHECK(driver->get_switch_description(1) == "ASIAIR Plus DC port 2 (on/off)");
+    CHECK(driver->get_switch_description(2) == "ASIAIR Plus DC port 3 (on/off)");
+    CHECK(driver->get_switch_description(3) == "ASIAIR Plus DC port 4 (PWM 0-100%)");
 
     // User-renamed switches persist for the lifetime of the driver instance.
     driver->set_switch_name(0, "Mount Power");
     CHECK(driver->get_switch_name(0) == "Mount Power");
 }
 
-TEST_CASE("ZWO ASIair Plus Switch Driver - Switch ID range validation",
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - Switch ID range validation",
           "[zwo][switch][asiair-plus][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(
         0, alpacacore::vendor::zwo::default_asiair_plus_rk3568_config());
@@ -148,7 +148,7 @@ TEST_CASE("ZWO ASIair Plus Switch Driver - Switch ID range validation",
                          alpacacore::AlpacaError::InvalidValue);
 }
 
-TEST_CASE("ZWO ASIair Plus Switch Driver - State machine when disconnected",
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - State machine when disconnected",
           "[zwo][switch][asiair-plus][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(
         0, alpacacore::vendor::zwo::default_asiair_plus_rk3568_config());
@@ -160,7 +160,7 @@ TEST_CASE("ZWO ASIair Plus Switch Driver - State machine when disconnected",
     CHECK(driver->get_device_state().empty());
 }
 
-TEST_CASE("ZWO ASIair Plus Switch Driver - Unsupported method error codes",
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - Unsupported method error codes",
           "[zwo][switch][asiair-plus][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(
         0, alpacacore::vendor::zwo::default_asiair_plus_rk3568_config());
@@ -183,7 +183,7 @@ TEST_CASE("ZWO ASIair Plus Switch Driver - Unsupported method error codes",
                          alpacacore::AlpacaError::NotImplemented);
 }
 
-TEST_CASE("ZWO ASIair Plus Switch Driver - Constructor rejects invalid configs",
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - Constructor rejects invalid configs",
           "[zwo][switch][asiair-plus][unit]") {
     // Empty ports list rejected at construction.
     alpacacore::vendor::zwo::AsiairPlusSwitchConfig empty_cfg;

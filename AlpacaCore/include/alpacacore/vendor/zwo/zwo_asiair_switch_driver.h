@@ -29,7 +29,7 @@ struct AsiairSwitchConfig {
     std::vector<AsiairPortConfig> ports;
 };
 
-// Returns the default ASIair Pro Pi4 layout: 4 ports on /dev/gpiochip0
+// Returns the default ASIAIR Pro Pi4 layout: 4 ports on /dev/gpiochip0
 // (Port 1=GPIO12, Port 2=GPIO13, Port 3=GPIO26, Port 4=GPIO18), all boolean,
 // PWM frequency 1000 Hz.
 AsiairSwitchConfig default_asiair_pro_config();

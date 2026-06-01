@@ -25,11 +25,11 @@ namespace alpacacore::vendor::zwo {
 
 struct AsiairPlusSwitchConfig {
     std::string device_path = "/dev/pwm-gpio-misc";
-    std::uint32_t pwm_frequency_hz = 1000;
+    std::uint32_t pwm_frequency_hz = 50;
     std::vector<AsiairPlusPortConfig> ports;
 };
 
-// Returns the default ASIair Plus RK3568 layout: 4 boolean ports labelled
+// Returns the default ASIAIR Plus RK3568 layout: 4 boolean ports labelled
 // "Port 1".."Port 4", PWM frequency 1000 Hz, opening /dev/pwm-gpio-misc.
 // The four wrapper indices (0..3) map internally to the kernel module's
 // DC-port ioctl indices (4..7).

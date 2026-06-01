@@ -7,7 +7,7 @@ Pick the section that matches your hardware.
 | Controller | Status | SBC | GPIO library |
 |----|----|----|----|
 | [ZWO ASIair Pro](#zwo-asiair-pro-raspberry-pi-4) | Available | Raspberry Pi 4 (BCM2711) | libgpiod v2 |
-| [ZWO ASIair Plus (Pi CM4)](#zwo-asiair-plus-raspberry-pi-cm4) | Pending hardware | Raspberry Pi CM4 | libgpiod v2 |
+| [ZWO ASIair Plus (Pi CM4)](#zwo-asiair-plus-raspberry-pi-cm4) | Available — ConformU pending | Raspberry Pi CM4 (BCM2711) | libgpiod v2 |
 | [ZWO ASIair Plus (RK3568)](#zwo-asiair-plus-rockchip-rk3568) | Available — ConformU pending | Rockchip RK3568 | ZWO `pwm_gpio.ko` ioctl |
 | [ToupTek StellaVita](#touptek-stellavita-raspberry-pi-cm4) | Pending hardware | Raspberry Pi CM4 | TBD |
 | [iOptron iMate](#ioptron-imate) | Pending hardware | TBD | TBD |
@@ -157,7 +157,102 @@ Not supported. The stock `zwoair_imager` claims the GPIO via `pigpiod`, and Alpa
 
 ## ZWO ASIair Plus (Raspberry Pi CM4)
 
-*Pending hardware validation. The ASIair Plus uses a Pi CM4 with on-board I²C current/voltage monitoring on each port; the GPIO mapping and per-channel telemetry will be documented after first ConformU validation.*
+The CM4-based ASIair Plus is a **Raspberry Pi Compute Module 4 (BCM2711)** and drives its four 12V DC outputs through the exact same wiring as the Pi 4 ASIair Pro: GPIO 12, 13, 26, 18 on `/dev/gpiochip0` (`pinctrl-bcm2711`), active-high, default-on at boot. It therefore **reuses the existing libgpiod `asiair` driver** — there is no separate "Plus CM4" switch type. (This is the CM4 variant only; the Rockchip RK3568 ASIair Plus is a completely different controller — see the [RK3568 section](#zwo-asiair-plus-rockchip-rk3568).)
+
+> **Mapping verified on real hardware.** Against a live stock-firmware unit (Port 1 ON, Port 2 dew heater 59%, Port 3 flat panel 34%, Port 4 ON), the BCM GPIO bank read back exactly: GPIO12 static-high (Port 1), GPIO13 pigpio PWM at 59% (Port 2), GPIO26 PWM at 34% (Port 3), GPIO18 static-high (Port 4). Identical to `default_asiair_pro_config()`.
+
+| Port label | GPIO line | Default mode |
+|----|----|----|
+| Port 1 | 12 | boolean (on/off) |
+| Port 2 | 13 | boolean (on/off) |
+| Port 3 | 26 | boolean (on/off) |
+| Port 4 | 18 | boolean (on/off) |
+
+### 1. Re-image the device
+
+The factory CM4 ASIair Plus ships **32-bit Raspbian (armv7l)** (confirmed: `uname -m` reports `armv7l`, kernel `5.10.27-v7l`). AlpacaBridge is arm64-only. Flash one of:
+
+- Raspberry Pi OS (64-bit) Bookworm or Trixie, **or**
+- Debian 13 (Trixie) arm64
+
+onto the CM4's eMMC / microSD before continuing.
+
+### 2. Install runtime dependencies and add yourself to the gpio group
+
+Identical to the Pro — the CM4 Plus uses libgpiod v2:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  git build-essential cmake \
+  libgpiod3 gpiod \
+  libusb-1.0-0 libudev1 libcurl4 \
+  libgpiod-dev libusb-1.0-0-dev libudev-dev libcurl4-openssl-dev \
+  nlohmann-json3-dev catch2
+sudo usermod -aG gpio "$USER"
+```
+
+> **Runtime libs** (`libgpiod3`, `libusb-1.0-0`, `libudev1`, `libcurl4`) are what AlpacaBridge links against at runtime — required even if you install only the `.deb`. `gpiod` provides the `gpioget` / `gpioinfo` command-line tools used by the verification step below. **Dev libs** (`libgpiod-dev`, `libusb-1.0-0-dev`, `libudev-dev`, `libcurl4-openssl-dev`, `nlohmann-json3-dev`, `catch2`) and **build tools** (`git`, `build-essential`, `cmake`) are needed only when building from source on the device via `build_and_run.sh`. They are harmless on a `.deb`-only target.
+
+Log out and log back in (or reboot) so the new group membership applies. Verify with:
+
+```bash
+groups | tr ' ' '\n' | grep -x gpio
+```
+
+You should see `gpio` printed back.
+
+### 3. Optional: preserve "default-on at boot" behaviour
+
+The stock CM4 ASIair firmware turns the 12V outputs ON at boot via a kernel directive in `/boot/firmware/config.txt` (the factory line also lists extra control pins: `gpio=12,13,18,26,5,6,16,17=op,dh`). AlpacaBridge does not require this — but if you want gear plugged into the DC ports powered before the daemon starts, add the four DC-port lines:
+
+```bash
+sudo grep -q '^gpio=12,13,18,26=op,dh' /boot/firmware/config.txt \
+  || echo 'gpio=12,13,18,26=op,dh' | sudo tee -a /boot/firmware/config.txt
+```
+
+Reboot for the change to take effect. Skip this step if you want the ports to come up OFF until the driver claims them.
+
+### 4. Install AlpacaBridge
+
+Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:11111`.
+
+### 5. Add the Switch device
+
+Open `http://<your-asiair-plus-ip>:11111/` in a browser:
+
+1. **Configure** tab → **Add Device**
+2. **Device Type**: Switch
+3. **Vendor**: ZWO
+4. **Switch Type**: **ASIair Pro 12V Power Switch** — this is the libgpiod driver, and it serves both the Pi 4 Pro and the CM4 Plus. The pre-filled GPIO defaults (12/13/26/18) are already correct for the CM4 Plus; leave them as-is.
+5. **Device Number**: 0 (or any unique number)
+6. In the **Power Ports** table, tick the **PWM** checkbox on any port you'll use with a dew heater or flat panel, and rename channels to taste. Leave **GPIO chip device** and **PWM frequency** at their defaults.
+7. Submit
+
+Or `POST` the equivalent JSON to the management API:
+
+```json
+{
+  "deviceType": "switch",
+  "deviceNumber": 0,
+  "vendor": "zwo",
+  "switchType": "asiair"
+}
+```
+
+### 6. Verify
+
+Connect the device from the **Devices** tab. You should see four channels (Port 1–4). From a second SSH session, watch the live GPIO state while you toggle a port in the Web UI:
+
+```bash
+gpioget gpiochip0 12 13 26 18
+```
+
+The value of the toggled pin will flip between `inactive` and `active`.
+
+### Advanced configuration, disconnect behavior, and stock-app coexistence
+
+All identical to the Pi 4 ASIair Pro — see [Advanced configuration](#advanced-configuration), [Disconnect behavior](#disconnect-behavior--important-for-unattended-observatories), and [Coexistence with the stock ZWO app](#coexistence-with-the-stock-zwo-app) above. In short: per-port overrides use the same `gpioChip` / `pwmFrequencyHz` / `ports[]` schema; released lines keep their last-driven state (so set ports OFF in your client before disconnecting if you want a cold release); and you cannot run AlpacaBridge alongside the factory ASIair app, because the stock `zwoair_imager` claims the lines via `pigpiod` and libgpiod will fail with `EBUSY`.
 
 ---
 
@@ -256,7 +351,7 @@ For non-default deployments (e.g. you've remapped the device node), the full con
 }
 ```
 
-The driver's userspace soft-PWM accepts any value in 1–100,000 Hz, but the practical ceiling on stock Linux without busy-waiting is around 2 kHz — above that, `nanosleep`/`sleep_until` jitter is large enough relative to the period that the duty cycle distorts visibly. The default `200 Hz` was empirically tuned as the quietest stable point on the test hardware (1 kHz produced an audible whine from the device's MOSFET driver; ≤ 100 Hz showed intermittent flicker; ≤ 80 Hz destabilized loads with internal smoothing caps). Reasonable manual overrides for specific loads sit in the 100–500 Hz band. *(Aside: the kernel module's mode=2 `SET_CONFIG` ioctl does accept and echo back any period_ns/duty_ns you write across the full 100 Hz – 100 kHz range — but, as the limitation note above explains, that's just CONFIG-register storage; the kernel's hrtimer never arms and the pad never toggles. The driver doesn't depend on that path.)*
+The driver's userspace soft-PWM accepts any value in 1–100,000 Hz, but the practical ceiling on stock Linux without busy-waiting is around 2 kHz — above that, `nanosleep`/`sleep_until` jitter is large enough relative to the period that the duty cycle distorts visibly. The default `50 Hz` matches what ZWO's stock `zwoair_imager` daemon uses — verified against a live stock-firmware ASIair Plus by reading the kernel module's per-port config via `PWM_GPIO_GET_CONFIG`, which returned `period_ns = 20,000,000` (= 20 ms = 50 Hz) on every PWM-enabled port (37%, 43%, 100% duties exactly matched the user's settings). 50 Hz also matches mains frequency in China where ZWO is based, likely chosen to avoid beating against AC ripple in the 12 V input. For loads that visibly flicker at 50 Hz (some passive LED panels viewed off-axis), bump to 100–500 Hz via `pwmFrequencyHz`.
 
 ### Disconnect behavior
 

@@ -34,45 +34,42 @@ constexpr const char* kLogCategory = "ZWO_ASIAIR_PLUS";
 AsiairPlusSwitchConfig default_asiair_plus_rk3568_config() {
     AsiairPlusSwitchConfig cfg;
     cfg.device_path = "/dev/pwm-gpio-misc";
-    // Userspace soft-PWM frequency. Empirically tuned on real hardware
-    // sweeping 80 Hz to 20 kHz against a USB-powered LED tracing pad
-    // plugged into DC port 2. 200 Hz is the chosen default — see the
-    // detailed reasoning below.
+    // Userspace soft-PWM frequency. Set to 50 Hz to match what ZWO's
+    // stock `zwoair_imager` daemon actually drives the kernel module
+    // with — confirmed by booting back to stock firmware and reading
+    // the per-port config via `PWM_GPIO_GET_CONFIG`:
     //
-    // Frequency sweep results (lower = quieter, but watch the load):
-    //   1 kHz – 20 kHz  – Audible whine from the ASIair Plus's own
-    //                     MOSFET driver. Human ear sensitivity peaks at
-    //                     2–4 kHz so this band is the worst for
-    //                     perceived loudness. 20 kHz also breaks duty
-    //                     accuracy on stock Linux nanosleep (50 µs
-    //                     phases are below scheduler precision).
-    //   500 Hz          – Noticeably quieter than 1 kHz, no flicker.
-    //   200 Hz          – Quieter still, no flicker, stable across
-    //                     every retest. CHOSEN DEFAULT.
-    //   100 Hz          – Sometimes quieter, sometimes shows slight
-    //                     flicker depending on scheduler load.
-    //    80–60 Hz       – Cascaded-PWM interference and load instability
-    //                     (see next paragraph).
+    //   Port 1 (camera, boolean): no PWM config
+    //   Port 2 (dew heater 37%):  period_ns = 20,000,000 → 50 Hz, duty 37.0%
+    //   Port 3 (flat panel 100%): period_ns = 20,000,000 → 50 Hz, duty 100.0%
+    //   Port 4 (flat panel 43%):  period_ns = 20,000,000 → 50 Hz, duty 43.0%
     //
-    // Important caveat documented for future-you: the load we tested
-    // against was an HSK A4 LED tracing pad, which has its OWN internal
-    // touch-dimming PWM controller. Our PWM cascaded onto the pad's
-    // internal PWM produced interference patterns that drove the
-    // flicker thresholds higher than they would be for a passive LED
-    // panel. Real ASCOM CoverCalibrator-style flat panels (passive LED,
-    // no internal MCU — Geoptik, Lacerta, EvoStar EFLAT, etc.) should
-    // tolerate this PWM cleanly. Don't re-tune the default downward
-    // just because someone reports flicker at 200 Hz unless you've
-    // verified the load doesn't have its own switching circuit.
+    // Earlier defaults in this driver (1 kHz, then 200 Hz) were chosen
+    // from indoor bench tests against an HSK A4 LED tracing pad whose
+    // own internal dimming controller created cascaded-PWM artifacts
+    // that don't show up against real astrophotography loads. The
+    // resistive dew heaters and the flat-field panels with their own
+    // DC-DC regulators that ZWO designed around are happy at 50 Hz —
+    // dew heaters are thermal loads (slow time constant, no observable
+    // flicker), and panel drivers smooth the input. 50 Hz also matches
+    // mains frequency in China (where ZWO is based), likely chosen to
+    // avoid beating against AC ripple in the 12 V input.
     //
-    // Hardware constraint: the RK3568 has 16 hardware PWM peripherals
-    // (pwm0..pwm15) but NONE of them have pinctrl entries for the
-    // airplus-gpios pins on GPIO bank 4 (GPIO4_C2/C3/C5/C6). So
-    // hardware PWM is not an option on this board — software PWM via
-    // the kernel module ioctl is the only path. ZWO's own stock daemon
-    // takes the same approach (confirmed from the extracted
-    // zwoair_imager binary).
-    cfg.pwm_frequency_hz = 200;
+    // We still do PWM in userspace rather than via the kernel module's
+    // own PWM mode. The .ko's hrtimer-based PWM does work on stock ZWO
+    // (`/proc/timer_list` shows `pwm_gpio_timer_func` scheduled at the
+    // expected intervals when the daemon is running), but the exact
+    // ioctl sequence to arm it from a fresh process is opaque to us —
+    // every documented ordering we tried left the hrtimer unscheduled.
+    // So we replicate ZWO's *waveform* (50 Hz at the user's duty) via
+    // our pwm_loop worker thread without depending on their specific
+    // kernel-module activation sequence.
+    //
+    // Hardware constraint still applies: the RK3568 has 16 hardware
+    // PWM peripherals but NONE of them mux to the airplus-gpios pins
+    // on GPIO bank 4, so a true-hardware-PWM path isn't an option
+    // either way.
+    cfg.pwm_frequency_hz = 50;
     cfg.ports = {
         {"Port 1", false},
         {"Port 2", false},
@@ -102,13 +99,13 @@ public:
             wrapper_.close();
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(kLogCategory,
-                            std::string("Error during ASIair Plus switch destruction: ") + e.what());
+                            std::string("Error during ASIAIR Plus switch destruction: ") + e.what());
         }
     }
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "ZWO ASIair Plus Switch (RK3568)"; }
+    std::string get_name() const override { return "ZWO ASIAIR Plus Switch (RK3568)"; }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
@@ -117,11 +114,11 @@ public:
     }
 
     std::string get_description() const override {
-        return "ZWO ASIair Plus (RK3568) 12V power switch (" + config_.device_path + ")";
+        return "ZWO ASIAIR Plus (RK3568) 12V power switch (" + config_.device_path + ")";
     }
 
     std::string get_driver_info() const override {
-        return "AlpacaCore ZWO ASIair Plus Switch";
+        return "AlpacaCore ZWO ASIAIR Plus Switch";
     }
 
     std::string get_driver_version() const override { return "1.0.0"; }
@@ -264,7 +261,7 @@ public:
         validate_id(id);
         const auto& p = config_.ports[static_cast<std::size_t>(id)];
         const std::string mode = p.pwm_enabled ? "PWM 0-100%" : "on/off";
-        return "ASIair Plus DC port " + std::to_string(id + 1) + " (" + mode + ")";
+        return "ASIAIR Plus DC port " + std::to_string(id + 1) + " (" + mode + ")";
     }
 
     double get_min_switch_value(int id) const override {
@@ -285,7 +282,7 @@ public:
 private:
     void ensure_connected() const {
         if (!wrapper_.is_open()) {
-            throw AlpacaException("ASIair Plus switch not connected", AlpacaError::NotConnected);
+            throw AlpacaException("ASIAIR Plus switch not connected", AlpacaError::NotConnected);
         }
     }
 
@@ -315,7 +312,7 @@ private:
                 set_connected(connect);
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR(kLogCategory,
-                                 std::string("ASIair Plus connection task failed: ") + e.what());
+                                 std::string("ASIAIR Plus connection task failed: ") + e.what());
             }
             connecting_.store(false);
         });

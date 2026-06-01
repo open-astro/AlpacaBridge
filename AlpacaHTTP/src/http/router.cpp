@@ -6650,9 +6650,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::string switch_type = config.value("switchType", "dewheater");
         switch_type = to_lower_copy(switch_type);
         if (switch_type != "dewheater" && switch_type != "asiair" &&
+            switch_type != "asiair-plus-picm4" &&
             switch_type != "asiair-plus-rk3568") {
             error_message =
-                "ZWO switchType must be 'dewheater', 'asiair', or 'asiair-plus-rk3568'";
+                "ZWO switchType must be 'dewheater', 'asiair', "
+                "'asiair-plus-picm4', or 'asiair-plus-rk3568'";
             return false;
         }
 
@@ -6681,7 +6683,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                                                                        plus_config);
 
             if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
-                util::log_info("Registered ZWO ASIair Plus (RK3568) switch");
+                util::log_info("Registered ZWO ASIAIR Plus (RK3568) switch");
                 return true;
             }
 
@@ -6689,7 +6691,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        if (switch_type == "asiair") {
+        // ASIAIR Pro (Pi 4) and ASIAIR Plus (Pi CM4) share the same on-board
+        // libgpiod wiring (GPIO 12/13/26/18 on /dev/gpiochip0, BCM2711),
+        // verified against live CM4 hardware. Both route to the same driver
+        // and default config; only the log label differs.
+        if (switch_type == "asiair" || switch_type == "asiair-plus-picm4") {
             auto asiair_config = alpacacore::vendor::zwo::default_asiair_pro_config();
             asiair_config.gpio_chip_path = config.value("gpioChip", asiair_config.gpio_chip_path);
             asiair_config.pwm_frequency_hz = config.value("pwmFrequencyHz", asiair_config.pwm_frequency_hz);
@@ -6717,7 +6723,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             sw = alpacacore::vendor::zwo::create_zwo_asiair_switch(device_number, asiair_config);
 
             if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
-                util::log_info("Registered ZWO ASIair Pro switch");
+                util::log_info(switch_type == "asiair-plus-picm4"
+                                   ? "Registered ZWO ASIAIR Plus (Pi CM4) switch"
+                                   : "Registered ZWO ASIAIR Pro switch");
                 return true;
             }
 
@@ -6991,11 +6999,12 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         // PWM-mode toggles and channel renames silently revert after save
         // because sanitize_device_config strips anything not allowlisted.
         const std::string switch_type = config.value("switchType", "");
-        if (switch_type == "asiair" || switch_type == "asiair-plus-rk3568") {
+        if (switch_type == "asiair" || switch_type == "asiair-plus-picm4" ||
+            switch_type == "asiair-plus-rk3568") {
             copy_if_present("pwmFrequencyHz");
             copy_if_present("ports");
         }
-        if (switch_type == "asiair") {
+        if (switch_type == "asiair" || switch_type == "asiair-plus-picm4") {
             copy_if_present("gpioChip");
         }
         if (switch_type == "asiair-plus-rk3568") {

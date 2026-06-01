@@ -74,16 +74,16 @@ public:
         , open_(false)
     {
         if (ports_.empty()) {
-            throw AlpacaException("ASIair Plus port configuration is empty",
+            throw AlpacaException("ASIAIR Plus port configuration is empty",
                                   AlpacaError::InvalidValue);
         }
         if (ports_.size() > 4) {
-            throw AlpacaException("ASIair Plus exposes 4 DC ports; configuration lists more",
+            throw AlpacaException("ASIAIR Plus exposes 4 DC ports; configuration lists more",
                                   AlpacaError::InvalidValue);
         }
         if (pwm_frequency_hz_ == 0 || pwm_frequency_hz_ > 100000) {
             throw AlpacaException(
-                "ASIair Plus PWM frequency out of supported range (1..100000 Hz)",
+                "ASIAIR Plus PWM frequency out of supported range (1..100000 Hz)",
                 AlpacaError::InvalidValue);
         }
         port_states_.reserve(ports_.size());
@@ -100,7 +100,7 @@ public:
             close();
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(kLogCategory,
-                            std::string("Error during ASIair Plus wrapper destruction: ") + e.what());
+                            std::string("Error during ASIAIR Plus wrapper destruction: ") + e.what());
         }
     }
 
@@ -264,7 +264,7 @@ public:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!open_) {
-                    throw AlpacaException("ASIair Plus device is not open",
+                    throw AlpacaException("ASIAIR Plus device is not open",
                                           AlpacaError::NotConnected);
                 }
             }
@@ -275,7 +275,7 @@ public:
         // Boolean port: synchronous SET_MODE + ENABLE + SET_LEVEL.
         std::lock_guard<std::mutex> lock(mutex_);
         if (!open_) {
-            throw AlpacaException("ASIair Plus device is not open",
+            throw AlpacaException("ASIAIR Plus device is not open",
                                   AlpacaError::NotConnected);
         }
         apply_port_locked(index, value);
