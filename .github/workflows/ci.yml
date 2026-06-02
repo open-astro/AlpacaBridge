@@ -1,0 +1,60 @@
+# AlpacaBridge CI
+#
+# AlpacaBridge is **Linux arm64 only** (AGENTS.md "Target Architecture";
+# CMake / debian/rules / build scripts hard-fail on non-arm64). CI therefore
+# runs on GitHub's native arm64 runner (`ubuntu-24.04-arm`, free for public
+# repos) — an x86_64 runner cannot even configure the project.
+#
+# This first workflow establishes the build + test gate. It builds the
+# vendor-neutral core (ALPACACORE_ENABLE_ALL_VENDORS=OFF) so the gate does
+# not depend on installing the bundled vendor SDK .so / firmware blobs; a
+# vendors-ON build job can be layered on later once SDK staging is wired up.
+# Lint (clang-format/clang-tidy) is intentionally deferred until a
+# `.clang-format` style config is adopted — without one, a format check would
+# flag the entire existing codebase against LLVM defaults.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build + test (arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            g++ \
+            libusb-1.0-0-dev \
+            libudev-dev \
+            libgpiod-dev \
+            nlohmann-json3-dev \
+            libcurl4-openssl-dev
+
+      - name: Verify toolchain
+        run: |
+          cmake --version
+          g++ --version
+
+      - name: Build + run tests (vendor-neutral core)
+        env:
+          ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
+          ALPACABRIDGE_ENABLE_VCPKG: "OFF"   # system libs come from apt above
+        run: ./run_all_tests.sh
