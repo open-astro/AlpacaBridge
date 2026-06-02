@@ -17,6 +17,8 @@
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   unicode        scan sources for Trojan-Source / invisible Unicode
 #   shellcheck     lint the project's shell scripts
+#   cppcheck       second C/C++ static-analysis engine, PR changed files only
+#   zizmor         security audit of these GitHub Actions workflows
 #
 # The vendor-neutral build (ALPACACORE_ENABLE_ALL_VENDORS=OFF) does not depend
 # on the bundled vendor SDK .so / firmware blobs; the vendor-ON job stages
@@ -333,3 +335,74 @@ jobs:
           done
           echo "Linting: ${scripts[*]}"
           shellcheck "${scripts[@]}"
+
+  cppcheck:
+    name: cppcheck (changed files)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cppcheck
+
+      - name: Analyze changed C/C++ files
+        # A second static-analysis engine alongside clang-tidy — it catches
+        # different defects. Scoped to files this PR changes so the existing
+        # tree is not bulk-flagged (same policy as clang-tidy/clang-format);
+        # the vendored external/ tree is never included. Suppress false
+        # positives inline with `// cppcheck-suppress <id>`.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$GITHUB_BASE_REF"
+          merge_base="$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)"
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$merge_base" HEAD -- \
+            AlpacaCore/src AlpacaCore/include AlpacaHTTP/src AlpacaHTTP/include \
+            | grep -E '\.(c|cc|cpp|cxx|h|hpp|hxx)$' || true)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No changed C/C++ files — nothing to analyze."
+            exit 0
+          fi
+          printf 'Analyzing:\n%s\n' "${files[*]}"
+          cppcheck \
+            --enable=warning,performance,portability \
+            --inline-suppr \
+            --std=c++20 \
+            --language=c++ \
+            --error-exitcode=2 \
+            --quiet \
+            --suppress=missingInclude \
+            --suppress=missingIncludeSystem \
+            -I AlpacaCore/include -I AlpacaHTTP/include \
+            "${files[@]}"
+
+  zizmor:
+    name: zizmor (workflow audit)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        # Prebuilt arm64 release binary — no Rust toolchain / pip build needed.
+        run: |
+          set -euo pipefail
+          ver=1.25.2
+          curl -fsSL "https://github.com/zizmorcore/zizmor/releases/download/v${ver}/zizmor-aarch64-unknown-linux-gnu.tar.gz" \
+            -o /tmp/zizmor.tgz
+          tar -xzf /tmp/zizmor.tgz -C /tmp
+          sudo install /tmp/zizmor /usr/local/bin/zizmor
+          zizmor --version
+
+      - name: Audit workflows
+        # Offline audit: deterministic, no token/network. Audits the workflow
+        # files for security issues (injection, over-broad permissions, etc.).
+        run: zizmor --offline .github/workflows/
