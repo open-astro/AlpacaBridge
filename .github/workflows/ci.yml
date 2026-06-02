@@ -1,19 +1,22 @@
 # AlpacaBridge CI
 #
 # AlpacaBridge is **Linux arm64 only** (AGENTS.md "Target Architecture";
-# CMake / debian/rules / build scripts hard-fail on non-arm64). The C++ jobs
-# therefore run on GitHub's native arm64 runner (`ubuntu-24.04-arm`, free for
-# public repos) — an x86_64 runner cannot even configure the project. The only
-# exception is the clang-format check, which inspects diffs and needs no build,
-# so it runs on the cheaper/faster x86_64 runner.
+# CMake / debian/rules / build scripts hard-fail on non-arm64). Every job here
+# runs on GitHub's native arm64 runner (`ubuntu-24.04-arm`, free for public
+# repos) — an x86_64 runner cannot even configure the project, and the text-only
+# checks (format/unicode/shellcheck) produce identical results on any arch, so
+# we keep a single-architecture fleet. (CodeQL is the lone forced exception and
+# lives in its own workflow: its CLI has no arm64 build.)
 #
 # Jobs:
 #   build-test     build vendor-neutral core + run unit tests (the base gate)
 #   build-vendors  stage in-tree vendor SDK .so libs, build+test with all
 #                  vendors ON
 #   sanitizers     build+test under AddressSanitizer + UndefinedBehaviorSanitizer
-#   format         clang-format check, PR changed lines only (x86_64)
+#   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
+#   unicode        scan sources for Trojan-Source / invisible Unicode
+#   shellcheck     lint the project's shell scripts
 #
 # The vendor-neutral build (ALPACACORE_ENABLE_ALL_VENDORS=OFF) does not depend
 # on the bundled vendor SDK .so / firmware blobs; the vendor-ON job stages
@@ -185,7 +188,7 @@ jobs:
   format:
     name: clang-format (changed lines)
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest   # diff-only check, no build — x86_64 is fine and faster
+    runs-on: ubuntu-24.04-arm   # text-only check; kept on arm64 for a single-arch fleet
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -283,3 +286,50 @@ jobs:
             exit 1
           fi
           echo "clang-tidy OK"
+
+  unicode:
+    name: Unicode scan
+    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      - name: Scan for Trojan-Source / invisible Unicode
+        # Guards against CVE-2021-42574: bidi controls / zero-width characters
+        # that make source render differently than it compiles. Excludes the
+        # vendored external/ tree (see the script).
+        run: python3 .github/scripts/check-unicode.py
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-24.04-arm   # static text analysis; arch-independent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Lint shell scripts
+        # Our authored scripts only — the vendored external/ tree is skipped.
+        # debian/ maintainer scripts have no .sh extension, so add them by name.
+        run: |
+          set -euo pipefail
+          scripts=()
+          while IFS= read -r f; do
+            case "$f" in
+              AlpacaCore/external/*) continue ;;
+            esac
+            scripts+=("$f")
+          done < <(git ls-files '*.sh')
+          for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm; do
+            [ -f "$f" ] && scripts+=("$f")
+          done
+          echo "Linting: ${scripts[*]}"
+          shellcheck "${scripts[@]}"
