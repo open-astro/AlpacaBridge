@@ -1,17 +1,23 @@
 # AlpacaBridge CI
 #
 # AlpacaBridge is **Linux arm64 only** (AGENTS.md "Target Architecture";
-# CMake / debian/rules / build scripts hard-fail on non-arm64). CI therefore
-# runs on GitHub's native arm64 runner (`ubuntu-24.04-arm`, free for public
-# repos) — an x86_64 runner cannot even configure the project.
+# CMake / debian/rules / build scripts hard-fail on non-arm64). The C++ jobs
+# therefore run on GitHub's native arm64 runner (`ubuntu-24.04-arm`, free for
+# public repos) — an x86_64 runner cannot even configure the project. The only
+# exception is the clang-format check, which inspects diffs and needs no build,
+# so it runs on the cheaper/faster x86_64 runner.
 #
-# This first workflow establishes the build + test gate. It builds the
-# vendor-neutral core (ALPACACORE_ENABLE_ALL_VENDORS=OFF) so the gate does
-# not depend on installing the bundled vendor SDK .so / firmware blobs; a
-# vendors-ON build job can be layered on later once SDK staging is wired up.
-# Lint (clang-format/clang-tidy) is intentionally deferred until a
-# `.clang-format` style config is adopted — without one, a format check would
-# flag the entire existing codebase against LLVM defaults.
+# Jobs:
+#   build-test     build vendor-neutral core + run unit tests (the base gate)
+#   build-vendors  stage in-tree vendor SDK .so libs, build+test with all
+#                  vendors ON
+#   sanitizers     build+test under AddressSanitizer + UndefinedBehaviorSanitizer
+#   format         clang-format check, PR changed lines only (x86_64)
+#   clang-tidy     clang-tidy static analysis, PR changed lines only
+#
+# The vendor-neutral build (ALPACACORE_ENABLE_ALL_VENDORS=OFF) does not depend
+# on the bundled vendor SDK .so / firmware blobs; the vendor-ON job stages
+# those libraries from the in-tree external/ trees before building.
 
 name: CI
 
@@ -21,6 +27,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+
+# A newer push to the same ref makes in-flight runs obsolete — cancel them so
+# we don't burn two arm64 builds racing each other.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -58,3 +70,194 @@ jobs:
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
           ALPACABRIDGE_ENABLE_VCPKG: "OFF"   # system libs come from apt above
         run: ./run_all_tests.sh
+
+  build-vendors:
+    name: Build + test (all vendors, arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            g++ \
+            libusb-1.0-0-dev \
+            libudev-dev \
+            libgpiod-dev \
+            nlohmann-json3-dev \
+            libcurl4-openssl-dev
+
+      - name: Stage vendor SDK shared libraries
+        # Mirrors run_system_setup() in build_and_run.sh: copy the in-tree
+        # arm64 vendor .so files onto the loader path so the vendor-ON build
+        # links. Firmware blobs / udev rules are device-runtime concerns and
+        # are not needed to build or run the unit tests.
+        run: |
+          set -euo pipefail
+          core="AlpacaCore/external"
+          libs=(
+            "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
+            "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
+            "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
+            "$core/QHY/sdk_Arm64_25.09.29/usr/local/lib/libqhyccd.so"
+          )
+          for lib in "${libs[@]}"; do
+            if compgen -G "${lib}*" > /dev/null; then
+              echo "Staging $(basename "$lib")*"
+              sudo cp -a "${lib}"* /usr/local/lib/
+            else
+              echo "WARNING: ${lib}* not found — skipping"
+            fi
+          done
+          sudo ldconfig
+
+      - name: Build + run tests (all vendors)
+        env:
+          ALPACACORE_ENABLE_ALL_VENDORS: "ON"
+          ALPACABRIDGE_ENABLE_VCPKG: "OFF"
+        run: ./run_all_tests.sh
+
+  sanitizers:
+    name: Sanitizers (ASan + UBSan, arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            g++ \
+            libusb-1.0-0-dev \
+            libudev-dev \
+            libgpiod-dev \
+            nlohmann-json3-dev \
+            libcurl4-openssl-dev
+
+      - name: Build + run tests with sanitizers (vendor-neutral)
+        # CMake seeds CMAKE_CXX_FLAGS / linker flags from CXXFLAGS / LDFLAGS on
+        # a fresh configure, and run_all_tests.sh wipes build/ first, so these
+        # instrument the whole tree. -fno-sanitize-recover makes any detected
+        # UB a hard test failure rather than a logged warning.
+        env:
+          ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
+          ALPACABRIDGE_ENABLE_VCPKG: "OFF"
+          CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+          LDFLAGS: "-fsanitize=address,undefined"
+          ASAN_OPTIONS: "abort_on_error=1:detect_leaks=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+        run: ./run_all_tests.sh
+
+  format:
+    name: clang-format (changed lines)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest   # diff-only check, no build — x86_64 is fine and faster
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format
+
+      - name: Check formatting of changed lines
+        # git-clang-format reformats only the lines this PR touched, so adopting
+        # .clang-format does not flag the pre-existing tree.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$GITHUB_BASE_REF"
+          merge_base="$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)"
+          diff="$(git-clang-format --commit "$merge_base" --diff \
+            --extensions c,cc,cpp,cxx,h,hh,hpp,hxx)"
+          if [ "$diff" != "no modified files to format" ] && \
+             [ "$diff" != "clang-format did not modify any files" ]; then
+            echo "$diff"
+            echo "::error::Formatting issues on changed lines. Fix locally with: git-clang-format $merge_base"
+            exit 1
+          fi
+          echo "Formatting OK"
+
+  clang-tidy:
+    name: clang-tidy (changed lines)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04-arm   # needs a real configure/build, which is arm64-only
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            g++ \
+            clang-tidy \
+            libusb-1.0-0-dev \
+            libudev-dev \
+            libgpiod-dev \
+            nlohmann-json3-dev \
+            libcurl4-openssl-dev
+
+      - name: Generate compile_commands.json (vendor-neutral)
+        # AlpacaHTTP pulls AlpacaCore in as a subdirectory, so this single
+        # configure+build yields a compile DB covering both source trees and
+        # materializes any generated headers before analysis.
+        run: |
+          set -euo pipefail
+          cmake -S AlpacaHTTP -B AlpacaHTTP/build \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DALPACAHTTP_BUILD_TESTS=ON \
+            -DALPACACORE_ENABLE_ALL_VENDORS=OFF
+          cmake --build AlpacaHTTP/build --parallel "$(nproc)"
+
+      - name: Run clang-tidy on changed lines
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$GITHUB_BASE_REF"
+          merge_base="$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)"
+
+          tidy_diff="$(dpkg -L clang-tidy 2>/dev/null | grep -m1 -E 'clang-tidy-diff.*\.py' || true)"
+          if [ -z "$tidy_diff" ]; then
+            tidy_diff="$(find /usr -name 'clang-tidy-diff*.py' 2>/dev/null | head -1)"
+          fi
+          if [ -z "$tidy_diff" ]; then
+            echo "::error::clang-tidy-diff.py not found"
+            exit 1
+          fi
+          echo "Using $tidy_diff"
+
+          # -U0: no context lines, so only genuinely changed lines are analyzed.
+          # Restrict to our source/include dirs; the vendored external/ tree is
+          # never fed in.
+          git diff -U0 --no-color "$merge_base" -- \
+            AlpacaCore/src AlpacaCore/include \
+            AlpacaHTTP/src AlpacaHTTP/include \
+            | python3 "$tidy_diff" -p1 -path AlpacaHTTP/build \
+                -clang-tidy-binary clang-tidy 2>&1 | tee tidy.log
+
+          # clang-tidy-diff exits 0 even when checks fire, so key off the output.
+          if grep -qE ': (warning|error):' tidy.log; then
+            echo "::error::clang-tidy reported issues on changed lines"
+            exit 1
+          fi
+          echo "clang-tidy OK"

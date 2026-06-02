@@ -1,0 +1,19 @@
+# Dependabot keeps our SHA-pinned GitHub Actions current.
+#
+# CI pins actions to immutable commit SHAs (see .github/workflows/*.yml) for
+# supply-chain safety; the cost is that a bare SHA never updates itself.
+# Dependabot watches upstream releases and opens PRs that bump the SHA while
+# preserving the pin, so security/bug fixes land without us hand-tracking them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      # One PR per week for all action bumps instead of a flurry of singletons.
+      github-actions:
+        patterns:
+          - "*"
