@@ -2,10 +2,14 @@
 #
 # Complements the manual `security-review` workflow with automated scanning on
 # every PR and a weekly scheduled sweep (catches advisories published against
-# code that hasn't changed). Like the build gate, this runs on GitHub's native
-# arm64 runner because the project only configures on aarch64. We scan the
-# vendor-neutral core (ALPACACORE_ENABLE_ALL_VENDORS=OFF): the goal is to find
-# issues in code we author, not in the vendored SDK trees.
+# code that hasn't changed).
+#
+# Runner/build note: the CodeQL CLI has no linux/arm64 build, yet AlpacaBridge
+# only *compiles* on arm64 (CMake hard-fails elsewhere) — so a build-based scan
+# is impossible. We therefore run on x86_64 with `build-mode: none`, CodeQL's
+# buildless C/C++ extractor, which analyzes the sources without compiling them.
+# This scans the code we author; the vendored SDK trees under
+# AlpacaCore/external/ are not our code and are excluded below.
 
 name: CodeQL
 
@@ -30,7 +34,7 @@ permissions:
 jobs:
   analyze:
     name: Analyze (C++)
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest   # CodeQL CLI has no arm64 build; build-mode none needs no compile
     permissions:
       contents: read
       security-events: write   # required to upload SARIF results
@@ -41,38 +45,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            g++ \
-            libusb-1.0-0-dev \
-            libudev-dev \
-            libgpiod-dev \
-            nlohmann-json3-dev \
-            libcurl4-openssl-dev
-
       - name: Initialize CodeQL
         uses: github/codeql-action/init@d77b13a0df3134d64a457ea9003f600b09fa1c8a  # v3
         with:
           languages: c-cpp
-          build-mode: manual
-
-      - name: Build (vendor-neutral core)
-        env:
-          ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
-          ALPACABRIDGE_ENABLE_VCPKG: "OFF"
-        run: |
-          cmake -S AlpacaCore -B AlpacaCore/build \
-            -DALPACACORE_BUILD_TESTS=ON \
-            -DALPACACORE_ENABLE_ALL_VENDORS=OFF
-          cmake --build AlpacaCore/build --parallel "$(nproc)"
-          cmake -S AlpacaHTTP -B AlpacaHTTP/build \
-            -DALPACAHTTP_BUILD_TESTS=ON \
-            -DALPACACORE_ENABLE_ALL_VENDORS=OFF
-          cmake --build AlpacaHTTP/build --parallel "$(nproc)"
+          build-mode: none
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@d77b13a0df3134d64a457ea9003f600b09fa1c8a  # v3
