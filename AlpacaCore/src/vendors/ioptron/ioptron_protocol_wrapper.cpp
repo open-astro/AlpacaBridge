@@ -550,9 +550,7 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
                     continue;
                 }
 
-                std::string code = probe_ioptron_network(pending[i].host,
-                                                         pending[i].port,
-                                                         PROBE_TIMEOUT_MS);
+                std::string code = probe_ioptron_network(pending[i].host, pending[i].port, PROBE_TIMEOUT_MS);
                 if (!code.empty()) {
                     std::string model = model_code_to_name(code);
                     ALPACA_LOG_INFO("iOptron", "Network discovery: found mount at " +

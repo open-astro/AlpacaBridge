@@ -886,10 +886,10 @@ struct ImageBytesFormat {
 
 bool is_expected_not_implemented(const alpacacore::AlpacaException& e) {
     const int error_code = e.error_code();
+    // NotImplemented, PropertyNotImplemented and MethodNotImplemented all map to
+    // the same ASCOM code (0x400); ActionNotImplemented (0x40C) is distinct.
     return error_code == alpacacore::AlpacaError::NotImplemented ||
-        error_code == alpacacore::AlpacaError::PropertyNotImplemented ||
-        error_code == alpacacore::AlpacaError::MethodNotImplemented ||
-        error_code == alpacacore::AlpacaError::ActionNotImplemented;
+           error_code == alpacacore::AlpacaError::ActionNotImplemented;
 }
 
 bool is_expected_validation_error(const alpacacore::AlpacaException& e) {
@@ -5419,7 +5419,7 @@ Response Router::handle_static_file(const Request& request) {
         response.set_body("Access denied");
         return response;
     }
-    
+
     // Extract filename from path (e.g., web/index.html -> index.html)
     std::string filename = file_path;
     size_t web_pos = file_path.find("web/");

@@ -153,9 +153,15 @@ public:
     ~CelestronTelescopeDriver() override {
         stop_connection_thread();
         if (connected_) {
+            // Qualify the call so it binds statically (we want this class's
+            // implementation, not virtual dispatch from a destructor), and
+            // swallow any throw so it cannot escape the noexcept destructor.
             try {
-                set_connected(false);
+                CelestronTelescopeDriver::set_connected(false);
             } catch (...) {
+                // Best-effort disconnect on destruction; log and continue so
+                // nothing escapes the noexcept destructor.
+                ALPACA_LOG_WARN("Celestron", "Error disconnecting mount during destruction");
             }
         }
     }

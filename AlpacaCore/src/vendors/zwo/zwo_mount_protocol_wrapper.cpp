@@ -333,14 +333,16 @@ std::string format_utc_minutes_to_protocol_timezone(int utc_offset_minutes) {
 class ZWOMountProtocolWrapper::Impl {
 public:
     Impl()
-        : connected_(false)
-        , connection_type_(ConnectionType::Serial)
+        : connected_(false),
+          connection_type_(ConnectionType::Serial)
 #ifdef _WIN32
-        , serial_handle_(INVALID_HANDLE_VALUE)
-        , socket_handle_(INVALID_SOCKET)
+          ,
+          serial_handle_(INVALID_HANDLE_VALUE),
+          socket_handle_(INVALID_SOCKET)
 #else
-        , serial_fd_(-1)
-        , socket_fd_(-1)
+          ,
+          serial_fd_(-1),
+          socket_fd_(-1)
 #endif
     {
 #ifdef _WIN32

@@ -235,8 +235,9 @@ void Server::run_server() {
         if (FD_ISSET(server_fd, &read_fds)) {
             struct sockaddr_in client_address;
             util::SocketLen client_len = sizeof(client_address);
-            
-            util::SocketHandle client_fd = accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_address), &client_len);
+
+            util::SocketHandle client_fd =
+                accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_address), &client_len);
             if (client_fd == util::kInvalidSocket) {
                 int err = util::socket_get_last_error();
                 if (util::socket_interrupted(err) || util::socket_would_block(err)) {

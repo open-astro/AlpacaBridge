@@ -105,10 +105,14 @@ public:
         if (connected_) {
             // Destructors are implicitly noexcept; a throw from set_connected()
             // would call std::terminate(). Swallow any error during teardown.
+            // Qualify the call so it binds statically (we want this class's
+            // implementation, not virtual dispatch from a destructor).
             try {
-                set_connected(false);
+                iOptronTelescopeDriver::set_connected(false);
             } catch (...) {
-                // Best-effort disconnect on destruction; nothing useful to do here.
+                // Best-effort disconnect on destruction; log and continue so
+                // nothing escapes the noexcept destructor.
+                ALPACA_LOG_WARN("iOptron", "Error disconnecting mount during destruction");
             }
         }
     }
