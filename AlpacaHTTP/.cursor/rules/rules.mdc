@@ -20,9 +20,9 @@ AlpacaHTTP depends entirely on **AlpacaCore** for device behavior.
 
 - **Language:** Modern C++ (**C++20 preferred**)
 - **Build system:** **CMake**
-- **HTTP Server:** Prefer **Boost.Beast**; alternative: `cpp-httplib`
+- **HTTP Server:** Hand-rolled HTTP/1.1 server on POSIX sockets (no external HTTP framework)
 - **JSON library:** Use **nlohmann/json**
-- **OS Targets:** Linux first, then macOS and Windows
+- **OS Targets:** Linux **arm64 only** (no amd64/x86_64, no macOS, no Windows)
 - Follow the ASCOM Alpaca Management API: https://ascom-standards.org/api/?urls.primaryName=ASCOM+Alpaca+Management+API
 
 **Dependencies:**
@@ -30,7 +30,7 @@ AlpacaHTTP depends entirely on **AlpacaCore** for device behavior.
 - Must link to **AlpacaCore**
 - Must NOT link to vendor SDKs
 - Should NOT introduce GUI or heavy frameworks
-- Allowed: Beast, Asio, nlohmann/json, yaml-cpp (optional)
+- Allowed: nlohmann/json, yaml-cpp (optional)
 
 **Coding style:**
 - RAII only, no raw pointers unless absolutely required
@@ -287,7 +287,7 @@ util/logging_adapter.cpp
 ## 11. Threading Rules
 
 - Must support concurrent HTTP requests.
-- Recommended: Beast async model with multiple `io_context` threads.
+- Model: the server `accept()`s on a `select()` loop and dispatches each connection to its own detached worker thread (configurable pool size via `config_.thread_pool_size()`).
 - No global mutable state without a mutex.
 - Device instances in AlpacaCore are assumed thread-safe.
 
@@ -311,7 +311,6 @@ Never crash the server on device errors.
 
 ```
 ALPACAHTTP_BUILD_TESTS
-ALPACAHTTP_USE_BOOST_BEAST
 ALPACAHTTP_ENABLE_DISCOVERY
 ```
 

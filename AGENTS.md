@@ -409,7 +409,7 @@ Connection types: USB serial (CH340/CH341 adapters) only. No WiFi support.
 - Movement commands (`:05<pos>#`) are fire-and-forget (blind). Poll `is_moving()` (`:01#`) to detect completion.
 - Some commands are blind (no response). Use `send_command_blind_locked()` for these to avoid blocking on a timeout waiting for data that will never arrive.
 - Default baud rate is 9600 (8N1). Configurable: 9600, 19200, 38400, 57600, 115200.
-- ConformU validated (v4.2.1) on Debian 13 x64 and ARM64. Results in `AlpacaCore/conformu/Gemini/`.
+- ConformU validated (v4.2.1) on Debian 13 arm64. Results in `AlpacaCore/conformu/Gemini/`.
 
 ### WeeWX
 

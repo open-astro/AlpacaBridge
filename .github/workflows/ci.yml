@@ -73,7 +73,6 @@ jobs:
       - name: Build + run tests (vendor-neutral core)
         env:
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
-          ALPACABRIDGE_ENABLE_VCPKG: "OFF"   # system libs come from apt above
         run: ./run_all_tests.sh
 
   build-vendors:
@@ -148,7 +147,6 @@ jobs:
       - name: Build + run tests (all vendors)
         env:
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
-          ALPACABRIDGE_ENABLE_VCPKG: "OFF"
         run: ./run_all_tests.sh
 
   sanitizers:
@@ -180,7 +178,6 @@ jobs:
         # UB a hard test failure rather than a logged warning.
         env:
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
-          ALPACABRIDGE_ENABLE_VCPKG: "OFF"
           CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
           LDFLAGS: "-fsanitize=address,undefined"
           ASAN_OPTIONS: "abort_on_error=1:detect_leaks=1"

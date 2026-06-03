@@ -17,7 +17,6 @@ AlpacaHTTP provides:
 
 - C++20 compiler
 - CMake 3.15+
-- Boost.Beast (or cpp-httplib as alternative)
 - nlohmann/json
 - AlpacaCore library
 
