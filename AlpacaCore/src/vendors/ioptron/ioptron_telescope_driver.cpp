@@ -103,7 +103,13 @@ public:
     ~iOptronTelescopeDriver() override {
         stop_connection_thread();
         if (connected_) {
-            set_connected(false);
+            // Destructors are implicitly noexcept; a throw from set_connected()
+            // would call std::terminate(). Swallow any error during teardown.
+            try {
+                set_connected(false);
+            } catch (...) {
+                // Best-effort disconnect on destruction; nothing useful to do here.
+            }
         }
     }
     
@@ -725,6 +731,9 @@ public:
         refresh_position_cache_locked();
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
+            // ensure_site_info_cached_locked() sets site_info_valid_ on success;
+            // this re-check detects a failed cache populate, not a dead condition.
+            // cppcheck-suppress identicalInnerCondition
             if (!site_info_valid_) {
                 return normalize_side_of_pier_value(cached_side_of_pier_);
             }
@@ -744,6 +753,9 @@ public:
 
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
+            // ensure_site_info_cached_locked() sets site_info_valid_ on success;
+            // this re-check detects a failed cache populate, not a dead condition.
+            // cppcheck-suppress identicalInnerCondition
             if (!site_info_valid_) {
                 return normalize_side_of_pier_value(cached_side_of_pier_);
             }
@@ -1395,6 +1407,9 @@ public:
             validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
             if (!site_info_valid_) {
                 ensure_site_info_cached_locked();
+                // ensure_site_info_cached_locked() sets site_info_valid_ on success;
+                // this re-check detects a failed cache populate, not a dead condition.
+                // cppcheck-suppress identicalInnerCondition
                 if (!site_info_valid_) {
                     throw AlpacaException("Site information unavailable for Alt/Az slew",
                                           AlpacaError::ValueNotSet);

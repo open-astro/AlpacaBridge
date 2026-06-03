@@ -315,7 +315,7 @@ std::optional<std::pair<uint32_t, uint32_t>> parse_axis_pair_response(const std:
     }
 
     left = left.substr(left.size() - expected_digits);
-    right = right.substr(0, expected_digits);
+    right.resize(expected_digits);
 
     uint32_t first_raw = 0;
     uint32_t second_raw = 0;

@@ -1624,6 +1624,9 @@ private:
         if (!hc_available_) return false;
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
+            // ensure_site_info_cached_locked() sets site_info_valid_ on success;
+            // this re-check detects a failed cache populate, not a dead condition.
+            // cppcheck-suppress identicalInnerCondition
             if (!site_info_valid_) return false;
         }
         auto& protocol = CelestronProtocolWrapper::instance();

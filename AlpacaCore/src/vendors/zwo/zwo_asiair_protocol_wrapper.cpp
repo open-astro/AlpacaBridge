@@ -264,7 +264,7 @@ public:
         port_states_[index]->value.store(value);
     }
 
-    std::string gpio_chip_path() const { return gpio_chip_path_; }
+    const std::string& gpio_chip_path() const { return gpio_chip_path_; }
     std::uint32_t pwm_frequency_hz() const { return pwm_frequency_hz_; }
 
 private:

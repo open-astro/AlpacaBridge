@@ -282,7 +282,7 @@ public:
         port_states_[index]->value.store(value, std::memory_order_release);
     }
 
-    std::string device_path() const { return device_path_; }
+    const std::string& device_path() const { return device_path_; }
     std::uint32_t pwm_frequency_hz() const { return pwm_frequency_hz_; }
 
 private:

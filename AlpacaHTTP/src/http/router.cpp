@@ -2736,7 +2736,7 @@ Response Router::dispatch_telescope_method(
                     base = cleaned.substr(0, dot_pos);
                     std::string frac = cleaned.substr(dot_pos + 1);
                     if (frac.size() > 3) {
-                        frac = frac.substr(0, 3);
+                        frac.resize(3);
                     }
                     while (frac.size() < 3) {
                         frac.push_back('0');
@@ -5414,7 +5414,7 @@ Response Router::handle_static_file(const Request& request) {
     }
     
     // Security: Only allow files from web directory
-    if (file_path.find("web/") != 0 && file_path != "web/index.html") {
+    if (!file_path.starts_with("web/") && file_path != "web/index.html") {
         response.set_status(403, "Forbidden");
         response.set_body("Access denied");
         return response;

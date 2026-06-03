@@ -550,7 +550,7 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
                     continue;
                 }
 
-                std::string code = probe_ioptron_network(pending[i].host.c_str(),
+                std::string code = probe_ioptron_network(pending[i].host,
                                                          pending[i].port,
                                                          PROBE_TIMEOUT_MS);
                 if (!code.empty()) {
@@ -751,7 +751,7 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
 
 namespace {
 
-std::string strip_status_prefix(std::string response) {
+std::string strip_status_prefix(const std::string& response) {
     auto sign_pos = response.find_first_of("+-");
     if (sign_pos == std::string::npos || sign_pos == 0) {
         return response;

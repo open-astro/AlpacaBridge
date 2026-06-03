@@ -64,7 +64,7 @@ void Discovery::run_discovery() {
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(ALPACA_DISCOVERY_PORT);
 
-    if (bind(socket_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (bind(socket_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         util::log_error("Failed to bind discovery socket");
         util::socket_close(socket_fd_);
         socket_fd_ = util::kInvalidSocket;
@@ -123,7 +123,7 @@ void Discovery::run_discovery() {
         
         int bytes_received = static_cast<int>(recvfrom(
             socket_fd_, buffer, static_cast<int>(sizeof(buffer) - 1), 0,
-            (struct sockaddr*)&sender_addr, &sender_len
+            reinterpret_cast<struct sockaddr*>(&sender_addr), &sender_len
         ));
 
         if (bytes_received > 0) {
@@ -168,7 +168,7 @@ void Discovery::handle_probe(const std::string& probe_data, const std::string& s
         const int payload_len = static_cast<int>(json_response.size());
         int sent = static_cast<int>(sendto(
             socket_fd_, json_response.c_str(), payload_len, 0,
-            (struct sockaddr*)&target_addr, sizeof(target_addr)
+            reinterpret_cast<struct sockaddr*>(&target_addr), sizeof(target_addr)
         ));
         
         if (sent > 0) {

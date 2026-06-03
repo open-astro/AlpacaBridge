@@ -171,7 +171,7 @@ void Server::run_server() {
     }
     address.sin_port = htons(static_cast<u_short>(port));
 
-    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+    if (bind(server_fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) < 0) {
         util::log_error("Failed to bind socket to port " + std::to_string(config_.http_port()));
         util::socket_close(server_fd);
         server_fd_.store(util::kInvalidSocket);
@@ -236,7 +236,7 @@ void Server::run_server() {
             struct sockaddr_in client_address;
             util::SocketLen client_len = sizeof(client_address);
             
-            util::SocketHandle client_fd = accept(server_fd, (struct sockaddr*)&client_address, &client_len);
+            util::SocketHandle client_fd = accept(server_fd, reinterpret_cast<struct sockaddr*>(&client_address), &client_len);
             if (client_fd == util::kInvalidSocket) {
                 int err = util::socket_get_last_error();
                 if (util::socket_interrupted(err) || util::socket_would_block(err)) {
