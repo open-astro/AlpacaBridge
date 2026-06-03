@@ -1,9 +1,0 @@
-# CodeRabbit review configuration.
-#
-# Vendor SDK trees under AlpacaCore/external/ contain firmware blobs (.HEX,
-# .img), prebuilt vendor headers, sample apps, and documentation that we
-# don't author or modify — exclude them from automated review so the file
-# count stays tractable for PRs that add or remove SDK contents in bulk.
-reviews:
-  path_filters:
-    - "!AlpacaCore/external/**"

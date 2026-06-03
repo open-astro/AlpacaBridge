@@ -1,0 +1,18 @@
+# AlpacaBridge C++ style (C++20).
+#
+# Captures the conventions already in the tree so adoption is a no-op for
+# existing code: 4-space indent, attached (K&R) braces, pointer binds to the
+# type (`char* p`), ~120 column target. Enforced incrementally in CI via
+# git-clang-format, which only reformats lines touched by a PR — so turning
+# this on does not churn the existing codebase.
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+AccessModifierOffset: -4
+PointerAlignment: Left
+DerivePointerAlignment: false

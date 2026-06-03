@@ -50,7 +50,7 @@ require_linux() {
 
 detect_parallel() {
   if command -v nproc >/dev/null 2>&1; then
-    echo "$(nproc)"
+    nproc
   else
     echo "4"
   fi

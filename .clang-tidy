@@ -1,0 +1,28 @@
+# AlpacaBridge clang-tidy configuration.
+#
+# Tuned for signal over volume: bug-prone patterns, performance, the static
+# analyzer, and a conservative slice of cppcoreguidelines. Noisy or
+# stylistically opinionated checks (full modernize/readability sweeps,
+# magic-numbers, trailing-return, etc.) are disabled so the CI gate flags
+# real issues rather than churn. CI runs these only on lines changed in a PR
+# (clang-tidy-diff), so the existing tree is never bulk-flagged.
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  clang-analyzer-*,
+  cppcoreguidelines-pro-type-member-init,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-narrowing-conversions,
+  misc-definitions-in-headers,
+  misc-redundant-expression,
+  misc-unused-using-decls,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions
+
+# Findings on changed lines fail the job; the existing tree is exempt because
+# clang-tidy-diff only feeds it the PR diff.
+WarningsAsErrors: '*'
+
+# Only diagnose project headers, never the vendored SDK trees.
+HeaderFilterRegex: '(AlpacaCore|AlpacaHTTP)/(include|src)/.*'

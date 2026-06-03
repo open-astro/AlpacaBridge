@@ -1,0 +1,59 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+# Cancel an in-progress review if a newer commit is pushed to the same PR,
+# so rapid pushes don't stack up redundant reviews (saves usage).
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: anthropics/claude-code-action@36a69b6a90b850823f86de06fdfd56264772ad98  # v1
+        with:
+          # Subscription (Pro/Max) auth. Generate locally with `claude setup-token`
+          # and store as an org or repo secret named CLAUDE_CODE_OAUTH_TOKEN.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Keep the whole review in ONE top-level comment that updates in place,
+          # instead of posting a new comment on every push.
+          use_sticky_comment: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are reviewing this pull request. The PR branch is already
+            checked out in the current working directory.
+
+            Focus ONLY on genuinely important issues, in these categories:
+            - Potential bugs or logic errors
+            - Correctness
+            - Security implications
+            - Performance considerations
+
+            Rules:
+            - Be concise. Use short bullet points.
+            - Skip minor style/formatting nitpicks (a linter/clang-format handles those).
+            - If you find no significant issues, say so briefly.
+            - End your comment with a sign-off line:
+              "✅ Approved" if no significant issues, or
+              "⚠️ Issues found" if there are things to address.
+
+            Post your review as a SINGLE top-level comment using `gh pr comment`.
+            Do not submit the review text as a chat message.
+          claude_args: |
+            --model sonnet
+            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"

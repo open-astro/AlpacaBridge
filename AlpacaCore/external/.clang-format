@@ -1,0 +1,5 @@
+# Vendored SDK trees are imported upstream artifacts we don't author. Disable
+# formatting here so git-clang-format never touches lines in bulk SDK
+# add/remove PRs (mirrors the old CodeRabbit path_filter exclusion).
+DisableFormat: true
+SortIncludes: false

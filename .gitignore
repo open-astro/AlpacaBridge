@@ -64,6 +64,10 @@ obj-*/
 AlpacaCore/build-test*/
 AlpacaHTTP/build-test*/
 
+# Python bytecode cache (e.g. .github/scripts/ tooling)
+__pycache__/
+*.pyc
+
 # Claude Code local settings
 .claude/settings.local.json
 
