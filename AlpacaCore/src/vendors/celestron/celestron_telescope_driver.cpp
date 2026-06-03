@@ -153,9 +153,15 @@ public:
     ~CelestronTelescopeDriver() override {
         stop_connection_thread();
         if (connected_) {
+            // Qualify the call so it binds statically (we want this class's
+            // implementation, not virtual dispatch from a destructor), and
+            // swallow any throw so it cannot escape the noexcept destructor.
             try {
-                set_connected(false);
+                CelestronTelescopeDriver::set_connected(false);
             } catch (...) {
+                // Best-effort disconnect on destruction; log and continue so
+                // nothing escapes the noexcept destructor.
+                ALPACA_LOG_WARN("Celestron", "Error disconnecting mount during destruction");
             }
         }
     }
@@ -1624,6 +1630,9 @@ private:
         if (!hc_available_) return false;
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
+            // ensure_site_info_cached_locked() sets site_info_valid_ on success;
+            // this re-check detects a failed cache populate, not a dead condition.
+            // cppcheck-suppress identicalInnerCondition
             if (!site_info_valid_) return false;
         }
         auto& protocol = CelestronProtocolWrapper::instance();

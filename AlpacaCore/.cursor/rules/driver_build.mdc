@@ -103,9 +103,7 @@ external/
    ├─ include/
    │   └─ ASICamera2.h
    ├─ lib/
-   │   ├─ linux/x64/libASICamera2.a
-   │   ├─ mac/x64/libASICamera2.a
-   │   └─ windows/x64/ASICamera2.lib
+   │   └─ linux/armv8/libASICamera2.a   # arm64 only — do not vendor x64/mac/windows libs
    └─ README.md
 ```
 
@@ -136,8 +134,7 @@ In your driver's CMakeLists.txt, document the SDK folder name and which files ar
 ```cmake
 # ZWO SDK Structure (example - actual folder name may vary):
 # - external/ZWO/ASI_Camera_SDK/include/ASICamera2.h (header)
-# - external/ZWO/ASI_Camera_SDK/lib/linux/x64/libASICamera2.a (Linux static lib)
-# - external/ZWO/ASI_Camera_SDK/lib/mac/x64/libASICamera2.a (macOS static lib)
+# - external/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.a (Linux arm64 static lib)
 ```
 
 ---
@@ -358,20 +355,17 @@ if(ALPACACORE_ENABLE_ZWO)
 
     message(STATUS "Found ZWO SDK at: ${ZWO_SDK_DIR}")
 
-    # Platform-specific library selection (see src/vendors/zwo/CMakeLists.txt)
-    if(APPLE)
-        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/mac")
-        set(ZWO_LIB_NAME "ASICamera2")
-        set(ZWO_LIB_TYPE STATIC)
-    elseif(UNIX)
-        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/linux/x64")
-        set(ZWO_LIB_NAME "ASICamera2")
-        set(ZWO_LIB_TYPE STATIC)
-    elseif(WIN32)
-        set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/windows/x64")
-        set(ZWO_LIB_NAME "ASICamera2")
-        set(ZWO_LIB_TYPE STATIC)
+    # arm64-only library selection (see src/vendors/zwo/CMakeLists.txt).
+    # AlpacaBridge is Linux arm64 only — hard-fail on any other target.
+    if(NOT UNIX)
+        message(FATAL_ERROR "AlpacaBridge is Linux arm64-only.")
     endif()
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}. AlpacaBridge is arm64-only.")
+    endif()
+    set(ZWO_LIB_DIR "${ZWO_SDK_DIR}/lib/linux/armv8")
+    set(ZWO_LIB_NAME "ASICamera2")
+    set(ZWO_LIB_TYPE STATIC)
     
     # Source files
     set(ZWO_SOURCES

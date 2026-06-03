@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_DIR="${ROOT_DIR}/AlpacaCore"
 HTTP_DIR="${ROOT_DIR}/AlpacaHTTP"
 SERVICE_NAME="alpacahttp.service"
-HTTP_BEAST="${ALPACAHTTP_USE_BOOST_BEAST:-OFF}"
 CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
 INSTALL_UDEV_RULES="${ALPACA_INSTALL_UDEV_RULES:-ON}"
 GIT_PULL="${ALPACA_GIT_PULL:-OFF}"
@@ -16,7 +15,6 @@ usage() {
 Usage: install_alpaca_service.sh <install|update|uninstall|status>
 
 Environment overrides:
-  ALPACAHTTP_USE_BOOST_BEAST=ON|OFF
   ALPACACORE_ENABLE_ALL_VENDORS=ON|OFF
   ALPACA_INSTALL_UDEV_RULES=ON|OFF
   ALPACA_GIT_PULL=ON|OFF          (update only)
@@ -165,7 +163,6 @@ build_projects() {
 
   echo "== AlpacaHTTP =="
   cmake -S "${HTTP_DIR}" -B "${HTTP_DIR}/build" \
-    -DALPACAHTTP_USE_BOOST_BEAST="${HTTP_BEAST}" \
     -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}"
   cmake --build "${HTTP_DIR}/build" --parallel "${parallel}"
 }

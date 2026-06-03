@@ -64,7 +64,7 @@ void Discovery::run_discovery() {
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(ALPACA_DISCOVERY_PORT);
 
-    if (bind(socket_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (bind(socket_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         util::log_error("Failed to bind discovery socket");
         util::socket_close(socket_fd_);
         socket_fd_ = util::kInvalidSocket;
@@ -120,11 +120,9 @@ void Discovery::run_discovery() {
 
         struct sockaddr_in sender_addr;
         util::SocketLen sender_len = sizeof(sender_addr);
-        
-        int bytes_received = static_cast<int>(recvfrom(
-            socket_fd_, buffer, static_cast<int>(sizeof(buffer) - 1), 0,
-            (struct sockaddr*)&sender_addr, &sender_len
-        ));
+
+        int bytes_received = static_cast<int>(recvfrom(socket_fd_, buffer, static_cast<int>(sizeof(buffer) - 1), 0,
+                                                       reinterpret_cast<struct sockaddr*>(&sender_addr), &sender_len));
 
         if (bytes_received > 0) {
             buffer[bytes_received] = '\0';
@@ -166,11 +164,9 @@ void Discovery::handle_probe(const std::string& probe_data, const std::string& s
         target_addr.sin_port = htons(sender_port);
 
         const int payload_len = static_cast<int>(json_response.size());
-        int sent = static_cast<int>(sendto(
-            socket_fd_, json_response.c_str(), payload_len, 0,
-            (struct sockaddr*)&target_addr, sizeof(target_addr)
-        ));
-        
+        int sent = static_cast<int>(sendto(socket_fd_, json_response.c_str(), payload_len, 0,
+                                           reinterpret_cast<struct sockaddr*>(&target_addr), sizeof(target_addr)));
+
         if (sent > 0) {
             util::log_info("Discovery: Sent JSON response to " + sender_address + ":" + std::to_string(sender_port) + 
                           " (AlpacaPort=" + std::to_string(config_.http_port()) + ", " + std::to_string(sent) + " bytes)");

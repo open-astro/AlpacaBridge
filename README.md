@@ -16,7 +16,7 @@ AlpacaBridge is a complete ASCOM Alpaca server for Linux. Install it on a machin
 
 ## AlpacaBridge Overview
 
-AlpacaBridge runs on any Debian 13 machine — a Raspberry Pi at the mount, a mini PC in the observatory, or an off-the-shelf astronomy control unit like a ToupTek StellaVita, ZWO ASIAIR, or iOptron iMate repurposed with a fresh Debian install. See the [Wiki](https://github.com/open-astro/AlpacaBridge/wiki) for setup guides covering these devices.
+AlpacaBridge runs on a Debian 13 arm64 machine — a Raspberry Pi at the mount, or an off-the-shelf astronomy control unit like a ToupTek StellaVita, ZWO ASIAIR, or iOptron iMate repurposed with a fresh Debian install. See the [Wiki](https://github.com/open-astro/AlpacaBridge/wiki) for setup guides covering these devices.
 
 ScopeTrader covered the project launch and what it means for the Alpaca ecosystem: [OpenAstro AlpacaBridge Launches and Why It Matters](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/).
 

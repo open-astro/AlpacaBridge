@@ -860,20 +860,13 @@ on: [push, pull_request]
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    
+    runs-on: ubuntu-24.04-arm   # AlpacaBridge is Linux arm64 only
+
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Install Catch2
-        run: |
-          # Install Catch2 (method depends on OS)
-          # Linux: sudo apt-get install catch2
-          # macOS: brew install catch2
-          # Windows: vcpkg install catch2
+        run: sudo apt-get install -y catch2
       
       - name: Configure CMake
         run: |
@@ -893,7 +886,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v3
         with:
-          name: test-results-${{ matrix.os }}
+          name: test-results
           path: build/test_results.xml
 ```
 
