@@ -207,8 +207,12 @@ jobs:
           set -euo pipefail
           git fetch --no-tags origin "$GITHUB_BASE_REF"
           merge_base="$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)"
+          # git-clang-format --diff exits non-zero when it finds differences.
+          # `|| true` keeps `set -e` from aborting at this assignment so the
+          # check below runs and prints the diff + fix hint, instead of the job
+          # dying with a bare "exit 1" and no actionable output.
           diff="$(git-clang-format --commit "$merge_base" --diff \
-            --extensions c,cc,cpp,cxx,h,hh,hpp,hxx)"
+            --extensions c,cc,cpp,cxx,h,hh,hpp,hxx)" || true
           if [ "$diff" != "no modified files to format" ] && \
              [ "$diff" != "clang-format did not modify any files" ]; then
             echo "$diff"
@@ -390,12 +394,24 @@ jobs:
 
       - name: Install zizmor
         # Prebuilt arm64 release binary — no Rust toolchain / pip build needed.
+        # The tarball is checksum-verified before it runs: a security-audit job
+        # must not itself execute an unverified download. Bump both `ver` and
+        # `sha256` together when upgrading (GitHub release assets are immutable,
+        # so the hash is stable for a given version).
         run: |
           set -euo pipefail
           ver=1.25.2
+          sha256=4b4b9491112c2a09b318101c0d3349b73af1c4f532e097dd6d0164f2abda760d
           curl -fsSL "https://github.com/zizmorcore/zizmor/releases/download/v${ver}/zizmor-aarch64-unknown-linux-gnu.tar.gz" \
             -o /tmp/zizmor.tgz
+          echo "${sha256}  /tmp/zizmor.tgz" | sha256sum --check --strict -
           tar -xzf /tmp/zizmor.tgz -C /tmp
+          # Fail explicitly if a future release changes the archive layout,
+          # rather than relying on `install` to error on a missing path.
+          if [ ! -x /tmp/zizmor ]; then
+            echo "::error::zizmor binary not found at /tmp/zizmor after extraction (archive layout changed?)"
+            exit 1
+          fi
           sudo install /tmp/zizmor /usr/local/bin/zizmor
           zizmor --version
 
