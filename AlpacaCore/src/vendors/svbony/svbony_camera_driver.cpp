@@ -10,14 +10,16 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/svbony/svbony_camera_driver.h>
-#include <alpacacore/vendor/svbony/svbony_sdk_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/svbony/svbony_camera_driver.h>
+#include <alpacacore/vendor/svbony/svbony_sdk_wrapper.h>
+#include <alpacacore/version.h>
+
 #include <algorithm>
 #include <atomic>
-#include <cmath>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -132,9 +134,7 @@ public:
         return "AlpacaCore SVBONY Camera Driver";
     }
 
-    std::string get_driver_version() const override {
-        return "1.0.0";
-    }
+    std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     int get_interface_version() const override {
         return 3;

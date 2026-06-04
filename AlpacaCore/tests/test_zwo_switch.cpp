@@ -11,11 +11,13 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
-#include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/zwo/zwo_switch_driver.h>
+#include <alpacacore/version.h>
+
 #include <functional>
+
+#include "catch2_compat.h"
 
 namespace {
 
@@ -68,7 +70,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Device metadata", "[zwo][switch][unit]
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_description() == "ZWO camera dew heater switch");
     CHECK(driver->get_driver_info() == "AlpacaCore ZWO Dew Heater Switch");
-    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "ZWO_DEW_3");
 }

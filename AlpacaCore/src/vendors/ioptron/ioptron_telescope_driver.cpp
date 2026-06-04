@@ -12,23 +12,25 @@
 // with all SSPL v1 requirements.
 
 #include <alpacacore/telescope_driver.h>
-#include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
-#include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/units.h>
-#include <mutex>
+#include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
+#include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
+#include <alpacacore/version.h>
+
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
-#include <limits>
-#include <numbers>
-#include <sstream>
-#include <algorithm>
-#include <thread>
-#include <atomic>
 #include <ctime>
 #include <functional>
+#include <limits>
+#include <mutex>
+#include <numbers>
 #include <optional>
+#include <sstream>
+#include <thread>
 
 namespace alpacacore::vendor::ioptron {
 
@@ -148,11 +150,9 @@ public:
     std::string get_driver_info() const override {
         return "AlpacaCore iOptron Driver v1.0";
     }
-    
-    std::string get_driver_version() const override {
-        return "1.0.0";
-    }
-    
+
+    std::string get_driver_version() const override { return alpacacore::kVersion; }
+
     int get_interface_version() const override {
         return 3;
     }

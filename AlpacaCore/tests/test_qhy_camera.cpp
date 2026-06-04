@@ -10,11 +10,13 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
-#include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/qhy/qhy_camera_driver.h>
+#include <alpacacore/version.h>
+
 #include <functional>
+
+#include "catch2_compat.h"
 
 namespace {
 
@@ -44,7 +46,7 @@ TEST_CASE("QHY Camera Driver - Device metadata", "[qhy][camera][unit]") {
 
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_description() == "QHY CCD Camera Driver");
-    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "QHY_3");
 }

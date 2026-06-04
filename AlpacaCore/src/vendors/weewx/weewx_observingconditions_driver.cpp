@@ -11,11 +11,13 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
+#include <alpacacore/version.h>
 #include <curl/curl.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -279,9 +281,7 @@ public:
         return "AlpacaCore WeeWX ObservingConditions Driver";
     }
 
-    std::string get_driver_version() const override {
-        return "1.0.0";
-    }
+    std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     int get_interface_version() const override {
         return 1;

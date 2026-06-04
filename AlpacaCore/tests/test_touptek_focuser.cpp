@@ -10,12 +10,14 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
-#include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
+#include <alpacacore/version.h>
+
 #include <functional>
 #include <variant>
+
+#include "catch2_compat.h"
 
 namespace {
 
@@ -48,7 +50,7 @@ TEST_CASE("ToupTek AAF Focuser Driver - Device metadata", "[touptek][focuser][un
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_description() == "ToupTek AAF Focuser Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore ToupTek AAF Focuser Driver");
-    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "TOUPTEK_AAF_3");
 }

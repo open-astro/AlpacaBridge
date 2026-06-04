@@ -11,12 +11,14 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
 #include <alpacacore/telescope_driver.h>
-#include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
+#include <alpacacore/version.h>
+
 #include <functional>
+
+#include "catch2_compat.h"
 
 using alpacacore::DeviceType;
 
@@ -75,7 +77,7 @@ TEST_CASE("Bisque Telescope Driver - Device metadata", "[bisque][telescope][unit
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_description() == "Bisque Paramount / TheSkyX Mount Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore Bisque TheSkyX Driver v0.1");
-    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "Bisque_3");
 }
