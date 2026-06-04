@@ -11,8 +11,10 @@
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
 #include <alpacahttp/config.h>
-#include "test_assert.h"
+
 #include <iostream>
+
+#include "test_assert.h"
 
 int main() {
     std::cout << "Testing configuration...\n";

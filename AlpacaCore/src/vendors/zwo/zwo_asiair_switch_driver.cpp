@@ -82,9 +82,7 @@ public:
         return "ZWO " + config_.model_name + " 12V power switch (" + config_.gpio_chip_path + ")";
     }
 
-    std::string get_driver_info() const override {
-        return "AlpacaCore ZWO " + config_.model_name + " Switch";
-    }
+    std::string get_driver_info() const override { return "AlpacaCore ZWO " + config_.model_name + " Switch"; }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 

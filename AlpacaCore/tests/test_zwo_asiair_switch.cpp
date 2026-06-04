@@ -67,8 +67,7 @@ TEST_CASE("ZWO ASIAIR Plus (Pi CM4) Switch Driver - model label", "[zwo][switch]
 
     REQUIRE(driver != nullptr);
     CHECK(driver->get_name() == "ZWO ASIAIR Plus (Pi CM4) Switch");
-    CHECK(driver->get_description() ==
-          "ZWO ASIAIR Plus (Pi CM4) 12V power switch (/dev/gpiochip0)");
+    CHECK(driver->get_description() == "ZWO ASIAIR Plus (Pi CM4) 12V power switch (/dev/gpiochip0)");
     CHECK(driver->get_driver_info() == "AlpacaCore ZWO ASIAIR Plus (Pi CM4) Switch");
 }
 

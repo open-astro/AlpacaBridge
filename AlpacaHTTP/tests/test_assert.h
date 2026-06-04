@@ -25,11 +25,10 @@
 // The expression is evaluated exactly once (in the if condition) so side
 // effects fire as intended. On failure it prints the expression + location and
 // aborts, which ctest reports as a failed test.
-#define EXPECT(expr)                                                          \
-    do {                                                                      \
-        if (!(expr)) {                                                        \
-            std::fprintf(stderr, "EXPECT failed: %s\n  at %s:%d\n", #expr,    \
-                         __FILE__, __LINE__);                                 \
-            std::abort();                                                     \
-        }                                                                     \
+#define EXPECT(expr)                                                                            \
+    do {                                                                                        \
+        if (!(expr)) {                                                                          \
+            std::fprintf(stderr, "EXPECT failed: %s\n  at %s:%d\n", #expr, __FILE__, __LINE__); \
+            std::abort();                                                                       \
+        }                                                                                       \
     } while (0)

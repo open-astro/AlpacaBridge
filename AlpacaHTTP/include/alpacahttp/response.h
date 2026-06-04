@@ -12,11 +12,11 @@
 
 #pragma once
 
-#include <string>
 #include <cstdint>
-#include <optional>
-#include <unordered_map>
 #include <nlohmann/json.hpp>
+#include <optional>
+#include <string>
+#include <unordered_map>
 
 namespace alpacahttp {
 

@@ -10,12 +10,14 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include <alpacahttp/discovery.h>
 #include <alpacahttp/config.h>
-#include "test_assert.h"
+#include <alpacahttp/discovery.h>
+
+#include <chrono>
 #include <iostream>
 #include <thread>
-#include <chrono>
+
+#include "test_assert.h"
 
 int main() {
     std::cout << "Testing discovery...\n";
@@ -41,7 +43,7 @@ int main() {
     
     // Stop discovery
     discovery.stop();
-    
+
     EXPECT(!discovery.is_running());
 
     std::cout << "All discovery tests passed!\n";

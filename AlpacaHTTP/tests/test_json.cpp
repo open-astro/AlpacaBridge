@@ -12,8 +12,10 @@
 
 #include <alpacahttp/json_utils.h>
 #include <alpacahttp/response.h>
-#include "test_assert.h"
+
 #include <iostream>
+
+#include "test_assert.h"
 
 using namespace alpacahttp;
 

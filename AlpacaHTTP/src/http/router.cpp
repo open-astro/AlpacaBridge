@@ -1855,8 +1855,7 @@ Response Router::dispatch_device_method(
                 for (const auto& action : device->get_supported_actions()) {
                     actions.push_back(action);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, actions);
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, actions);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -2064,8 +2063,7 @@ Response Router::dispatch_device_method(
                     std::visit([&obj](const auto& val) { obj["Value"] = val; }, entry.value);
                     values.push_back(obj);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, values);
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, values);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -2472,8 +2470,7 @@ Response Router::dispatch_telescope_method(
                     rate_obj["Maximum"] = range.second;
                     rates_array.push_back(rate_obj);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rates_array);
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, rates_array);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -2578,8 +2575,7 @@ Response Router::dispatch_telescope_method(
                 for (int rate : rates) {
                     rates_array.push_back(rate);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rates_array);
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, rates_array);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -3417,8 +3413,7 @@ Response Router::dispatch_camera_method(
                 for (const auto& gain : camera->get_gains()) {
                     gains.push_back(gain);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, gains);
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, gains);
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "hasshutter") {
@@ -3537,8 +3532,7 @@ Response Router::dispatch_camera_method(
                 for (const auto& offset : camera->get_offsets()) {
                     offsets.push_back(offset);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, offsets);
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, offsets);
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "percentcompleted") {
@@ -3568,8 +3562,7 @@ Response Router::dispatch_camera_method(
                 for (const auto& mode : camera->get_readout_modes()) {
                     modes.push_back(mode);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, modes);
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, modes);
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "sensorname") {
@@ -4112,8 +4105,7 @@ Response Router::dispatch_filterwheel_method(
                 for (const auto& name : filterwheel->get_names()) {
                     names.push_back(name);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, names);
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, names);
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "focusoffsets") {
@@ -4121,8 +4113,7 @@ Response Router::dispatch_filterwheel_method(
                 for (int offset : filterwheel->get_focus_offsets()) {
                     offsets.push_back(offset);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, offsets);
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, offsets);
                 response.set_body(alpaca_response);
                 return response;
             }

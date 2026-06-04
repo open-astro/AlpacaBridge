@@ -10,13 +10,15 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include <alpacahttp/router.h>
 #include <alpacahttp/request.h>
-#include <nlohmann/json.hpp>
-#include "test_assert.h"
+#include <alpacahttp/router.h>
+
 #include <cmath>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <sstream>
+
+#include "test_assert.h"
 
 namespace {
 
@@ -138,8 +140,7 @@ int main() {
         // The structured-Value change in to_json briefly left these handlers
         // passing a ".dump()"-ed string to make_success_response, which ConformU
         // rejected ("The JSON value could not be converted to IList<String>").
-        const auto actions_response = route_request(
-            router, "GET", "/api/v1/telescope/9101/supportedactions");
+        const auto actions_response = route_request(router, "GET", "/api/v1/telescope/9101/supportedactions");
         const auto actions_json = nlohmann::json::parse(actions_response.body());
         EXPECT(actions_json.value("ErrorNumber", -1) == 0);
         EXPECT(actions_json.contains("Value"));
