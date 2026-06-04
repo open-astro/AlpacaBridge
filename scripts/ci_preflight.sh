@@ -11,8 +11,8 @@
 #   RUN_SANITIZERS=1 ./scripts/ci_preflight.sh # also run the ASan+UBSan job
 #   PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh         # never apt-install
 #
-# Missing analysis tools (clang-tidy, cppcheck, shellcheck, clang-format) are
-# auto-installed via `sudo apt-get` unless PREFLIGHT_NO_INSTALL=1, in which case
+# Missing analysis tools (clang-tidy, cppcheck, shellcheck, clang-format, node)
+# are auto-installed via `sudo apt-get` unless PREFLIGHT_NO_INSTALL=1, in which case
 # the corresponding check is reported SKIP and the run still fails loudly if a
 # mandatory tool could not be obtained. CI runs these regardless, so a skip is
 # never silently treated as a pass. zizmor is not in apt, so it is fetched as a
@@ -163,6 +163,11 @@ mapfile -t SH_FILES < <(
   } | sort -u
 )
 
+# Hand-written web UI JavaScript (served static, no build step).
+mapfile -t JS_FILES < <(
+  printf '%s\n' "${CHANGED[@]}" | grep -E '^AlpacaHTTP/web/.*\.js$' || true
+)
+
 have_workflow_changes() {
   printf '%s\n' "${CHANGED[@]}" | grep -qE '^\.github/workflows/'
 }
@@ -309,7 +314,32 @@ else
   record SKIP "shellcheck (tool missing)"
 fi
 
-# --- gate 8: zizmor (only if workflows changed) ----------------------------
+# --- gate 8: javascript syntax (only if web JS changed) --------------------
+
+section "JavaScript syntax (node --check)"
+if [ "${#JS_FILES[@]}" -eq 0 ]; then
+  echo "No web JavaScript changed -- skipping."
+  record SKIP "javascript (no JS changes)"
+elif ensure_tool node nodejs; then
+  js_ok=1
+  for f in "${JS_FILES[@]}"; do
+    if ! node --check "${f}"; then
+      echo "Syntax error in ${f}"
+      js_ok=0
+    fi
+  done
+  if [ "${js_ok}" -eq 1 ]; then
+    echo "JavaScript syntax OK."
+    record PASS "javascript"
+  else
+    record FAIL "javascript"
+  fi
+else
+  echo "node unavailable -- CI will still check it."
+  record SKIP "javascript (tool missing)"
+fi
+
+# --- gate 9: zizmor (only if workflows changed) ----------------------------
 
 section "zizmor (workflow audit)"
 if ! have_workflow_changes; then

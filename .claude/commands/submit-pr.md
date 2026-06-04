@@ -135,9 +135,10 @@ The script reproduces, in order, the CI jobs that can run on this arm64 host and
 5. **clang-tidy** changed lines (CI `clang-tidy`)
 6. **cppcheck** changed files (CI `cppcheck`)
 7. **shellcheck** — only if shell scripts changed (CI `shellcheck`)
-8. **zizmor** — only if `.github/workflows/*` changed (CI `zizmor`)
+8. **javascript** — `node --check` of web UI JS, only if `AlpacaHTTP/web/*.js` changed (CI `javascript`)
+9. **zizmor** — only if `.github/workflows/*` changed (CI `zizmor`)
 
-It **auto-installs** every missing tool so each gate actually runs rather than being skipped: `clang-tidy`/`cppcheck`/`shellcheck`/`clang-format` via `sudo apt-get`, and `zizmor` as a pinned, checksum-verified release binary cached under `~/.cache` (no sudo). The two `run_all_tests.sh` invocations are full rebuilds and are the slow part — that's expected.
+It **auto-installs** every missing tool so each gate actually runs rather than being skipped: `clang-tidy`/`cppcheck`/`shellcheck`/`clang-format`/`nodejs` via `sudo apt-get`, and `zizmor` as a pinned, checksum-verified release binary cached under `~/.cache` (no sudo). The two `run_all_tests.sh` invocations are full rebuilds and are the slow part — that's expected.
 
 Knobs:
 - `PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh` — fork contributors whose PR base is the upstream remote.
