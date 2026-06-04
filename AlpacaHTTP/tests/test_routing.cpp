@@ -133,6 +133,18 @@ int main() {
         }
         EXPECT(found_device);
 
+        // Regression: device-API array responses (SupportedActions, DeviceState,
+        // AxisRates, Gains, ...) must serialize as a JSON array, not a string.
+        // The structured-Value change in to_json briefly left these handlers
+        // passing a ".dump()"-ed string to make_success_response, which ConformU
+        // rejected ("The JSON value could not be converted to IList<String>").
+        const auto actions_response = route_request(
+            router, "GET", "/api/v1/telescope/9101/supportedactions");
+        const auto actions_json = nlohmann::json::parse(actions_response.body());
+        EXPECT(actions_json.value("ErrorNumber", -1) == 0);
+        EXPECT(actions_json.contains("Value"));
+        EXPECT(actions_json["Value"].is_array());
+
         nlohmann::json remove_body = {
             {"vendor", "zwo"},
             {"deviceType", "telescope"},
