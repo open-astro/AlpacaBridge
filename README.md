@@ -9,7 +9,7 @@ AlpacaBridge is a complete ASCOM Alpaca server for Linux. Install it on a machin
 ## Features
 
 - **Turnkey Alpaca server** — installs as a systemd service, starts on boot
-- **[ConformU-validated drivers](SUPPORTED-DRIVERS.md)** — cameras (ZWO, QHY, SVBONY, ToupTek, Player One), mounts (iOptron, SynScan, Celestron, ZWO), focusers (ZWO, Gemini), filter wheels, rotators, switches, and weather stations (WeeWX)
+- **[ConformU-validated drivers](SUPPORTED-DRIVERS.md)** — cameras, mounts, focusers, filter wheels, rotators, switches, and weather stations from iOptron, Player One Astronomy, ZWO, QHY, ToupTek, Skywatcher, Celestron, Gemini, SVBONY, and WeeWX
 - **Auto-detection** — USB and Wi-Fi devices are discovered automatically, no manual port configuration required
 - **Bundled vendor SDKs and udev rules** — plug in supported USB devices and go
 - **Web management UI** — configure devices from any browser on your network
