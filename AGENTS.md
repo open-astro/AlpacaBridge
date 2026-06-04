@@ -344,7 +344,7 @@ Connection types: Serial (USB serial) only. Default 9600 baud, 8N1. Protocol ver
 
 ### iOptron
 
-Devices: Telescope.
+Devices: Telescope (mount), Switch (iMate PowerBox).
 
 Protocol documentation: `AlpacaCore/external/iOptron/RS-232_Command_Language2014V310.md`. No external SDK required — uses RS-232 serial communication directly.
 
@@ -359,6 +359,22 @@ Connection types: Serial (USB serial, 115200 baud default per v3.10 spec) and Ne
 - **Pulse guiding**: Uses native iOptron pulse guide commands (`:ZS#`, `:ZQ#`, `:ZE#`, `:ZC#` for N/S/E/W with duration in ms). Hardware-timed by the mount.
 - **`:GEP#` response format**: sign + 8 RA digits + sign + 8 DEC digits + 1 side_of_pier digit + 1 pointing_state digit. No `#` terminator on some firmware versions — use idle-timeout read.
 - ConformU 4.3.0 validated for **iOptron HEM27** on Linux arm64 with 0 errors and 0 issues.
+
+#### iMate PowerBox (Switch)
+
+The iMate is iOptron's embedded astronomy computer (OrangePi 3 LTS / Allwinner H6, arm64). Its "PowerBox" accessory exposes switchable DC power ports. This is a **local GPIO** device, completely independent of the mount RS-232 protocol — AlpacaBridge runs *on* the iMate and toggles GPIO directly. It does **not** share `ioptron_protocol_wrapper`; it has a dedicated `ioptron_powerbox_wrapper` (libgpiod, `/dev/gpiochip0`).
+
+- **Hardware**: 3 physical DC jacks. Two are GPIO-controllable, one is a hardwired always-on pass-through with no GPIO line:
+  - `DC1` → gpiochip0 line **118** (WiringPi pin 2, PWM.0).
+  - `DC2` → gpiochip0 line **114** (WiringPi pin 6, PD18).
+  - `DC3` → always-on pass-through, no GPIO.
+- **Switch mapping** (`MaxSwitch = 3`): switch 0 = `DC3 (always on)` (read-only, `CanWrite=false`, `GetSwitch` always true, writes throw `NotImplemented`); switch 1 = `DC1`; switch 2 = `DC2`. All boolean (min 0 / max 1 / step 1).
+- **Discovery of the control path**: stock iMate drives the ports via the setuid WiringPi `gpio` tool (`/usr/local/bin/gpio mode/write/read`) from `/home/imate/imatepowerbox.sh`, and configures them as outputs driven high at boot via `dc-power-ports.service` (`gpio mode 2/6 out; gpio write 2/6 1`). There is also a Dart `tcp_server.service` (port 3000) used by iOptron's own apps, but it is not required (and was inactive on the test unit). We use libgpiod directly for consistency with the ZWO ASIAIR switch driver rather than shelling out.
+- **WiringPi → SoC GPIO mapping**: WiringPi pin numbers (2, 6) are NOT the libgpiod line offsets. Use `gpio readall` on the device to map wPi → GPIO (wPi 2 = GPIO 118, wPi 6 = GPIO 114). libgpiod addresses lines by SoC offset.
+- **Never power off on disconnect**: the wrapper defaults controllable ports to "on" at `open()` so connecting preserves the boot state, and `close()` only releases the request — it must not drive ports low (that would cut power to attached gear). Note libgpiod releases the line on `close()`; keep AlpacaBridge connected for the session.
+- **Read-only write ordering**: `set_switch`/`set_switch_value` on the read-only DC3 throws `NotImplemented` *before* the connection check, so the read-only contract holds even when disconnected (ConformU connects first in practice, but this keeps the static capability honest and unit-testable without hardware).
+- **Permissions**: the service user needs access to `/dev/gpiochip0` (root, or a `gpio`/`dialout`-style group with a udev rule). The stock `gpio` tool sidesteps this via setuid; libgpiod does not.
+- Build dependency: `libgpiod-dev` (>= 2.0), same as the ZWO ASIAIR switch.
 
 ### Celestron (NexStar)
 

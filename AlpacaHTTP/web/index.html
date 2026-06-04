@@ -75,6 +75,8 @@
 
                 <!-- iOptron Telescope Configuration -->
                 <div id="ioptron-config" class="vendor-config" style="display: none;">
+                  <!-- Mount (telescope) configuration -->
+                  <div id="ioptron-telescope-config">
                     <h3>iOptron Telescope Configuration</h3>
 
                     <div class="form-group">
@@ -129,7 +131,24 @@
                         <input type="number" id="focal-length" name="focalLength" min="0" step="0.001" placeholder="0.800">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
+                  </div>
 
+                  <!-- iMate PowerBox (switch) configuration -->
+                  <div id="ioptron-switch-config" style="display: none;">
+                    <h3>iOptron iMate PowerBox Configuration</h3>
+                    <p class="hint">
+                        Controls the iMate's on-board DC power ports over local GPIO.
+                        Exposes three switches: <strong>DC3</strong> (always-on
+                        pass-through, read-only), <strong>DC1</strong> and
+                        <strong>DC2</strong> (switchable). Run AlpacaBridge on the
+                        iMate itself.
+                    </p>
+                    <div class="form-group">
+                        <label for="ioptron-powerbox-gpio-chip">GPIO Chip:</label>
+                        <input type="text" id="ioptron-powerbox-gpio-chip" name="ioptronPowerboxGpioChip" placeholder="/dev/gpiochip0">
+                        <small>Optional. Defaults to /dev/gpiochip0 (the iMate's main GPIO bank).</small>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- SynScan Telescope Configuration -->

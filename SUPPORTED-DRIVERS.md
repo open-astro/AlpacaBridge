@@ -209,6 +209,17 @@ This document lists all hardware vendors and device types that are verified to w
 - **ASIAIR Plus 12V Power — RK3568** (`switchType: asiair-plus-rk3568`) — Rockchip RK3568 ASIAIR Plus via ZWO's `pwm_gpio.ko` kernel module on `/dev/pwm-gpio-misc` (reverse-engineered header at `AlpacaCore/external/ZWO/asiair-plus/pwm_gpio.h`). Wrapper indices 0–3 → kernel ioctl indices 4–7 (DC1–DC4). `SET_LEVEL` polarity is inverted (`level=0` ⇒ port ON); the wrapper hides this so ASCOM `value=1` = on. PWM is userspace soft-PWM (default **50 Hz**, matching the stock daemon's `period_ns = 20,000,000`); the module's own hardware-PWM path is unreachable and GPIO bank 4 has no PWM mux. Requires the stock ZWO kernel (4.19.219) to keep `pwm_gpio.ko` loaded, plus the `99-zwo-asiair-plus.rules` udev rule and `gpio`-group membership. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md).
   - **ConformU** 4.3.0 — 0 errors / 0 issues / 0 timing, Linux arm64 (kernel 4.19.219 + stock `pwm_gpio.ko`). Mixed 3 boolean + 1 PWM config; slowest member `SetSwitch (3)` 30 ms.
 
+### iOptron
+
+| Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
+|-------------|--------------|------------|------------------|--------|
+| iMate PowerBox | iMate (OrangePi 3 LTS / H6) | Local GPIO (libgpiod v2) | ⏳ | ConformU pending hardware run |
+
+### iOptron Switch Driver Notes
+
+- **iMate PowerBox** (`vendor: ioptron`, `deviceType: switch`) — the iMate's on-board DC power ports via libgpiod v2 on `/dev/gpiochip0` (override with `gpioChip`). Exposes three switches: `DC3 (always on)` — the hardwired pass-through jack, read-only; `DC1` — GPIO line 118 (WiringPi pin 2); `DC2` — GPIO line 114 (WiringPi pin 6). All boolean on/off. Local GPIO only — independent of the iOptron mount RS-232 protocol; run AlpacaBridge on the iMate itself (already arm64 Debian 13, no re-image). The service user needs access to `/dev/gpiochip0` (root or a `gpio`-group udev rule — the stock image ships neither). Connecting preserves the boot-time "on" state; disconnecting does not power the ports off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#ioptron-imate).
+  - **ConformU** 4.3.0 — ⏳ pending validation on iMate hardware (Linux arm64).
+
 ## Telescope Drivers
 
 ### Celestron

@@ -10,7 +10,7 @@ Pick the section that matches your hardware.
 | [ZWO ASIair Plus (Pi CM4)](#zwo-asiair-plus-raspberry-pi-cm4) | Available — ConformU pending | Raspberry Pi CM4 (BCM2711) | libgpiod v2 |
 | [ZWO ASIair Plus (RK3568)](#zwo-asiair-plus-rockchip-rk3568) | Available — ConformU pending | Rockchip RK3568 | ZWO `pwm_gpio.ko` ioctl |
 | [ToupTek StellaVita](#touptek-stellavita-raspberry-pi-cm4) | Pending hardware | Raspberry Pi CM4 | TBD |
-| [iOptron iMate](#ioptron-imate) | Pending hardware | TBD | TBD |
+| [iOptron iMate](#ioptron-imate) | Available — ConformU pending | OrangePi 3 LTS (Allwinner H6) | libgpiod v2 |
 
 ---
 
@@ -371,7 +371,118 @@ The same `pwm_gpio.ko` module also controls the two USB2 ports, two USB3 ports, 
 
 ## iOptron iMate
 
-*Pending hardware validation. Hardware layout, GPIO mapping, and any vendor-specific quirks will be documented after first ConformU validation.*
+The iMate is iOptron's embedded astronomy computer — an **OrangePi 3 LTS (Allwinner H6, arm64)** that already runs **Debian 13 (Trixie) aarch64**, so unlike the ASIair controllers there is **no re-image step**. AlpacaBridge runs directly on the iMate and drives its on-board DC power ports over local GPIO (libgpiod v2). The "iMate PowerBox" exposes three DC barrel jacks; only two are GPIO-switchable, the third is a hardwired always-on pass-through.
+
+| Switch ID | ASCOM name | libgpiod line (`/dev/gpiochip0`) | WiringPi pin | Writable |
+|----|----|----|----|----|
+| 0 | `DC3 (always on)` | — (no GPIO) | — | No — read-only, always reports ON |
+| 1 | `DC1` | 118 (PWM.0) | 2 | Yes (boolean) |
+| 2 | `DC2` | 114 (PD18) | 6 | Yes (boolean) |
+
+> **GPIO line numbers are SoC offsets, not WiringPi pins.** The stock `imatepowerbox.sh` script and `dc-power-ports.service` address the ports as WiringPi pins 2 and 6; libgpiod addresses them by Allwinner H6 line offset (118 and 114). Confirm the mapping on your unit with `gpio readall` (the stock WiringPi tool) — the `GPIO` column is the libgpiod offset.
+
+### 1. Install runtime dependencies
+
+The stock iMate image already ships `libgpiod3` and the `gpiod` CLI tools. Installing the `.deb` only needs the usual AlpacaBridge runtime libraries; building from source on the device additionally needs the dev packages:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  git build-essential cmake \
+  libgpiod3 gpiod \
+  libusb-1.0-0 libudev1 libcurl4 \
+  libgpiod-dev libusb-1.0-0-dev libudev-dev libcurl4-openssl-dev \
+  nlohmann-json3-dev catch2
+```
+
+> **Runtime libs** (`libgpiod3`, `libusb-1.0-0`, `libudev1`, `libcurl4`) are linked at runtime — required even for a `.deb`-only install. `gpiod` provides the `gpioget` / `gpioinfo` tools used in the verification step. **Dev libs** + **build tools** are needed only when building from source via `build_and_run.sh`.
+
+### 2. Grant the service user access to the GPIO chip
+
+On the stock iMate, `/dev/gpiochip0` is **root-only** (`crw------- root root`) and there is **no `gpio` group** — the factory tooling reaches the pins through a setuid WiringPi binary instead. AlpacaBridge runs unprivileged and uses libgpiod directly, so create a `gpio` group, add yourself, and install a udev rule that grants the group `0660` access:
+
+```bash
+sudo groupadd -f gpio
+sudo usermod -aG gpio "$USER"
+echo 'KERNEL=="gpiochip0", GROUP="gpio", MODE="0660"' \
+  | sudo tee /etc/udev/rules.d/99-alpacabridge-imate-gpio.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+Log out and back in (or `newgrp gpio`) so the membership applies, then confirm:
+
+```bash
+groups | tr ' ' '\n' | grep -x gpio        # should print: gpio
+ls -l /dev/gpiochip0                         # group should be 'gpio', mode crw-rw----
+```
+
+> Running the AlpacaBridge service as root instead works too, but the udev-rule approach keeps the daemon unprivileged and is the recommended setup.
+
+### 3. "Default-on at boot" is already configured
+
+The stock iMate enables both switchable ports at boot via `dc-power-ports.service` (`gpio mode 2/6 out; gpio write 2/6 1`, with `RemainAfterExit=yes`), so DC1 and DC2 come up **ON** before AlpacaBridge starts — gear plugged into them is powered immediately. The always-on DC3 jack is hardwired live regardless. Leave this service in place; AlpacaBridge's wrapper preserves the on-state when it connects (see [Disconnect behavior](#disconnect-behavior-1) below).
+
+### 4. Install AlpacaBridge
+
+Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:11111`.
+
+### 5. Add the Switch device
+
+Open `http://<your-imate-ip>:11111/` in a browser:
+
+1. **Configure** tab → **Add Device**
+2. **Device Type**: Switch
+3. **Vendor**: iOptron
+4. **Device Number**: 0 (or any unique number)
+5. Leave **GPIO Chip** at its default (`/dev/gpiochip0`) unless you know you need to override it. There are no per-port fields — the three DC ports and their line mapping are fixed.
+6. Submit
+
+Or `POST` the equivalent JSON to the management API:
+
+```json
+{
+  "deviceType": "switch",
+  "deviceNumber": 0,
+  "vendor": "ioptron"
+}
+```
+
+### 6. Verify
+
+Connect the device from the **Devices** tab. You should see three channels: `DC3 (always on)` (read-only, always ON), `DC1`, and `DC2`. From a second SSH session, watch the live GPIO state while you toggle DC1/DC2 in the Web UI (libgpiod v2 syntax — `--chip` lets you address lines by offset):
+
+```bash
+gpioget --numeric -c gpiochip0 118 114    # DC1 line 118, DC2 line 114
+```
+
+The value of the toggled line flips between `0` (off) and `1` (on). Attempting to write `DC3` returns an ASCOM "not implemented" error — it is a read-only pass-through.
+
+### Advanced configuration
+
+The only override is the GPIO chip path; the port-to-line mapping is fixed for the iMate hardware:
+
+```json
+{
+  "deviceType": "switch",
+  "deviceNumber": 0,
+  "vendor": "ioptron",
+  "gpioChip": "/dev/gpiochip0"
+}
+```
+
+| Field | Type | Notes |
+|----|----|----|
+| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip0`. |
+
+### Disconnect behavior
+
+Same policy as the ASIair drivers: when the ASCOM client (or the Web UI) disconnects the device, the wrapper releases its libgpiod request **without driving the lines LOW first**, and at connect it claims the lines at their current "on" default — so connecting and disconnecting never power-cycle attached gear. The always-on DC3 jack is unaffected by the driver entirely. If you want DC1 or DC2 OFF after disconnect, toggle it OFF in your client **before** disconnecting.
+
+> libgpiod releases the line on `close()`, so for unattended setups keep AlpacaBridge connected for the duration of the session rather than relying on a disconnected-but-powered state.
+
+### Coexistence with the stock iMate tooling
+
+The factory `imatepowerbox.sh` menu and the Dart `tcp_server.service` (port 3000) drive the same two GPIO lines. Don't run them against the ports at the same time as AlpacaBridge — pick one controller. The stock `dc-power-ports.service` (a boot-time one-shot that sets the lines high and exits) does **not** hold the lines, so it coexists fine and provides the default-on behavior described above.
 
 ---
 

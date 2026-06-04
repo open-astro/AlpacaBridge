@@ -569,7 +569,13 @@ function startEditDevice(device) {
 
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
-    if (vendor === 'ioptron') {
+    if (vendor === 'ioptron' && deviceType === 'switch') {
+        // iMate PowerBox: only the optional GPIO chip override.
+        if (config.gpioChip !== undefined && config.gpioChip !== null) {
+            setFormValue('ioptron-powerbox-gpio-chip', config.gpioChip);
+        }
+        updateIoptronConfigFields();
+    } else if (vendor === 'ioptron') {
         const ioptronConnectionType = config.connectionType || 'auto';
         setFormValue('ioptron-connection-type', ioptronConnectionType);
         if (ioptronConnectionType === 'serial') {
@@ -1402,8 +1408,10 @@ function updateVendorOptions() {
     const isObservingConditions = deviceType === 'observingconditions';
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
-        ioptronOption.disabled = !isTelescope;
-        ioptronOption.hidden = !isTelescope;
+        // iOptron provides the mount (telescope) and the iMate PowerBox (switch).
+        const ioptronAllowed = isTelescope || isSwitch;
+        ioptronOption.disabled = !ioptronAllowed;
+        ioptronOption.hidden = !ioptronAllowed;
     }
     const synscanOption = vendorSelect.querySelector('option[value="synscan"]');
     if (synscanOption) {
@@ -1458,7 +1466,7 @@ function updateVendorOptions() {
         geminiOption.hidden = !isFocuser;
     }
 
-    if (!isTelescope && vendorSelect.value === 'ioptron') {
+    if (!isTelescope && !isSwitch && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
     }
     if (!isTelescope && vendorSelect.value === 'synscan') {
@@ -1505,6 +1513,7 @@ document.getElementById('vendor').addEventListener('change', function() {
     
     if (vendor === 'ioptron') {
         document.getElementById('ioptron-config').style.display = 'block';
+        updateIoptronConfigFields();
     } else if (vendor === 'synscan') {
         document.getElementById('synscan-config').style.display = 'block';
     } else if (vendor === 'celestron') {
@@ -1531,6 +1540,22 @@ document.getElementById('vendor').addEventListener('change', function() {
     updateTouptekConfigFields();
     updateAutoNumbering();
 });
+
+// iOptron covers two device types from one vendor config block: the mount
+// (telescope) and the iMate PowerBox (switch). Show the relevant sub-section
+// based on the selected device type.
+function updateIoptronConfigFields() {
+    const telescopeSection = document.getElementById('ioptron-telescope-config');
+    const switchSection = document.getElementById('ioptron-switch-config');
+    if (!telescopeSection || !switchSection) {
+        return;
+    }
+    const deviceTypeSelect = document.getElementById('device-type');
+    const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
+    const isSwitch = deviceType === 'switch';
+    telescopeSection.style.display = isSwitch ? 'none' : 'block';
+    switchSection.style.display = isSwitch ? 'block' : 'none';
+}
 
 const ioptronConnectionType = document.getElementById('ioptron-connection-type');
 if (ioptronConnectionType) {
@@ -2020,7 +2045,14 @@ document.getElementById('device-form').addEventListener('submit', async function
         connectionType: formData.get('connectionType'),
     };
 
-    if (deviceData.vendor === 'ioptron') {
+    if (deviceData.vendor === 'ioptron' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
+        // iMate PowerBox: local GPIO, no mount connection fields. Only an
+        // optional GPIO chip override (defaults to /dev/gpiochip0 server-side).
+        const gpioChip = (formData.get('ioptronPowerboxGpioChip') || '').trim();
+        if (gpioChip) {
+            deviceData.gpioChip = gpioChip;
+        }
+    } else if (deviceData.vendor === 'ioptron') {
         deviceData.connectionType = formData.get('ioptronConnectionType') || 'auto';
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('ioptronPortPath');

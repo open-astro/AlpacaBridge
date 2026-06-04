@@ -430,6 +430,85 @@ int main() {
 #endif
     }
 
+    // --- iOptron iMate PowerBox switch routing/config persistence test ---
+#ifdef ALPACACORE_ENABLE_IOPTRON
+    {
+        nlohmann::json remove_body = {
+            {"vendor", "ioptron"},
+            {"deviceType", "switch"},
+            {"deviceNumber", 9301}
+        };
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        nlohmann::json configure_body = {
+            {"vendor", "ioptron"},
+            {"deviceType", "switch"},
+            {"deviceNumber", 9301},
+            {"gpioChip", "/dev/gpiochip0"}
+        };
+
+        const auto configure_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_IOPTRON
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        EXPECT(configured_json.value("ErrorNumber", -1) == 0);
+        EXPECT(configured_json.contains("Value"));
+        EXPECT(configured_json["Value"].is_array());
+
+        bool found_powerbox = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Switch" &&
+                entry.value("DeviceNumber", -1) == 9301) {
+                EXPECT(entry.value("Vendor", "") == "ioptron");
+                EXPECT(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                EXPECT(cfg.value("vendor", "") == "ioptron");
+                EXPECT(cfg.value("deviceType", "") == "switch");
+                // The iMate PowerBox persists only the GPIO chip override; the
+                // mount connection fields must NOT leak into a switch config.
+                EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip0");
+                EXPECT(!cfg.contains("connectionType"));
+                EXPECT(!cfg.contains("portPath"));
+                found_powerbox = true;
+                break;
+            }
+        }
+        EXPECT(found_powerbox);
+
+        // MaxSwitch reports the three DC outputs without needing hardware.
+        const auto maxswitch_response = route_request(router, "GET", "/api/v1/switch/9301/maxswitch");
+        const auto maxswitch_json = nlohmann::json::parse(maxswitch_response.body());
+        EXPECT(maxswitch_json.value("ErrorNumber", -1) == 0);
+        EXPECT(maxswitch_json.value("Value", -1) == 3);
+
+        nlohmann::json remove_body = {
+            {"vendor", "ioptron"},
+            {"deviceType", "switch"},
+            {"deviceNumber", 9301}
+        };
+        const auto remove_response = route_request(
+            router,
+            "POST",
+            "/management/v1/removedevice",
+            remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        EXPECT(remove_json.value("ErrorNumber", -1) == 0);
+#else
+        EXPECT(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }
