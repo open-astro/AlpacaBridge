@@ -1507,7 +1507,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
 
         nlohmann::json desc = build_description_payload();
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-        alpaca_response.value = desc.dump();
+        alpaca_response.value = desc;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error getting description: " + std::string(e.what()));
@@ -1598,7 +1598,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
         }
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-        alpaca_response.value = devices.dump();
+        alpaca_response.value = devices;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error getting configured devices: " + std::string(e.what()));
@@ -5362,7 +5362,7 @@ Response Router::handle_root(const Request& request, std::uint32_t server_tx_id)
     });
 
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-    alpaca_response.value = info.dump();
+    alpaca_response.value = info;
     response.set_body(alpaca_response);
     return response;
 }
@@ -5382,7 +5382,7 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
         nlohmann::json versions = nlohmann::json::array({1});
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-        alpaca_response.value = versions.dump();
+        alpaca_response.value = versions;
         response.set_body(alpaca_response);
         
         util::log_info("API versions response: " + versions.dump());
@@ -5726,7 +5726,7 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
 
     auto send_payload = [&](std::uint32_t ctx_id) {
         AlpacaResponse alpaca_response(ctx_id, server_tx_id);
-        alpaca_response.value = make_log_level_payload().dump();
+        alpaca_response.value = make_log_level_payload();
         response.set_body(alpaca_response);
         return response;
     };
@@ -5928,7 +5928,7 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
         payload["Files"] = std::move(files);
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-        alpaca_response.value = payload.dump();
+        alpaca_response.value = payload;
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
@@ -5999,7 +5999,7 @@ Response Router::handle_log_file_item(const Request& request,
             AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
             nlohmann::json payload;
             payload["Deleted"] = filename;
-            alpaca_response.value = payload.dump();
+            alpaca_response.value = payload;
             response.set_body(alpaca_response);
             return response;
         } catch (const std::exception& e) {

@@ -40,13 +40,32 @@ int main() {
     EXPECT(success_response.server_transaction_id == 101112);
     EXPECT(success_response.error_number == 0);
     EXPECT(success_response.value.has_value());
-    EXPECT(std::get<bool>(success_response.value.value()) == true);
+    EXPECT(success_response.value->is_boolean());
+    EXPECT(success_response.value->get<bool>() == true);
 
     // Test JSON parsing
     auto parsed = from_json(json);
     EXPECT(parsed.client_transaction_id == 123);
     EXPECT(parsed.server_transaction_id == 456);
     EXPECT(parsed.error_number == 1024);
+
+    // A string Value that happens to look like JSON must stay a string — the
+    // old to_json re-parsed strings, which corrupted e.g. numeric-string
+    // properties into numbers (wrong ASCOM type).
+    auto numeric_string = make_success_response(1, 2, std::string("12345"));
+    auto numeric_string_json = to_json(numeric_string);
+    EXPECT(numeric_string_json["Value"].is_string());
+    EXPECT(numeric_string_json["Value"] == "12345");
+
+    auto bool_string = make_success_response(1, 2, std::string("true"));
+    EXPECT(to_json(bool_string)["Value"].is_string());
+
+    // A structured Value is emitted as real JSON, not an escaped string.
+    nlohmann::json arr = nlohmann::json::array({"DeviceType", "Vendor"});
+    auto array_response = make_success_response(1, 2, arr);
+    auto array_json = to_json(array_response);
+    EXPECT(array_json["Value"].is_array());
+    EXPECT(array_json["Value"].size() == 2);
 
     std::cout << "All JSON tests passed!\n";
     return 0;

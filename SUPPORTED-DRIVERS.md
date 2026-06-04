@@ -267,7 +267,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
-| AM3 | USB/Serial, Wi-Fi | ✓ | [ConformU](AlpacaCore/conformu/ZWO/AM3/) |
+| AM3 | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/AM3/) |
 | AM5 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
 | AM5N | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
 | AM7 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |

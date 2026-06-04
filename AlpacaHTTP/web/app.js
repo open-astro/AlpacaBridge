@@ -2379,12 +2379,22 @@ function parseResponseValue(value) {
     if (value === undefined || value === null) {
         return null;
     }
+    // The server returns the Alpaca "Value" as structured JSON, so an object or
+    // array arrives ready to use. Only attempt to parse a string when it clearly
+    // encodes a JSON object/array — this keeps backward compatibility with an
+    // older server that double-encoded structured payloads as a string, while
+    // never coercing a plain scalar string (e.g. a "12345" serial or "true"
+    // text property) into a number/boolean.
     if (typeof value === 'string') {
-        try {
-            return JSON.parse(value);
-        } catch (e) {
-            return value;
+        const trimmed = value.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            try {
+                return JSON.parse(trimmed);
+            } catch (e) {
+                return value;
+            }
         }
+        return value;
     }
     return value;
 }
