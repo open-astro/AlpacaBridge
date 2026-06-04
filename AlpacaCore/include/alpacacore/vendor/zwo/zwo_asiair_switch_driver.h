@@ -27,6 +27,12 @@ struct AsiairSwitchConfig {
     std::string gpio_chip_path = "/dev/gpiochip0";
     std::uint32_t pwm_frequency_hz = 1000;
     std::vector<AsiairPortConfig> ports;
+    // Marketing model this libgpiod driver is standing in for, used in the
+    // device Name/Description/DriverInfo. The Pi 4 ASIAIR Pro and the Pi CM4
+    // ASIAIR Plus share identical on-board GPIO wiring and use this same
+    // driver, so the only difference clients see is this label. Defaults to the
+    // Pro layout; the router overrides it for the CM4 Plus.
+    std::string model_name = "ASIAIR Pro";
 };
 
 // Returns the default ASIAIR Pro Pi4 layout: 4 ports on /dev/gpiochip0

@@ -6697,6 +6697,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // and default config; only the log label differs.
         if (switch_type == "asiair" || switch_type == "asiair-plus-picm4") {
             auto asiair_config = alpacacore::vendor::zwo::default_asiair_pro_config();
+            // Same on-board GPIO wiring, two marketing models — label the
+            // device so the CM4 Plus doesn't identify itself as a Pro.
+            if (switch_type == "asiair-plus-picm4") {
+                asiair_config.model_name = "ASIAIR Plus (Pi CM4)";
+            }
             asiair_config.gpio_chip_path = config.value("gpioChip", asiair_config.gpio_chip_path);
             asiair_config.pwm_frequency_hz = config.value("pwmFrequencyHz", asiair_config.pwm_frequency_hz);
             if (config.contains("ports") && config["ports"].is_array() && !config["ports"].empty()) {
@@ -6704,12 +6709,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 ports.reserve(config["ports"].size());
                 for (const auto& p : config["ports"]) {
                     if (!p.contains("gpio") || !p["gpio"].is_number_integer()) {
-                        error_message = "ASIair port entry requires integer 'gpio'";
+                        error_message = "ASIAIR port entry requires integer 'gpio'";
                         return false;
                     }
                     const int gpio_value = p["gpio"].get<int>();
                     if (gpio_value < 0 || gpio_value > 63) {
-                        error_message = "ASIair port 'gpio' must be in [0, 63]";
+                        error_message = "ASIAIR port 'gpio' must be in [0, 63]";
                         return false;
                     }
                     alpacacore::vendor::zwo::AsiairPortConfig pc;
@@ -6994,7 +6999,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
         copy_if_present("switchType");
-        // ASIair Pro (Pi 4, libgpiod) and ASIair Plus (RK3568, pwm_gpio.ko)
+        // ASIAIR Pro (Pi 4, libgpiod) and ASIAIR Plus (RK3568, pwm_gpio.ko)
         // both persist per-port configuration. Without these the user's
         // PWM-mode toggles and channel renames silently revert after save
         // because sanitize_device_config strips anything not allowlisted.

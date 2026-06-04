@@ -12,7 +12,7 @@
 
 #include <alpacahttp/discovery.h>
 #include <alpacahttp/config.h>
-#include <cassert>
+#include "test_assert.h"
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -42,7 +42,7 @@ int main() {
     // Stop discovery
     discovery.stop();
     
-    assert(!discovery.is_running());
+    EXPECT(!discovery.is_running());
 
     std::cout << "All discovery tests passed!\n";
     return 0;
