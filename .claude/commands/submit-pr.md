@@ -33,7 +33,7 @@ git status
 git log @{u}..HEAD --oneline 2>/dev/null || echo "NO_UPSTREAM"
 ```
 
-- If there are unpushed commits or no upstream tracking branch, note this — the branch will need to be pushed in Step 4.
+- If there are unpushed commits or no upstream tracking branch, note this — the branch will need to be pushed in Step 5 (after the Step 4 local CI pre-flight).
 
 ### ConformU report validation (HARD BLOCK)
 
@@ -118,9 +118,37 @@ Review the branch contents and warn the user about anything that's missing:
 
 Present the checklist to the user with pass/fail status. If critical items are missing (tests, CHANGELOG), recommend fixing before submitting but let the user decide.
 
-## Step 4 — Push the branch
+## Step 4 — Local CI pre-flight (HARD BLOCK)
 
-If the branch has unpushed commits or no upstream tracking:
+CI runs a strict set of gates on every PR (`.github/workflows/ci.yml`). Reproduce them **locally before pushing** so the PR never opens red and wastes a CI cycle. This is automated by `scripts/ci_preflight.sh`:
+
+```bash
+./scripts/ci_preflight.sh
+```
+
+The script reproduces, in order, the CI jobs that can run on this arm64 host and prints a `[PASS]/[FAIL]/[SKIP]` summary:
+
+1. **clang-format** changed lines (CI `format`)
+2. **Unicode / Trojan-Source** scan (CI `unicode`)
+3. **Build + unit tests, vendors OFF** — `run_all_tests.sh` (CI `build-test`)
+4. **Build + unit tests, vendors ON** — `run_all_tests.sh` (CI `build-vendors`)
+5. **clang-tidy** changed lines (CI `clang-tidy`)
+6. **cppcheck** changed files (CI `cppcheck`)
+7. **shellcheck** — only if shell scripts changed (CI `shellcheck`)
+8. **zizmor** — only if `.github/workflows/*` changed (CI `zizmor`)
+
+It **auto-installs** every missing tool so each gate actually runs rather than being skipped: `clang-tidy`/`cppcheck`/`shellcheck`/`clang-format` via `sudo apt-get`, and `zizmor` as a pinned, checksum-verified release binary cached under `~/.cache` (no sudo). The two `run_all_tests.sh` invocations are full rebuilds and are the slow part — that's expected.
+
+Knobs:
+- `PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh` — fork contributors whose PR base is the upstream remote.
+- `RUN_SANITIZERS=1 ./scripts/ci_preflight.sh` — also reproduce the ASan+UBSan `sanitizers` job (a third rebuild). Recommended when the branch changes C++ runtime logic; skip for docs/CI-only changes.
+- `PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh` — never apt-install; missing tools are reported `[SKIP]` instead.
+
+**Gate:** the script exits non-zero if any mandatory check failed. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` only appears when a check is not applicable (no matching files changed) or `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled — in the latter case, surface it so the user knows CI will still enforce that gate.
+
+## Step 5 — Push the branch
+
+Only after the Step 4 pre-flight is green. If the branch has unpushed commits or no upstream tracking:
 
 ```bash
 git push -u origin <branch-name>
@@ -128,7 +156,7 @@ git push -u origin <branch-name>
 
 Confirm the push succeeded before proceeding.
 
-## Step 5 — Build the PR
+## Step 6 — Build the PR
 
 ### PR title
 
@@ -160,6 +188,7 @@ Group by component using bold tags:
 - **Documentation**: CHANGELOG, SUPPORTED-DRIVERS.md, AGENTS.md updates
 
 ## Test plan
+- [ ] Local CI pre-flight green: `run_all_tests.sh` (vendors OFF + ON), clang-format, unicode scan, and (when installed) clang-tidy/cppcheck
 - [ ] Unit tests pass (`cd build && ctest`)
 - [ ] ConformU 4.3.0 passes on Linux arm64
 - [ ] Web UI configuration works in browser
@@ -175,7 +204,7 @@ Group by component using bold tags:
 
 Show the user the full PR title and body before submitting. Ask for approval or edits.
 
-## Step 6 — Submit the PR
+## Step 7 — Submit the PR
 
 ### Direct contributor
 
@@ -197,7 +226,7 @@ EOF
 
 After submission, display the PR URL to the user.
 
-## Step 7 — Post-submission
+## Step 8 — Post-submission
 
 After the PR is created:
 - Display the PR URL
