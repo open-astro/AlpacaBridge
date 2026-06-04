@@ -257,10 +257,10 @@ fi
 # --- gate 6: cppcheck (changed files) --------------------------------------
 #
 # Keep the --suppress list identical to the cppcheck job in
-# .github/workflows/ci.yml. Note that cppcheck classifies some checks
-# differently across versions (the CI runner ships 2.13.x; a Debian Trixie dev
-# box has 2.17.x), so a finding the runner reports may not appear locally and
-# vice versa -- the shared suppress list is what keeps the two in agreement.
+# .github/workflows/ci.yml. CI builds cppcheck 2.17.x from source to match a
+# Debian Trixie dev box, so this gate and CI run the same version; the shared
+# suppress list keeps them in agreement (and guards older cppcheck installs,
+# which classify some checks differently).
 
 section "cppcheck (changed files)"
 if [ "${#SRC_CPP_FILES[@]}" -eq 0 ]; then
