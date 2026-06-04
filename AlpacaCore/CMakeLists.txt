@@ -6,6 +6,12 @@ string(STRIP "${PROJECT_VERSION}" PROJECT_VERSION)
 
 project(AlpacaCore VERSION ${PROJECT_VERSION} LANGUAGES CXX)
 
+# Expose the workspace version (from the VERSION file) to all AlpacaCore targets,
+# including the per-vendor driver libraries added via add_subdirectory below, so
+# that DriverVersion reflects the AlpacaBridge release instead of a hardcoded value.
+# Directory-scoped so it reaches every target created after this point.
+add_compile_definitions(ALPACACORE_VERSION="${PROJECT_VERSION}")
+
 # C++20 required
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

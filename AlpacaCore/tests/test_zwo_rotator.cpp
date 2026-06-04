@@ -11,12 +11,14 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
-#include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
+#include <alpacacore/version.h>
+
 #include <functional>
 #include <variant>
+
+#include "catch2_compat.h"
 
 namespace {
 
@@ -77,7 +79,7 @@ TEST_CASE("ZWO CAA Rotator Driver - Device metadata", "[zwo][rotator][unit]") {
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_description() == "ZWO CAA Rotator Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore ZWO CAA Rotator Driver");
-    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "ZWO_CAA_3");
 }

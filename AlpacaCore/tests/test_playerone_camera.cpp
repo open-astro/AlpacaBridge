@@ -10,11 +10,13 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
-#include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/playerone/playerone_camera_driver.h>
+#include <alpacacore/version.h>
+
 #include <functional>
+
+#include "catch2_compat.h"
 
 namespace {
 
@@ -47,7 +49,7 @@ TEST_CASE("Player One Camera Driver - Device metadata", "[playerone][camera][uni
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_description() == "Player One Camera Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore Player One Camera Driver");
-    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
     // Without a connected camera the serial number is unknown, so the unique id falls
     // back to the device number.

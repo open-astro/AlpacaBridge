@@ -11,10 +11,12 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
-#include <alpacacore/vendor/zwo/zwo_caa_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/zwo/zwo_caa_wrapper.h>
+#include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
+#include <alpacacore/version.h>
+
 #include <atomic>
 #include <cmath>
 #include <mutex>
@@ -89,9 +91,7 @@ public:
         return "AlpacaCore ZWO CAA Rotator Driver";
     }
 
-    std::string get_driver_version() const override {
-        return "1.0.0";
-    }
+    std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     int get_interface_version() const override {
         return 3;

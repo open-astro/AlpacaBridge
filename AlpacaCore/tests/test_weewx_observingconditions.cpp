@@ -10,12 +10,14 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
-#include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
+#include <alpacacore/version.h>
+
 #include <cmath>
+
+#include "catch2_compat.h"
 
 TEST_CASE("WeeWX current parsing", "[weewx]") {
     const std::string payload = R"json(
@@ -74,7 +76,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - Device metadata", "[weewx]") {
 
     CHECK(driver->get_description() == "WeeWX ObservingConditions from HTTP JSON");
     CHECK(driver->get_driver_info() == "AlpacaCore WeeWX ObservingConditions Driver");
-    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 1);
     CHECK(driver->get_unique_id() == "WEEWX_OC_3");
 }

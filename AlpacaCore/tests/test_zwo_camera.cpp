@@ -11,11 +11,13 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
-#include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/zwo/zwo_camera_driver.h>
+#include <alpacacore/version.h>
+
 #include <functional>
+
+#include "catch2_compat.h"
 
 namespace {
 
@@ -46,7 +48,7 @@ TEST_CASE("ZWO Camera Driver - Device metadata", "[zwo][camera][unit]") {
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_description() == "ZWO ASI Camera Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore ZWO Camera Driver");
-    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "ZWO_3");
 }

@@ -89,6 +89,10 @@ The `.deb` ships `/etc/ld.so.conf.d/alpacabridge.conf` which adds `/usr/lib/alpa
 
 When a vendor releases a new SDK version, update the `.so` files in `external/` and bump symlink targets (e.g. `libASICamera2.so.1.41` → `libASICamera2.so.1.42`). If the vendor's SDK path is versioned (e.g. ToupTek's `toupcamsdk.20260128/`), update the path reference in `debian/rules`, `build_and_run.sh`, `install_alpaca_service.sh`, AND `AlpacaCore/src/vendors/<vendor>/CMakeLists.txt` in the same commit.
 
+### Driver version (DriverVersion)
+
+Every driver's `get_driver_version()` returns `alpacacore::kVersion` (from `<alpacacore/version.h>`), which is the single workspace `VERSION` file injected at build time via the `ALPACACORE_VERSION` compile definition. AlpacaCore's top-level `CMakeLists.txt` sets this with directory-scoped `add_compile_definitions(...)` right after `project()`, so it reaches the core lib, every per-vendor sub-library, and the tests. **Do not hardcode a version string** in a driver. To bump the reported version for the whole project, edit the `VERSION` file only. Unit tests assert `get_driver_version() == alpacacore::kVersion` rather than a literal, so they don't need updating on a version bump.
+
 ### Verification
 
 After wiring a new camera vendor, verify the `.so` is reachable as SmartGuider would see it:

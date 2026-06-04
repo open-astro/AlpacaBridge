@@ -11,12 +11,14 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
 #include <alpacacore/telescope_driver.h>
-#include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
+#include <alpacacore/version.h>
+
 #include <functional>
+
+#include "catch2_compat.h"
 
 using alpacacore::DeviceType;
 
@@ -115,7 +117,7 @@ TEST_CASE("SynScan Telescope Driver - Device metadata", "[synscan][telescope][un
 
     CHECK(driver->get_description() == "Sky-Watcher SynScan V3/V4 Mount Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore SynScan Driver v0.1");
-    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "SynScan_3");
 }

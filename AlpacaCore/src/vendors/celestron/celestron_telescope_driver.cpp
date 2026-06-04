@@ -12,22 +12,24 @@
 // with all SSPL v1 requirements.
 
 #include <alpacacore/telescope_driver.h>
-#include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
-#include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-#include <mutex>
+#include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
+#include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
+#include <alpacacore/version.h>
+
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
-#include <limits>
-#include <thread>
-#include <atomic>
+#include <cstdio>
 #include <ctime>
+#include <limits>
+#include <mutex>
+#include <numbers>
 #include <optional>
 #include <sstream>
-#include <numbers>
-#include <algorithm>
-#include <cstdio>
+#include <thread>
 
 namespace alpacacore::vendor::celestron {
 
@@ -193,9 +195,7 @@ public:
         return "AlpacaCore Celestron NexStar Driver v0.1";
     }
 
-    std::string get_driver_version() const override {
-        return "1.0.0";
-    }
+    std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     int get_interface_version() const override {
         return 3;

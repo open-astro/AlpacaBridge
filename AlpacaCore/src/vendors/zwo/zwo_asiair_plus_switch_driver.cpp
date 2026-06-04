@@ -11,10 +11,10 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
-
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
+#include <alpacacore/version.h>
 
 #include <atomic>
 #include <cmath>
@@ -121,7 +121,7 @@ public:
         return "AlpacaCore ZWO ASIAIR Plus Switch";
     }
 
-    std::string get_driver_version() const override { return "1.0.0"; }
+    std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     int get_interface_version() const override { return 3; }
 

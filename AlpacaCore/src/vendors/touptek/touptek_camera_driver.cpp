@@ -10,10 +10,11 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/touptek/touptek_camera_driver.h>
-#include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/touptek/touptek_camera_driver.h>
+#include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
+#include <alpacacore/version.h>
 
 #include <algorithm>
 #include <atomic>
@@ -125,7 +126,7 @@ public:
 
     std::string get_description() const override { return "ToupTek Camera Driver"; }
     std::string get_driver_info() const override { return "AlpacaCore ToupTek Camera Driver"; }
-    std::string get_driver_version() const override { return "1.0.0"; }
+    std::string get_driver_version() const override { return alpacacore::kVersion; }
     int get_interface_version() const override { return 3; }
 
     bool get_connected() const override { return connected_.load(); }

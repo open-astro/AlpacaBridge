@@ -11,11 +11,11 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
-
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
+#include <alpacacore/version.h>
 
 #include <algorithm>
 #include <array>
@@ -337,9 +337,7 @@ public:
         return "AlpacaCore ZWO Mount Driver";
     }
 
-    std::string get_driver_version() const override {
-        return "1.0.0";
-    }
+    std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     int get_interface_version() const override {
         return 3;

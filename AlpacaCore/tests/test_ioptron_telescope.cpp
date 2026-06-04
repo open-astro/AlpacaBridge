@@ -11,12 +11,14 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
 #include <alpacacore/telescope_driver.h>
-#include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
+#include <alpacacore/version.h>
+
 #include <functional>
+
+#include "catch2_compat.h"
 
 using alpacacore::DeviceType;
 
@@ -127,7 +129,7 @@ TEST_CASE("iOptron Telescope Driver - Device metadata", "[ioptron][telescope][un
 
     CHECK(driver->get_description() == "iOptron CEM120,70,40,26, GEM, HEM, HAE, HAZ series and SkyHunter Mount Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore iOptron Driver v1.0");
-    CHECK(driver->get_driver_version() == "1.0.0");
+    CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "iOptron_3");
 }

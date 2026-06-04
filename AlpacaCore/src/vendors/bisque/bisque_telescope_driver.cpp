@@ -12,18 +12,20 @@
 // with all SSPL v1 requirements.
 
 #include <alpacacore/telescope_driver.h>
-#include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
-#include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-#include <mutex>
+#include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
+#include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
+#include <alpacacore/version.h>
+
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
-#include <thread>
-#include <atomic>
-#include <optional>
-#include <algorithm>
+#include <mutex>
 #include <numbers>
+#include <optional>
+#include <thread>
 
 namespace alpacacore::vendor::bisque {
 
@@ -144,9 +146,7 @@ public:
         return "AlpacaCore Bisque TheSkyX Driver v0.1";
     }
 
-    std::string get_driver_version() const override {
-        return "1.0.0";
-    }
+    std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     int get_interface_version() const override {
         return 3;
