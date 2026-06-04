@@ -698,7 +698,7 @@ function startEditDevice(device) {
     setFormValue('rotator-id', config.rotatorId);
     setFormValue('zwo-switch-type', config.switchType);
 
-    // Populate the ASIair Pro Switch per-port table from the saved config.
+    // Populate the ASIAIR Pro Switch per-port table from the saved config.
     // When the saved device omits ports/gpioChip/pwmFrequencyHz (one-click
     // default flow), the HTML's pre-filled defaults remain in place.
     if (vendor === 'zwo' &&
@@ -726,7 +726,7 @@ function startEditDevice(device) {
             }
         }
     }
-    // Populate the ASIair Plus (RK3568) per-port table from the saved config.
+    // Populate the ASIAIR Plus (RK3568) per-port table from the saved config.
     // The kernel module fixes the per-port hardware mapping, so only the
     // device path, PWM frequency, channel names and per-port PWM flags are
     // configurable here.
@@ -755,7 +755,7 @@ function startEditDevice(device) {
             }
         }
     }
-    // Trigger the visibility update so the ASIair section actually appears
+    // Trigger the visibility update so the ASIAIR section actually appears
     // when editing an asiair-typed switch (vs. dewheater).
     const zwoSwitchTypeEl = document.getElementById('zwo-switch-type');
     if (zwoSwitchTypeEl) {
@@ -2379,12 +2379,22 @@ function parseResponseValue(value) {
     if (value === undefined || value === null) {
         return null;
     }
+    // The server returns the Alpaca "Value" as structured JSON, so an object or
+    // array arrives ready to use. Only attempt to parse a string when it clearly
+    // encodes a JSON object/array — this keeps backward compatibility with an
+    // older server that double-encoded structured payloads as a string, while
+    // never coercing a plain scalar string (e.g. a "12345" serial or "true"
+    // text property) into a number/boolean.
     if (typeof value === 'string') {
-        try {
-            return JSON.parse(value);
-        } catch (e) {
-            return value;
+        const trimmed = value.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            try {
+                return JSON.parse(trimmed);
+            } catch (e) {
+                return value;
+            }
         }
+        return value;
     }
     return value;
 }

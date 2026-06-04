@@ -27,22 +27,9 @@ nlohmann::json to_json(const AlpacaResponse& response) {
     j["ErrorMessage"] = response.error_message;
 
     if (response.value.has_value()) {
-        std::visit([&j](const auto& val) {
-            // If value is a string that looks like JSON, parse it
-            if constexpr (std::is_same_v<std::decay_t<decltype(val)>, std::string>) {
-                // Try to parse as JSON - if it's valid JSON, use the parsed value
-                // Otherwise, use the string as-is
-                try {
-                    auto parsed = nlohmann::json::parse(val);
-                    j["Value"] = parsed;
-                } catch (const nlohmann::json::exception&) {
-                    // Not valid JSON, use as string
-                    j["Value"] = val;
-                }
-            } else {
-                j["Value"] = val;
-            }
-        }, response.value.value());
+        // value already holds structured JSON; emit it verbatim. No string
+        // re-parsing — a string Value stays a string (correct ASCOM typing).
+        j["Value"] = *response.value;
     }
 
     return j;
@@ -64,16 +51,7 @@ AlpacaResponse from_json(const nlohmann::json& j) {
         response.error_message = j["ErrorMessage"].get<std::string>();
     }
     if (j.contains("Value")) {
-        const auto& value = j["Value"];
-        if (value.is_boolean()) {
-            response.value = value.get<bool>();
-        } else if (value.is_number_integer()) {
-            response.value = value.get<std::int32_t>();
-        } else if (value.is_number_float()) {
-            response.value = value.get<double>();
-        } else if (value.is_string()) {
-            response.value = value.get<std::string>();
-        }
+        response.value = j.at("Value");
     }
 
     return response;

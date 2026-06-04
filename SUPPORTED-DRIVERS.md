@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-05-31
+## Updated 2026-06-04
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -267,7 +267,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
-| AM3 | USB/Serial, Wi-Fi | ✓ | [ConformU](AlpacaCore/conformu/ZWO/AM3/) |
+| AM3 | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/AM3/) |
 | AM5 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
 | AM5N | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
 | AM7 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |

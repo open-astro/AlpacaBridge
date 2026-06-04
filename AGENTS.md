@@ -144,6 +144,7 @@ Vendor registration alone is not enough for HTTP/UI visibility. All eight steps 
   - `test_<vendor>_<device>.cpp`
 - Use tags to separate unit/integration/hardware behavior when applicable.
 - Use Catch2 macros (`REQUIRE`, `CHECK`, `CHECK_THROWS_AS`, etc.) via the `catch2_compat.h` header.
+- **AlpacaHTTP hand-rolled tests must not use `assert()`.** The AlpacaHTTP tests (`test_routing`, `test_json`, `test_config`, `test_discovery`) are plain `int main()` programs, not Catch2. They use the always-on `EXPECT()` macro from `AlpacaHTTP/tests/test_assert.h`. Never use `<cassert>` `assert()` there: it is compiled out under `-DNDEBUG` — which Release, `debian/rules`, and the shipped `.deb` all define — so an assert-based check silently does nothing in an optimized build. Worse, an `assert(side_effecting_call())` (e.g. `assert(request.parse(...))`) means the call itself never runs under `NDEBUG`, so the test exercises nothing and can crash on the resulting empty state. `run_all_tests.sh` and CI build *without* `NDEBUG`, so this class of bug hides until someone builds Release. `EXPECT()` evaluates its expression exactly once and aborts on failure regardless of build type.
 
 ### Required Test Cases for Every New Vendor Device Driver
 
@@ -184,6 +185,14 @@ When adding a test file for a new vendor device:
 - Add `target_link_libraries(alpacacore_tests PRIVATE alpacacore_<vendor>)` in the matching conditional block.
 - Build and run all tests (`cmake --build build --target alpacacore_tests && ./build/tests/alpacacore_tests`) before considering the driver complete.
 
+## Continuous Integration and Pre-flight
+
+- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner: `build-test` (vendors OFF) + `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `clang-format`, `clang-tidy`, `cppcheck`, `unicode`, `shellcheck`, `javascript`, and `zizmor`.
+- **Run `scripts/ci_preflight.sh` before opening a PR** (it is the `/submit-pr` Step 4 hard gate). It reproduces the CI gates locally, auto-installing missing tools, and exits non-zero if any mandatory gate fails — catching failures before they ever reach CI.
+- **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`.**
+- **Web UI JavaScript is gated only by `node --check`** (the `javascript` job + pre-flight gate). The web UI is hand-written static JS with no bundler/eslint/`package.json`, so this parse-only check is its sole automated validation — there is nothing else stopping a stray brace from shipping.
+- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together.
+
 ## Logging, Threading, and Errors
 
 - Use AlpacaCore logging sink flow; do not use ad-hoc stdout/stderr logging in runtime paths.
@@ -195,6 +204,7 @@ When adding a test file for a new vendor device:
 - Web portal exposes `GET /management/v1/logfiles`, `GET /management/v1/logfiles/{name}[?download=1]`, and `DELETE /management/v1/logfiles/{name}`. Filenames are validated against the daily pattern to prevent path traversal. `util::read_log_file` enforces a 10 MiB per-request cap; web viewer warns and suggests download above 5 MiB.
 - Log level set via `POST/PUT /management/v1/loglevel` is persisted to `config/runtime_state.json` and reapplied on the next start (overrides `default.yaml`'s `logging.level`). Delete that file to fall back to the YAML default. Persistence failures are logged at WARNING and never block the API response.
 - Alpaca-style management responses (including the new logfile endpoints) return HTTP 200 even when `ErrorNumber != 0` — clients must inspect the body, not the HTTP status.
+- **The Alpaca `Value` is structured JSON, never a re-parsed string.** `AlpacaResponse::value` is `std::optional<nlohmann::json>` and `to_json` emits it verbatim. Handlers assign the real type directly — scalar, string, array, or object (e.g. `alpaca_response.value = actions;` for `SupportedActions`, **not** `actions.dump()`; `make_success_response(..., gains)` where `gains` is a `nlohmann::json` array). Do NOT serialize a structured payload to a string and rely on it being re-parsed downstream. The old `to_json` ran `json::parse()` on every string `Value` and substituted the result if it parsed — which (a) corrupted scalar string properties whose text is valid JSON (`"12345"` → number, `"true"` → bool, wrong ASCOM type on the wire) and (b) forced every array/object endpoint to round-trip through `.dump()`. That heuristic bit `SupportedActions`/`DeviceState` (every device) plus camera `Gains`/`Offsets`/`ReadoutModes`, telescope `AxisRates`, and filter `Names`/`FocusOffsets` — ConformU rejected the stringified arrays ("could not be converted to IList`<String>`"). The web UI mirror (`web/app.js parseResponseValue`) only parses a string that begins with `{`/`[`, never a bare scalar. The large camera image payload uses its own `build_image_*_payload` path and never goes through `Value`.
 
 ## Units and Behavior Conventions
 
@@ -245,7 +255,7 @@ The CM4-based ASIAIR Plus is electrically a Pi-class board and **reuses the exis
 - **Probing gotcha**: a single `pigs r <pin>` snapshot of a PWM pin races the duty cycle and frequently reads 0 — it caught all four DC pins "low" on the first pass and sent me chasing the PCA9685. Use `pigs gdc` (pigpio's tracked duty) or sample the level ~200× to recover the real duty before concluding anything about a pin.
 - **Reuse wiring**: router accepts `switchType: "asiair-plus-picm4"` and routes it to `create_zwo_asiair_switch` / `default_asiair_pro_config()` with the same config sanitization as `asiair` (the `picm4` id was pre-reserved on the roadmap). Web UI adds an "ASIAIR Plus 12V Power Switch (Pi CM4)" dropdown option that reuses the Pro's per-port GPIO table. End-user setup lives in [AlpacaCore/PowerPorts.md](AlpacaCore/PowerPorts.md) under "ZWO ASIair Plus (Raspberry Pi CM4)".
 - **Same OS / coexistence constraints as the Pro**: stock OS is 32-bit `armv7l` (kernel `5.10.27-v7l`) — requires re-imaging to arm64; the stock `pigpiod` / `zwoair_imager` must be disabled (libgpiod vs pigpio line-ownership conflict, `EBUSY`).
-- **Known limitation**: because it reuses the Pro driver, a CM4 unit reports its ASCOM name as "ZWO ASIAIR Pro Switch" (correctly cased, but says "Pro"). Making it report "Plus (Pi CM4)" would need a config-driven name plumbed into `create_zwo_asiair_switch` / the driver's `get_name()` / `get_description()` — not done in v1.
+- **Model label (config-driven)**: the CM4 Plus reuses the Pro driver but reports the correct model. `AsiairSwitchConfig` carries a `model_name` (default `"ASIAIR Pro"`) that `get_name()`/`get_description()`/`get_driver_info()` interpolate; the router sets it to `"ASIAIR Plus (Pi CM4)"` for `switchType: asiair-plus-picm4`. So the same driver serves both the Pro and the CM4 Plus, differing only by this label. ConformU 4.3.0 re-validated 2026-06-04 on the live CM4 (host `astro.lan`, `192.168.1.171`) — 0 errors / 0 issues / 0 timing, reporting "ASIAIR Plus (Pi CM4)".
 - **Branding**: user-facing strings were normalized "ASIair" → **"ASIAIR"** (ZWO's actual product branding) across both switch drivers, the Web UI, and tests. Internal `switchType` ids (`asiair`, `asiair-plus-picm4`, `asiair-plus-rk3568`), log categories, and the gpiod consumer label stay lowercase/unchanged.
 
 #### ZWO ASIair Plus Switch (RK3568 variant — kernel module ioctl, not libgpiod)

@@ -12,10 +12,10 @@
 
 #pragma once
 
-#include <string>
 #include <cstdint>
-#include <variant>
+#include <nlohmann/json.hpp>
 #include <optional>
+#include <string>
 #include <unordered_map>
 
 namespace alpacahttp {
@@ -26,7 +26,11 @@ struct AlpacaResponse {
     std::uint32_t server_transaction_id = 0;
     std::int32_t error_number = 0;
     std::string error_message;
-    std::optional<std::variant<bool, std::int32_t, double, std::string>> value;
+    // The Alpaca "Value" payload, carried as structured JSON so handlers can
+    // assign any type directly (scalar, string, array, object) and to_json can
+    // emit it verbatim. Scalars/strings keep their JSON type — a string Value
+    // that happens to look like JSON (e.g. "12345", "true") stays a string.
+    std::optional<nlohmann::json> value;
 
     AlpacaResponse() = default;
     AlpacaResponse(std::uint32_t client_tx_id, std::uint32_t server_tx_id)

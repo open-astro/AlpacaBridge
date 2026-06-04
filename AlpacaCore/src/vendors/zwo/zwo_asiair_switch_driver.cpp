@@ -70,7 +70,7 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "ZWO ASIAIR Pro Switch"; }
+    std::string get_name() const override { return "ZWO " + config_.model_name + " Switch"; }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
@@ -79,12 +79,10 @@ public:
     }
 
     std::string get_description() const override {
-        return "ZWO ASIAIR Pro 12V power switch (" + config_.gpio_chip_path + ")";
+        return "ZWO " + config_.model_name + " 12V power switch (" + config_.gpio_chip_path + ")";
     }
 
-    std::string get_driver_info() const override {
-        return "AlpacaCore ZWO ASIAIR Pro Switch";
-    }
+    std::string get_driver_info() const override { return "AlpacaCore ZWO " + config_.model_name + " Switch"; }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 

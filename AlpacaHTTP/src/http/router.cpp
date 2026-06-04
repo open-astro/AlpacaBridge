@@ -1507,7 +1507,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
 
         nlohmann::json desc = build_description_payload();
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-        alpaca_response.value = desc.dump();
+        alpaca_response.value = desc;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error getting description: " + std::string(e.what()));
@@ -1598,7 +1598,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
         }
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-        alpaca_response.value = devices.dump();
+        alpaca_response.value = devices;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         util::log_error("Error getting configured devices: " + std::string(e.what()));
@@ -1855,8 +1855,7 @@ Response Router::dispatch_device_method(
                 for (const auto& action : device->get_supported_actions()) {
                     actions.push_back(action);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, actions.dump());
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, actions);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -2064,8 +2063,7 @@ Response Router::dispatch_device_method(
                     std::visit([&obj](const auto& val) { obj["Value"] = val; }, entry.value);
                     values.push_back(obj);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, values.dump());
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, values);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -2472,8 +2470,7 @@ Response Router::dispatch_telescope_method(
                     rate_obj["Maximum"] = range.second;
                     rates_array.push_back(rate_obj);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rates_array.dump());
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, rates_array);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -2578,8 +2575,7 @@ Response Router::dispatch_telescope_method(
                 for (int rate : rates) {
                     rates_array.push_back(rate);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, rates_array.dump());
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, rates_array);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -3417,8 +3413,7 @@ Response Router::dispatch_camera_method(
                 for (const auto& gain : camera->get_gains()) {
                     gains.push_back(gain);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, gains.dump());
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, gains);
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "hasshutter") {
@@ -3537,8 +3532,7 @@ Response Router::dispatch_camera_method(
                 for (const auto& offset : camera->get_offsets()) {
                     offsets.push_back(offset);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, offsets.dump());
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, offsets);
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "percentcompleted") {
@@ -3568,8 +3562,7 @@ Response Router::dispatch_camera_method(
                 for (const auto& mode : camera->get_readout_modes()) {
                     modes.push_back(mode);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, modes.dump());
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, modes);
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "sensorname") {
@@ -4112,8 +4105,7 @@ Response Router::dispatch_filterwheel_method(
                 for (const auto& name : filterwheel->get_names()) {
                     names.push_back(name);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, names.dump());
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, names);
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "focusoffsets") {
@@ -4121,8 +4113,7 @@ Response Router::dispatch_filterwheel_method(
                 for (int offset : filterwheel->get_focus_offsets()) {
                     offsets.push_back(offset);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, offsets.dump());
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, offsets);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -5362,7 +5353,7 @@ Response Router::handle_root(const Request& request, std::uint32_t server_tx_id)
     });
 
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-    alpaca_response.value = info.dump();
+    alpaca_response.value = info;
     response.set_body(alpaca_response);
     return response;
 }
@@ -5382,7 +5373,7 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
         nlohmann::json versions = nlohmann::json::array({1});
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-        alpaca_response.value = versions.dump();
+        alpaca_response.value = versions;
         response.set_body(alpaca_response);
         
         util::log_info("API versions response: " + versions.dump());
@@ -5726,7 +5717,7 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
 
     auto send_payload = [&](std::uint32_t ctx_id) {
         AlpacaResponse alpaca_response(ctx_id, server_tx_id);
-        alpaca_response.value = make_log_level_payload().dump();
+        alpaca_response.value = make_log_level_payload();
         response.set_body(alpaca_response);
         return response;
     };
@@ -5928,7 +5919,7 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
         payload["Files"] = std::move(files);
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-        alpaca_response.value = payload.dump();
+        alpaca_response.value = payload;
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
@@ -5999,7 +5990,7 @@ Response Router::handle_log_file_item(const Request& request,
             AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
             nlohmann::json payload;
             payload["Deleted"] = filename;
-            alpaca_response.value = payload.dump();
+            alpaca_response.value = payload;
             response.set_body(alpaca_response);
             return response;
         } catch (const std::exception& e) {
@@ -6697,6 +6688,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // and default config; only the log label differs.
         if (switch_type == "asiair" || switch_type == "asiair-plus-picm4") {
             auto asiair_config = alpacacore::vendor::zwo::default_asiair_pro_config();
+            // Same on-board GPIO wiring, two marketing models — label the
+            // device so the CM4 Plus doesn't identify itself as a Pro.
+            if (switch_type == "asiair-plus-picm4") {
+                asiair_config.model_name = "ASIAIR Plus (Pi CM4)";
+            }
             asiair_config.gpio_chip_path = config.value("gpioChip", asiair_config.gpio_chip_path);
             asiair_config.pwm_frequency_hz = config.value("pwmFrequencyHz", asiair_config.pwm_frequency_hz);
             if (config.contains("ports") && config["ports"].is_array() && !config["ports"].empty()) {
@@ -6704,12 +6700,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 ports.reserve(config["ports"].size());
                 for (const auto& p : config["ports"]) {
                     if (!p.contains("gpio") || !p["gpio"].is_number_integer()) {
-                        error_message = "ASIair port entry requires integer 'gpio'";
+                        error_message = "ASIAIR port entry requires integer 'gpio'";
                         return false;
                     }
                     const int gpio_value = p["gpio"].get<int>();
                     if (gpio_value < 0 || gpio_value > 63) {
-                        error_message = "ASIair port 'gpio' must be in [0, 63]";
+                        error_message = "ASIAIR port 'gpio' must be in [0, 63]";
                         return false;
                     }
                     alpacacore::vendor::zwo::AsiairPortConfig pc;
@@ -6994,7 +6990,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
         copy_if_present("switchType");
-        // ASIair Pro (Pi 4, libgpiod) and ASIair Plus (RK3568, pwm_gpio.ko)
+        // ASIAIR Pro (Pi 4, libgpiod) and ASIAIR Plus (RK3568, pwm_gpio.ko)
         // both persist per-port configuration. Without these the user's
         // PWM-mode toggles and channel renames silently revert after save
         // because sanitize_device_config strips anything not allowlisted.

@@ -17,6 +17,7 @@
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   unicode        scan sources for Trojan-Source / invisible Unicode
 #   shellcheck     lint the project's shell scripts
+#   javascript     node --check the hand-written web UI JavaScript
 #   cppcheck       second C/C++ static-analysis engine, PR changed files only
 #   zizmor         security audit of these GitHub Actions workflows
 #
@@ -336,6 +337,38 @@ jobs:
           done
           echo "Linting: ${scripts[*]}"
           shellcheck "${scripts[@]}"
+
+  javascript:
+    name: JavaScript syntax
+    runs-on: ubuntu-24.04-arm   # syntax-only check; arch-independent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nodejs
+
+      - name: Syntax-check web UI JavaScript
+        # The web UI is hand-written static JS served as-is (no bundler/build
+        # step), so `node --check` is its only automated gate. It parses each
+        # file and reports syntax errors (stray braces, etc.) without executing
+        # anything. Kept in sync with the javascript gate in
+        # scripts/ci_preflight.sh.
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files 'AlpacaHTTP/web/*.js')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No web JavaScript files — nothing to check."
+            exit 0
+          fi
+          echo "Checking: ${files[*]}"
+          for f in "${files[@]}"; do
+            node --check "$f"
+          done
 
   cppcheck:
     name: cppcheck (changed files)
