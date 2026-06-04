@@ -348,10 +348,29 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install cppcheck
+      - name: Build cppcheck 2.17.x from source
+        # The ubuntu-24.04 runner ships cppcheck 2.13, which classifies some
+        # checks differently from current cppcheck (e.g. virtualCallInConstructor
+        # is a `warning` in 2.13 but reclassified in 2.17). Our dev/target
+        # environment is Debian 13 Trixie (cppcheck 2.17), and scripts/ci_preflight.sh
+        # runs whatever the dev box has — so pinning CI to 2.17 keeps the local
+        # pre-flight and CI in agreement. Built from source (matching the libgpiod
+        # pattern below); the tarball is checksum-verified before it is unpacked.
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cppcheck
+          sudo apt-get install -y --no-install-recommends build-essential cmake g++
+          ver=2.17.1
+          sha256=bfd681868248ec03855ca7c2aea7bcb1f39b8b18860d76aec805a92a967b966c
+          curl -fsSL "https://github.com/danmar/cppcheck/archive/refs/tags/${ver}.tar.gz" \
+            -o /tmp/cppcheck.tar.gz
+          echo "${sha256}  /tmp/cppcheck.tar.gz" | sha256sum --check --strict -
+          mkdir -p /tmp/cppcheck
+          tar -xf /tmp/cppcheck.tar.gz -C /tmp/cppcheck --strip-components=1
+          cmake -S /tmp/cppcheck -B /tmp/cppcheck/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/cppcheck/build --parallel "$(nproc)"
+          sudo cmake --install /tmp/cppcheck/build
+          cppcheck --version
 
       - name: Analyze changed C/C++ files
         # A second static-analysis engine alongside clang-tidy — it catches
@@ -360,15 +379,15 @@ jobs:
         # the vendored external/ tree is never included. Suppress false
         # positives inline with `// cppcheck-suppress <id>`.
         # normalCheckLevelMaxBranches is an info-only note (cppcheck >= 2.14)
-        # about analysis depth, not a defect; suppressed so the gate behaves
-        # identically across cppcheck versions (and matches scripts/ci_preflight.sh).
+        # about analysis depth, not a defect; suppressed so the gate stays quiet.
         # virtualCallInConstructor fires on the deliberate set_connected(false)
         # shutdown call in every driver destructor (AGENTS.md gold-standard). For
         # these concrete leaf drivers the dynamic type during their own destructor
         # is correct, so it is a benign general-hazard flag, not a real defect; it
         # is a pervasive intentional pattern, hence suppressed globally rather than
-        # inline. (cppcheck 2.13 reports it under --enable=warning; 2.17 reclassifies
-        # it, so suppressing keeps both the runner's and a dev box's cppcheck green.)
+        # inline. Suppressed defensively: 2.17 does not report it, but an older
+        # cppcheck (e.g. the runner's apt 2.13) does under --enable=warning.
+        # Keep this --suppress list identical to scripts/ci_preflight.sh.
         run: |
           set -euo pipefail
           git fetch --no-tags origin "$GITHUB_BASE_REF"
