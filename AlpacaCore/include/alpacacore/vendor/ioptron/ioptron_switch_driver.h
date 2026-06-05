@@ -29,7 +29,11 @@ struct IoptronSwitchConfig {
     std::string gpio_chip_path = "/dev/gpiochip1";
     std::vector<IoptronPowerPortConfig> ports;
     // Bit-bang frequency for any port configured as PWM (1..100000 Hz).
-    std::uint32_t pwm_frequency_hz = 1000;
+    // 50 Hz is the panel-friendly default (same value ZWO drives the ASIAIR
+    // Plus at): a flat panel's LED driver fully cycles each ~20 ms period and
+    // visibly dims, where ~1 kHz gets smoothed by the driver's input cap into
+    // an on/off gate. Resistive loads (dew heaters) dim at any frequency.
+    std::uint32_t pwm_frequency_hz = 50;
     // Marketing model used in the device Name/Description/DriverInfo.
     std::string model_name = "iMate PowerBox";
 };

@@ -446,9 +446,9 @@ The value of the toggled line flips between `0` (off) and `1` (on). Attempting t
 
 ### Dimmable ports (PWM)
 
-DC1 and DC2 can each be switched from plain on/off to **soft-PWM dimming** (0–100% duty), driven by a per-port worker thread that bit-bangs the line at a configurable frequency — the same mechanism as the ZWO ASIAIR switch. In the **Configure** form, tick **PWM** next to DC1 and/or DC2 and set the **PWM Frequency** (default 1000 Hz). A PWM port then appears in ASCOM clients (NINA, etc.) as a 0–100% slider instead of an on/off toggle.
+DC1 and DC2 can each be switched from plain on/off to **soft-PWM dimming** (0–100% duty), driven by a per-port worker thread that bit-bangs the line at a configurable frequency — the same mechanism as the ZWO ASIAIR switch. In the **Configure** form, tick **PWM** next to DC1 and/or DC2 and set the **PWM Frequency** (default **50 Hz**). A PWM port then appears in ASCOM clients (NINA, etc.) as a 0–100% slider instead of an on/off toggle. This dims both **dew heaters** and **flat panels** (confirmed on iMate hardware against a real panel).
 
-> **PWM only dims *resistive* loads — dew heaters, a 12 V bulb, a power resistor.** Regulated gear (cameras, mounts, and **most flat panels**) has its own input regulator that rejects a chopped supply: it stays on above a threshold and simply cuts out below it (no proportional dimming, and a flat panel may just blink off). So leave such ports on **on/off**. The DC port circuitry itself passes PWM cleanly (verified on iMate hardware); whether a given device *dims* depends entirely on the load. The always-on DC3 jack has no GPIO and can't be PWM.
+> **Frequency matters for panels.** A flat panel has its own LED driver with an input capacitor. At a **low frequency (~50 Hz)** the driver fully powers the LEDs during each on-period and goes dark during each off-period, so the panel visibly dims — this is why 50 Hz is the default (and what ZWO drives the ASIAIR Plus at). At **~1 kHz** the input cap smooths the chopping into a steady reduced voltage that the driver gates on/off instead of dimming (a panel may just blink off). **Resistive loads (dew heaters, a 12 V bulb) dim at any frequency.** Truly regulated gear — cameras, mounts — should stay on/off regardless. The always-on DC3 jack has no GPIO and can't be PWM.
 
 The fixed DC3/DC1/DC2 layout is not remappable; the configurable fields are the GPIO chip, the PWM frequency, and the per-port PWM flags:
 
@@ -458,7 +458,7 @@ The fixed DC3/DC1/DC2 layout is not remappable; the configurable fields are the 
   "deviceNumber": 0,
   "vendor": "ioptron",
   "gpioChip": "/dev/gpiochip1",
-  "pwmFrequencyHz": 1000,
+  "pwmFrequencyHz": 50,
   "ports": [ {}, { "pwm": true }, { "pwm": false } ]
 }
 ```
@@ -466,7 +466,7 @@ The fixed DC3/DC1/DC2 layout is not remappable; the configurable fields are the 
 | Field | Type | Notes |
 |----|----|----|
 | `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip1`. |
-| `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `1000`. |
+| `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `50` (dims flat panels; raise for dew-heater-only setups if you prefer). |
 | `ports` | array | Positional overlay on `[DC3, DC1, DC2]`; each entry's optional `pwm` (bool) / `name` (string) is applied to that port. The DC3 entry's `pwm` is ignored (no GPIO). |
 
 ### Disconnect behavior
