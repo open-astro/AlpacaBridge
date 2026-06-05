@@ -11,11 +11,9 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/ioptron/ioptron_powerbox_wrapper.h>
-
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-
+#include <alpacacore/vendor/ioptron/ioptron_powerbox_wrapper.h>
 #include <gpiod.h>
 
 #include <atomic>
@@ -48,27 +46,21 @@ std::string strerror_safe(int err) {
 #endif
 }
 
-gpiod_line_value to_line_value(int v) {
-    return v != 0 ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE;
-}
+gpiod_line_value to_line_value(int v) { return v != 0 ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE; }
 
-} // namespace
+}  // namespace
 
 class IoptronPowerboxWrapper::Impl {
 public:
-    Impl(std::string gpio_chip_path,
-         std::vector<IoptronPowerPortConfig> ports,
-         std::uint32_t pwm_frequency_hz)
-        : gpio_chip_path_(std::move(gpio_chip_path))
-        , ports_(std::move(ports))
-        , pwm_frequency_hz_(pwm_frequency_hz)
-        , chip_(nullptr)
-        , request_(nullptr)
-        , open_(false)
-    {
+    Impl(std::string gpio_chip_path, std::vector<IoptronPowerPortConfig> ports, std::uint32_t pwm_frequency_hz)
+        : gpio_chip_path_(std::move(gpio_chip_path)),
+          ports_(std::move(ports)),
+          pwm_frequency_hz_(pwm_frequency_hz),
+          chip_(nullptr),
+          request_(nullptr),
+          open_(false) {
         if (ports_.empty()) {
-            throw AlpacaException("iMate PowerBox port configuration is empty",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("iMate PowerBox port configuration is empty", AlpacaError::InvalidValue);
         }
         if (pwm_frequency_hz_ == 0 || pwm_frequency_hz_ > 100000) {
             throw AlpacaException("iMate PowerBox PWM frequency out of supported range (1..100000 Hz)",
@@ -91,9 +83,7 @@ public:
         try {
             close();
         } catch (const std::exception& e) {
-            ALPACA_LOG_WARN(kLogCategory,
-                            std::string("Error during iMate PowerBox wrapper destruction: ") +
-                                e.what());
+            ALPACA_LOG_WARN(kLogCategory, std::string("Error during iMate PowerBox wrapper destruction: ") + e.what());
         }
     }
 
@@ -129,8 +119,7 @@ public:
         chip_ = ::gpiod_chip_open(gpio_chip_path_.c_str());
         if (chip_ == nullptr) {
             int err = errno;
-            throw AlpacaException("Failed to open GPIO chip '" + gpio_chip_path_ +
-                                      "': " + strerror_safe(err),
+            throw AlpacaException("Failed to open GPIO chip '" + gpio_chip_path_ + "': " + strerror_safe(err),
                                   AlpacaError::NotConnected);
         }
 
@@ -153,21 +142,14 @@ public:
             if (line_cfg == nullptr) {
                 throw AlpacaException("gpiod_line_config_new failed", AlpacaError::DriverException);
             }
-            if (::gpiod_line_config_add_line_settings(line_cfg,
-                                                      offsets.data(),
-                                                      offsets.size(),
-                                                      settings) != 0) {
+            if (::gpiod_line_config_add_line_settings(line_cfg, offsets.data(), offsets.size(), settings) != 0) {
                 int err = errno;
-                throw AlpacaException("gpiod_line_config_add_line_settings failed: " +
-                                          strerror_safe(err),
+                throw AlpacaException("gpiod_line_config_add_line_settings failed: " + strerror_safe(err),
                                       AlpacaError::DriverException);
             }
-            if (::gpiod_line_config_set_output_values(line_cfg,
-                                                      initial_values.data(),
-                                                      initial_values.size()) != 0) {
+            if (::gpiod_line_config_set_output_values(line_cfg, initial_values.data(), initial_values.size()) != 0) {
                 int err = errno;
-                throw AlpacaException("gpiod_line_config_set_output_values failed: " +
-                                          strerror_safe(err),
+                throw AlpacaException("gpiod_line_config_set_output_values failed: " + strerror_safe(err),
                                       AlpacaError::DriverException);
             }
 
@@ -235,8 +217,7 @@ public:
             for (std::size_t i = 0; i < ports_.size(); ++i) {
                 if (ports_[i].has_line && ports_[i].pwm_enabled) {
                     const int d = port_states_[i]->value.load();
-                    ::gpiod_line_request_set_value(request_, ports_[i].gpio_line,
-                                                   to_line_value(d > 0 ? 1 : 0));
+                    ::gpiod_line_request_set_value(request_, ports_[i].gpio_line, to_line_value(d > 0 ? 1 : 0));
                 }
             }
             ::gpiod_line_request_release(request_);
@@ -274,8 +255,7 @@ public:
         validate_index(index);
         const auto& cfg = ports_[index];
         if (!cfg.writable || !cfg.has_line) {
-            throw AlpacaException("Port '" + cfg.name + "' is read-only",
-                                  AlpacaError::NotImplemented);
+            throw AlpacaException("Port '" + cfg.name + "' is read-only", AlpacaError::NotImplemented);
         }
         if (cfg.pwm_enabled) {
             if (value < 0 || value > 100) {
@@ -301,7 +281,7 @@ public:
         port_states_[index]->value.store(value);
     }
 
-    std::string gpio_chip_path() const { return gpio_chip_path_; }
+    const std::string& gpio_chip_path() const { return gpio_chip_path_; }
     std::uint32_t pwm_frequency_hz() const { return pwm_frequency_hz_; }
 
 private:
@@ -359,8 +339,8 @@ private:
                     std::this_thread::sleep_for(std::chrono::microseconds(period_us));
                     continue;
                 }
-                const std::uint32_t on_us = static_cast<std::uint32_t>(
-                    (static_cast<std::uint64_t>(d) * period_us) / 100u);
+                const std::uint32_t on_us =
+                    static_cast<std::uint32_t>((static_cast<std::uint64_t>(d) * period_us) / 100u);
                 const std::uint32_t off_us = period_us - on_us;
                 // Mid-duty: cache is invalidated because we toggle every period.
                 last_written = -1;
@@ -379,10 +359,10 @@ private:
                 }
                 if (::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_INACTIVE) != 0) {
                     const int err = errno;
-                    ALPACA_LOG_ERROR(kLogCategory,
-                                     "iMate PowerBox PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
-                                         std::to_string(offset) + ": " + strerror_safe(err) +
-                                         "; aborting worker thread");
+                    ALPACA_LOG_ERROR(
+                        kLogCategory,
+                        "iMate PowerBox PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
+                            std::to_string(offset) + ": " + strerror_safe(err) + "; aborting worker thread");
                     stop->store(true);
                     break;
                 }
@@ -402,11 +382,9 @@ private:
     std::vector<std::unique_ptr<PortState>> port_states_;
 };
 
-IoptronPowerboxWrapper::IoptronPowerboxWrapper(std::string gpio_chip_path,
-                                               std::vector<IoptronPowerPortConfig> ports,
+IoptronPowerboxWrapper::IoptronPowerboxWrapper(std::string gpio_chip_path, std::vector<IoptronPowerPortConfig> ports,
                                                std::uint32_t pwm_frequency_hz)
-    : impl_(std::make_unique<Impl>(std::move(gpio_chip_path), std::move(ports), pwm_frequency_hz))
-{}
+    : impl_(std::make_unique<Impl>(std::move(gpio_chip_path), std::move(ports), pwm_frequency_hz)) {}
 
 IoptronPowerboxWrapper::~IoptronPowerboxWrapper() = default;
 
@@ -419,10 +397,8 @@ const IoptronPowerPortConfig& IoptronPowerboxWrapper::port_config(std::size_t in
     return impl_->port_config(index);
 }
 int IoptronPowerboxWrapper::get_value(std::size_t index) const { return impl_->get_value(index); }
-void IoptronPowerboxWrapper::set_value(std::size_t index, int value) {
-    impl_->set_value(index, value);
-}
+void IoptronPowerboxWrapper::set_value(std::size_t index, int value) { impl_->set_value(index, value); }
 std::string IoptronPowerboxWrapper::gpio_chip_path() const { return impl_->gpio_chip_path(); }
 std::uint32_t IoptronPowerboxWrapper::pwm_frequency_hz() const { return impl_->pwm_frequency_hz(); }
 
-} // namespace alpacacore::vendor::ioptron
+}  // namespace alpacacore::vendor::ioptron

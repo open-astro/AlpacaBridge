@@ -45,8 +45,8 @@
 #include <unordered_set>
 #include <limits>
 #ifdef ALPACACORE_ENABLE_IOPTRON
-#include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
@@ -6216,10 +6216,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // the always-on DC pass-through (read-only); switches 1/2 are the
         // controllable DC1/DC2 lines.
         auto powerbox_config = alpacacore::vendor::ioptron::default_imate_powerbox_config();
-        powerbox_config.gpio_chip_path =
-            config.value("gpioChip", powerbox_config.gpio_chip_path);
-        powerbox_config.pwm_frequency_hz =
-            config.value("pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
+        powerbox_config.gpio_chip_path = config.value("gpioChip", powerbox_config.gpio_chip_path);
+        powerbox_config.pwm_frequency_hz = config.value("pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
         // Per-port PWM/name overrides applied positionally onto the fixed
         // DC3/DC1/DC2 layout. The always-on pass-through has no GPIO line and
         // can't be PWM, so its pwm flag is ignored.
@@ -6237,8 +6235,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             }
         }
 
-        auto sw = alpacacore::vendor::ioptron::create_ioptron_switch(device_number,
-                                                                     std::move(powerbox_config));
+        auto sw = alpacacore::vendor::ioptron::create_ioptron_switch(device_number, std::move(powerbox_config));
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
             util::log_info("Registered iOptron iMate PowerBox switch");

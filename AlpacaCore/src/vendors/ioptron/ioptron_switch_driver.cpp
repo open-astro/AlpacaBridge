@@ -29,7 +29,7 @@ namespace {
 
 constexpr const char* kLogCategory = "IOPTRON_POWERBOX";
 
-} // namespace
+}  // namespace
 
 IoptronSwitchConfig default_imate_powerbox_config() {
     IoptronSwitchConfig cfg;
@@ -38,9 +38,9 @@ IoptronSwitchConfig default_imate_powerbox_config() {
     cfg.gpio_chip_path = "/dev/gpiochip1";
     cfg.ports = {
         // name,                has_line, gpio_line, writable
-        {"DC3 (always on)",     false,    0u,        false},
-        {"DC1",                 true,     118u,      true},
-        {"DC2",                 true,     114u,      true},
+        {"DC3 (always on)", false, 0u, false},
+        {"DC1", true, 118u, true},
+        {"DC2", true, 114u, true},
     };
     return cfg;
 }
@@ -48,11 +48,10 @@ IoptronSwitchConfig default_imate_powerbox_config() {
 class IoptronSwitchDriver : public SwitchDriver {
 public:
     IoptronSwitchDriver(int device_number, IoptronSwitchConfig config)
-        : device_number_(device_number)
-        , config_(std::move(config))
-        , wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz)
-        , connecting_(false)
-    {
+        : device_number_(device_number),
+          config_(std::move(config)),
+          wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz),
+          connecting_(false) {
         switch_names_.reserve(config_.ports.size());
         for (const auto& p : config_.ports) {
             switch_names_.emplace_back(p.name);
@@ -64,9 +63,7 @@ public:
         try {
             wrapper_.close();
         } catch (const std::exception& e) {
-            ALPACA_LOG_WARN(kLogCategory,
-                            std::string("Error during iMate PowerBox switch destruction: ") +
-                                e.what());
+            ALPACA_LOG_WARN(kLogCategory, std::string("Error during iMate PowerBox switch destruction: ") + e.what());
         }
     }
 
@@ -76,17 +73,13 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
-    std::string get_unique_id() const override {
-        return "iOptron_iMate_PowerBox_" + std::to_string(device_number_);
-    }
+    std::string get_unique_id() const override { return "iOptron_iMate_PowerBox_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "iOptron " + config_.model_name + " DC power switch (" + config_.gpio_chip_path + ")";
     }
 
-    std::string get_driver_info() const override {
-        return "AlpacaCore iOptron " + config_.model_name + " Switch";
-    }
+    std::string get_driver_info() const override { return "AlpacaCore iOptron " + config_.model_name + " Switch"; }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
@@ -129,8 +122,7 @@ public:
     std::vector<std::string> get_supported_actions() const override { return {}; }
 
     std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name),
-                              AlpacaError::ActionNotImplemented);
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
     bool can_action(std::string_view) const override { return false; }
@@ -147,9 +139,7 @@ public:
         throw AlpacaException("CommandString not supported", AlpacaError::NotImplemented);
     }
 
-    int get_max_switch() const override {
-        return static_cast<int>(config_.ports.size());
-    }
+    int get_max_switch() const override { return static_cast<int>(config_.ports.size()); }
 
     bool get_can_write(int id) const override {
         validate_id(id);
@@ -271,8 +261,7 @@ private:
     // connection state.
     void ensure_writable(int id) const {
         if (!config_.ports[static_cast<std::size_t>(id)].writable) {
-            throw AlpacaException("Switch " + std::to_string(id) + " is read-only",
-                                  AlpacaError::NotImplemented);
+            throw AlpacaException("Switch " + std::to_string(id) + " is read-only", AlpacaError::NotImplemented);
         }
     }
 
@@ -289,8 +278,7 @@ private:
             try {
                 set_connected(connect);
             } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR(kLogCategory,
-                                 std::string("iMate PowerBox connection task failed: ") + e.what());
+                ALPACA_LOG_ERROR(kLogCategory, std::string("iMate PowerBox connection task failed: ") + e.what());
             }
             connecting_.store(false);
         });
@@ -319,4 +307,4 @@ std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSw
     return std::make_unique<IoptronSwitchDriver>(device_number, std::move(config));
 }
 
-} // namespace alpacacore::vendor::ioptron
+}  // namespace alpacacore::vendor::ioptron

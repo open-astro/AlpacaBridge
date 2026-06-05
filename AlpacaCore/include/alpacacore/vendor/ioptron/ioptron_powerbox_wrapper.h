@@ -45,8 +45,7 @@ struct IoptronPowerPortConfig {
 // the ports are configured as outputs and driven high at boot.
 class IoptronPowerboxWrapper {
 public:
-    IoptronPowerboxWrapper(std::string gpio_chip_path,
-                           std::vector<IoptronPowerPortConfig> ports,
+    IoptronPowerboxWrapper(std::string gpio_chip_path, std::vector<IoptronPowerPortConfig> ports,
                            std::uint32_t pwm_frequency_hz = 1000);
     ~IoptronPowerboxWrapper();
 
@@ -76,4 +75,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace alpacacore::vendor::ioptron
+}  // namespace alpacacore::vendor::ioptron

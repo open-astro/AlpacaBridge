@@ -30,7 +30,7 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     }
 }
 
-} // namespace
+}  // namespace
 
 // 1. Defaults
 TEST_CASE("iOptron iMate PowerBox Switch Driver - Defaults", "[ioptron][switch][unit]") {
@@ -45,9 +45,9 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Defaults", "[ioptron][switch][
 
     // Three DC outputs: one always-on pass-through plus two controllable.
     REQUIRE(driver->get_max_switch() == 3);
-    CHECK_FALSE(driver->get_can_write(0)); // DC3 pass-through is read-only
-    CHECK(driver->get_can_write(1));       // DC1
-    CHECK(driver->get_can_write(2));       // DC2
+    CHECK_FALSE(driver->get_can_write(0));  // DC3 pass-through is read-only
+    CHECK(driver->get_can_write(1));        // DC1
+    CHECK(driver->get_can_write(2));        // DC2
 }
 
 // 2. Device metadata
@@ -58,8 +58,7 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Device metadata", "[ioptron][s
     REQUIRE(driver != nullptr);
 
     CHECK(driver->get_device_number() == 3);
-    CHECK(driver->get_description() ==
-          "iOptron iMate PowerBox DC power switch (/dev/gpiochip1)");
+    CHECK(driver->get_description() == "iOptron iMate PowerBox DC power switch (/dev/gpiochip1)");
     CHECK(driver->get_driver_info() == "AlpacaCore iOptron iMate PowerBox Switch");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
@@ -177,19 +176,17 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Unsupported methods", "[ioptro
 }
 
 // 9. Constructor rejects an empty port configuration.
-TEST_CASE("iOptron iMate PowerBox Switch Driver - Constructor rejects empty config",
-          "[ioptron][switch][unit]") {
+TEST_CASE("iOptron iMate PowerBox Switch Driver - Constructor rejects empty config", "[ioptron][switch][unit]") {
     alpacacore::vendor::ioptron::IoptronSwitchConfig empty_cfg;
     empty_cfg.ports.clear();
-    require_alpaca_error(
-        [&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, empty_cfg); },
-        alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, empty_cfg); },
+                         alpacacore::AlpacaError::InvalidValue);
 }
 
 // 10. A PWM-enabled port becomes an analog 0-100 channel; siblings stay boolean.
 TEST_CASE("iOptron iMate PowerBox Switch Driver - PWM port metadata", "[ioptron][switch][unit]") {
     auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
-    cfg.ports[1].pwm_enabled = true;   // DC1 -> soft-PWM
+    cfg.ports[1].pwm_enabled = true;  // DC1 -> soft-PWM
     cfg.pwm_frequency_hz = 2000;
     auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg);
 
@@ -208,18 +205,15 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - PWM port metadata", "[ioptron]
 }
 
 // 11. An out-of-range PWM frequency is rejected at construction.
-TEST_CASE("iOptron iMate PowerBox Switch Driver - Rejects invalid PWM frequency",
-          "[ioptron][switch][unit]") {
+TEST_CASE("iOptron iMate PowerBox Switch Driver - Rejects invalid PWM frequency", "[ioptron][switch][unit]") {
     auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
     cfg.ports[1].pwm_enabled = true;
 
     cfg.pwm_frequency_hz = 0;
-    require_alpaca_error(
-        [&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg); },
-        alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg); },
+                         alpacacore::AlpacaError::InvalidValue);
 
-    cfg.pwm_frequency_hz = 200000; // above the 100 kHz ceiling
-    require_alpaca_error(
-        [&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg); },
-        alpacacore::AlpacaError::InvalidValue);
+    cfg.pwm_frequency_hz = 200000;  // above the 100 kHz ceiling
+    require_alpaca_error([&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg); },
+                         alpacacore::AlpacaError::InvalidValue);
 }

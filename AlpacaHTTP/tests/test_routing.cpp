@@ -433,31 +433,22 @@ int main() {
     // --- iOptron iMate PowerBox switch routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_IOPTRON
     {
-        nlohmann::json remove_body = {
-            {"vendor", "ioptron"},
-            {"deviceType", "switch"},
-            {"deviceNumber", 9301}
-        };
+        nlohmann::json remove_body = {{"vendor", "ioptron"}, {"deviceType", "switch"}, {"deviceNumber", 9301}};
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
     }
 #endif
 
     {
-        nlohmann::json configure_body = {
-            {"vendor", "ioptron"},
-            {"deviceType", "switch"},
-            {"deviceNumber", 9301},
-            {"gpioChip", "/dev/gpiochip1"},
-            {"pwmFrequencyHz", 2000},
-            // Positional DC3/DC1/DC2 overlay: DC1 dimmable, DC2 plain on/off.
-            {"ports", {nlohmann::json::object(), {{"pwm", true}}, {{"pwm", false}}}}
-        };
+        nlohmann::json configure_body = {{"vendor", "ioptron"},
+                                         {"deviceType", "switch"},
+                                         {"deviceNumber", 9301},
+                                         {"gpioChip", "/dev/gpiochip1"},
+                                         {"pwmFrequencyHz", 2000},
+                                         // Positional DC3/DC1/DC2 overlay: DC1 dimmable, DC2 plain on/off.
+                                         {"ports", {nlohmann::json::object(), {{"pwm", true}}, {{"pwm", false}}}}};
 
-        const auto configure_response = route_request(
-            router,
-            "POST",
-            "/management/v1/configuredevice",
-            configure_body.dump());
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
 #ifdef ALPACACORE_ENABLE_IOPTRON
@@ -471,8 +462,7 @@ int main() {
 
         bool found_powerbox = false;
         for (const auto& entry : configured_json["Value"]) {
-            if (entry.value("DeviceType", "") == "Switch" &&
-                entry.value("DeviceNumber", -1) == 9301) {
+            if (entry.value("DeviceType", "") == "Switch" && entry.value("DeviceNumber", -1) == 9301) {
                 EXPECT(entry.value("Vendor", "") == "ioptron");
                 EXPECT(entry.contains("Config"));
                 const auto& cfg = entry["Config"];
@@ -502,16 +492,8 @@ int main() {
         EXPECT(maxswitch_json.value("ErrorNumber", -1) == 0);
         EXPECT(maxswitch_json.value("Value", -1) == 3);
 
-        nlohmann::json remove_body = {
-            {"vendor", "ioptron"},
-            {"deviceType", "switch"},
-            {"deviceNumber", 9301}
-        };
-        const auto remove_response = route_request(
-            router,
-            "POST",
-            "/management/v1/removedevice",
-            remove_body.dump());
+        nlohmann::json remove_body = {{"vendor", "ioptron"}, {"deviceType", "switch"}, {"deviceNumber", 9301}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
         const auto remove_json = nlohmann::json::parse(remove_response.body());
         EXPECT(remove_json.value("ErrorNumber", -1) == 0);
 #else

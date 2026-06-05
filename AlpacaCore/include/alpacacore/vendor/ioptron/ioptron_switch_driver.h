@@ -47,4 +47,4 @@ IoptronSwitchConfig default_imate_powerbox_config();
 
 std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config);
 
-} // namespace alpacacore::vendor::ioptron
+}  // namespace alpacacore::vendor::ioptron
