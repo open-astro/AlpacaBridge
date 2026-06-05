@@ -6210,7 +6210,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     }
 
     if (vendor == "ioptron" && device_type_str == "switch") {
-#ifdef ALPACACORE_ENABLE_IOPTRON
+#if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
         // iMate PowerBox: on-board DC power ports driven over local GPIO
         // (libgpiod) — independent of the mount RS-232 protocol. Switch 0 is
         // the always-on DC pass-through (read-only); switches 1/2 are the
@@ -6243,6 +6243,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         }
 
         error_message = "Failed to register device. Device may already exist.";
+        return false;
+#elif defined(ALPACACORE_ENABLE_IOPTRON)
+        error_message =
+            "iOptron iMate PowerBox switch not built. Rebuild on a host with "
+            "libgpiod (>= 2.0) installed (e.g. apt install libgpiod-dev).";
         return false;
 #else
         error_message = "iOptron support not enabled. Rebuild with -DALPACACORE_ENABLE_IOPTRON=ON";

@@ -261,6 +261,13 @@ public:
             if (value < 0 || value > 100) {
                 throw AlpacaException("PWM value out of range [0,100]", AlpacaError::InvalidValue);
             }
+            // Mirror the boolean path's connection guard so the wrapper is
+            // self-contained (the driver also checks, but a direct caller
+            // shouldn't be able to set a duty while disconnected).
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!open_) {
+                throw AlpacaException("GPIO chip is not open", AlpacaError::NotConnected);
+            }
             // The worker thread observes the new duty on its next cycle; no
             // direct line write here.
             port_states_[index]->value.store(value);

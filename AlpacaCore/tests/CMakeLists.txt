@@ -46,7 +46,11 @@ if(TARGET alpacacore_synscan)
 endif()
 if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope.cpp)
-    list(APPEND TEST_SOURCES test_ioptron_switch.cpp)
+    # The PowerBox Switch test only builds when its driver was compiled in
+    # (i.e. libgpiod >= 2.0 was available).
+    if(ALPACACORE_IOPTRON_POWERBOX)
+        list(APPEND TEST_SOURCES test_ioptron_switch.cpp)
+    endif()
 endif()
 if(TARGET alpacacore_weewx)
     list(APPEND TEST_SOURCES test_weewx_observingconditions.cpp)

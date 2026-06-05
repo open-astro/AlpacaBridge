@@ -234,6 +234,12 @@ jobs:
           persist-credentials: false
 
       - name: Install build dependencies
+        # NOTE: libgpiod-dev is intentionally omitted — the ubuntu-24.04 runner
+        # ships libgpiod 1.6, but the iOptron/ZWO GPIO switch drivers need >= 2.0.
+        # We build v2 from source in the next step so clang-tidy parses the vendor
+        # sources against v2 headers; otherwise the interpolated compile command
+        # resolves the system v1 <gpiod.h> and reports spurious
+        # clang-diagnostic-errors on v2 API usage (gpiod_line_value, etc.).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -241,11 +247,28 @@ jobs:
             cmake \
             g++ \
             clang-tidy \
+            pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
-            libgpiod-dev \
             nlohmann-json3-dev \
             libcurl4-openssl-dev
+
+      - name: Build libgpiod v2 from source
+        # Mirrors the build-vendors job: install the upstream release into
+        # /usr/local so clang's default search path resolves the v2 <gpiod.h>
+        # ahead of any system copy.
+        run: |
+          set -euo pipefail
+          ver=2.2.4
+          curl -fsSL "https://mirrors.edge.kernel.org/pub/software/libs/libgpiod/libgpiod-${ver}.tar.xz" \
+            -o /tmp/libgpiod.tar.xz
+          mkdir -p /tmp/libgpiod
+          tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
+          cd /tmp/libgpiod
+          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
 
       - name: Generate compile_commands.json (vendor-neutral)
         # AlpacaHTTP pulls AlpacaCore in as a subdirectory, so this single

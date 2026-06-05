@@ -451,7 +451,7 @@ int main() {
             route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
-#ifdef ALPACACORE_ENABLE_IOPTRON
+#if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
         EXPECT(configure_json.value("ErrorNumber", -1) == 0);
 
         const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");

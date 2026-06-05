@@ -46,7 +46,7 @@ struct IoptronPowerPortConfig {
 class IoptronPowerboxWrapper {
 public:
     IoptronPowerboxWrapper(std::string gpio_chip_path, std::vector<IoptronPowerPortConfig> ports,
-                           std::uint32_t pwm_frequency_hz = 1000);
+                           std::uint32_t pwm_frequency_hz = 50);
     ~IoptronPowerboxWrapper();
 
     IoptronPowerboxWrapper(const IoptronPowerboxWrapper&) = delete;
