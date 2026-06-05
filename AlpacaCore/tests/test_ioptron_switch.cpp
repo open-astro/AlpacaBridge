@@ -59,7 +59,7 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Device metadata", "[ioptron][s
 
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_description() ==
-          "iOptron iMate PowerBox DC power switch (/dev/gpiochip0)");
+          "iOptron iMate PowerBox DC power switch (/dev/gpiochip1)");
     CHECK(driver->get_driver_info() == "AlpacaCore iOptron iMate PowerBox Switch");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);

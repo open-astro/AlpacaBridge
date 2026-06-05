@@ -217,7 +217,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 ### iOptron Switch Driver Notes
 
-- **iMate PowerBox** (`vendor: ioptron`, `deviceType: switch`) — the iMate's on-board DC power ports via libgpiod v2 on `/dev/gpiochip0` (override with `gpioChip`). Exposes three switches: `DC3 (always on)` — the hardwired pass-through jack, read-only; `DC1` — GPIO line 118 (WiringPi pin 2); `DC2` — GPIO line 114 (WiringPi pin 6). All boolean on/off. Local GPIO only — independent of the iOptron mount RS-232 protocol; run AlpacaBridge on the iMate itself (already arm64 Debian 13, no re-image). The service user needs access to `/dev/gpiochip0` (root or a `gpio`-group udev rule — the stock image ships neither). Connecting preserves the boot-time "on" state; disconnecting does not power the ports off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#ioptron-imate).
+- **iMate PowerBox** (`vendor: ioptron`, `deviceType: switch`) — the iMate's on-board DC power ports via libgpiod v2 on `/dev/gpiochip1` (override with `gpioChip`). Exposes three switches: `DC3 (always on)` — the hardwired pass-through jack, read-only; `DC1` — GPIO line 118 (PD22); `DC2` — GPIO line 114 (PD18). All boolean on/off. Local GPIO only — independent of the iOptron mount RS-232 protocol; runs on the iMate itself under the [OpenAstro](https://github.com/open-astro/aw-flashtool) Armbian image (mainline kernel, Debian 13), which already ships libgpiod v2 plus a `gpio`-group udev rule for `/dev/gpiochip*`. Connecting powers the ports on; disconnecting does not power them off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#ioptron-imate).
   - **ConformU** 4.3.0 — ⏳ pending validation on iMate hardware (Linux arm64).
 
 ## Telescope Drivers

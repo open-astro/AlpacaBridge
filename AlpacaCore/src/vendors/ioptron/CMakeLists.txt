@@ -30,7 +30,7 @@ if(ALPACACORE_ENABLE_IOPTRON)
     # The vendor library only uses headers, and alpacacore will link to this library
 
     # libgpiod (>= 2.0) backs the iMate PowerBox Switch driver. The iMate's DC
-    # outputs are driven via /dev/gpiochip0 character-device lines.
+    # outputs are driven via /dev/gpiochip1 character-device lines.
     if(UNIX)
         find_package(PkgConfig)
         if(PkgConfig_FOUND)

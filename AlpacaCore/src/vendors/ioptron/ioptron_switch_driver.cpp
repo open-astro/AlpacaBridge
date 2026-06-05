@@ -33,7 +33,9 @@ constexpr const char* kLogCategory = "IOPTRON_POWERBOX";
 
 IoptronSwitchConfig default_imate_powerbox_config() {
     IoptronSwitchConfig cfg;
-    cfg.gpio_chip_path = "/dev/gpiochip0";
+    // OpenAstro runs the iMate on Armbian's mainline kernel, where the H6 main
+    // GPIO bank is /dev/gpiochip1 (the dead stock BSP exposed it as gpiochip0).
+    cfg.gpio_chip_path = "/dev/gpiochip1";
     cfg.ports = {
         // name,                has_line, gpio_line, writable
         {"DC3 (always on)",     false,    0u,        false},

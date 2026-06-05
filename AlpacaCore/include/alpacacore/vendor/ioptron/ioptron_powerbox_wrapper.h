@@ -24,8 +24,8 @@ namespace alpacacore::vendor::ioptron {
 // One DC output of the iMate PowerBox.
 //
 // The iMate exposes three physical DC barrel jacks but only two are wired to
-// a GPIO: DC1 -> gpiochip0 line 118 (WiringPi pin 2), DC2 -> gpiochip0 line
-// 114 (WiringPi pin 6). The third jack is a hardwired pass-through that is
+// a GPIO: DC1 -> gpiochip1 line 118 (PD22), DC2 -> gpiochip1 line
+// 114 (PD18) on the OpenAstro (Armbian mainline) kernel. The third jack is a hardwired pass-through that is
 // always energised and has no GPIO line; it is represented with
 // has_line == false / writable == false so clients can still see it.
 struct IoptronPowerPortConfig {

@@ -447,7 +447,7 @@ int main() {
             {"vendor", "ioptron"},
             {"deviceType", "switch"},
             {"deviceNumber", 9301},
-            {"gpioChip", "/dev/gpiochip0"}
+            {"gpioChip", "/dev/gpiochip1"}
         };
 
         const auto configure_response = route_request(
@@ -477,7 +477,7 @@ int main() {
                 EXPECT(cfg.value("deviceType", "") == "switch");
                 // The iMate PowerBox persists only the GPIO chip override; the
                 // mount connection fields must NOT leak into a switch config.
-                EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip0");
+                EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip1");
                 EXPECT(!cfg.contains("connectionType"));
                 EXPECT(!cfg.contains("portPath"));
                 found_powerbox = true;
