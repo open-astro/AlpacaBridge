@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-06-04
+## Updated 2026-06-05
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -208,6 +208,17 @@ This document lists all hardware vendors and device types that are verified to w
   - **ConformU** 4.3.0 — 0 errors / 0 issues / 0 timing, Linux arm64 (Raspberry Pi CM4). All four DC ports exercised; slowest member 15 ms.
 - **ASIAIR Plus 12V Power — RK3568** (`switchType: asiair-plus-rk3568`) — Rockchip RK3568 ASIAIR Plus via ZWO's `pwm_gpio.ko` kernel module on `/dev/pwm-gpio-misc` (reverse-engineered header at `AlpacaCore/external/ZWO/asiair-plus/pwm_gpio.h`). Wrapper indices 0–3 → kernel ioctl indices 4–7 (DC1–DC4). `SET_LEVEL` polarity is inverted (`level=0` ⇒ port ON); the wrapper hides this so ASCOM `value=1` = on. PWM is userspace soft-PWM (default **50 Hz**, matching the stock daemon's `period_ns = 20,000,000`); the module's own hardware-PWM path is unreachable and GPIO bank 4 has no PWM mux. Requires the stock ZWO kernel (4.19.219) to keep `pwm_gpio.ko` loaded, plus the `99-zwo-asiair-plus.rules` udev rule and `gpio`-group membership. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md).
   - **ConformU** 4.3.0 — 0 errors / 0 issues / 0 timing, Linux arm64 (kernel 4.19.219 + stock `pwm_gpio.ko`). Mixed 3 boolean + 1 PWM config; slowest member `SetSwitch (3)` 30 ms.
+
+### iOptron
+
+| Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
+|-------------|--------------|------------|------------------|--------|
+| iMate PowerBox | iMate (OrangePi 3 LTS / H6) | Local GPIO (libgpiod v2) | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iMate%20PowerBox/) |
+
+### iOptron Switch Driver Notes
+
+- **iMate PowerBox** (`vendor: ioptron`, `deviceType: switch`) — the iMate's on-board DC power ports via libgpiod v2 on `/dev/gpiochip1` (override with `gpioChip`). Exposes three switches: `DC3 (always on)` — the hardwired pass-through jack, read-only; `DC1` — GPIO line 118 (PD22); `DC2` — GPIO line 114 (PD18). Ports default to boolean on/off; DC1/DC2 can each opt into 0–100% soft-PWM dimming (per-port `pwm` flag, `pwmFrequencyHz` default 50 Hz) for dew heaters and flat panels — 50 Hz dims panels, confirmed on iMate hardware. Local GPIO only — independent of the iOptron mount RS-232 protocol; runs on the iMate itself under the [OpenAstro](https://github.com/open-astro/aw-flashtool) Armbian image (mainline kernel, Debian 13), which already ships libgpiod v2 plus a `gpio`-group udev rule for `/dev/gpiochip*`. Connecting powers the ports on; disconnecting does not power them off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#ioptron-imate).
+  - **ConformU** 4.3.0 — ✓ validated on iMate hardware (Linux arm64; OpenAstro Armbian / mainline kernel, `/dev/gpiochip1`): 0 errors, 0 issues, 0 timing issues. Run against a mixed config (DC1 PWM, DC2 boolean, DC3 read-only pass-through) so all three port types were exercised in one pass. [Report](AlpacaCore/conformu/iOptron/iMate%20PowerBox/Linux-arm64.txt).
 
 ## Telescope Drivers
 

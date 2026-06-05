@@ -45,6 +45,7 @@
 #include <unordered_set>
 #include <limits>
 #ifdef ALPACACORE_ENABLE_IOPTRON
+#include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
@@ -6208,6 +6209,52 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "ioptron" && device_type_str == "switch") {
+#if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
+        // iMate PowerBox: on-board DC power ports driven over local GPIO
+        // (libgpiod) — independent of the mount RS-232 protocol. Switch 0 is
+        // the always-on DC pass-through (read-only); switches 1/2 are the
+        // controllable DC1/DC2 lines.
+        auto powerbox_config = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+        powerbox_config.gpio_chip_path = config.value("gpioChip", powerbox_config.gpio_chip_path);
+        powerbox_config.pwm_frequency_hz = config.value("pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
+        // Per-port PWM/name overrides applied positionally onto the fixed
+        // DC3/DC1/DC2 layout. The always-on pass-through has no GPIO line and
+        // can't be PWM, so its pwm flag is ignored.
+        if (config.contains("ports") && config["ports"].is_array()) {
+            const auto& port_overrides = config["ports"];
+            auto& ports = powerbox_config.ports;
+            for (std::size_t i = 0; i < ports.size() && i < port_overrides.size(); ++i) {
+                const auto& p = port_overrides[i];
+                if (p.contains("name")) {
+                    ports[i].name = p.value("name", ports[i].name);
+                }
+                if (ports[i].has_line) {
+                    ports[i].pwm_enabled = p.value("pwm", ports[i].pwm_enabled);
+                }
+            }
+        }
+
+        auto sw = alpacacore::vendor::ioptron::create_ioptron_switch(device_number, std::move(powerbox_config));
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+            util::log_info("Registered iOptron iMate PowerBox switch");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#elif defined(ALPACACORE_ENABLE_IOPTRON)
+        error_message =
+            "iOptron iMate PowerBox switch not built. Rebuild on a host with "
+            "libgpiod (>= 2.0) installed (e.g. apt install libgpiod-dev).";
+        return false;
+#else
+        error_message = "iOptron support not enabled. Rebuild with -DALPACACORE_ENABLE_IOPTRON=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "synscan" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_SYNSCAN
         std::string conn_type = config.value("connectionType", "auto");
@@ -6955,14 +7002,23 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     std::string vendor = config.value("vendor", "");
     std::string device_type = config.value("deviceType", "");
     if (vendor == "ioptron") {
-        copy_if_present("connectionType");
-        std::string connection_type = config.value("connectionType", "");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
-        } else if (connection_type == "network") {
-            copy_if_present("host");
-            copy_if_present("tcpPort");
+        if (device_type == "switch") {
+            // iMate PowerBox: local GPIO. Persist the optional chip path plus
+            // the PWM frequency and per-port PWM/name overrides so dimmable-port
+            // config survives a save (sanitize strips anything not allowlisted).
+            copy_if_present("gpioChip");
+            copy_if_present("pwmFrequencyHz");
+            copy_if_present("ports");
+        } else {
+            copy_if_present("connectionType");
+            std::string connection_type = config.value("connectionType", "");
+            if (connection_type == "serial") {
+                copy_if_present("portPath");
+                copy_if_present("baudRate");
+            } else if (connection_type == "network") {
+                copy_if_present("host");
+                copy_if_present("tcpPort");
+            }
         }
     } else if (vendor == "synscan") {
         copy_if_present("synscanVersion");

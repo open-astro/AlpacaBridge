@@ -75,6 +75,8 @@
 
                 <!-- iOptron Telescope Configuration -->
                 <div id="ioptron-config" class="vendor-config" style="display: none;">
+                  <!-- Mount (telescope) configuration -->
+                  <div id="ioptron-telescope-config">
                     <h3>iOptron Telescope Configuration</h3>
 
                     <div class="form-group">
@@ -129,7 +131,57 @@
                         <input type="number" id="focal-length" name="focalLength" min="0" step="0.001" placeholder="0.800">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
+                  </div>
 
+                  <!-- iMate PowerBox (switch) configuration -->
+                  <div id="ioptron-switch-config" style="display: none;">
+                    <h3>iOptron iMate PowerBox Configuration</h3>
+                    <p class="hint">
+                        Controls the iMate's on-board DC power ports over local GPIO.
+                        Exposes three switches: <strong>DC3</strong> (always-on
+                        pass-through, read-only), <strong>DC1</strong> and
+                        <strong>DC2</strong> (switchable). Run AlpacaBridge on the
+                        iMate itself.
+                    </p>
+                    <div class="form-group">
+                        <label for="ioptron-powerbox-gpio-chip">GPIO Chip:</label>
+                        <input type="text" id="ioptron-powerbox-gpio-chip" name="ioptronPowerboxGpioChip" placeholder="/dev/gpiochip1">
+                        <small>Optional. Defaults to <code>/dev/gpiochip1</code> (the iMate's main GPIO bank on the OpenAstro mainline kernel).</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="ioptron-powerbox-pwm-frequency">PWM Frequency (Hz):</label>
+                        <input type="number" id="ioptron-powerbox-pwm-frequency" name="ioptronPowerboxPwmFrequency" value="50" min="1" max="100000">
+                        <small>Software PWM frequency for any DC port marked PWM below. <strong>50 Hz</strong> dims flat panels (their LED driver cycles fully each period); ~1 kHz is smoothed into on/off by a panel but is fine for dew heaters.</small>
+                    </div>
+                    <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
+                    <small style="color: #666;">Tick <em>PWM</em> on DC1/DC2 for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off. DC3 is a hardwired always-on pass-through.</small>
+                    <table class="ioptron-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                        <thead>
+                            <tr>
+                                <th style="text-align: left; padding: 4px; color: #333;">DC port</th>
+                                <th style="text-align: left; padding: 4px; color: #333;">GPIO line</th>
+                                <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td style="padding: 4px;">DC1</td>
+                                <td style="padding: 4px;">118 (PD22)</td>
+                                <td style="padding: 4px;"><input type="checkbox" id="ioptron-port-pwm-1" name="ioptronPortPwm1"></td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 4px;">DC2</td>
+                                <td style="padding: 4px;">114 (PD18)</td>
+                                <td style="padding: 4px;"><input type="checkbox" id="ioptron-port-pwm-2" name="ioptronPortPwm2"></td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 4px;">DC3</td>
+                                <td style="padding: 4px;">&mdash; always on</td>
+                                <td style="padding: 4px; color: #999;">n/a</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                  </div>
                 </div>
 
                 <!-- SynScan Telescope Configuration -->

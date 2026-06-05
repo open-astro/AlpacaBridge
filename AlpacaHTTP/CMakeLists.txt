@@ -37,6 +37,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/CMakeLists.txt")
     if(TARGET alpacacore_ioptron)
         add_definitions(-DALPACACORE_ENABLE_IOPTRON)
     endif()
+    # The iMate PowerBox Switch is only compiled into the iOptron vendor lib
+    # when libgpiod (>= 2.0) was available; guard the router branch to match.
+    if(ALPACACORE_IOPTRON_POWERBOX)
+        add_definitions(-DALPACACORE_IOPTRON_POWERBOX)
+    endif()
     if(TARGET alpacacore_synscan)
         add_definitions(-DALPACACORE_ENABLE_SYNSCAN)
     endif()
@@ -74,6 +79,11 @@ else()
     # Check if vendor libraries exist (this is a best-effort check)
     if(TARGET alpacacore_ioptron)
         add_definitions(-DALPACACORE_ENABLE_IOPTRON)
+    endif()
+    # The iMate PowerBox Switch is only compiled into the iOptron vendor lib
+    # when libgpiod (>= 2.0) was available; guard the router branch to match.
+    if(ALPACACORE_IOPTRON_POWERBOX)
+        add_definitions(-DALPACACORE_IOPTRON_POWERBOX)
     endif()
     if(TARGET alpacacore_synscan)
         add_definitions(-DALPACACORE_ENABLE_SYNSCAN)

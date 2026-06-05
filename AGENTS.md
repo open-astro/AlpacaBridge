@@ -344,7 +344,7 @@ Connection types: Serial (USB serial) only. Default 9600 baud, 8N1. Protocol ver
 
 ### iOptron
 
-Devices: Telescope.
+Devices: Telescope (mount), Switch (iMate PowerBox).
 
 Protocol documentation: `AlpacaCore/external/iOptron/RS-232_Command_Language2014V310.md`. No external SDK required — uses RS-232 serial communication directly.
 
@@ -359,6 +359,25 @@ Connection types: Serial (USB serial, 115200 baud default per v3.10 spec) and Ne
 - **Pulse guiding**: Uses native iOptron pulse guide commands (`:ZS#`, `:ZQ#`, `:ZE#`, `:ZC#` for N/S/E/W with duration in ms). Hardware-timed by the mount.
 - **`:GEP#` response format**: sign + 8 RA digits + sign + 8 DEC digits + 1 side_of_pier digit + 1 pointing_state digit. No `#` terminator on some firmware versions — use idle-timeout read.
 - ConformU 4.3.0 validated for **iOptron HEM27** on Linux arm64 with 0 errors and 0 issues.
+
+#### iMate PowerBox (Switch)
+
+The iMate is iOptron's embedded astronomy computer (OrangePi 3 LTS / Allwinner H6, arm64). Its "PowerBox" accessory exposes switchable DC power ports. This is a **local GPIO** device, completely independent of the mount RS-232 protocol — AlpacaBridge runs *on* the iMate and toggles GPIO directly. It does **not** share `ioptron_protocol_wrapper`; it has a dedicated `ioptron_powerbox_wrapper` (libgpiod, `/dev/gpiochip1`).
+
+> **The iMate now runs the OpenAstro Armbian image, not the stock iOptron OS.** The stock BSP kernel crashed under load (the `cpufreq_dt` OOPS when WiFi/BT powers on wedges the CPU governor, hanging AlpacaBridge before it can bind its port), so OpenAstro re-bases the iMate on Armbian's mainline kernel (Debian 13 Trixie) — see the aw-flashtool repo. **Consequence for this driver:** the H6 main pinctrl (`300b000`) is `/dev/gpiochip1` on mainline (the dead BSP exposed it as `gpiochip0`). Line offsets are unchanged. The historical WiringPi / stock-tooling notes below describe the *old* stock OS and are kept only for context.
+
+- **Hardware**: 3 physical DC jacks. Two are GPIO-controllable, one is a hardwired always-on pass-through with no GPIO line:
+  - `DC1` → gpiochip1 line **118** (PD22).
+  - `DC2` → gpiochip1 line **114** (PD18).
+  - `DC3` → always-on pass-through, no GPIO.
+- **Switch mapping** (`MaxSwitch = 3`): switch 0 = `DC3 (always on)` (read-only, `CanWrite=false`, `GetSwitch` always true, writes throw `NotImplemented`); switch 1 = `DC1`; switch 2 = `DC2`. DC1/DC2 default boolean (min 0 / max 1 / step 1) and can each opt into soft-PWM (min 0 / max 100 / step 1) via the per-port `pwm_enabled` flag. DC3 is always boolean read-only.
+- **Discovery of the control path**: stock iMate drives the ports via the setuid WiringPi `gpio` tool (`/usr/local/bin/gpio mode/write/read`) from `/home/imate/imatepowerbox.sh`, and configures them as outputs driven high at boot via `dc-power-ports.service` (`gpio mode 2/6 out; gpio write 2/6 1`). There is also a Dart `tcp_server.service` (port 3000) used by iOptron's own apps, but it is not required (and was inactive on the test unit). We use libgpiod directly for consistency with the ZWO ASIAIR switch driver rather than shelling out.
+- **WiringPi → SoC GPIO mapping**: WiringPi pin numbers (2, 6) are NOT the libgpiod line offsets. Use `gpio readall` on the device to map wPi → GPIO (wPi 2 = GPIO 118, wPi 6 = GPIO 114). libgpiod addresses lines by SoC offset.
+- **Never power off on disconnect**: the wrapper defaults controllable ports to "on" at `open()` so connecting preserves the boot state, and `close()` only releases the request — it must not drive a boolean port low (that would cut power to attached gear). For a PWM port, `close()` stops the worker and first drives the line to a defined steady level (duty > 0 ⇒ high) before releasing, so a port left mid-cycle doesn't strand low. Note libgpiod releases the line on `close()`; keep AlpacaBridge connected for the session.
+- **Soft-PWM (opt-in per port)**: DC1/DC2 can be PWM-dimmed using the same per-port worker-thread bit-bang as `zwo_asiair_protocol_wrapper` (**50 Hz default**, 0–100% duty; steady-state 0/100 skips the ioctl). Driver mirrors ZWO: a PWM port reports max 100 and `set_switch` maps on→100. **Hardware findings (validated on the iMate):** (1) the GPIO→MOSFET stage chops cleanly, so soft-PWM is electrically viable; (2) **PWM frequency is the lever, not load type** — a flat panel has its own LED driver + input cap, so at ~1 kHz the cap smooths the chop and the driver gates on/off (we first saw a panel go on→off→on with no dimming at 1 kHz and wrongly concluded "regulated loads can't dim"), but at **~50 Hz the driver fully cycles each ~20 ms period and the panel visibly dims** (confirmed on the user's real panel). 50 Hz matches what ZWO drives the ASIAIR Plus at, hence the default. Resistive loads (dew heaters) dim at any frequency; truly regulated gear (cameras/mounts) stays on/off; (3) **no usable hardware PWM**: although `gpio readall` labels DC1 (wPi 2 / PD22) `PWM.0`, the stock WiringPi sunxi build rejects `gpio mode 2 pwm` ("doesn't support hardware PWM… use wiringPi pin 42"), and DC2 (PD18) isn't a PWM pin at all — so soft-PWM on both is the right call. A library-free bench test is a sysfs bit-bang (`/sys/class/gpio`, PD22=118/PD18=114) via a tiny C program.
+- **Read-only write ordering**: `set_switch`/`set_switch_value` on the read-only DC3 throws `NotImplemented` *before* the connection check, so the read-only contract holds even when disconnected (ConformU connects first in practice, but this keeps the static capability honest and unit-testable without hardware).
+- **Permissions**: the service user needs access to `/dev/gpiochip1` (root, or a `gpio`-style group with a udev rule). The OpenAstro image already creates a `gpio` group, adds the `alpacabridge` user to it, and installs a `KERNEL=="gpiochip[0-9]*", GROUP="gpio", MODE="0660"` udev rule — so on the shipped image this is already handled. (The old stock `gpio` tool sidestepped it via setuid; libgpiod does not.)
+- Build dependency: `libgpiod-dev` (>= 2.0), same as the ZWO ASIAIR switch.
 
 ### Celestron (NexStar)
 

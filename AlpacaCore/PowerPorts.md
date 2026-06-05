@@ -10,7 +10,7 @@ Pick the section that matches your hardware.
 | [ZWO ASIair Plus (Pi CM4)](#zwo-asiair-plus-raspberry-pi-cm4) | Available — ConformU pending | Raspberry Pi CM4 (BCM2711) | libgpiod v2 |
 | [ZWO ASIair Plus (RK3568)](#zwo-asiair-plus-rockchip-rk3568) | Available — ConformU pending | Rockchip RK3568 | ZWO `pwm_gpio.ko` ioctl |
 | [ToupTek StellaVita](#touptek-stellavita-raspberry-pi-cm4) | Pending hardware | Raspberry Pi CM4 | TBD |
-| [iOptron iMate](#ioptron-imate) | Pending hardware | TBD | TBD |
+| [iOptron iMate](#ioptron-imate) | Available — ConformU pending | OrangePi 3 LTS (Allwinner H6) | libgpiod v2 |
 
 ---
 
@@ -371,7 +371,109 @@ The same `pwm_gpio.ko` module also controls the two USB2 ports, two USB3 ports, 
 
 ## iOptron iMate
 
-*Pending hardware validation. Hardware layout, GPIO mapping, and any vendor-specific quirks will be documented after first ConformU validation.*
+The iMate is iOptron's embedded astronomy computer — an **OrangePi 3 LTS (Allwinner H6, arm64)**. OpenAstro replaces its aging stock OS with an **[Armbian](https://www.armbian.com/)-based Debian 13 (Trixie) image on a mainline kernel** (see the [OpenAstro image builder](https://github.com/open-astro/aw-flashtool)): flash the image to a microSD, boot once to let it self-install to the internal eMMC, then pull the SD. The result is a modern OS with the iMate WiFi AP, GPIO/power-port support, and `libgpiod` v2 already in place — AlpacaBridge then installs from apt.
+
+AlpacaBridge runs directly on the iMate and drives its on-board DC power ports over local GPIO (libgpiod v2). The "iMate PowerBox" exposes three DC barrel jacks; only two are GPIO-switchable, the third is a hardwired always-on pass-through.
+
+| Switch ID | ASCOM name | libgpiod line (`/dev/gpiochip1`) | H6 pin | Writable |
+|----|----|----|----|----|
+| 0 | `DC3 (always on)` | — (no GPIO) | — | No — read-only, always reports ON |
+| 1 | `DC1` | 118 | PD22 | Yes (boolean) |
+| 2 | `DC2` | 114 | PD18 | Yes (boolean) |
+
+> **The main GPIO bank is `/dev/gpiochip1` on the OpenAstro (mainline) image.** The dead stock BSP kernel exposed the same H6 pinctrl (`300b000`) as `gpiochip0`; the mainline kernel numbers it `gpiochip1`. The line offsets are unchanged (118 = PD22, 114 = PD18). Confirm on your unit with `gpioinfo` — find the `300b000.pinctrl` chip and its `PD22` / `PD18` lines.
+
+### 1. Install AlpacaBridge
+
+The OpenAstro image already ships `libgpiod` v2 (`libgpiod3` plus the `gpiod` CLI tools). Install AlpacaBridge from the OpenAstro apt repository — the same as on every other platform:
+
+```bash
+sudo apt install alpacabridge
+```
+
+The service auto-starts on `:11111`. (Building from source on the device instead additionally needs the dev packages: `git build-essential cmake libgpiod-dev libusb-1.0-0-dev libudev-dev libcurl4-openssl-dev nlohmann-json3-dev catch2`.)
+
+### 2. GPIO access is already configured
+
+The OpenAstro image creates a `gpio` group and installs a udev rule (`KERNEL=="gpiochip[0-9]*", GROUP="gpio", MODE="0660"`) and adds the `alpacabridge` service user to that group, so the unprivileged daemon can drive the lines with no manual setup. On a hand-rolled (non-OpenAstro) install, replicate it:
+
+```bash
+sudo groupadd -f gpio
+sudo usermod -aG gpio alpacabridge      # or "$USER" when running by hand
+echo 'KERNEL=="gpiochip[0-9]*", GROUP="gpio", MODE="0660"' \
+  | sudo tee /etc/udev/rules.d/99-openastro-gpio.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+Confirm the chip is group-accessible:
+
+```bash
+ls -l /dev/gpiochip1     # group should be 'gpio', mode crw-rw----
+```
+
+> Running the AlpacaBridge service as root instead works too, but the udev-rule approach keeps the daemon unprivileged and is the recommended setup (and what the OpenAstro image ships).
+
+### 3. Add the Switch device
+
+Open `http://<your-imate-ip>:11111/` in a browser:
+
+1. **Configure** tab → **Add Device**
+2. **Device Type**: Switch
+3. **Vendor**: iOptron
+4. **Device Number**: 0 (or any unique number)
+5. Leave **GPIO Chip** at its default (`/dev/gpiochip1`) unless you know you need to override it. There are no per-port fields — the three DC ports and their line mapping are fixed.
+6. Submit
+
+Or `POST` the equivalent JSON to the management API:
+
+```json
+{
+  "deviceType": "switch",
+  "deviceNumber": 0,
+  "vendor": "ioptron"
+}
+```
+
+### 4. Verify
+
+Connect the device from the **Devices** tab. You should see three channels: `DC3 (always on)` (read-only, always ON), `DC1`, and `DC2`. From a second SSH session, watch the live GPIO state while you toggle DC1/DC2 in the Web UI (libgpiod v2 syntax — `-c` addresses lines by offset on a chip):
+
+```bash
+gpioget --numeric -c gpiochip1 118 114    # DC1 line 118, DC2 line 114
+```
+
+The value of the toggled line flips between `0` (off) and `1` (on). Attempting to write `DC3` returns an ASCOM "not implemented" error — it is a read-only pass-through.
+
+### Dimmable ports (PWM)
+
+DC1 and DC2 can each be switched from plain on/off to **soft-PWM dimming** (0–100% duty), driven by a per-port worker thread that bit-bangs the line at a configurable frequency — the same mechanism as the ZWO ASIAIR switch. In the **Configure** form, tick **PWM** next to DC1 and/or DC2 and set the **PWM Frequency** (default **50 Hz**). A PWM port then appears in ASCOM clients (NINA, etc.) as a 0–100% slider instead of an on/off toggle. This dims both **dew heaters** and **flat panels** (confirmed on iMate hardware against a real panel).
+
+> **Frequency matters for panels.** A flat panel has its own LED driver with an input capacitor. At a **low frequency (~50 Hz)** the driver fully powers the LEDs during each on-period and goes dark during each off-period, so the panel visibly dims — this is why 50 Hz is the default (and what ZWO drives the ASIAIR Plus at). At **~1 kHz** the input cap smooths the chopping into a steady reduced voltage that the driver gates on/off instead of dimming (a panel may just blink off). **Resistive loads (dew heaters, a 12 V bulb) dim at any frequency.** Truly regulated gear — cameras, mounts — should stay on/off regardless. The always-on DC3 jack has no GPIO and can't be PWM.
+
+The fixed DC3/DC1/DC2 layout is not remappable; the configurable fields are the GPIO chip, the PWM frequency, and the per-port PWM flags:
+
+```json
+{
+  "deviceType": "switch",
+  "deviceNumber": 0,
+  "vendor": "ioptron",
+  "gpioChip": "/dev/gpiochip1",
+  "pwmFrequencyHz": 50,
+  "ports": [ {}, { "pwm": true }, { "pwm": false } ]
+}
+```
+
+| Field | Type | Notes |
+|----|----|----|
+| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip1`. |
+| `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `50` (dims flat panels; raise for dew-heater-only setups if you prefer). |
+| `ports` | array | Positional overlay on `[DC3, DC1, DC2]`; each entry's optional `pwm` (bool) / `name` (string) is applied to that port. The DC3 entry's `pwm` is ignored (no GPIO). |
+
+### Disconnect behavior
+
+Same policy as the ASIair drivers: at connect the wrapper claims DC1/DC2 at their "on" default — so gear plugged into them is powered as soon as the device connects — and when the ASCOM client (or the Web UI) disconnects, the wrapper releases its libgpiod request **without driving the lines LOW first**. (A PWM port stops its worker and is first driven to a defined steady level — on for any duty > 0, off at 0% — so it never strands the line low mid-cycle.) Connecting and disconnecting therefore never power-cycle attached gear. The always-on DC3 jack is hardwired live and unaffected by the driver entirely. If you want DC1 or DC2 OFF after disconnect, toggle it OFF in your client **before** disconnecting.
+
+> libgpiod releases the line on `close()`, so for unattended setups keep AlpacaBridge connected for the duration of the session rather than relying on a disconnected-but-powered state.
 
 ---
 

@@ -569,7 +569,25 @@ function startEditDevice(device) {
 
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
-    if (vendor === 'ioptron') {
+    if (vendor === 'ioptron' && deviceType === 'switch') {
+        // iMate PowerBox: optional GPIO chip override plus PWM frequency and
+        // per-port PWM flags (positional: index 1 = DC1, index 2 = DC2).
+        if (config.gpioChip !== undefined && config.gpioChip !== null) {
+            setFormValue('ioptron-powerbox-gpio-chip', config.gpioChip);
+        }
+        if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
+            setFormValue('ioptron-powerbox-pwm-frequency', config.pwmFrequencyHz);
+        }
+        if (Array.isArray(config.ports)) {
+            [1, 2].forEach(function(i) {
+                const pwmCheckbox = document.getElementById('ioptron-port-pwm-' + i);
+                if (pwmCheckbox && config.ports[i]) {
+                    pwmCheckbox.checked = config.ports[i].pwm === true;
+                }
+            });
+        }
+        updateIoptronConfigFields();
+    } else if (vendor === 'ioptron') {
         const ioptronConnectionType = config.connectionType || 'auto';
         setFormValue('ioptron-connection-type', ioptronConnectionType);
         if (ioptronConnectionType === 'serial') {
@@ -1402,8 +1420,10 @@ function updateVendorOptions() {
     const isObservingConditions = deviceType === 'observingconditions';
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
-        ioptronOption.disabled = !isTelescope;
-        ioptronOption.hidden = !isTelescope;
+        // iOptron provides the mount (telescope) and the iMate PowerBox (switch).
+        const ioptronAllowed = isTelescope || isSwitch;
+        ioptronOption.disabled = !ioptronAllowed;
+        ioptronOption.hidden = !ioptronAllowed;
     }
     const synscanOption = vendorSelect.querySelector('option[value="synscan"]');
     if (synscanOption) {
@@ -1458,7 +1478,7 @@ function updateVendorOptions() {
         geminiOption.hidden = !isFocuser;
     }
 
-    if (!isTelescope && vendorSelect.value === 'ioptron') {
+    if (!isTelescope && !isSwitch && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
     }
     if (!isTelescope && vendorSelect.value === 'synscan') {
@@ -1505,6 +1525,7 @@ document.getElementById('vendor').addEventListener('change', function() {
     
     if (vendor === 'ioptron') {
         document.getElementById('ioptron-config').style.display = 'block';
+        updateIoptronConfigFields();
     } else if (vendor === 'synscan') {
         document.getElementById('synscan-config').style.display = 'block';
     } else if (vendor === 'celestron') {
@@ -1531,6 +1552,22 @@ document.getElementById('vendor').addEventListener('change', function() {
     updateTouptekConfigFields();
     updateAutoNumbering();
 });
+
+// iOptron covers two device types from one vendor config block: the mount
+// (telescope) and the iMate PowerBox (switch). Show the relevant sub-section
+// based on the selected device type.
+function updateIoptronConfigFields() {
+    const telescopeSection = document.getElementById('ioptron-telescope-config');
+    const switchSection = document.getElementById('ioptron-switch-config');
+    if (!telescopeSection || !switchSection) {
+        return;
+    }
+    const deviceTypeSelect = document.getElementById('device-type');
+    const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
+    const isSwitch = deviceType === 'switch';
+    telescopeSection.style.display = isSwitch ? 'none' : 'block';
+    switchSection.style.display = isSwitch ? 'block' : 'none';
+}
 
 const ioptronConnectionType = document.getElementById('ioptron-connection-type');
 if (ioptronConnectionType) {
@@ -2020,7 +2057,30 @@ document.getElementById('device-form').addEventListener('submit', async function
         connectionType: formData.get('connectionType'),
     };
 
-    if (deviceData.vendor === 'ioptron') {
+    if (deviceData.vendor === 'ioptron' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
+        // iMate PowerBox: local GPIO, no mount connection fields. Optional GPIO
+        // chip override (defaults to /dev/gpiochip1 server-side) plus optional
+        // PWM dimming on DC1/DC2.
+        const gpioChip = (formData.get('ioptronPowerboxGpioChip') || '').trim();
+        if (gpioChip) {
+            deviceData.gpioChip = gpioChip;
+        }
+        const dc1Pwm = formData.get('ioptronPortPwm1') === 'on';
+        const dc2Pwm = formData.get('ioptronPortPwm2') === 'on';
+        if (dc1Pwm || dc2Pwm) {
+            const pwmFreq = Number.parseInt(formData.get('ioptronPowerboxPwmFrequency'), 10);
+            if (!Number.isNaN(pwmFreq)) {
+                deviceData.pwmFrequencyHz = pwmFreq;
+            }
+            // Positional overlay on the fixed DC3/DC1/DC2 layout: index 0 is the
+            // always-on DC3 pass-through (no PWM), 1 = DC1, 2 = DC2.
+            deviceData.ports = [
+                {},
+                { pwm: dc1Pwm },
+                { pwm: dc2Pwm },
+            ];
+        }
+    } else if (deviceData.vendor === 'ioptron') {
         deviceData.connectionType = formData.get('ioptronConnectionType') || 'auto';
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('ioptronPortPath');
