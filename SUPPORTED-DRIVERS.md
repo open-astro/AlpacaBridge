@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-06-04
+## Updated 2026-06-05
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## General Notes
@@ -213,12 +213,12 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
 |-------------|--------------|------------|------------------|--------|
-| iMate PowerBox | iMate (OrangePi 3 LTS / H6) | Local GPIO (libgpiod v2) | ⏳ | ConformU pending hardware run |
+| iMate PowerBox | iMate (OrangePi 3 LTS / H6) | Local GPIO (libgpiod v2) | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iMate%20PowerBox/) |
 
 ### iOptron Switch Driver Notes
 
 - **iMate PowerBox** (`vendor: ioptron`, `deviceType: switch`) — the iMate's on-board DC power ports via libgpiod v2 on `/dev/gpiochip1` (override with `gpioChip`). Exposes three switches: `DC3 (always on)` — the hardwired pass-through jack, read-only; `DC1` — GPIO line 118 (PD22); `DC2` — GPIO line 114 (PD18). Ports default to boolean on/off; DC1/DC2 can each opt into 0–100% soft-PWM dimming (per-port `pwm` flag, `pwmFrequencyHz` default 50 Hz) for dew heaters and flat panels — 50 Hz dims panels, confirmed on iMate hardware. Local GPIO only — independent of the iOptron mount RS-232 protocol; runs on the iMate itself under the [OpenAstro](https://github.com/open-astro/aw-flashtool) Armbian image (mainline kernel, Debian 13), which already ships libgpiod v2 plus a `gpio`-group udev rule for `/dev/gpiochip*`. Connecting powers the ports on; disconnecting does not power them off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#ioptron-imate).
-  - **ConformU** 4.3.0 — ⏳ pending validation on iMate hardware (Linux arm64).
+  - **ConformU** 4.3.0 — ✓ validated on iMate hardware (Linux arm64; OpenAstro Armbian / mainline kernel, `/dev/gpiochip1`): 0 errors, 0 issues, 0 timing issues. Run against a mixed config (DC1 PWM, DC2 boolean, DC3 read-only pass-through) so all three port types were exercised in one pass. [Report](AlpacaCore/conformu/iOptron/iMate%20PowerBox/Linux-arm64.txt).
 
 ## Telescope Drivers
 
