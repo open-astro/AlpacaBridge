@@ -204,6 +204,8 @@ public:
         }
 
         lock.lock();
+        // Re-arm the stop flags so a subsequent open() can start fresh PWM
+        // workers — the wrapper supports close-then-reopen.
         for (auto& ps : port_states_) {
             ps->stop.store(false);
         }

@@ -112,6 +112,11 @@ jobs:
           ver=2.2.4
           curl -fsSL "https://mirrors.edge.kernel.org/pub/software/libs/libgpiod/libgpiod-${ver}.tar.xz" \
             -o /tmp/libgpiod.tar.xz
+          # Pin a known-good checksum (matches kernel.org's published
+          # sha256sums) so a compromised mirror/CDN cannot substitute a
+          # modified archive.
+          echo "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592  /tmp/libgpiod.tar.xz" \
+            | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
           cd /tmp/libgpiod
@@ -262,6 +267,11 @@ jobs:
           ver=2.2.4
           curl -fsSL "https://mirrors.edge.kernel.org/pub/software/libs/libgpiod/libgpiod-${ver}.tar.xz" \
             -o /tmp/libgpiod.tar.xz
+          # Pin a known-good checksum (matches kernel.org's published
+          # sha256sums) so a compromised mirror/CDN cannot substitute a
+          # modified archive.
+          echo "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592  /tmp/libgpiod.tar.xz" \
+            | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
           cd /tmp/libgpiod
