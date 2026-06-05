@@ -570,9 +570,21 @@ function startEditDevice(device) {
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
     if (vendor === 'ioptron' && deviceType === 'switch') {
-        // iMate PowerBox: only the optional GPIO chip override.
+        // iMate PowerBox: optional GPIO chip override plus PWM frequency and
+        // per-port PWM flags (positional: index 1 = DC1, index 2 = DC2).
         if (config.gpioChip !== undefined && config.gpioChip !== null) {
             setFormValue('ioptron-powerbox-gpio-chip', config.gpioChip);
+        }
+        if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
+            setFormValue('ioptron-powerbox-pwm-frequency', config.pwmFrequencyHz);
+        }
+        if (Array.isArray(config.ports)) {
+            [1, 2].forEach(function(i) {
+                const pwmCheckbox = document.getElementById('ioptron-port-pwm-' + i);
+                if (pwmCheckbox && config.ports[i]) {
+                    pwmCheckbox.checked = config.ports[i].pwm === true;
+                }
+            });
         }
         updateIoptronConfigFields();
     } else if (vendor === 'ioptron') {
@@ -2046,11 +2058,27 @@ document.getElementById('device-form').addEventListener('submit', async function
     };
 
     if (deviceData.vendor === 'ioptron' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
-        // iMate PowerBox: local GPIO, no mount connection fields. Only an
-        // optional GPIO chip override (defaults to /dev/gpiochip0 server-side).
+        // iMate PowerBox: local GPIO, no mount connection fields. Optional GPIO
+        // chip override (defaults to /dev/gpiochip1 server-side) plus optional
+        // PWM dimming on DC1/DC2.
         const gpioChip = (formData.get('ioptronPowerboxGpioChip') || '').trim();
         if (gpioChip) {
             deviceData.gpioChip = gpioChip;
+        }
+        const dc1Pwm = formData.get('ioptronPortPwm1') === 'on';
+        const dc2Pwm = formData.get('ioptronPortPwm2') === 'on';
+        if (dc1Pwm || dc2Pwm) {
+            const pwmFreq = Number.parseInt(formData.get('ioptronPowerboxPwmFrequency'), 10);
+            if (!Number.isNaN(pwmFreq)) {
+                deviceData.pwmFrequencyHz = pwmFreq;
+            }
+            // Positional overlay on the fixed DC3/DC1/DC2 layout: index 0 is the
+            // always-on DC3 pass-through (no PWM), 1 = DC1, 2 = DC2.
+            deviceData.ports = [
+                {},
+                { pwm: dc1Pwm },
+                { pwm: dc2Pwm },
+            ];
         }
     } else if (deviceData.vendor === 'ioptron') {
         deviceData.connectionType = formData.get('ioptronConnectionType') || 'auto';

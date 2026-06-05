@@ -447,7 +447,10 @@ int main() {
             {"vendor", "ioptron"},
             {"deviceType", "switch"},
             {"deviceNumber", 9301},
-            {"gpioChip", "/dev/gpiochip1"}
+            {"gpioChip", "/dev/gpiochip1"},
+            {"pwmFrequencyHz", 2000},
+            // Positional DC3/DC1/DC2 overlay: DC1 dimmable, DC2 plain on/off.
+            {"ports", {nlohmann::json::object(), {{"pwm", true}}, {{"pwm", false}}}}
         };
 
         const auto configure_response = route_request(
@@ -475,9 +478,16 @@ int main() {
                 const auto& cfg = entry["Config"];
                 EXPECT(cfg.value("vendor", "") == "ioptron");
                 EXPECT(cfg.value("deviceType", "") == "switch");
-                // The iMate PowerBox persists only the GPIO chip override; the
-                // mount connection fields must NOT leak into a switch config.
+                // The iMate PowerBox persists the GPIO chip override plus the
+                // PWM frequency and per-port PWM overlay; the mount connection
+                // fields must NOT leak into a switch config.
                 EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip1");
+                EXPECT(cfg.value("pwmFrequencyHz", 0) == 2000);
+                EXPECT(cfg.contains("ports"));
+                EXPECT(cfg["ports"].is_array());
+                EXPECT(cfg["ports"].size() == 3);
+                EXPECT(cfg["ports"][1].value("pwm", false) == true);
+                EXPECT(cfg["ports"][2].value("pwm", true) == false);
                 EXPECT(!cfg.contains("connectionType"));
                 EXPECT(!cfg.contains("portPath"));
                 found_powerbox = true;

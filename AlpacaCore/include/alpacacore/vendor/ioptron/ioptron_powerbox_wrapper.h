@@ -33,17 +33,21 @@ struct IoptronPowerPortConfig {
     bool has_line;             // false for the always-on pass-through jack
     std::uint32_t gpio_line;   // libgpiod offset on gpio_chip_path; ignored when !has_line
     bool writable;             // false for the always-on pass-through jack
+    bool pwm_enabled = false;  // soft-PWM dimming (0-100% duty) instead of on/off
 };
 
 // libgpiod-backed controller for the iMate PowerBox DC outputs.
 //
-// Boolean only: each controllable line is driven 0 (off / low) or 1 (on /
-// high). Matches the stock iMate behaviour where the ports are configured as
-// outputs and driven high at boot.
+// Each controllable line is driven either as a boolean (0 = off / low, 1 = on /
+// high) or, when pwm_enabled, as a soft-PWM channel: a per-port worker thread
+// bit-bangs the line at pwm_frequency_hz with a 0-100% duty cycle (same
+// approach as the ZWO ASIAIR switch). Matches the stock iMate behaviour where
+// the ports are configured as outputs and driven high at boot.
 class IoptronPowerboxWrapper {
 public:
     IoptronPowerboxWrapper(std::string gpio_chip_path,
-                           std::vector<IoptronPowerPortConfig> ports);
+                           std::vector<IoptronPowerPortConfig> ports,
+                           std::uint32_t pwm_frequency_hz = 1000);
     ~IoptronPowerboxWrapper();
 
     IoptronPowerboxWrapper(const IoptronPowerboxWrapper&) = delete;
@@ -59,11 +63,13 @@ public:
     const IoptronPowerPortConfig& port_config(std::size_t index) const;
 
     // Boolean port: value is 0 (off / GPIO low) or 1 (on / GPIO high).
+    // PWM port: value is the duty-cycle percent in [0, 100].
     // The always-on pass-through port always reads 1 and rejects writes.
     int get_value(std::size_t index) const;
     void set_value(std::size_t index, int value);
 
     std::string gpio_chip_path() const;
+    std::uint32_t pwm_frequency_hz() const;
 
 private:
     class Impl;

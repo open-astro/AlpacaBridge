@@ -185,3 +185,41 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Constructor rejects empty conf
         [&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, empty_cfg); },
         alpacacore::AlpacaError::InvalidValue);
 }
+
+// 10. A PWM-enabled port becomes an analog 0-100 channel; siblings stay boolean.
+TEST_CASE("iOptron iMate PowerBox Switch Driver - PWM port metadata", "[ioptron][switch][unit]") {
+    auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    cfg.ports[1].pwm_enabled = true;   // DC1 -> soft-PWM
+    cfg.pwm_frequency_hz = 2000;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg);
+
+    // DC1 (PWM) reports a 0-100 range with step 1; DC2 stays boolean [0,1].
+    CHECK(driver->get_min_switch_value(1) == Catch::Approx(0.0));
+    CHECK(driver->get_max_switch_value(1) == Catch::Approx(100.0));
+    CHECK(driver->get_switch_step(1) == Catch::Approx(1.0));
+    CHECK(driver->get_max_switch_value(2) == Catch::Approx(1.0));
+
+    // Descriptions reflect each port's mode.
+    CHECK(driver->get_switch_description(1) == "iMate DC power port on GPIO 118 (PWM 0-100%)");
+    CHECK(driver->get_switch_description(2) == "iMate DC power port on GPIO 114 (on/off)");
+
+    // The always-on pass-through is unaffected and remains read-only.
+    CHECK_FALSE(driver->get_can_write(0));
+}
+
+// 11. An out-of-range PWM frequency is rejected at construction.
+TEST_CASE("iOptron iMate PowerBox Switch Driver - Rejects invalid PWM frequency",
+          "[ioptron][switch][unit]") {
+    auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    cfg.ports[1].pwm_enabled = true;
+
+    cfg.pwm_frequency_hz = 0;
+    require_alpaca_error(
+        [&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg); },
+        alpacacore::AlpacaError::InvalidValue);
+
+    cfg.pwm_frequency_hz = 200000; // above the 100 kHz ceiling
+    require_alpaca_error(
+        [&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg); },
+        alpacacore::AlpacaError::InvalidValue);
+}

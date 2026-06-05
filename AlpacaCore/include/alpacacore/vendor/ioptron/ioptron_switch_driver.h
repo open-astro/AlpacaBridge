@@ -28,6 +28,8 @@ struct IoptronSwitchConfig {
     // exposed it as gpiochip0. Override via the gpioChip config field if needed.
     std::string gpio_chip_path = "/dev/gpiochip1";
     std::vector<IoptronPowerPortConfig> ports;
+    // Bit-bang frequency for any port configured as PWM (1..100000 Hz).
+    std::uint32_t pwm_frequency_hz = 1000;
     // Marketing model used in the device Name/Description/DriverInfo.
     std::string model_name = "iMate PowerBox";
 };
@@ -36,7 +38,7 @@ struct IoptronSwitchConfig {
 //   Switch 0 = "DC3 (always on)" — hardwired pass-through, read-only.
 //   Switch 1 = "DC1"             — gpiochip1 line 118 (PD22).
 //   Switch 2 = "DC2"             — gpiochip1 line 114 (PD18).
-// All ports are boolean on/off.
+// All ports default to boolean on/off; DC1/DC2 can be switched to soft-PWM.
 IoptronSwitchConfig default_imate_powerbox_config();
 
 std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config);

@@ -444,26 +444,34 @@ gpioget --numeric -c gpiochip1 118 114    # DC1 line 118, DC2 line 114
 
 The value of the toggled line flips between `0` (off) and `1` (on). Attempting to write `DC3` returns an ASCOM "not implemented" error — it is a read-only pass-through.
 
-### Advanced configuration
+### Dimmable ports (PWM)
 
-The only override is the GPIO chip path; the port-to-line mapping is fixed for the iMate hardware:
+DC1 and DC2 can each be switched from plain on/off to **soft-PWM dimming** (0–100% duty), driven by a per-port worker thread that bit-bangs the line at a configurable frequency — the same mechanism as the ZWO ASIAIR switch. In the **Configure** form, tick **PWM** next to DC1 and/or DC2 and set the **PWM Frequency** (default 1000 Hz). A PWM port then appears in ASCOM clients (NINA, etc.) as a 0–100% slider instead of an on/off toggle.
+
+> **PWM only dims *resistive* loads — dew heaters, a 12 V bulb, a power resistor.** Regulated gear (cameras, mounts, and **most flat panels**) has its own input regulator that rejects a chopped supply: it stays on above a threshold and simply cuts out below it (no proportional dimming, and a flat panel may just blink off). So leave such ports on **on/off**. The DC port circuitry itself passes PWM cleanly (verified on iMate hardware); whether a given device *dims* depends entirely on the load. The always-on DC3 jack has no GPIO and can't be PWM.
+
+The fixed DC3/DC1/DC2 layout is not remappable; the configurable fields are the GPIO chip, the PWM frequency, and the per-port PWM flags:
 
 ```json
 {
   "deviceType": "switch",
   "deviceNumber": 0,
   "vendor": "ioptron",
-  "gpioChip": "/dev/gpiochip1"
+  "gpioChip": "/dev/gpiochip1",
+  "pwmFrequencyHz": 1000,
+  "ports": [ {}, { "pwm": true }, { "pwm": false } ]
 }
 ```
 
 | Field | Type | Notes |
 |----|----|----|
 | `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip1`. |
+| `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `1000`. |
+| `ports` | array | Positional overlay on `[DC3, DC1, DC2]`; each entry's optional `pwm` (bool) / `name` (string) is applied to that port. The DC3 entry's `pwm` is ignored (no GPIO). |
 
 ### Disconnect behavior
 
-Same policy as the ASIair drivers: at connect the wrapper claims DC1/DC2 at their "on" default — so gear plugged into them is powered as soon as the device connects — and when the ASCOM client (or the Web UI) disconnects, the wrapper releases its libgpiod request **without driving the lines LOW first**. Connecting and disconnecting therefore never power-cycle attached gear. The always-on DC3 jack is hardwired live and unaffected by the driver entirely. If you want DC1 or DC2 OFF after disconnect, toggle it OFF in your client **before** disconnecting.
+Same policy as the ASIair drivers: at connect the wrapper claims DC1/DC2 at their "on" default — so gear plugged into them is powered as soon as the device connects — and when the ASCOM client (or the Web UI) disconnects, the wrapper releases its libgpiod request **without driving the lines LOW first**. (A PWM port stops its worker and is first driven to a defined steady level — on for any duty > 0, off at 0% — so it never strands the line low mid-cycle.) Connecting and disconnecting therefore never power-cycle attached gear. The always-on DC3 jack is hardwired live and unaffected by the driver entirely. If you want DC1 or DC2 OFF after disconnect, toggle it OFF in your client **before** disconnecting.
 
 > libgpiod releases the line on `close()`, so for unattended setups keep AlpacaBridge connected for the duration of the session rather than relying on a disconnected-but-powered state.
 

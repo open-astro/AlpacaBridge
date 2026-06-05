@@ -6218,6 +6218,24 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         auto powerbox_config = alpacacore::vendor::ioptron::default_imate_powerbox_config();
         powerbox_config.gpio_chip_path =
             config.value("gpioChip", powerbox_config.gpio_chip_path);
+        powerbox_config.pwm_frequency_hz =
+            config.value("pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
+        // Per-port PWM/name overrides applied positionally onto the fixed
+        // DC3/DC1/DC2 layout. The always-on pass-through has no GPIO line and
+        // can't be PWM, so its pwm flag is ignored.
+        if (config.contains("ports") && config["ports"].is_array()) {
+            const auto& port_overrides = config["ports"];
+            auto& ports = powerbox_config.ports;
+            for (std::size_t i = 0; i < ports.size() && i < port_overrides.size(); ++i) {
+                const auto& p = port_overrides[i];
+                if (p.contains("name")) {
+                    ports[i].name = p.value("name", ports[i].name);
+                }
+                if (ports[i].has_line) {
+                    ports[i].pwm_enabled = p.value("pwm", ports[i].pwm_enabled);
+                }
+            }
+        }
 
         auto sw = alpacacore::vendor::ioptron::create_ioptron_switch(device_number,
                                                                      std::move(powerbox_config));
@@ -6983,8 +7001,12 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     std::string device_type = config.value("deviceType", "");
     if (vendor == "ioptron") {
         if (device_type == "switch") {
-            // iMate PowerBox: local GPIO, only the optional chip path persists.
+            // iMate PowerBox: local GPIO. Persist the optional chip path plus
+            // the PWM frequency and per-port PWM/name overrides so dimmable-port
+            // config survives a save (sanitize strips anything not allowlisted).
             copy_if_present("gpioChip");
+            copy_if_present("pwmFrequencyHz");
+            copy_if_present("ports");
         } else {
             copy_if_present("connectionType");
             std::string connection_type = config.value("connectionType", "");

@@ -50,7 +50,7 @@ public:
     IoptronSwitchDriver(int device_number, IoptronSwitchConfig config)
         : device_number_(device_number)
         , config_(std::move(config))
-        , wrapper_(config_.gpio_chip_path, config_.ports)
+        , wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz)
         , connecting_(false)
     {
         switch_names_.reserve(config_.ports.size());
@@ -118,6 +118,7 @@ public:
         for (std::size_t i = 0; i < config_.ports.size(); ++i) {
             const int v = wrapper_.get_value(i);
             const auto idx = std::to_string(i);
+            // A PWM port counts as "on" for any non-zero duty.
             state.push_back({"GetSwitch" + idx, v != 0});
             state.push_back({"GetSwitchValue" + idx, static_cast<double>(v)});
             state.push_back({"StateChangeComplete" + idx, true});
@@ -167,7 +168,10 @@ public:
     }
 
     void set_switch(int id, bool state) override {
-        set_switch_value(id, state ? 1.0 : 0.0);
+        validate_id(id);
+        // "On" maps to the port's maximum (100 for a PWM port, 1 for boolean);
+        // "off" maps to 0. set_switch_value enforces writability/connection.
+        set_switch_value(id, state ? get_max_switch_value_unchecked(id) : 0.0);
     }
 
     void set_async(int id, bool /*state*/) override {
@@ -186,9 +190,11 @@ public:
         validate_id(id);
         ensure_writable(id);
         ensure_connected();
+        const long max_v = static_cast<long>(get_max_switch_value_unchecked(id));
         const long rounded = std::lround(value);
-        if (rounded < 0 || rounded > 1) {
-            throw AlpacaException("Switch value out of range [0,1]", AlpacaError::InvalidValue);
+        if (rounded < 0 || rounded > max_v) {
+            throw AlpacaException("Switch value out of range [0," + std::to_string(max_v) + "]",
+                                  AlpacaError::InvalidValue);
         }
         wrapper_.set_value(static_cast<std::size_t>(id), static_cast<int>(rounded));
     }
@@ -223,7 +229,8 @@ public:
         if (!p.has_line) {
             return "iMate always-on DC pass-through (read-only)";
         }
-        return "iMate DC power port on GPIO " + std::to_string(p.gpio_line) + " (on/off)";
+        const std::string mode = p.pwm_enabled ? "PWM 0-100%" : "on/off";
+        return "iMate DC power port on GPIO " + std::to_string(p.gpio_line) + " (" + mode + ")";
     }
 
     double get_min_switch_value(int id) const override {
@@ -233,7 +240,7 @@ public:
 
     double get_max_switch_value(int id) const override {
         validate_id(id);
-        return 1.0;
+        return get_max_switch_value_unchecked(id);
     }
 
     double get_switch_step(int id) const override {
@@ -252,6 +259,11 @@ private:
         if (id < 0 || id >= static_cast<int>(config_.ports.size())) {
             throw AlpacaException("Switch ID out of range", AlpacaError::InvalidValue);
         }
+    }
+
+    // A PWM port is an analog channel [0,100]; a boolean port is [0,1].
+    double get_max_switch_value_unchecked(int id) const {
+        return config_.ports[static_cast<std::size_t>(id)].pwm_enabled ? 100.0 : 1.0;
     }
 
     // Read-only ports (the always-on pass-through) reject writes with a

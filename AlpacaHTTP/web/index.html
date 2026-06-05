@@ -145,9 +145,42 @@
                     </p>
                     <div class="form-group">
                         <label for="ioptron-powerbox-gpio-chip">GPIO Chip:</label>
-                        <input type="text" id="ioptron-powerbox-gpio-chip" name="ioptronPowerboxGpioChip" placeholder="/dev/gpiochip0">
-                        <small>Optional. Defaults to /dev/gpiochip0 (the iMate's main GPIO bank).</small>
+                        <input type="text" id="ioptron-powerbox-gpio-chip" name="ioptronPowerboxGpioChip" placeholder="/dev/gpiochip1">
+                        <small>Optional. Defaults to <code>/dev/gpiochip1</code> (the iMate's main GPIO bank on the OpenAstro mainline kernel).</small>
                     </div>
+                    <div class="form-group">
+                        <label for="ioptron-powerbox-pwm-frequency">PWM Frequency (Hz):</label>
+                        <input type="number" id="ioptron-powerbox-pwm-frequency" name="ioptronPowerboxPwmFrequency" value="1000" min="1" max="100000">
+                        <small>Software PWM frequency for any DC port marked PWM below. 1000 Hz suits dew heaters.</small>
+                    </div>
+                    <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
+                    <small style="color: #666;">Tick <em>PWM</em> on DC1/DC2 for dimmable loads such as dew heaters (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. Regulated gear &mdash; cameras, mounts, most flat panels &mdash; should stay on/off. DC3 is a hardwired always-on pass-through.</small>
+                    <table class="ioptron-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
+                        <thead>
+                            <tr>
+                                <th style="text-align: left; padding: 4px; color: #333;">DC port</th>
+                                <th style="text-align: left; padding: 4px; color: #333;">GPIO line</th>
+                                <th style="text-align: left; padding: 4px; color: #333;">PWM</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td style="padding: 4px;">DC1</td>
+                                <td style="padding: 4px;">118 (PD22)</td>
+                                <td style="padding: 4px;"><input type="checkbox" id="ioptron-port-pwm-1" name="ioptronPortPwm1"></td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 4px;">DC2</td>
+                                <td style="padding: 4px;">114 (PD18)</td>
+                                <td style="padding: 4px;"><input type="checkbox" id="ioptron-port-pwm-2" name="ioptronPortPwm2"></td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 4px;">DC3</td>
+                                <td style="padding: 4px;">&mdash; always on</td>
+                                <td style="padding: 4px; color: #999;">n/a</td>
+                            </tr>
+                        </tbody>
+                    </table>
                   </div>
                 </div>
 
