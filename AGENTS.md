@@ -312,9 +312,9 @@ SDK location: `AlpacaCore/external/SVBONY/lib/armv8/`, headers under `external/S
 
 ### ToupTek
 
-Devices: Camera, Focuser (AAF — Astro Auto Focuser).
+Devices: Camera, Focuser (AAF — Astro Auto Focuser), Switch (StellaVita PowerBox).
 
-SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between camera and focuser drivers).
+SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between camera and focuser drivers). The StellaVita Switch driver uses **no SDK** — it is a libgpiod-only driver that happens to live under the ToupTek vendor.
 
 - **Single SDK, two device types**: Both camera and focuser drivers go through `ToupTekSDKWrapper`. Cameras enumerate via `enumerate_cameras()`, focusers via `enumerate_focusers()` which filters `Toupcam_EnumV2` results by `TOUPCAM_FLAG_AUTOFOCUSER`. Same `Toupcam_Open` is used for both — the device-class is determined entirely by the capability flag.
 - **AAF API convention** (`Toupcam_AAF(handle, action, value, *out)`):
@@ -326,6 +326,16 @@ SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between
 - **Temperature units**: `AAF_GETTEMP` returns tenths of Celsius (e.g. `32` → `3.2 °C`). Divide by 10.0 before returning to ASCOM. INDI applies a 0.1 °C hysteresis when updating UI; we read on demand so the hysteresis is unnecessary on the driver side.
 - **No temp-comp action**: The AAF action set has no temp-comp control. `TempCompAvailable` returns false; `set_temp_comp(true)` throws `NotImplemented` (not `DriverException`).
 - **`Toupcam_get_FocusMotor` is deprecated** in the shipped SDK header. Do not use it for AAF focusers — use the `Toupcam_AAF` action interface instead. The non-deprecated `FocusMotor` API is for autofocus-equipped cameras (`TOUPCAM_FLAG_FOCUSMOTOR`), a different capability.
+
+#### StellaVita PowerBox (Switch)
+
+The StellaVita is a **Raspberry Pi CM4 (BCM2711)** observatory controller. Its four on-board 12V DC ports are local GPIO outputs driven via **libgpiod v2** — there is no SDK and no camera-SDK dependency. Files: `touptek_powerbox_wrapper.{h,cpp}` (libgpiod backend, same design as `ioptron_powerbox_wrapper`) and `touptek_switch_driver.{h,cpp}`. Built only when libgpiod (>= 2.0) is present; the `ALPACACORE_TOUPTEK_STELLAVITA` CMake cache var gates the AlpacaHTTP router branch and the unit test to match (same pattern as `ALPACACORE_IOPTRON_POWERBOX`).
+
+- **GPIO mapping (verified on hardware)**: the four DC ports are BCM GPIO **18 (Port 1), 10 (Port 2), 17 (Port 3), 4 (Port 4)** on `/dev/gpiochip0` (`pinctrl-bcm2711`), where the libgpiod line offset equals the BCM GPIO number. Source of truth is the board's `config.txt`: `gpio=18,10,17,4,9,11=op,dh,pu`.
+- **GPIO 9 and 11 are deliberately excluded**: that same config.txt line drives them high too, but they power the on-board **Cypress USB hub** — exposing them as switch channels would let a client cut power to every attached USB camera/focuser. Never add them to `default_stellavita_config()`.
+- **Boot-high preserve**: `op,dh` drives all ports high at boot. The wrapper requests each line with an initial value of high and defaults its cached state to "on", so connecting the driver does not glitch power on attached gear. `close()` releases the request without driving a boolean line low (PWM ports are first driven to a defined steady level) — disconnecting never cuts power.
+- **PWM frequency — 100 Hz is the StellaVita sweet spot**: tested best on hardware; it dims flat panels smoothly without the visible flicker some panels show at the iMate/ASIAIR 50 Hz default. `default_stellavita_config()` uses `pwm_frequency_hz = 100`. (Contrast: iMate and ASIAIR Plus default to 50 Hz — the right value is panel-dependent, so the default is per-driver, not global.)
+- All four ports are writable and boolean by default, each switchable to soft-PWM (0–100%) — unlike the iMate there is no always-on read-only pass-through port.
 
 ### SynScan (SkyWatcher)
 

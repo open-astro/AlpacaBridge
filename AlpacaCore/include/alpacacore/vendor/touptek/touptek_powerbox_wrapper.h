@@ -51,7 +51,7 @@ struct StellaVitaPortConfig {
 class TouptekPowerboxWrapper {
 public:
     TouptekPowerboxWrapper(std::string gpio_chip_path, std::vector<StellaVitaPortConfig> ports,
-                           std::uint32_t pwm_frequency_hz = 50);
+                           std::uint32_t pwm_frequency_hz = 100);
     ~TouptekPowerboxWrapper();
 
     TouptekPowerboxWrapper(const TouptekPowerboxWrapper&) = delete;

@@ -657,8 +657,8 @@
                         </div>
                         <div class="form-group">
                             <label for="touptek-powerbox-pwm-frequency">PWM Frequency (Hz):</label>
-                            <input type="number" id="touptek-powerbox-pwm-frequency" name="touptekPowerboxPwmFrequency" value="50" min="1" max="100000">
-                            <small>Software PWM frequency for any port marked PWM below. <strong>50 Hz</strong> dims flat panels (their LED driver cycles fully each period); ~1 kHz is smoothed into on/off by a panel but is fine for dew heaters.</small>
+                            <input type="number" id="touptek-powerbox-pwm-frequency" name="touptekPowerboxPwmFrequency" value="100" min="1" max="100000">
+                            <small>Software PWM frequency for any port marked PWM below. <strong>100 Hz</strong> dims flat panels smoothly (their LED driver cycles fully each period); ~1 kHz is smoothed into on/off by a panel but is fine for dew heaters.</small>
                         </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
                         <small style="color: #666;">Tick <em>PWM</em> on a port for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off.</small>

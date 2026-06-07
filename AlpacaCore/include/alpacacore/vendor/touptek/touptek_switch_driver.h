@@ -30,11 +30,13 @@ struct TouptekSwitchConfig {
     std::string gpio_chip_path = "/dev/gpiochip0";
     std::vector<StellaVitaPortConfig> ports;
     // Bit-bang frequency for any port configured as PWM (1..100000 Hz).
-    // 50 Hz is the panel-friendly default (same value the iMate/ASIAIR Plus use):
-    // a flat panel's LED driver fully cycles each ~20 ms period and visibly
-    // dims, where ~1 kHz gets smoothed by the driver's input cap into an on/off
-    // gate. Resistive loads (dew heaters) dim at any frequency.
-    std::uint32_t pwm_frequency_hz = 50;
+    // 100 Hz is the panel-friendly default, validated on StellaVita hardware as
+    // the sweet spot: a flat panel's LED driver still fully cycles each ~10 ms
+    // period and visibly dims, while the higher rate (vs the iMate/ASIAIR Plus
+    // 50 Hz) is smoother and avoids visible flicker on some panels. ~1 kHz gets
+    // smoothed by the driver's input cap into an on/off gate. Resistive loads
+    // (dew heaters) dim at any frequency.
+    std::uint32_t pwm_frequency_hz = 100;
     // Marketing model used in the device Name/Description/DriverInfo.
     std::string model_name = "StellaVita";
 };

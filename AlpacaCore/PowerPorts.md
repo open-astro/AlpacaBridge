@@ -457,9 +457,9 @@ The value of the toggled line flips between `0` (off) and `1` (on). While connec
 
 ### Dimmable ports (PWM)
 
-Any of the four ports can be switched from plain on/off to **soft-PWM dimming** (0–100% duty), driven by a per-port worker thread that bit-bangs the line at a configurable frequency — the same mechanism as the ZWO ASIAIR and iOptron iMate switches. In the **Configure** form, tick **PWM** next to a port and set the **PWM Frequency** (default **50 Hz**). A PWM port then appears in ASCOM clients as a 0–100% slider instead of an on/off toggle. This dims both dew heaters and flat panels.
+Any of the four ports can be switched from plain on/off to **soft-PWM dimming** (0–100% duty), driven by a per-port worker thread that bit-bangs the line at a configurable frequency — the same mechanism as the ZWO ASIAIR and iOptron iMate switches. In the **Configure** form, tick **PWM** next to a port and set the **PWM Frequency** (default **100 Hz**). A PWM port then appears in ASCOM clients as a 0–100% slider instead of an on/off toggle. This dims both dew heaters and flat panels.
 
-> **Frequency matters for panels.** A flat panel has its own LED driver with an input capacitor. At a **low frequency (~50 Hz)** the driver fully powers the LEDs during each on-period and goes dark during each off-period, so the panel visibly dims — this is why 50 Hz is the default. At **~1 kHz** the input cap smooths the chopping into a steady reduced voltage that the driver gates on/off instead of dimming (a panel may just blink off). **Resistive loads (dew heaters) dim at any frequency.** Truly regulated gear — cameras, mounts — should stay on/off regardless.
+> **Frequency matters for panels.** A flat panel has its own LED driver with an input capacitor. At a **low frequency** the driver fully powers the LEDs during each on-period and goes dark during each off-period, so the panel visibly dims. **100 Hz tested best on the StellaVita** — it dims smoothly without the visible flicker some panels show at 50 Hz, which is why it is the default. At **~1 kHz** the input cap smooths the chopping into a steady reduced voltage that the driver gates on/off instead of dimming (a panel may just blink off). **Resistive loads (dew heaters) dim at any frequency.** Truly regulated gear — cameras, mounts — should stay on/off regardless.
 
 The defaults match the StellaVita wiring. The configurable fields are the GPIO chip, the PWM frequency, and the per-port name / PWM flags (the GPIO line mapping is fixed):
 
@@ -469,7 +469,7 @@ The defaults match the StellaVita wiring. The configurable fields are the GPIO c
   "deviceNumber": 0,
   "vendor": "touptek",
   "gpioChip": "/dev/gpiochip0",
-  "pwmFrequencyHz": 50,
+  "pwmFrequencyHz": 100,
   "ports": [
     { "name": "Mount Power", "pwm": false },
     { "name": "Camera Power", "pwm": false },
@@ -482,7 +482,7 @@ The defaults match the StellaVita wiring. The configurable fields are the GPIO c
 | Field | Type | Notes |
 |----|----|----|
 | `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip0` (the CM4's main BCM2711 bank). |
-| `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `50` (dims flat panels; raise for dew-heater-only setups if you prefer). |
+| `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `100` (tested best on StellaVita — dims flat panels smoothly without 50 Hz flicker). |
 | `ports` | array | Positional overlay on `[Port 1, Port 2, Port 3, Port 4]`; each entry's optional `pwm` (bool) / `name` (string) is applied to that port. The GPIO line mapping (18/10/17/4) is fixed. |
 
 ### Disconnect behavior — important for unattended observatories
