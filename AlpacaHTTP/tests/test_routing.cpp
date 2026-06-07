@@ -163,6 +163,34 @@ int main() {
 #endif
     }
 
+    // --- Regression: a malformed "ports" array must not crash the router ---
+    // A non-object ports entry (null / string / number) previously made the
+    // libgpiod switch registration call nlohmann contains()/value() on a
+    // non-object, throwing type_error (an uncaught 500). The router now skips
+    // non-object entries; registration must complete with a clean response.
+#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
+    {
+        nlohmann::json ports = nlohmann::json::array();
+        ports.push_back(nullptr);
+        ports.push_back("foo");
+        ports.push_back(42);
+        ports.push_back({{"pwm", true}});  // only this valid entry is applied
+        nlohmann::json configure_body = {
+            {"vendor", "touptek"}, {"deviceType", "switch"}, {"deviceNumber", 9171}, {"ports", ports}};
+        // Must return a well-formed response (no uncaught type_error → 500);
+        // the malformed entries are skipped and registration succeeds.
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "switch"}, {"deviceNumber", 9171}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        EXPECT(remove_json.value("ErrorNumber", -1) == 0);
+    }
+#endif
+
     // --- Celestron telescope routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_CELESTRON
     {

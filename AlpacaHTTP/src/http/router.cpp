@@ -6229,6 +6229,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             auto& ports = powerbox_config.ports;
             for (std::size_t i = 0; i < ports.size() && i < port_overrides.size(); ++i) {
                 const auto& p = port_overrides[i];
+                // Skip non-object entries (e.g. "ports":[null]) — contains()/value()
+                // throw nlohmann type_error on a non-object, which would 500 the request.
+                if (!p.is_object()) {
+                    continue;
+                }
                 if (p.contains("name")) {
                     ports[i].name = p.value("name", ports[i].name);
                 }
@@ -6712,6 +6717,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 std::vector<alpacacore::vendor::zwo::AsiairPlusPortConfig> ports;
                 ports.reserve(config["ports"].size());
                 for (const auto& p : config["ports"]) {
+                    // Skip non-object entries (e.g. "ports":[null]) — value()
+                    // throws nlohmann type_error on a non-object (would 500).
+                    if (!p.is_object()) {
+                        continue;
+                    }
                     alpacacore::vendor::zwo::AsiairPlusPortConfig pc;
                     pc.name = p.value("name",
                                       std::string("Port ") + std::to_string(ports.size() + 1));
@@ -6749,6 +6759,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 std::vector<alpacacore::vendor::zwo::AsiairPortConfig> ports;
                 ports.reserve(config["ports"].size());
                 for (const auto& p : config["ports"]) {
+                    // A non-object entry (e.g. "ports":[null]) would make the
+                    // contains()/[] accessors below throw nlohmann type_error.
+                    if (!p.is_object()) {
+                        error_message = "ASIAIR port entry must be a JSON object";
+                        return false;
+                    }
                     if (!p.contains("gpio") || !p["gpio"].is_number_integer()) {
                         error_message = "ASIAIR port entry requires integer 'gpio'";
                         return false;
@@ -6948,6 +6964,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             auto& ports = powerbox_config.ports;
             for (std::size_t i = 0; i < ports.size() && i < port_overrides.size(); ++i) {
                 const auto& p = port_overrides[i];
+                // Skip non-object entries (e.g. "ports":[null]) — contains()/value()
+                // throw nlohmann type_error on a non-object, which would 500 the request.
+                if (!p.is_object()) {
+                    continue;
+                }
                 if (p.contains("name")) {
                     ports[i].name = p.value("name", ports[i].name);
                 }
