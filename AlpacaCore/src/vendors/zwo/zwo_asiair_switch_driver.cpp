@@ -187,6 +187,11 @@ public:
     void set_switch_value(int id, double value) override {
         ensure_connected();
         validate_id(id);
+        // std::lround on NaN/Inf is undefined behaviour; reject non-finite
+        // values from the HTTP API as InvalidValue first.
+        if (!std::isfinite(value)) {
+            throw AlpacaException("Switch value must be a finite number", AlpacaError::InvalidValue);
+        }
         const double min_v = get_min_switch_value_unchecked(id);
         const double max_v = get_max_switch_value_unchecked(id);
         const long rounded = std::lround(value);

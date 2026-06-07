@@ -238,6 +238,11 @@ public:
         if (!caps.is_writable) {
             throw AlpacaException("Dew heater is read-only", AlpacaError::InvalidOperation);
         }
+        // std::lround on NaN/Inf is undefined behaviour; reject non-finite
+        // values from the HTTP API as InvalidValue first.
+        if (!std::isfinite(value)) {
+            throw AlpacaException("Dew heater value must be a finite number", AlpacaError::InvalidValue);
+        }
         long value_long = static_cast<long>(std::lround(value));
         if (value_long < caps.min_value || value_long > caps.max_value) {
             throw AlpacaException("Dew heater value out of range", AlpacaError::InvalidValue);

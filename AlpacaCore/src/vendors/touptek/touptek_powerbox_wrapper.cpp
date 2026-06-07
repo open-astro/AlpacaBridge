@@ -216,7 +216,19 @@ public:
             for (std::size_t i = 0; i < ports_.size(); ++i) {
                 if (ports_[i].pwm_enabled) {
                     const int d = port_states_[i]->value.load();
-                    ::gpiod_line_request_set_value(request_, ports_[i].gpio_line, to_line_value(d > 0 ? 1 : 0));
+                    int rc;
+                    {
+                        std::lock_guard<std::mutex> io(io_mutex_);
+                        rc =
+                            ::gpiod_line_request_set_value(request_, ports_[i].gpio_line, to_line_value(d > 0 ? 1 : 0));
+                    }
+                    if (rc != 0) {
+                        const int err = errno;
+                        ALPACA_LOG_WARN(kLogCategory, "StellaVita: failed to settle PWM port on GPIO " +
+                                                          std::to_string(ports_[i].gpio_line) +
+                                                          " before release: " + strerror_safe(err) +
+                                                          " (port may be left in an indeterminate state)");
+                    }
                 }
             }
             ::gpiod_line_request_release(request_);
@@ -275,7 +287,12 @@ public:
         if (!open_) {
             throw AlpacaException("GPIO chip is not open", AlpacaError::NotConnected);
         }
-        if (::gpiod_line_request_set_value(request_, cfg.gpio_line, to_line_value(value)) != 0) {
+        int rc;
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            rc = ::gpiod_line_request_set_value(request_, cfg.gpio_line, to_line_value(value));
+        }
+        if (rc != 0) {
             int err = errno;
             throw AlpacaException("gpiod_line_request_set_value failed: " + strerror_safe(err),
                                   AlpacaError::DriverException);
@@ -306,7 +323,16 @@ private:
         gpiod_line_request* request = request_;
         std::atomic<int>* duty = &state.value;
         std::atomic<bool>* stop = &state.stop;
-        state.worker = std::thread([request, offset, duty, stop, period_us]() {
+        std::mutex* io_mutex = &io_mutex_;
+        state.worker = std::thread([request, offset, duty, stop, period_us, io_mutex]() {
+            // Every line write goes through io_mutex (held only around the
+            // ioctl, never across a sleep) so PWM workers and the boolean
+            // set_value path never write the shared gpiod_line_request
+            // concurrently.
+            auto locked_set = [&](gpiod_line_value v) -> int {
+                std::lock_guard<std::mutex> io(*io_mutex);
+                return ::gpiod_line_request_set_value(request, offset, v);
+            };
             // Cache the last value driven onto the line so steady-state 0% /
             // 100% duty cycles skip the kernel ioctl (otherwise we'd write the
             // same value every period — 1000 wasted syscalls/s/port at 1 kHz).
@@ -317,7 +343,7 @@ private:
                 if (desired == last_written) {
                     return true;
                 }
-                if (::gpiod_line_request_set_value(request, offset, v) != 0) {
+                if (locked_set(v) != 0) {
                     const int err = errno;
                     ALPACA_LOG_ERROR(kLogCategory,
                                      "StellaVita PWM worker: gpiod_line_request_set_value failed on GPIO " +
@@ -346,7 +372,7 @@ private:
                 const std::uint32_t off_us = period_us - on_us;
                 // Mid-duty: cache is invalidated because we toggle every period.
                 last_written = -1;
-                if (::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_ACTIVE) != 0) {
+                if (locked_set(GPIOD_LINE_VALUE_ACTIVE) != 0) {
                     const int err = errno;
                     ALPACA_LOG_ERROR(kLogCategory,
                                      "StellaVita PWM worker: gpiod_line_request_set_value(ACTIVE) failed on GPIO " +
@@ -359,7 +385,7 @@ private:
                 if (stop->load()) {
                     break;
                 }
-                if (::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_INACTIVE) != 0) {
+                if (locked_set(GPIOD_LINE_VALUE_INACTIVE) != 0) {
                     const int err = errno;
                     ALPACA_LOG_ERROR(kLogCategory,
                                      "StellaVita PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
@@ -378,6 +404,14 @@ private:
     const std::uint32_t pwm_frequency_hz_;
 
     mutable std::mutex mutex_;
+    // Serialises every gpiod_line_request_set_value call against the shared
+    // gpiod_line_request — boolean writes, per-port PWM worker writes, and the
+    // close-time settle writes. libgpiod v2 does not document the request as
+    // safe for concurrent writers, and a mixed config (one PWM port + one
+    // boolean port) issues writes from a worker thread and a client thread at
+    // the same time. This is a dedicated, tightly-scoped lock (held only around
+    // the ioctl, never across a PWM sleep) so it never blocks the duty loop.
+    std::mutex io_mutex_;
     gpiod_chip* chip_;
     gpiod_line_request* request_;
     bool open_;

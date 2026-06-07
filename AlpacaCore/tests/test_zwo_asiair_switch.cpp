@@ -202,4 +202,12 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - Constructor rejects invalid configs",
     require_alpaca_error(
         [&]() { alpacacore::vendor::zwo::create_zwo_asiair_switch(0, huge_freq); },
         alpacacore::AlpacaError::InvalidValue);
+
+    // A GPIO chip path that is not an absolute /dev/ node is rejected.
+    for (const char* bad : {"", "gpiochip0", "/sys/class/gpio", "relative/gpiochip0"}) {
+        auto bad_chip = alpacacore::vendor::zwo::default_asiair_pro_config();
+        bad_chip.gpio_chip_path = bad;
+        require_alpaca_error([&]() { alpacacore::vendor::zwo::create_zwo_asiair_switch(0, bad_chip); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
 }

@@ -2092,19 +2092,21 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
         const dc1Pwm = formData.get('ioptronPortPwm1') === 'on';
         const dc2Pwm = formData.get('ioptronPortPwm2') === 'on';
-        if (dc1Pwm || dc2Pwm) {
-            const pwmFreq = Number.parseInt(formData.get('ioptronPowerboxPwmFrequency'), 10);
-            if (!Number.isNaN(pwmFreq)) {
-                deviceData.pwmFrequencyHz = pwmFreq;
-            }
-            // Positional overlay on the fixed DC3/DC1/DC2 layout: index 0 is the
-            // always-on DC3 pass-through (no PWM), 1 = DC1, 2 = DC2.
-            deviceData.ports = [
-                {},
-                { pwm: dc1Pwm },
-                { pwm: dc2Pwm },
-            ];
+        // Always persist the PWM frequency so a custom value survives even if
+        // the user temporarily un-ticks both ports; it applies the next time a
+        // port is switched back to PWM.
+        const pwmFreq = Number.parseInt(formData.get('ioptronPowerboxPwmFrequency'), 10);
+        if (!Number.isNaN(pwmFreq)) {
+            deviceData.pwmFrequencyHz = pwmFreq;
         }
+        // Always emit the positional overlay on the fixed DC3/DC1/DC2 layout
+        // (index 0 is the always-on DC3 pass-through, 1 = DC1, 2 = DC2) so any
+        // per-port config is not dropped on a re-save with PWM un-ticked.
+        deviceData.ports = [
+            {},
+            { pwm: dc1Pwm },
+            { pwm: dc2Pwm },
+        ];
     } else if (deviceData.vendor === 'ioptron') {
         deviceData.connectionType = formData.get('ioptronConnectionType') || 'auto';
         if (deviceData.connectionType === 'serial') {
@@ -2364,12 +2366,12 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (!Number.isNaN(pwmFreq)) {
             deviceData.pwmFrequencyHz = pwmFreq;
         }
-        if (portPwm.some(Boolean)) {
-            // Positional overlay on the fixed Port 1..4 layout.
-            deviceData.ports = portPwm.map(function(pwm) {
-                return { pwm: pwm };
-            });
-        }
+        // Always emit the positional ports overlay (even all-false) so any
+        // per-port config carried in the saved device (e.g. names) is not
+        // dropped on a re-save with every PWM box un-ticked.
+        deviceData.ports = portPwm.map(function(pwm) {
+            return { pwm: pwm };
+        });
     } else if (deviceData.vendor === 'touptek') {
         if (normalizeDeviceType(deviceData.deviceType) === 'focuser') {
             const touptekFocuserId = formData.get('focuserId');

@@ -183,6 +183,11 @@ public:
         validate_id(id);
         ensure_writable(id);
         ensure_connected();
+        // Guard against NaN/Inf from the HTTP API: std::lround on a non-finite
+        // value is undefined behaviour. Reject them as InvalidValue up front.
+        if (!std::isfinite(value)) {
+            throw AlpacaException("Switch value must be a finite number", AlpacaError::InvalidValue);
+        }
         const long max_v = static_cast<long>(get_max_switch_value_unchecked(id));
         const long rounded = std::lround(value);
         if (rounded < 0 || rounded > max_v) {

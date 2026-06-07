@@ -217,3 +217,16 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Rejects invalid PWM frequency"
     require_alpaca_error([&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg); },
                          alpacacore::AlpacaError::InvalidValue);
 }
+
+// A GPIO chip path that is not an absolute /dev/ node is rejected at construction.
+TEST_CASE("iOptron iMate PowerBox Switch Driver - Rejects invalid GPIO chip path", "[ioptron][switch][unit]") {
+    for (const char* bad : {"", "gpiochip1", "/sys/class/gpio", "relative/gpiochip1"}) {
+        auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+        cfg.gpio_chip_path = bad;
+        require_alpaca_error([&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    auto ok = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    ok.gpio_chip_path = "/dev/gpiochip0";
+    CHECK_NOTHROW(alpacacore::vendor::ioptron::create_ioptron_switch(0, ok));
+}

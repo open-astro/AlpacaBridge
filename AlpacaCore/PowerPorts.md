@@ -455,6 +455,8 @@ gpioget --numeric -c gpiochip0 18 10 17 4
 
 The value of the toggled line flips between `0` (off) and `1` (on). While connected, `gpioinfo -c gpiochip0 18` shows the line claimed by consumer `alpacabridge-stellavita-powerbox`.
 
+> **Port names are session-only.** Renaming a channel through an ASCOM client (e.g. NINA's `SetSwitchName`) is kept in memory for the life of the driver instance and is **not** persisted — the names reset to `Port 1`–`Port 4` on the next server restart or reconnect. The StellaVita web form has no name fields; if you need persistent custom labels, set them in your client's own device profile.
+
 ### Dimmable ports (PWM)
 
 Any of the four ports can be switched from plain on/off to **soft-PWM dimming** (0–100% duty), driven by a per-port worker thread that bit-bangs the line at a configurable frequency — the same mechanism as the ZWO ASIAIR and iOptron iMate switches. In the **Configure** form, tick **PWM** next to a port and set the **PWM Frequency** (default **100 Hz**). A PWM port then appears in ASCOM clients as a 0–100% slider instead of an on/off toggle. This dims both dew heaters and flat panels.
