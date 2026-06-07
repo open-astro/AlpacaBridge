@@ -210,3 +210,18 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Rejects invalid PWM frequency", "[
     require_alpaca_error([&]() { alpacacore::vendor::touptek::create_touptek_switch(0, cfg); },
                          alpacacore::AlpacaError::InvalidValue);
 }
+
+// 12. A GPIO chip path that is not an absolute /dev/ node is rejected at construction.
+TEST_CASE("ToupTek StellaVita Switch Driver - Rejects invalid GPIO chip path", "[touptek][switch][unit]") {
+    for (const char* bad : {"", "gpiochip0", "/sys/class/gpio", "relative/gpiochip0", "dev/gpiochip0"}) {
+        auto cfg = alpacacore::vendor::touptek::default_stellavita_config();
+        cfg.gpio_chip_path = bad;
+        require_alpaca_error([&]() { alpacacore::vendor::touptek::create_touptek_switch(0, cfg); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+
+    // A well-formed /dev/ path is accepted (construction does not open the chip).
+    auto ok = alpacacore::vendor::touptek::default_stellavita_config();
+    ok.gpio_chip_path = "/dev/gpiochip3";
+    CHECK_NOTHROW(alpacacore::vendor::touptek::create_touptek_switch(0, ok));
+}

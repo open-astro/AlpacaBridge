@@ -62,6 +62,15 @@ public:
         if (ports_.empty()) {
             throw AlpacaException("StellaVita port configuration is empty", AlpacaError::InvalidValue);
         }
+        // The GPIO chip is a libgpiod character-device node; it must be an
+        // absolute /dev/ path. Reject anything else up front (empty string,
+        // relative path, a bare "gpiochip0") with a clear InvalidValue rather
+        // than letting it reach gpiod_chip_open() as an opaque failure.
+        if (gpio_chip_path_.rfind("/dev/", 0) != 0) {
+            throw AlpacaException(
+                "StellaVita GPIO chip path must be an absolute /dev/ device node (got '" + gpio_chip_path_ + "')",
+                AlpacaError::InvalidValue);
+        }
         if (pwm_frequency_hz_ == 0 || pwm_frequency_hz_ > 100000) {
             throw AlpacaException("StellaVita PWM frequency out of supported range (1..100000 Hz)",
                                   AlpacaError::InvalidValue);
