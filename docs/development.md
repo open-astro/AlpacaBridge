@@ -10,13 +10,15 @@ This guide covers building AlpacaBridge from source, running tests, and contribu
 ## Prerequisites
 
 ```sh
-sudo apt install build-essential cmake g++ \
-    libusb-1.0-0-dev libudev-dev \
+sudo apt install git build-essential cmake g++ \
+    libusb-1.0-0-dev libudev-dev libgpiod-dev \
     nlohmann-json3-dev libcurl4-openssl-dev \
     catch2
 ```
 
 Verify: `cmake --version` (3.20+), `g++ --version` (GCC 10+, C++20 required).
+
+> `libgpiod-dev` (>= 2.0) is required only for the GPIO-backed power-port Switch drivers (ZWO ASIAIR, iOptron iMate, ToupTek StellaVita). Without it those switches are cleanly disabled at configure time and the rest of the build is unaffected. See [PowerPorts.md](../AlpacaCore/PowerPorts.md).
 
 ## Build and run
 
