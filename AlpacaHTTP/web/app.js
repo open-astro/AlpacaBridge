@@ -2357,11 +2357,14 @@ document.getElementById('device-form').addEventListener('submit', async function
         const portPwm = [0, 1, 2, 3].map(function(i) {
             return formData.get('touptekPortPwm' + i) === 'on';
         });
+        // Always persist the PWM frequency so a custom value survives even if
+        // the user temporarily un-ticks every port; it applies the next time a
+        // port is switched back to PWM.
+        const pwmFreq = Number.parseInt(formData.get('touptekPowerboxPwmFrequency'), 10);
+        if (!Number.isNaN(pwmFreq)) {
+            deviceData.pwmFrequencyHz = pwmFreq;
+        }
         if (portPwm.some(Boolean)) {
-            const pwmFreq = Number.parseInt(formData.get('touptekPowerboxPwmFrequency'), 10);
-            if (!Number.isNaN(pwmFreq)) {
-                deviceData.pwmFrequencyHz = pwmFreq;
-            }
             // Positional overlay on the fixed Port 1..4 layout.
             deviceData.ports = portPwm.map(function(pwm) {
                 return { pwm: pwm };
