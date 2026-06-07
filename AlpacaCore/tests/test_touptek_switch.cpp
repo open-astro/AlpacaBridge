@@ -34,8 +34,8 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
 
 // 1. Defaults
 TEST_CASE("ToupTek StellaVita Switch Driver - Defaults", "[touptek][switch][unit]") {
-    auto driver = alpacacore::vendor::touptek::create_touptek_switch(
-        0, alpacacore::vendor::touptek::default_stellavita_config());
+    auto driver =
+        alpacacore::vendor::touptek::create_touptek_switch(0, alpacacore::vendor::touptek::default_stellavita_config());
 
     REQUIRE(driver != nullptr);
     REQUIRE(driver->get_device_type() == alpacacore::DeviceType::Switch);
@@ -53,8 +53,8 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Defaults", "[touptek][switch][unit
 
 // 2. Device metadata
 TEST_CASE("ToupTek StellaVita Switch Driver - Device metadata", "[touptek][switch][unit]") {
-    auto driver = alpacacore::vendor::touptek::create_touptek_switch(
-        3, alpacacore::vendor::touptek::default_stellavita_config());
+    auto driver =
+        alpacacore::vendor::touptek::create_touptek_switch(3, alpacacore::vendor::touptek::default_stellavita_config());
 
     REQUIRE(driver != nullptr);
 
@@ -68,8 +68,8 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Device metadata", "[touptek][switc
 
 // 3. Not connected throws with correct error code
 TEST_CASE("ToupTek StellaVita Switch Driver - Not connected throws", "[touptek][switch][unit]") {
-    auto driver = alpacacore::vendor::touptek::create_touptek_switch(
-        0, alpacacore::vendor::touptek::default_stellavita_config());
+    auto driver =
+        alpacacore::vendor::touptek::create_touptek_switch(0, alpacacore::vendor::touptek::default_stellavita_config());
 
     REQUIRE_FALSE(driver->get_connected());
 
@@ -83,8 +83,8 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Not connected throws", "[touptek][
 
 // 4. Unsupported actions
 TEST_CASE("ToupTek StellaVita Switch Driver - Unsupported actions", "[touptek][switch][unit]") {
-    auto driver = alpacacore::vendor::touptek::create_touptek_switch(
-        0, alpacacore::vendor::touptek::default_stellavita_config());
+    auto driver =
+        alpacacore::vendor::touptek::create_touptek_switch(0, alpacacore::vendor::touptek::default_stellavita_config());
 
     CHECK(driver->get_supported_actions().empty());
     CHECK_FALSE(driver->can_action("anything"));
@@ -97,8 +97,8 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Unsupported actions", "[touptek][s
 
 // 5. Device-specific behavior — per-port metadata and the boot-high DC ports.
 TEST_CASE("ToupTek StellaVita Switch Driver - Per-port metadata", "[touptek][switch][unit]") {
-    auto driver = alpacacore::vendor::touptek::create_touptek_switch(
-        0, alpacacore::vendor::touptek::default_stellavita_config());
+    auto driver =
+        alpacacore::vendor::touptek::create_touptek_switch(0, alpacacore::vendor::touptek::default_stellavita_config());
 
     REQUIRE(driver->get_max_switch() == 4);
 
@@ -129,8 +129,8 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Per-port metadata", "[touptek][swi
 
 // 6. Value range validation
 TEST_CASE("ToupTek StellaVita Switch Driver - Value range validation", "[touptek][switch][unit]") {
-    auto driver = alpacacore::vendor::touptek::create_touptek_switch(
-        0, alpacacore::vendor::touptek::default_stellavita_config());
+    auto driver =
+        alpacacore::vendor::touptek::create_touptek_switch(0, alpacacore::vendor::touptek::default_stellavita_config());
 
     // Out-of-range switch IDs are rejected with InvalidValue regardless of
     // connection state.
@@ -145,8 +145,8 @@ TEST_CASE("ToupTek StellaVita Switch Driver - Value range validation", "[touptek
 
 // 7. State machine contracts (no hardware required).
 TEST_CASE("ToupTek StellaVita Switch Driver - State machine", "[touptek][switch][unit]") {
-    auto driver = alpacacore::vendor::touptek::create_touptek_switch(
-        0, alpacacore::vendor::touptek::default_stellavita_config());
+    auto driver =
+        alpacacore::vendor::touptek::create_touptek_switch(0, alpacacore::vendor::touptek::default_stellavita_config());
 
     // A disconnected switch reports not connected, not connecting, and an empty
     // device-state bag.
@@ -157,8 +157,8 @@ TEST_CASE("ToupTek StellaVita Switch Driver - State machine", "[touptek][switch]
 
 // 8. Unsupported method error codes.
 TEST_CASE("ToupTek StellaVita Switch Driver - Unsupported methods", "[touptek][switch][unit]") {
-    auto driver = alpacacore::vendor::touptek::create_touptek_switch(
-        0, alpacacore::vendor::touptek::default_stellavita_config());
+    auto driver =
+        alpacacore::vendor::touptek::create_touptek_switch(0, alpacacore::vendor::touptek::default_stellavita_config());
 
     // Asynchronous mutation is not implemented for any port (CanAsync == false).
     require_alpaca_error([&]() { driver->set_async(0, true); }, alpacacore::AlpacaError::NotImplemented);

@@ -352,10 +352,10 @@ private:
                 }
                 if (::gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_INACTIVE) != 0) {
                     const int err = errno;
-                    ALPACA_LOG_ERROR(
-                        kLogCategory,
-                        "StellaVita PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
-                            std::to_string(offset) + ": " + strerror_safe(err) + "; aborting worker thread");
+                    ALPACA_LOG_ERROR(kLogCategory,
+                                     "StellaVita PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
+                                         std::to_string(offset) + ": " + strerror_safe(err) +
+                                         "; aborting worker thread");
                     stop->store(true);
                     break;
                 }

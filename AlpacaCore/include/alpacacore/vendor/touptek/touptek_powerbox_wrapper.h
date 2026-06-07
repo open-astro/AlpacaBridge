@@ -35,9 +35,9 @@ namespace alpacacore::vendor::touptek {
 // them would drop every USB device (cameras, focusers) attached to the board.
 struct StellaVitaPortConfig {
     std::string name;
-    std::uint32_t gpio_line;    // libgpiod offset on gpio_chip_path (== BCM GPIO on BCM2711)
-    bool writable = true;       // false makes a port read-only (always-on)
-    bool pwm_enabled = false;   // soft-PWM dimming (0-100% duty) instead of on/off
+    std::uint32_t gpio_line;   // libgpiod offset on gpio_chip_path (== BCM GPIO on BCM2711)
+    bool writable = true;      // false makes a port read-only (always-on)
+    bool pwm_enabled = false;  // soft-PWM dimming (0-100% duty) instead of on/off
 };
 
 // libgpiod-backed controller for the StellaVita DC outputs.
