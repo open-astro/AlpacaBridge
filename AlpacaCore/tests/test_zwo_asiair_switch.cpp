@@ -148,6 +148,13 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - Switch ID range validation",
     require_alpaca_error([&]() { driver->get_min_switch_value(4); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->get_max_switch_value(4); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->get_switch_step(4); }, alpacacore::AlpacaError::InvalidValue);
+
+    // ID validation must run before the connection check: an out-of-range ID
+    // throws InvalidValue even while disconnected (ASCOM spec), not NotConnected.
+    REQUIRE_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { driver->get_switch(4); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->get_switch_value(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->get_state_change_complete(4); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("ZWO ASIAIR Pro Switch Driver - State machine when disconnected",

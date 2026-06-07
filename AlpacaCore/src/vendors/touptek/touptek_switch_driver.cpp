@@ -155,8 +155,8 @@ public:
     }
 
     bool get_switch(int id) const override {
-        ensure_connected();
         validate_id(id);
+        ensure_connected();
         return wrapper_.get_value(static_cast<std::size_t>(id)) != 0;
     }
 
@@ -174,8 +174,8 @@ public:
     }
 
     double get_switch_value(int id) const override {
-        ensure_connected();
         validate_id(id);
+        ensure_connected();
         return static_cast<double>(wrapper_.get_value(static_cast<std::size_t>(id)));
     }
 
@@ -204,8 +204,8 @@ public:
     }
 
     bool get_state_change_complete(int id) const override {
-        ensure_connected();
         validate_id(id);
+        ensure_connected();
         return true;
     }
 

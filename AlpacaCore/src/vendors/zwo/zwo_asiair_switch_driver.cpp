@@ -158,35 +158,35 @@ public:
     }
 
     bool get_switch(int id) const override {
-        ensure_connected();
         validate_id(id);
+        ensure_connected();
         const double v = wrapper_.get_value(static_cast<std::size_t>(id));
         return v > get_min_switch_value_unchecked(id);
     }
 
     void set_switch(int id, bool state) override {
-        ensure_connected();
         validate_id(id);
+        ensure_connected();
         const double v = state ? get_max_switch_value_unchecked(id)
                                : get_min_switch_value_unchecked(id);
         set_switch_value(id, v);
     }
 
     void set_async(int id, bool /*state*/) override {
-        ensure_connected();
         validate_id(id);
+        ensure_connected();
         throw AlpacaException("Async switch control not supported", AlpacaError::NotImplemented);
     }
 
     double get_switch_value(int id) const override {
-        ensure_connected();
         validate_id(id);
+        ensure_connected();
         return static_cast<double>(wrapper_.get_value(static_cast<std::size_t>(id)));
     }
 
     void set_switch_value(int id, double value) override {
-        ensure_connected();
         validate_id(id);
+        ensure_connected();
         // std::lround on NaN/Inf is undefined behaviour; reject non-finite
         // values from the HTTP API as InvalidValue first.
         if (!std::isfinite(value)) {
@@ -202,14 +202,14 @@ public:
     }
 
     void set_async_value(int id, double /*value*/) override {
-        ensure_connected();
         validate_id(id);
+        ensure_connected();
         throw AlpacaException("Async switch control not supported", AlpacaError::NotImplemented);
     }
 
     bool get_state_change_complete(int id) const override {
-        ensure_connected();
         validate_id(id);
+        ensure_connected();
         return true;
     }
 

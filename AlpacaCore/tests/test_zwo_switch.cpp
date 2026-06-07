@@ -60,6 +60,13 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Invalid Switch ID", "[zwo][switch][uni
     REQUIRE(driver->get_max_switch() == 1);
     REQUIRE_THROWS(driver->get_can_write(1));
     REQUIRE_THROWS(driver->get_switch_name(1));
+
+    // ID validation must run before the connection check: an out-of-range ID
+    // throws InvalidValue even while disconnected (ASCOM spec), not NotConnected.
+    REQUIRE_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { driver->get_switch(1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->get_switch_value(1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->get_state_change_complete(1); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("ZWO Dew Heater Switch Driver - Device metadata", "[zwo][switch][unit]") {

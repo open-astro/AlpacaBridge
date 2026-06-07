@@ -139,6 +139,13 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Value range validation", "[iop
     require_alpaca_error([&]() { driver->get_min_switch_value(3); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->get_max_switch_value(3); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->get_switch_step(3); }, alpacacore::AlpacaError::InvalidValue);
+
+    // ID validation must run before the connection check: an out-of-range ID
+    // throws InvalidValue even while disconnected (ASCOM spec), not NotConnected.
+    REQUIRE_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { driver->get_switch(3); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->get_switch_value(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->get_state_change_complete(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 // 7. State machine contracts (no hardware required).

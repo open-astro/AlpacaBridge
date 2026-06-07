@@ -187,41 +187,41 @@ public:
     }
 
     bool get_can_write(int id) const override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         const auto& caps = dew_caps_or_throw();
         return caps.is_writable;
     }
 
     bool get_can_async(int id) const override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         return false;
     }
 
     bool get_switch(int id) const override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         double value = get_switch_value(id);
         return value > get_min_switch_value(id);
     }
 
     void set_switch(int id, bool state) override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         double value = state ? get_max_switch_value(id) : get_min_switch_value(id);
         set_switch_value(id, value);
     }
 
     void set_async(int id, bool /*state*/) override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         throw AlpacaException("Async switch control not supported", AlpacaError::NotImplemented);
     }
 
     double get_switch_value(int id) const override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         dew_caps_or_throw();
         bool is_auto = false;
         long value = 0;
@@ -232,8 +232,8 @@ public:
     }
 
     void set_switch_value(int id, double value) override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         const auto& caps = dew_caps_or_throw();
         if (!caps.is_writable) {
             throw AlpacaException("Dew heater is read-only", AlpacaError::InvalidOperation);
@@ -251,53 +251,53 @@ public:
     }
 
     void set_async_value(int id, double /*value*/) override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         throw AlpacaException("Async switch control not supported", AlpacaError::NotImplemented);
     }
 
     bool get_state_change_complete(int id) const override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         return true;
     }
 
     std::string get_switch_name(int id) const override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         return switch_name_;
     }
 
     void set_switch_name(int id, const std::string& name) override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         switch_name_ = name;
     }
 
     std::string get_switch_description(int id) const override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         return switch_description_ + " (" + camera_name_ + ")";
     }
 
     double get_min_switch_value(int id) const override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         return static_cast<double>(dew_caps_or_throw().min_value);
     }
 
     double get_max_switch_value(int id) const override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         return static_cast<double>(dew_caps_or_throw().max_value);
     }
 
     double get_switch_step(int id) const override {
-        ensure_connected();
         validate_switch_id(id);
+        ensure_connected();
         return 1.0;
     }
 
