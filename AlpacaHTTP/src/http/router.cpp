@@ -82,6 +82,9 @@
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+#include <alpacacore/vendor/touptek/touptek_switch_driver.h>
+#endif
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
@@ -6929,6 +6932,49 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "touptek" && device_type_str == "switch") {
+#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
+        // StellaVita PowerBox: on-board 12V DC power ports driven over local
+        // GPIO (libgpiod) on the CM4's /dev/gpiochip0 — independent of the
+        // ToupTek camera SDK. Switches 0..3 are the controllable Port 1..4
+        // lines (BCM GPIO 18/10/17/4).
+        auto powerbox_config = alpacacore::vendor::touptek::default_stellavita_config();
+        powerbox_config.gpio_chip_path = config.value("gpioChip", powerbox_config.gpio_chip_path);
+        powerbox_config.pwm_frequency_hz = config.value("pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
+        // Per-port PWM/name overrides applied positionally onto the fixed
+        // Port 1..4 layout.
+        if (config.contains("ports") && config["ports"].is_array()) {
+            const auto& port_overrides = config["ports"];
+            auto& ports = powerbox_config.ports;
+            for (std::size_t i = 0; i < ports.size() && i < port_overrides.size(); ++i) {
+                const auto& p = port_overrides[i];
+                if (p.contains("name")) {
+                    ports[i].name = p.value("name", ports[i].name);
+                }
+                ports[i].pwm_enabled = p.value("pwm", ports[i].pwm_enabled);
+            }
+        }
+
+        auto sw = alpacacore::vendor::touptek::create_touptek_switch(device_number, std::move(powerbox_config));
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+            util::log_info("Registered ToupTek StellaVita switch");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#elif defined(ALPACACORE_ENABLE_TOUPTEK)
+        error_message =
+            "ToupTek StellaVita switch not built. Rebuild on a host with "
+            "libgpiod (>= 2.0) installed (e.g. apt install libgpiod-dev).";
+        return false;
+#else
+        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "playerone" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_PLAYERONE
         int camera_index = config.value("cameraIndex", 0);
@@ -7075,9 +7121,19 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "svbony") {
         copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
-        copy_if_present("cameraIndex");
-        copy_if_present("focuserIndex");
-        copy_if_present("focuserId");
+        if (device_type == "switch") {
+            // StellaVita PowerBox: local GPIO. Persist the optional chip path
+            // plus the PWM frequency and per-port PWM/name overrides so
+            // dimmable-port config survives a save (sanitize strips anything
+            // not allowlisted).
+            copy_if_present("gpioChip");
+            copy_if_present("pwmFrequencyHz");
+            copy_if_present("ports");
+        } else {
+            copy_if_present("cameraIndex");
+            copy_if_present("focuserIndex");
+            copy_if_present("focuserId");
+        }
     } else if (vendor == "playerone") {
         copy_if_present("cameraIndex");
     } else if (vendor == "weewx") {
