@@ -13,7 +13,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-#include <alpacacore/vendor/ioptron/ioptron_powerbox_wrapper.h>
+#include <alpacacore/vendor/touptek/touptek_powerbox_wrapper.h>
 #include <gpiod.h>
 
 #include <atomic>
@@ -27,12 +27,12 @@
 #include <utility>
 #include <vector>
 
-namespace alpacacore::vendor::ioptron {
+namespace alpacacore::vendor::touptek {
 
 namespace {
 
-constexpr const char* kLogCategory = "IOPTRON_POWERBOX";
-constexpr const char* kGpioConsumer = "alpacabridge-imate-powerbox";
+constexpr const char* kLogCategory = "TOUPTEK_STELLAVITA";
+constexpr const char* kGpioConsumer = "alpacabridge-stellavita-powerbox";
 
 std::string strerror_safe(int err) {
     char buf[128]{};
@@ -50,9 +50,9 @@ gpiod_line_value to_line_value(int v) { return v != 0 ? GPIOD_LINE_VALUE_ACTIVE 
 
 }  // namespace
 
-class IoptronPowerboxWrapper::Impl {
+class TouptekPowerboxWrapper::Impl {
 public:
-    Impl(std::string gpio_chip_path, std::vector<IoptronPowerPortConfig> ports, std::uint32_t pwm_frequency_hz)
+    Impl(std::string gpio_chip_path, std::vector<StellaVitaPortConfig> ports, std::uint32_t pwm_frequency_hz)
         : gpio_chip_path_(std::move(gpio_chip_path)),
           ports_(std::move(ports)),
           pwm_frequency_hz_(pwm_frequency_hz),
@@ -60,7 +60,7 @@ public:
           request_(nullptr),
           open_(false) {
         if (ports_.empty()) {
-            throw AlpacaException("iMate PowerBox port configuration is empty", AlpacaError::InvalidValue);
+            throw AlpacaException("StellaVita port configuration is empty", AlpacaError::InvalidValue);
         }
         // The GPIO chip is a libgpiod character-device node; it must be an
         // absolute /dev/ path. Reject anything else up front (empty string,
@@ -68,19 +68,18 @@ public:
         // than letting it reach gpiod_chip_open() as an opaque failure.
         if (gpio_chip_path_.rfind("/dev/", 0) != 0) {
             throw AlpacaException(
-                "iMate PowerBox GPIO chip path must be an absolute /dev/ device node (got '" + gpio_chip_path_ + "')",
+                "StellaVita GPIO chip path must be an absolute /dev/ device node (got '" + gpio_chip_path_ + "')",
                 AlpacaError::InvalidValue);
         }
         if (pwm_frequency_hz_ == 0 || pwm_frequency_hz_ > 100000) {
-            throw AlpacaException("iMate PowerBox PWM frequency out of supported range (1..100000 Hz)",
+            throw AlpacaException("StellaVita PWM frequency out of supported range (1..100000 Hz)",
                                   AlpacaError::InvalidValue);
         }
         // The cached value mirrors the level the GPIO is (or will be) driven
-        // to. Controllable ports default to "on" so connecting preserves the
-        // stock boot state where the iMate drives the DC lines high — we never
+        // to. Ports default to "on" so connecting preserves the StellaVita's
+        // stock boot state where config.txt drives the DC lines high — we never
         // want a connect to cut power to attached gear. For a PWM port "on" is
-        // full duty (100); for a boolean port it is 1. The always-on
-        // pass-through reports 1 and has no backing line.
+        // full duty (100); for a boolean port it is 1.
         port_states_.reserve(ports_.size());
         for (std::size_t i = 0; i < ports_.size(); ++i) {
             port_states_.emplace_back(std::make_unique<PortState>());
@@ -92,7 +91,7 @@ public:
         try {
             close();
         } catch (const std::exception& e) {
-            ALPACA_LOG_WARN(kLogCategory, std::string("Error during iMate PowerBox wrapper destruction: ") + e.what());
+            ALPACA_LOG_WARN(kLogCategory, std::string("Error during StellaVita wrapper destruction: ") + e.what());
         }
     }
 
@@ -102,27 +101,16 @@ public:
             return;
         }
 
-        // Collect the offsets/initial values for the ports that actually have
-        // a GPIO line. The always-on pass-through is skipped entirely. PWM
-        // ports start at full-on (high); the worker takes over once requested.
+        // Collect the offsets/initial values for every port. PWM ports start at
+        // full-on (high); the worker takes over once requested.
         std::vector<unsigned int> offsets;
         std::vector<gpiod_line_value> initial_values;
         offsets.reserve(ports_.size());
         initial_values.reserve(ports_.size());
         for (std::size_t i = 0; i < ports_.size(); ++i) {
-            if (!ports_[i].has_line) {
-                continue;
-            }
             offsets.push_back(ports_[i].gpio_line);
             const int v = port_states_[i]->value.load();
             initial_values.push_back(to_line_value(ports_[i].pwm_enabled ? 1 : v));
-        }
-
-        if (offsets.empty()) {
-            // No controllable lines (pass-through only); nothing to request,
-            // but the device is still "connected" for client purposes.
-            open_ = true;
-            return;
         }
 
         chip_ = ::gpiod_chip_open(gpio_chip_path_.c_str());
@@ -190,7 +178,7 @@ public:
         open_ = true;
 
         for (std::size_t i = 0; i < ports_.size(); ++i) {
-            if (ports_[i].has_line && ports_[i].pwm_enabled) {
+            if (ports_[i].pwm_enabled) {
                 start_pwm_worker_locked(i);
             }
         }
@@ -226,7 +214,7 @@ public:
             // their last commanded level. We never drive a line low here for a
             // port the user left on.
             for (std::size_t i = 0; i < ports_.size(); ++i) {
-                if (ports_[i].has_line && ports_[i].pwm_enabled) {
+                if (ports_[i].pwm_enabled) {
                     const int d = port_states_[i]->value.load();
                     int rc;
                     {
@@ -236,7 +224,7 @@ public:
                     }
                     if (rc != 0) {
                         const int err = errno;
-                        ALPACA_LOG_WARN(kLogCategory, "iMate PowerBox: failed to settle PWM port on GPIO " +
+                        ALPACA_LOG_WARN(kLogCategory, "StellaVita: failed to settle PWM port on GPIO " +
                                                           std::to_string(ports_[i].gpio_line) +
                                                           " before release: " + strerror_safe(err) +
                                                           " (port may be left in an indeterminate state)");
@@ -260,24 +248,20 @@ public:
 
     std::size_t port_count() const { return ports_.size(); }
 
-    const IoptronPowerPortConfig& port_config(std::size_t index) const {
+    const StellaVitaPortConfig& port_config(std::size_t index) const {
         validate_index(index);
         return ports_[index];
     }
 
     int get_value(std::size_t index) const {
         validate_index(index);
-        // The pass-through jack is hardwired live regardless of driver state.
-        if (!ports_[index].has_line) {
-            return 1;
-        }
         return port_states_[index]->value.load();
     }
 
     void set_value(std::size_t index, int value) {
         validate_index(index);
         const auto& cfg = ports_[index];
-        if (!cfg.writable || !cfg.has_line) {
+        if (!cfg.writable) {
             throw AlpacaException("Port '" + cfg.name + "' is read-only", AlpacaError::NotImplemented);
         }
         if (cfg.pwm_enabled) {
@@ -362,7 +346,7 @@ private:
                 if (locked_set(v) != 0) {
                     const int err = errno;
                     ALPACA_LOG_ERROR(kLogCategory,
-                                     "iMate PowerBox PWM worker: gpiod_line_request_set_value failed on GPIO " +
+                                     "StellaVita PWM worker: gpiod_line_request_set_value failed on GPIO " +
                                          std::to_string(offset) + ": " + strerror_safe(err) +
                                          "; aborting worker thread");
                     stop->store(true);
@@ -391,7 +375,7 @@ private:
                 if (locked_set(GPIOD_LINE_VALUE_ACTIVE) != 0) {
                     const int err = errno;
                     ALPACA_LOG_ERROR(kLogCategory,
-                                     "iMate PowerBox PWM worker: gpiod_line_request_set_value(ACTIVE) failed on GPIO " +
+                                     "StellaVita PWM worker: gpiod_line_request_set_value(ACTIVE) failed on GPIO " +
                                          std::to_string(offset) + ": " + strerror_safe(err) +
                                          "; aborting worker thread");
                     stop->store(true);
@@ -403,10 +387,10 @@ private:
                 }
                 if (locked_set(GPIOD_LINE_VALUE_INACTIVE) != 0) {
                     const int err = errno;
-                    ALPACA_LOG_ERROR(
-                        kLogCategory,
-                        "iMate PowerBox PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
-                            std::to_string(offset) + ": " + strerror_safe(err) + "; aborting worker thread");
+                    ALPACA_LOG_ERROR(kLogCategory,
+                                     "StellaVita PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
+                                         std::to_string(offset) + ": " + strerror_safe(err) +
+                                         "; aborting worker thread");
                     stop->store(true);
                     break;
                 }
@@ -416,16 +400,17 @@ private:
     }
 
     const std::string gpio_chip_path_;
-    const std::vector<IoptronPowerPortConfig> ports_;
+    const std::vector<StellaVitaPortConfig> ports_;
     const std::uint32_t pwm_frequency_hz_;
 
     mutable std::mutex mutex_;
     // Serialises every gpiod_line_request_set_value call against the shared
     // gpiod_line_request — boolean writes, per-port PWM worker writes, and the
-    // close-time settle writes — since libgpiod v2 does not document the
-    // request as safe for concurrent writers and a mixed boolean+PWM config
-    // issues writes from a worker and a client thread at once. Held only around
-    // the ioctl, never across a PWM sleep.
+    // close-time settle writes. libgpiod v2 does not document the request as
+    // safe for concurrent writers, and a mixed config (one PWM port + one
+    // boolean port) issues writes from a worker thread and a client thread at
+    // the same time. This is a dedicated, tightly-scoped lock (held only around
+    // the ioctl, never across a PWM sleep) so it never blocks the duty loop.
     std::mutex io_mutex_;
     gpiod_chip* chip_;
     gpiod_line_request* request_;
@@ -433,23 +418,23 @@ private:
     std::vector<std::unique_ptr<PortState>> port_states_;
 };
 
-IoptronPowerboxWrapper::IoptronPowerboxWrapper(std::string gpio_chip_path, std::vector<IoptronPowerPortConfig> ports,
+TouptekPowerboxWrapper::TouptekPowerboxWrapper(std::string gpio_chip_path, std::vector<StellaVitaPortConfig> ports,
                                                std::uint32_t pwm_frequency_hz)
     : impl_(std::make_unique<Impl>(std::move(gpio_chip_path), std::move(ports), pwm_frequency_hz)) {}
 
-IoptronPowerboxWrapper::~IoptronPowerboxWrapper() = default;
+TouptekPowerboxWrapper::~TouptekPowerboxWrapper() = default;
 
-void IoptronPowerboxWrapper::open() { impl_->open(); }
-void IoptronPowerboxWrapper::close() { impl_->close(); }
-bool IoptronPowerboxWrapper::is_open() const { return impl_->is_open(); }
+void TouptekPowerboxWrapper::open() { impl_->open(); }
+void TouptekPowerboxWrapper::close() { impl_->close(); }
+bool TouptekPowerboxWrapper::is_open() const { return impl_->is_open(); }
 
-std::size_t IoptronPowerboxWrapper::port_count() const { return impl_->port_count(); }
-const IoptronPowerPortConfig& IoptronPowerboxWrapper::port_config(std::size_t index) const {
+std::size_t TouptekPowerboxWrapper::port_count() const { return impl_->port_count(); }
+const StellaVitaPortConfig& TouptekPowerboxWrapper::port_config(std::size_t index) const {
     return impl_->port_config(index);
 }
-int IoptronPowerboxWrapper::get_value(std::size_t index) const { return impl_->get_value(index); }
-void IoptronPowerboxWrapper::set_value(std::size_t index, int value) { impl_->set_value(index, value); }
-std::string IoptronPowerboxWrapper::gpio_chip_path() const { return impl_->gpio_chip_path(); }
-std::uint32_t IoptronPowerboxWrapper::pwm_frequency_hz() const { return impl_->pwm_frequency_hz(); }
+int TouptekPowerboxWrapper::get_value(std::size_t index) const { return impl_->get_value(index); }
+void TouptekPowerboxWrapper::set_value(std::size_t index, int value) { impl_->set_value(index, value); }
+std::string TouptekPowerboxWrapper::gpio_chip_path() const { return impl_->gpio_chip_path(); }
+std::uint32_t TouptekPowerboxWrapper::pwm_frequency_hz() const { return impl_->pwm_frequency_hz(); }
 
-}  // namespace alpacacore::vendor::ioptron
+}  // namespace alpacacore::vendor::touptek

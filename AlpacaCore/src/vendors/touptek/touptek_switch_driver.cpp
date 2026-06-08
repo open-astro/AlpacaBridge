@@ -13,7 +13,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-#include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
+#include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 #include <alpacacore/version.h>
 
 #include <atomic>
@@ -23,66 +23,66 @@
 #include <thread>
 #include <vector>
 
-namespace alpacacore::vendor::zwo {
+namespace alpacacore::vendor::touptek {
 
 namespace {
 
-constexpr const char* kLogCategory = "ZWO_ASIAIR";
+constexpr const char* kLogCategory = "TOUPTEK_STELLAVITA";
 
-} // namespace
+}  // namespace
 
-AsiairSwitchConfig default_asiair_pro_config() {
-    AsiairSwitchConfig cfg;
+TouptekSwitchConfig default_stellavita_config() {
+    TouptekSwitchConfig cfg;
+    // StellaVita is a Raspberry Pi CM4 (BCM2711). The 40-pin header bank is
+    // /dev/gpiochip0 (pinctrl-bcm2711); the libgpiod line offset equals the BCM
+    // GPIO number. Mapping verified on hardware against config.txt
+    // (gpio=18,10,17,4,9,11=op,dh,pu) — 9/11 power the USB hub and are excluded.
     cfg.gpio_chip_path = "/dev/gpiochip0";
-    cfg.pwm_frequency_hz = 1000;
     cfg.ports = {
-        {"Port 1", 12u, false},
-        {"Port 2", 13u, false},
-        {"Port 3", 26u, false},
-        {"Port 4", 18u, false},
+        // name,      gpio_line, writable
+        {"Port 1", 18u, true},
+        {"Port 2", 10u, true},
+        {"Port 3", 17u, true},
+        {"Port 4", 4u, true},
     };
     return cfg;
 }
 
-class ZWOAsiairSwitchDriver : public SwitchDriver {
+class TouptekSwitchDriver : public SwitchDriver {
 public:
-    ZWOAsiairSwitchDriver(int device_number, AsiairSwitchConfig config)
-        : device_number_(device_number)
-        , config_(std::move(config))
-        , wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz)
-        , connecting_(false)
-    {
+    TouptekSwitchDriver(int device_number, TouptekSwitchConfig config)
+        : device_number_(device_number),
+          config_(std::move(config)),
+          wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz),
+          connecting_(false) {
         switch_names_.reserve(config_.ports.size());
         for (const auto& p : config_.ports) {
             switch_names_.emplace_back(p.name);
         }
     }
 
-    ~ZWOAsiairSwitchDriver() override {
+    ~TouptekSwitchDriver() override {
         stop_connection_thread();
         try {
             wrapper_.close();
         } catch (const std::exception& e) {
-            ALPACA_LOG_WARN(kLogCategory,
-                            std::string("Error during ASIAIR switch destruction: ") + e.what());
+            ALPACA_LOG_WARN(kLogCategory, std::string("Error during StellaVita switch destruction: ") + e.what());
         }
     }
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "ZWO " + config_.model_name + " Switch"; }
+    std::string get_name() const override { return "ToupTek " + config_.model_name; }
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
-    std::string get_unique_id() const override {
-        return "ZWO_ASIAIR_" + std::to_string(device_number_);
-    }
+    std::string get_unique_id() const override { return "ToupTek_StellaVita_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
-        return "ZWO " + config_.model_name + " 12V power switch (" + config_.gpio_chip_path + ")";
+        return "ToupTek " + config_.model_name + " DC power switch (" + config_.gpio_chip_path + ")";
     }
 
-    std::string get_driver_info() const override { return "AlpacaCore ZWO " + config_.model_name + " Switch"; }
+    std::string get_driver_info() const override { return "AlpacaCore ToupTek " + config_.model_name + " Switch"; }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
@@ -114,8 +114,8 @@ public:
         for (std::size_t i = 0; i < config_.ports.size(); ++i) {
             const int v = wrapper_.get_value(i);
             const auto idx = std::to_string(i);
-            const bool on = config_.ports[i].pwm_enabled ? (v > 0) : (v != 0);
-            state.push_back({"GetSwitch" + idx, on});
+            // A PWM port counts as "on" for any non-zero duty.
+            state.push_back({"GetSwitch" + idx, v != 0});
             state.push_back({"GetSwitchValue" + idx, static_cast<double>(v)});
             state.push_back({"StateChangeComplete" + idx, true});
         }
@@ -125,8 +125,7 @@ public:
     std::vector<std::string> get_supported_actions() const override { return {}; }
 
     std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name),
-                              AlpacaError::ActionNotImplemented);
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
     bool can_action(std::string_view) const override { return false; }
@@ -143,13 +142,11 @@ public:
         throw AlpacaException("CommandString not supported", AlpacaError::NotImplemented);
     }
 
-    int get_max_switch() const override {
-        return static_cast<int>(config_.ports.size());
-    }
+    int get_max_switch() const override { return static_cast<int>(config_.ports.size()); }
 
     bool get_can_write(int id) const override {
         validate_id(id);
-        return true;
+        return config_.ports[static_cast<std::size_t>(id)].writable;
     }
 
     bool get_can_async(int id) const override {
@@ -160,21 +157,19 @@ public:
     bool get_switch(int id) const override {
         validate_id(id);
         ensure_connected();
-        const double v = wrapper_.get_value(static_cast<std::size_t>(id));
-        return v > get_min_switch_value_unchecked(id);
+        return wrapper_.get_value(static_cast<std::size_t>(id)) != 0;
     }
 
     void set_switch(int id, bool state) override {
         validate_id(id);
-        ensure_connected();
-        const double v = state ? get_max_switch_value_unchecked(id)
-                               : get_min_switch_value_unchecked(id);
-        set_switch_value(id, v);
+        // "On" maps to the port's maximum (100 for a PWM port, 1 for boolean);
+        // "off" maps to 0. set_switch_value enforces writability/connection.
+        set_switch_value(id, state ? get_max_switch_value_unchecked(id) : 0.0);
     }
 
     void set_async(int id, bool /*state*/) override {
         validate_id(id);
-        ensure_connected();
+        ensure_writable(id);
         throw AlpacaException("Async switch control not supported", AlpacaError::NotImplemented);
     }
 
@@ -186,24 +181,25 @@ public:
 
     void set_switch_value(int id, double value) override {
         validate_id(id);
+        ensure_writable(id);
         ensure_connected();
-        // std::lround on NaN/Inf is undefined behaviour; reject non-finite
-        // values from the HTTP API as InvalidValue first.
+        // Guard against NaN/Inf from the HTTP API: std::lround on a non-finite
+        // value is undefined behaviour. Reject them as InvalidValue up front.
         if (!std::isfinite(value)) {
             throw AlpacaException("Switch value must be a finite number", AlpacaError::InvalidValue);
         }
-        const double min_v = get_min_switch_value_unchecked(id);
-        const double max_v = get_max_switch_value_unchecked(id);
+        const long max_v = static_cast<long>(get_max_switch_value_unchecked(id));
         const long rounded = std::lround(value);
-        if (rounded < static_cast<long>(min_v) || rounded > static_cast<long>(max_v)) {
-            throw AlpacaException("Switch value out of range", AlpacaError::InvalidValue);
+        if (rounded < 0 || rounded > max_v) {
+            throw AlpacaException("Switch value out of range [0," + std::to_string(max_v) + "]",
+                                  AlpacaError::InvalidValue);
         }
         wrapper_.set_value(static_cast<std::size_t>(id), static_cast<int>(rounded));
     }
 
     void set_async_value(int id, double /*value*/) override {
         validate_id(id);
-        ensure_connected();
+        ensure_writable(id);
         throw AlpacaException("Async switch control not supported", AlpacaError::NotImplemented);
     }
 
@@ -229,12 +225,12 @@ public:
         validate_id(id);
         const auto& p = config_.ports[static_cast<std::size_t>(id)];
         const std::string mode = p.pwm_enabled ? "PWM 0-100%" : "on/off";
-        return "ASIAIR power port on GPIO " + std::to_string(p.gpio_line) + " (" + mode + ")";
+        return "StellaVita DC power port on GPIO " + std::to_string(p.gpio_line) + " (" + mode + ")";
     }
 
     double get_min_switch_value(int id) const override {
         validate_id(id);
-        return get_min_switch_value_unchecked(id);
+        return 0.0;
     }
 
     double get_max_switch_value(int id) const override {
@@ -250,7 +246,7 @@ public:
 private:
     void ensure_connected() const {
         if (!wrapper_.is_open()) {
-            throw AlpacaException("ASIAIR switch not connected", AlpacaError::NotConnected);
+            throw AlpacaException("StellaVita not connected", AlpacaError::NotConnected);
         }
     }
 
@@ -260,10 +256,17 @@ private:
         }
     }
 
-    double get_min_switch_value_unchecked(int) const { return 0.0; }
-
+    // A PWM port is an analog channel [0,100]; a boolean port is [0,1].
     double get_max_switch_value_unchecked(int id) const {
         return config_.ports[static_cast<std::size_t>(id)].pwm_enabled ? 100.0 : 1.0;
+    }
+
+    // Read-only ports reject writes with a not-implemented error per the ASCOM
+    // Switch spec, independent of the connection state.
+    void ensure_writable(int id) const {
+        if (!config_.ports[static_cast<std::size_t>(id)].writable) {
+            throw AlpacaException("Switch " + std::to_string(id) + " is read-only", AlpacaError::NotImplemented);
+        }
     }
 
     void start_connection_task(bool connect) {
@@ -279,8 +282,7 @@ private:
             try {
                 set_connected(connect);
             } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR(kLogCategory,
-                                 std::string("ASIAIR connection task failed: ") + e.what());
+                ALPACA_LOG_ERROR(kLogCategory, std::string("StellaVita connection task failed: ") + e.what());
             }
             connecting_.store(false);
         });
@@ -294,8 +296,8 @@ private:
     }
 
     const int device_number_;
-    const AsiairSwitchConfig config_;
-    AsiairProtocolWrapper wrapper_;
+    const TouptekSwitchConfig config_;
+    TouptekPowerboxWrapper wrapper_;
 
     mutable std::mutex name_mutex_;
     std::vector<std::string> switch_names_;
@@ -305,8 +307,8 @@ private:
     std::thread connection_thread_;
 };
 
-std::unique_ptr<SwitchDriver> create_zwo_asiair_switch(int device_number, AsiairSwitchConfig config) {
-    return std::make_unique<ZWOAsiairSwitchDriver>(device_number, std::move(config));
+std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config) {
+    return std::make_unique<TouptekSwitchDriver>(device_number, std::move(config));
 }
 
-} // namespace alpacacore::vendor::zwo
+}  // namespace alpacacore::vendor::touptek

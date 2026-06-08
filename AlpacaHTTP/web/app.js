@@ -672,6 +672,23 @@ function startEditDevice(device) {
         setFormValue('qhy-camera-id', config.cameraId);
     } else if (vendor === 'svbony') {
         setFormValue('svbony-camera-index', config.cameraIndex);
+    } else if (vendor === 'touptek' && deviceType === 'switch') {
+        // StellaVita PowerBox: optional GPIO chip override plus PWM frequency
+        // and per-port PWM flags (positional: index 0 = Port 1 .. 3 = Port 4).
+        if (config.gpioChip !== undefined && config.gpioChip !== null) {
+            setFormValue('touptek-powerbox-gpio-chip', config.gpioChip);
+        }
+        if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
+            setFormValue('touptek-powerbox-pwm-frequency', config.pwmFrequencyHz);
+        }
+        if (Array.isArray(config.ports)) {
+            [0, 1, 2, 3].forEach(function(i) {
+                const pwmCheckbox = document.getElementById('touptek-port-pwm-' + i);
+                if (pwmCheckbox && config.ports[i]) {
+                    pwmCheckbox.checked = config.ports[i].pwm === true;
+                }
+            });
+        }
     } else if (vendor === 'touptek') {
         setFormValue('touptek-camera-index', config.cameraIndex);
         setFormValue('touptek-focuser-index', config.focuserIndex);
@@ -1458,7 +1475,9 @@ function updateVendorOptions() {
     }
     const touptekOption = vendorSelect.querySelector('option[value="touptek"]');
     if (touptekOption) {
-        const allowTouptek = isCamera || isFocuser;
+        // ToupTek provides cameras, the AAF focuser, and the StellaVita
+        // PowerBox (switch).
+        const allowTouptek = isCamera || isFocuser || isSwitch;
         touptekOption.disabled = !allowTouptek;
         touptekOption.hidden = !allowTouptek;
     }
@@ -1500,7 +1519,7 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'svbony') {
         vendorSelect.value = '';
     }
-    if (!isCamera && !isFocuser && vendorSelect.value === 'touptek') {
+    if (!isCamera && !isFocuser && !isSwitch && vendorSelect.value === 'touptek') {
         vendorSelect.value = '';
     }
     if (!isCamera && vendorSelect.value === 'playerone') {
@@ -1972,9 +1991,11 @@ function updateTouptekConfigFields() {
     }
     const cameraFields = document.getElementById('touptek-camera-fields');
     const focuserFields = document.getElementById('touptek-focuser-fields');
+    const switchFields = document.getElementById('touptek-switch-fields');
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
     const isCamera = deviceType === 'camera';
     const isFocuser = deviceType === 'focuser';
+    const isSwitch = deviceType === 'switch';
     if (cameraFields) {
         cameraFields.style.display = isCamera ? 'block' : 'none';
         setFieldGroupEnabled(cameraFields, isCamera);
@@ -1982,6 +2003,10 @@ function updateTouptekConfigFields() {
     if (focuserFields) {
         focuserFields.style.display = isFocuser ? 'block' : 'none';
         setFieldGroupEnabled(focuserFields, isFocuser);
+    }
+    if (switchFields) {
+        switchFields.style.display = isSwitch ? 'block' : 'none';
+        setFieldGroupEnabled(switchFields, isSwitch);
     }
 }
 
@@ -2067,19 +2092,21 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
         const dc1Pwm = formData.get('ioptronPortPwm1') === 'on';
         const dc2Pwm = formData.get('ioptronPortPwm2') === 'on';
-        if (dc1Pwm || dc2Pwm) {
-            const pwmFreq = Number.parseInt(formData.get('ioptronPowerboxPwmFrequency'), 10);
-            if (!Number.isNaN(pwmFreq)) {
-                deviceData.pwmFrequencyHz = pwmFreq;
-            }
-            // Positional overlay on the fixed DC3/DC1/DC2 layout: index 0 is the
-            // always-on DC3 pass-through (no PWM), 1 = DC1, 2 = DC2.
-            deviceData.ports = [
-                {},
-                { pwm: dc1Pwm },
-                { pwm: dc2Pwm },
-            ];
+        // Always persist the PWM frequency so a custom value survives even if
+        // the user temporarily un-ticks both ports; it applies the next time a
+        // port is switched back to PWM.
+        const pwmFreq = Number.parseInt(formData.get('ioptronPowerboxPwmFrequency'), 10);
+        if (!Number.isNaN(pwmFreq)) {
+            deviceData.pwmFrequencyHz = pwmFreq;
         }
+        // Always emit the positional overlay on the fixed DC3/DC1/DC2 layout
+        // (index 0 is the always-on DC3 pass-through, 1 = DC1, 2 = DC2) so any
+        // per-port config is not dropped on a re-save with PWM un-ticked.
+        deviceData.ports = [
+            {},
+            { pwm: dc1Pwm },
+            { pwm: dc2Pwm },
+        ];
     } else if (deviceData.vendor === 'ioptron') {
         deviceData.connectionType = formData.get('ioptronConnectionType') || 'auto';
         if (deviceData.connectionType === 'serial') {
@@ -2321,6 +2348,30 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'svbony') {
         const svbonyCameraIndex = readOptionalNumber(formData, 'cameraIndex');
         deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
+    } else if (deviceData.vendor === 'touptek' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
+        // StellaVita PowerBox: local GPIO, no camera/focuser index. Optional
+        // GPIO chip override (defaults to /dev/gpiochip0 server-side) plus
+        // optional PWM dimming on any of the four ports.
+        const gpioChip = (formData.get('touptekPowerboxGpioChip') || '').trim();
+        if (gpioChip) {
+            deviceData.gpioChip = gpioChip;
+        }
+        const portPwm = [0, 1, 2, 3].map(function(i) {
+            return formData.get('touptekPortPwm' + i) === 'on';
+        });
+        // Always persist the PWM frequency so a custom value survives even if
+        // the user temporarily un-ticks every port; it applies the next time a
+        // port is switched back to PWM.
+        const pwmFreq = Number.parseInt(formData.get('touptekPowerboxPwmFrequency'), 10);
+        if (!Number.isNaN(pwmFreq)) {
+            deviceData.pwmFrequencyHz = pwmFreq;
+        }
+        // Always emit the positional ports overlay (even all-false) so any
+        // per-port config carried in the saved device (e.g. names) is not
+        // dropped on a re-save with every PWM box un-ticked.
+        deviceData.ports = portPwm.map(function(pwm) {
+            return { pwm: pwm };
+        });
     } else if (deviceData.vendor === 'touptek') {
         if (normalizeDeviceType(deviceData.deviceType) === 'focuser') {
             const touptekFocuserId = formData.get('focuserId');

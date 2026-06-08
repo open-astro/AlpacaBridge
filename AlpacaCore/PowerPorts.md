@@ -9,7 +9,7 @@ Pick the section that matches your hardware.
 | [ZWO ASIair Pro](#zwo-asiair-pro-raspberry-pi-4) | Available | Raspberry Pi 4 (BCM2711) | libgpiod v2 |
 | [ZWO ASIair Plus (Pi CM4)](#zwo-asiair-plus-raspberry-pi-cm4) | Available — ConformU pending | Raspberry Pi CM4 (BCM2711) | libgpiod v2 |
 | [ZWO ASIair Plus (RK3568)](#zwo-asiair-plus-rockchip-rk3568) | Available — ConformU pending | Rockchip RK3568 | ZWO `pwm_gpio.ko` ioctl |
-| [ToupTek StellaVita](#touptek-stellavita-raspberry-pi-cm4) | Pending hardware | Raspberry Pi CM4 | TBD |
+| [ToupTek StellaVita](#touptek-stellavita-raspberry-pi-cm4) | Available — ConformU pending | Raspberry Pi CM4 (BCM2711) | libgpiod v2 |
 | [iOptron iMate](#ioptron-imate) | Available — ConformU pending | OrangePi 3 LTS (Allwinner H6) | libgpiod v2 |
 
 ---
@@ -365,7 +365,133 @@ The same `pwm_gpio.ko` module also controls the two USB2 ports, two USB3 ports, 
 
 ## ToupTek StellaVita (Raspberry Pi CM4)
 
-*Pending hardware validation. The StellaVita is a CM4-based controller from ToupTek; GPIO mapping, GPIO chip path, and any vendor-specific quirks will be documented after first ConformU validation.*
+The StellaVita is ToupTek's CM4-based observatory controller — a **Raspberry Pi Compute Module 4 (BCM2711)**. It drives four on-board 12V DC power ports over local GPIO (libgpiod v2). AlpacaBridge runs directly on the StellaVita and exposes all four ports as ASCOM Switch channels; each port can be a boolean on/off switch or a 0–100% software PWM channel (dew heater / flat panel use).
+
+> **Mapping verified on real hardware** (StellaVita CM4 Rev 1.1, Debian 13 Trixie, kernel 6.12.75, libgpiod 2.2.1). The board's `/boot/firmware/config.txt` enables the outputs with `gpio=18,10,17,4,9,11=op,dh,pu` under `[all]`. The four DC ports map to BCM GPIO **18, 10, 17, 4** on `/dev/gpiochip0` (`pinctrl-bcm2711`), where the libgpiod line offset equals the BCM GPIO number. GPIO **9** and **11** are also driven high but power the on-board **Cypress USB hub** — they are deliberately **not** exposed as switch channels (cutting them would drop every USB device attached to the StellaVita).
+
+| Port label | GPIO line | Default mode |
+|----|----|----|
+| Port 1 | 18 | boolean (on/off) |
+| Port 2 | 10 | boolean (on/off) |
+| Port 3 | 17 | boolean (on/off) |
+| Port 4 | 4 | boolean (on/off) |
+
+### 1. Use an arm64 OS
+
+AlpacaBridge is arm64-only. The StellaVita CM4 must run a 64-bit OS — Raspberry Pi OS (64-bit) Bookworm or Trixie, or Debian 13 (Trixie) arm64. (The validated unit shipped on Debian 13 Trixie aarch64.) If your unit is on a 32-bit image, re-image the CM4's eMMC / microSD before continuing.
+
+### 2. Install runtime dependencies and add yourself to the gpio group
+
+```bash
+sudo apt update
+sudo apt install -y \
+  git build-essential cmake \
+  libgpiod3 gpiod \
+  libusb-1.0-0 libudev1 libcurl4 \
+  libgpiod-dev libusb-1.0-0-dev libudev-dev libcurl4-openssl-dev \
+  nlohmann-json3-dev catch2
+sudo usermod -aG gpio "$USER"
+```
+
+> **Runtime libs** (`libgpiod3`, `libusb-1.0-0`, `libudev1`, `libcurl4`) are what AlpacaBridge links against at runtime — required even if you install only the `.deb`. `gpiod` provides the `gpioget` / `gpioinfo` command-line tools used by the verification step below. **Dev libs** (`libgpiod-dev`, `libusb-1.0-0-dev`, `libudev-dev`, `libcurl4-openssl-dev`, `nlohmann-json3-dev`, `catch2`) and **build tools** (`git`, `build-essential`, `cmake`) are needed only when building from source on the device via `build_and_run.sh`. They are harmless on a `.deb`-only target.
+
+Log out and log back in (or reboot) so the new group membership applies. Verify with:
+
+```bash
+groups | tr ' ' '\n' | grep -x gpio
+```
+
+You should see `gpio` printed back. If `/dev/gpiochip0` is not group-accessible (`ls -l /dev/gpiochip0` shows a group other than `gpio`), add a udev rule and reload:
+
+```bash
+echo 'KERNEL=="gpiochip[0-9]*", GROUP="gpio", MODE="0660"' \
+  | sudo tee /etc/udev/rules.d/99-gpio.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+### 3. Confirm the 12V GPIO outputs are enabled
+
+The StellaVita firmware enables the DC ports (and the USB-hub power lines) at boot via a directive in `/boot/firmware/config.txt`:
+
+```ini
+# Enable 12V GPIO output
+gpio=18,10,17,4,9,11=op,dh,pu
+```
+
+This line should already be present under the `[all]` section. It configures the lines as outputs, driven high (so the ports are **powered on at boot**) with pull-ups. **Do not remove `9` or `11`** — they power the on-board Cypress USB hub, and dropping them disables all USB devices. If you want a DC port to come up OFF until the driver claims it, you can remove that port's GPIO from the line (e.g. drop `4` to leave Port 4 off at boot); the four DC ports are `18`, `10`, `17`, `4`. Reboot after editing.
+
+### 4. Install AlpacaBridge
+
+Install the AlpacaBridge `.deb` for arm64 per the [main install guide](../README.md). The service auto-starts on `:11111`.
+
+### 5. Add the Switch device
+
+Open `http://<your-stellavita-ip>:11111/` in a browser:
+
+1. **Configure** tab → **Add Device**
+2. **Device Type**: Switch
+3. **Vendor**: ToupTek
+4. **Device Number**: 0 (or any unique number)
+5. The **Power Ports** table appears pre-filled with the four StellaVita ports (Port 1–4, GPIO 18/10/17/4). Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. Leave **GPIO Chip** (`/dev/gpiochip0`) and **PWM Frequency** at their defaults unless you know you need to override them.
+6. Submit
+
+Or `POST` the equivalent JSON to the management API:
+
+```json
+{
+  "deviceType": "switch",
+  "deviceNumber": 0,
+  "vendor": "touptek"
+}
+```
+
+### 6. Verify
+
+Connect the device from the **Devices** tab. You should see four channels (Port 1–4). From a second SSH session, watch the live GPIO state while you toggle a port in the Web UI (libgpiod v2 syntax — `-c` addresses lines by offset on a chip):
+
+```bash
+gpioget --numeric -c gpiochip0 18 10 17 4
+```
+
+The value of the toggled line flips between `0` (off) and `1` (on). While connected, `gpioinfo -c gpiochip0 18` shows the line claimed by consumer `alpacabridge-stellavita-powerbox`.
+
+> **Port names are session-only.** Renaming a channel through an ASCOM client (e.g. NINA's `SetSwitchName`) is kept in memory for the life of the driver instance and is **not** persisted — the names reset to `Port 1`–`Port 4` on the next server restart or reconnect. The StellaVita web form has no name fields; if you need persistent custom labels, set them in your client's own device profile.
+
+### Dimmable ports (PWM)
+
+Any of the four ports can be switched from plain on/off to **soft-PWM dimming** (0–100% duty), driven by a per-port worker thread that bit-bangs the line at a configurable frequency — the same mechanism as the ZWO ASIAIR and iOptron iMate switches. In the **Configure** form, tick **PWM** next to a port and set the **PWM Frequency** (default **100 Hz**). A PWM port then appears in ASCOM clients as a 0–100% slider instead of an on/off toggle. This dims both dew heaters and flat panels.
+
+> **Frequency matters for panels.** A flat panel has its own LED driver with an input capacitor. At a **low frequency** the driver fully powers the LEDs during each on-period and goes dark during each off-period, so the panel visibly dims. **100 Hz tested best on the StellaVita** — it dims smoothly without the visible flicker some panels show at 50 Hz, which is why it is the default. At **~1 kHz** the input cap smooths the chopping into a steady reduced voltage that the driver gates on/off instead of dimming (a panel may just blink off). **Resistive loads (dew heaters) dim at any frequency.** Truly regulated gear — cameras, mounts — should stay on/off regardless.
+
+The defaults match the StellaVita wiring. The configurable fields are the GPIO chip, the PWM frequency, and the per-port name / PWM flags (the GPIO line mapping is fixed):
+
+```json
+{
+  "deviceType": "switch",
+  "deviceNumber": 0,
+  "vendor": "touptek",
+  "gpioChip": "/dev/gpiochip0",
+  "pwmFrequencyHz": 100,
+  "ports": [
+    { "name": "Mount Power", "pwm": false },
+    { "name": "Camera Power", "pwm": false },
+    { "name": "Flat Panel",  "pwm": true  },
+    { "name": "Dew Heater",  "pwm": true  }
+  ]
+}
+```
+
+| Field | Type | Notes |
+|----|----|----|
+| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip0` (the CM4's main BCM2711 bank). |
+| `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `100` (tested best on StellaVita — dims flat panels smoothly without 50 Hz flicker). |
+| `ports` | array | Positional overlay on `[Port 1, Port 2, Port 3, Port 4]`; each entry's optional `pwm` (bool) / `name` (string) is applied to that port. The GPIO line mapping (18/10/17/4) is fixed. |
+
+### Disconnect behavior — important for unattended observatories
+
+At connect the wrapper claims all four lines at their "on" default — so gear plugged into them is powered as soon as the device connects, preserving the board's boot-high state — and when the ASCOM client (or the Web UI) disconnects, the wrapper releases its libgpiod request **without driving a boolean line LOW first**. (A PWM port stops its worker and is first driven to a defined steady level — on for any duty > 0, off at 0% — so it never strands the line low mid-cycle.) Connecting and disconnecting therefore never power-cycle attached gear.
+
+If you want a port OFF after disconnect, toggle it OFF in your client **before** disconnecting. For unattended setups, keep AlpacaBridge connected for the duration of the session rather than relying on a disconnected-but-powered state.
 
 ---
 

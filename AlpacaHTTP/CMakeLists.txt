@@ -69,6 +69,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/CMakeLists.txt")
     if(TARGET alpacacore_touptek)
         add_definitions(-DALPACACORE_ENABLE_TOUPTEK)
     endif()
+    # The StellaVita Switch is only compiled into the ToupTek vendor lib when
+    # libgpiod (>= 2.0) was available; guard the router branch to match.
+    if(ALPACACORE_TOUPTEK_STELLAVITA)
+        add_definitions(-DALPACACORE_TOUPTEK_STELLAVITA)
+    endif()
     if(TARGET alpacacore_playerone)
         add_definitions(-DALPACACORE_ENABLE_PLAYERONE)
     endif()
@@ -111,6 +116,11 @@ else()
     endif()
     if(TARGET alpacacore_touptek)
         add_definitions(-DALPACACORE_ENABLE_TOUPTEK)
+    endif()
+    # The StellaVita Switch is only compiled into the ToupTek vendor lib when
+    # libgpiod (>= 2.0) was available; guard the router branch to match.
+    if(ALPACACORE_TOUPTEK_STELLAVITA)
+        add_definitions(-DALPACACORE_TOUPTEK_STELLAVITA)
     endif()
     if(TARGET alpacacore_playerone)
         add_definitions(-DALPACACORE_ENABLE_PLAYERONE)

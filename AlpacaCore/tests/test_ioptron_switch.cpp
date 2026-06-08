@@ -139,6 +139,13 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Value range validation", "[iop
     require_alpaca_error([&]() { driver->get_min_switch_value(3); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->get_max_switch_value(3); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->get_switch_step(3); }, alpacacore::AlpacaError::InvalidValue);
+
+    // ID validation must run before the connection check: an out-of-range ID
+    // throws InvalidValue even while disconnected (ASCOM spec), not NotConnected.
+    REQUIRE_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { driver->get_switch(3); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->get_switch_value(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->get_state_change_complete(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 // 7. State machine contracts (no hardware required).
@@ -216,4 +223,17 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Rejects invalid PWM frequency"
     cfg.pwm_frequency_hz = 200000;  // above the 100 kHz ceiling
     require_alpaca_error([&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg); },
                          alpacacore::AlpacaError::InvalidValue);
+}
+
+// A GPIO chip path that is not an absolute /dev/ node is rejected at construction.
+TEST_CASE("iOptron iMate PowerBox Switch Driver - Rejects invalid GPIO chip path", "[ioptron][switch][unit]") {
+    for (const char* bad : {"", "gpiochip1", "/sys/class/gpio", "relative/gpiochip1"}) {
+        auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+        cfg.gpio_chip_path = bad;
+        require_alpaca_error([&]() { alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    auto ok = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    ok.gpio_chip_path = "/dev/gpiochip0";
+    CHECK_NOTHROW(alpacacore::vendor::ioptron::create_ioptron_switch(0, ok));
 }

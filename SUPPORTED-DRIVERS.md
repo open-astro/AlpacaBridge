@@ -2,8 +2,22 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-06-05
+## Updated 2026-06-07
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
+
+## Contents
+
+- [General Notes](#general-notes)
+- [Camera Drivers](#camera-drivers)
+- [CoverCalibrator Drivers](#covercalibrator-drivers)
+- [Dome Drivers](#dome-drivers)
+- [FilterWheel Drivers](#filterwheel-drivers)
+- [Focuser Drivers](#focuser-drivers)
+- [ObservingConditions Drivers](#observingconditions-drivers)
+- [Rotator Drivers](#rotator-drivers)
+- [SafetyMonitor Drivers](#safetymonitor-drivers)
+- [Switch Drivers](#switch-drivers)
+- [Telescope Drivers](#telescope-drivers)
 
 ## General Notes
 
@@ -30,7 +44,8 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | Ceres 462M | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Ceres%20462M/) |
 
-### Player One Driver Notes
+<details>
+<summary><strong>Player One Driver Notes</strong></summary>
 
 - **SDK**: Player One Camera SDK v3.10.0 (build target)
 - **Connection**: USB (requires udev rules `99-player_one_astronomy.rules`)
@@ -39,17 +54,22 @@ This document lists all hardware vendors and device types that are verified to w
 - **Dew Heater**: Not exposed. The SDK advertises `POA_HEATER_POWER` on cooled models, but we do not currently have a cooled Player One camera available to implement and validate the Switch device. Will be added when hardware is available.
 - **Pulse guiding**: Capability-gated on `isHasST4Port`. Driver times the pulse duration via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
 
+</details>
+
 ### QHY
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | QHY268C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/QHY268C/) |
 
-### QHY Driver Notes
+<details>
+<summary><strong>QHY Driver Notes</strong></summary>
 
 - **SDK**: QHY CCD SDK 25.09.29 (build target)
 - **Connection**: USB (requires udev rules and firmware; see below)
 - **Cooler power**: `CanGetCoolerPower` returns false; cooler power reporting is not implemented to avoid SDK timeouts.
+
+</details>
 
 ### SVBONY
 
@@ -57,10 +77,13 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | SV905C2 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/SVBONY/SV905C2/) |
 
-### SVBONY Driver Notes
+<details>
+<summary><strong>SVBONY Driver Notes</strong></summary>
 
 - **SDK**: SVBONY Camera SDK v1.13.4 (build target) 
 - **Connection**: USB (requires udev rules `90-ckusb.rules`)
+
+</details>
 
 ### ToupTek
 
@@ -68,13 +91,16 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | GPCMOS01200KPF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS01200KPF/) |
 
-### ToupTek Driver Notes
+<details>
+<summary><strong>ToupTek Driver Notes</strong></summary>
 
 - **SDK**: ToupTek toupcamsdk 2026-01-28 (build target)
 - **Connection**: USB (self-contained `libtoupcam.so`; no libusb/libudev link dependency)
 - **Tested model**: GPCMOS01200KPF (guide camera) on Linux arm64. Other ToupTek models sharing the same SDK are expected to work but have not been individually ConformU-verified.
 - **Dew Heater**: Not supported. The ToupTek SDK exposes `TOUPCAM_FLAG_HEAT` / `TOUPCAM_OPTION_HEAT` for anti-fog heating on cooled cameras, but we do not currently have a cooled ToupTek camera available to implement and validate the Switch device. Will be added when hardware is available.
 - **Cooling (TEC)**: Capability-gated on the SDK's `TOUPCAM_FLAG_TEC` / `TOUPCAM_FLAG_TEC_ONOFF` flags. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control paths are implemented but untested against physical cooled hardware.
+
+</details>
 
 ### ZWO
 
@@ -88,19 +114,28 @@ This document lists all hardware vendors and device types that are verified to w
 | ASI462MM | USB |  | pending arm64 re-validation |
 | ASI662MC | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI662MC/) |
 
-### ZWO Driver Notes
+<details>
+<summary><strong>ZWO Driver Notes</strong></summary>
 
 - **SDK**: ZWO ASI Camera SDK Version 1.40 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
 
+</details>
+
+[↑ Back to top](#alpacabridge-supported-drivers)
+
 ## CoverCalibrator Drivers
 
 *No drivers currently available.*
 
+[↑ Back to top](#alpacabridge-supported-drivers)
+
 ## Dome Drivers
 
 *No drivers currently available.*
+
+[↑ Back to top](#alpacabridge-supported-drivers)
 
 ## FilterWheel Drivers
 
@@ -110,10 +145,15 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | EFW | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EFW/) |
 
-### ZWO FilterWheel Driver Notes
+<details>
+<summary><strong>ZWO FilterWheel Driver Notes</strong></summary>
 
 - **SDK**: ZWO EFW SDK Version 1.8.4 (build target)
 - **Connection**: USB (requires libusb-1.0)
+
+</details>
+
+[↑ Back to top](#alpacabridge-supported-drivers)
 
 ## Focuser Drivers
 
@@ -123,11 +163,14 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | Gemini Automatic Astro Focuser Pro | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro%20Focuser%20Pro/) |
 
-### Gemini Focuser Driver Notes
+<details>
+<summary><strong>Gemini Focuser Driver Notes</strong></summary>
 
 - **Protocol**: MyFocuserPro2 serial protocol (no SDK required)
 - **Connection**: USB/Serial (CH340/CH341 adapter). Auto-detection supported.
 - **Auto-detection**: Scans `/dev/serial/by-id/` for CH340/CH341 USB-serial devices and probes with firmware handshake. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
+
+</details>
 
 ### ToupTek
 
@@ -135,7 +178,8 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | AAF (Astro Auto Focuser) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/AAF/) |
 
-### ToupTek Focuser Driver Notes
+<details>
+<summary><strong>ToupTek Focuser Driver Notes</strong></summary>
 
 - **SDK**: ToupTek toupcamsdk 2026-01-28 (shared with the ToupTek camera driver)
 - **Connection**: USB. Devices are enumerated via `Toupcam_EnumV2` and filtered by `TOUPCAM_FLAG_AUTOFOCUSER`.
@@ -144,17 +188,24 @@ This document lists all hardware vendors and device types that are verified to w
 - **Temperature compensation**: Not implemented — the AAF action set does not expose a temp-comp control.
 - **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on Linux arm64.
 
+</details>
+
 ### ZWO
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | EAF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAF/) |
 
-### ZWO Focuser Driver Notes
+<details>
+<summary><strong>ZWO Focuser Driver Notes</strong></summary>
 
 - **SDK**: ZWO EAF Focuser SDK Version 1.7.7 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **EAF Pro Bluetooth**: The ZWO EAF Pro Bluetooth version will only currently work with USB connection. Bluetooth support is not yet implemented.
+
+</details>
+
+[↑ Back to top](#alpacabridge-supported-drivers)
 
 ## ObservingConditions Drivers
 
@@ -164,11 +215,16 @@ This document lists all hardware vendors and device types that are verified to w
 |--------|------------|------------------|--------|
 | WeeWX HTTP JSON | HTTP(S) | ✓ | [ConformU Validation](AlpacaCore/conformu/WeeWX/) |
 
-### WeeWX ObservingConditions Driver Notes
+<details>
+<summary><strong>WeeWX ObservingConditions Driver Notes</strong></summary>
 
 - **Source**: WeeWX HTTP JSON feed (`lcd_datasheet.current`); missing sensors return NaN.
 - **Connection**: HTTP(S) to WeeWX REST/JSON endpoint.
 - **Configuration**: `weewxUrl` (required), optional `pollIntervalSeconds`, `timeoutMs`.
+
+</details>
+
+[↑ Back to top](#alpacabridge-supported-drivers)
 
 ## Rotator Drivers
 
@@ -178,16 +234,51 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | CAA | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/CAA/) |
 
-### ZWO Rotator Driver Notes
+<details>
+<summary><strong>ZWO Rotator Driver Notes</strong></summary>
 
 - **SDK**: ZWO CAA SDK Version 1.5.9 (build target)
 - **Connection**: USB (requires libusb-1.0)
+
+</details>
+
+[↑ Back to top](#alpacabridge-supported-drivers)
 
 ## SafetyMonitor Drivers
 
 *No drivers currently available.*
 
+[↑ Back to top](#alpacabridge-supported-drivers)
+
 ## Switch Drivers
+
+### iOptron
+
+| Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
+|-------------|--------------|------------|------------------|--------|
+| iMate PowerBox | iMate (OrangePi 3 LTS / H6) | Local GPIO (libgpiod v2) | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iMate%20PowerBox/) |
+
+<details>
+<summary><strong>iOptron Switch Driver Notes</strong></summary>
+
+- **iMate PowerBox** (`vendor: ioptron`, `deviceType: switch`) — the iMate's on-board DC power ports via libgpiod v2 on `/dev/gpiochip1` (override with `gpioChip`). Exposes three switches: `DC3 (always on)` — the hardwired pass-through jack, read-only; `DC1` — GPIO line 118 (PD22); `DC2` — GPIO line 114 (PD18). Ports default to boolean on/off; DC1/DC2 can each opt into 0–100% soft-PWM dimming (per-port `pwm` flag, `pwmFrequencyHz` default 50 Hz) for dew heaters and flat panels — 50 Hz dims panels, confirmed on iMate hardware. Local GPIO only — independent of the iOptron mount RS-232 protocol; runs on the iMate itself under the [OpenAstro](https://github.com/open-astro/aw-flashtool) Armbian image (mainline kernel, Debian 13), which already ships libgpiod v2 plus a `gpio`-group udev rule for `/dev/gpiochip*`. Connecting powers the ports on; disconnecting does not power them off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#ioptron-imate).
+  - **ConformU** 4.3.0 — ✓ validated on iMate hardware (Linux arm64; OpenAstro Armbian / mainline kernel, `/dev/gpiochip1`): 0 errors, 0 issues, 0 timing issues. Run against a mixed config (DC1 PWM, DC2 boolean, DC3 read-only pass-through) so all three port types were exercised in one pass. [Report](AlpacaCore/conformu/iOptron/iMate%20PowerBox/Linux-arm64.txt).
+
+</details>
+
+### ToupTek
+
+| Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
+|-------------|--------------|------------|------------------|--------|
+| StellaVita PowerBox | StellaVita (Raspberry Pi CM4 / BCM2711) | Local GPIO (libgpiod v2) | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/StellaVita/) |
+
+<details>
+<summary><strong>ToupTek Switch Driver Notes</strong></summary>
+
+- **StellaVita PowerBox** (`vendor: touptek`, `deviceType: switch`) — the StellaVita's four on-board 12V DC ports via libgpiod v2 on `/dev/gpiochip0` (override with `gpioChip`). Exposes Port 1–4 mapped to BCM GPIO 18/10/17/4 (on BCM2711 the libgpiod line offset equals the BCM GPIO number); mapping verified on hardware against the board's `gpio=18,10,17,4,9,11=op,dh,pu` config.txt directive. GPIO 9/11 power the on-board Cypress USB hub and are deliberately not exposed. All four ports are boolean on/off by default; each can opt into 0–100% soft-PWM dimming (per-port `pwm` flag, `pwmFrequencyHz` default **100 Hz** — tested best on StellaVita, dims flat panels smoothly without 50 Hz flicker). Local GPIO only — independent of the ToupTek camera/focuser SDK; runs on the StellaVita itself (arm64). Connecting preserves the board's boot-high state (ports powered on); disconnecting does not power them off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#touptek-stellavita-raspberry-pi-cm4).
+  - **ConformU** 4.3.0 — ✓ validated on StellaVita hardware (Linux arm64; Raspberry Pi CM4, Debian 13 Trixie, `/dev/gpiochip0`): 0 errors, 0 issues, 0 timing issues. Run against a mixed config (Port 1 PWM, Ports 2–4 boolean) so both the boolean and soft-PWM paths were exercised in one pass; slowest member 16 ms vs the 100 ms FAST target. [Report](AlpacaCore/conformu/ToupTek/StellaVita/Linux-arm64.txt).
+
+</details>
 
 ### ZWO
 
@@ -199,7 +290,8 @@ This document lists all hardware vendors and device types that are verified to w
 | ASIAIR Plus 12V Power | ASIAIR Plus (Pi CM4) | Local GPIO (libgpiod v2) | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASIair%20Plus%20(Pi%20CM4)/) |
 | ASIAIR Plus 12V Power | ASIAIR Plus (RK3568) | ZWO `pwm_gpio.ko` ioctl | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASIair%20Plus%20(RK3568)/) |
 
-### ZWO Switch Driver Notes
+<details>
+<summary><strong>ZWO Switch Driver Notes</strong></summary>
 
 - **Dew Heater** (`switchType: dewheater`) — exposed when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Bind to a camera via `cameraIndex` / `cameraId`.
 - **ASIAIR Pro 12V Power** (`switchType: asiair`) — four on-board 12V DC ports via libgpiod v2. Default Pi 4 layout: Port 1 = GPIO 12, Port 2 = GPIO 13, Port 3 = GPIO 26, Port 4 = GPIO 18 on `/dev/gpiochip0`. Ports are boolean by default; set `"pwm": true` for a 0–100% soft-PWM channel (default 1 kHz, via `pwmFrequencyHz`). Runs on the ASIAIR itself; arm64-only (re-image the stock 32-bit OS) with the stock `pigpiod`/`zwoair_imager` disabled. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md).
@@ -209,16 +301,9 @@ This document lists all hardware vendors and device types that are verified to w
 - **ASIAIR Plus 12V Power — RK3568** (`switchType: asiair-plus-rk3568`) — Rockchip RK3568 ASIAIR Plus via ZWO's `pwm_gpio.ko` kernel module on `/dev/pwm-gpio-misc` (reverse-engineered header at `AlpacaCore/external/ZWO/asiair-plus/pwm_gpio.h`). Wrapper indices 0–3 → kernel ioctl indices 4–7 (DC1–DC4). `SET_LEVEL` polarity is inverted (`level=0` ⇒ port ON); the wrapper hides this so ASCOM `value=1` = on. PWM is userspace soft-PWM (default **50 Hz**, matching the stock daemon's `period_ns = 20,000,000`); the module's own hardware-PWM path is unreachable and GPIO bank 4 has no PWM mux. Requires the stock ZWO kernel (4.19.219) to keep `pwm_gpio.ko` loaded, plus the `99-zwo-asiair-plus.rules` udev rule and `gpio`-group membership. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md).
   - **ConformU** 4.3.0 — 0 errors / 0 issues / 0 timing, Linux arm64 (kernel 4.19.219 + stock `pwm_gpio.ko`). Mixed 3 boolean + 1 PWM config; slowest member `SetSwitch (3)` 30 ms.
 
-### iOptron
+</details>
 
-| Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
-|-------------|--------------|------------|------------------|--------|
-| iMate PowerBox | iMate (OrangePi 3 LTS / H6) | Local GPIO (libgpiod v2) | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iMate%20PowerBox/) |
-
-### iOptron Switch Driver Notes
-
-- **iMate PowerBox** (`vendor: ioptron`, `deviceType: switch`) — the iMate's on-board DC power ports via libgpiod v2 on `/dev/gpiochip1` (override with `gpioChip`). Exposes three switches: `DC3 (always on)` — the hardwired pass-through jack, read-only; `DC1` — GPIO line 118 (PD22); `DC2` — GPIO line 114 (PD18). Ports default to boolean on/off; DC1/DC2 can each opt into 0–100% soft-PWM dimming (per-port `pwm` flag, `pwmFrequencyHz` default 50 Hz) for dew heaters and flat panels — 50 Hz dims panels, confirmed on iMate hardware. Local GPIO only — independent of the iOptron mount RS-232 protocol; runs on the iMate itself under the [OpenAstro](https://github.com/open-astro/aw-flashtool) Armbian image (mainline kernel, Debian 13), which already ships libgpiod v2 plus a `gpio`-group udev rule for `/dev/gpiochip*`. Connecting powers the ports on; disconnecting does not power them off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#ioptron-imate).
-  - **ConformU** 4.3.0 — ✓ validated on iMate hardware (Linux arm64; OpenAstro Armbian / mainline kernel, `/dev/gpiochip1`): 0 errors, 0 issues, 0 timing issues. Run against a mixed config (DC1 PWM, DC2 boolean, DC3 read-only pass-through) so all three port types were exercised in one pass. [Report](AlpacaCore/conformu/iOptron/iMate%20PowerBox/Linux-arm64.txt).
+[↑ Back to top](#alpacabridge-supported-drivers)
 
 ## Telescope Drivers
 
@@ -228,7 +313,8 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | CGX-L | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/) |
 
-### Celestron Driver Notes
+<details>
+<summary><strong>Celestron Driver Notes</strong></summary>
 
 - **Protocol**: NexStar HC serial protocol with MC passthrough (P-command) for per-axis control.
 - **Connection**: USB/Serial via hand controller.
@@ -240,6 +326,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **Pulse guiding**: Uses native MC_AUX_GUIDE (0x26) hardware command via the autoguider port. The firmware times the pulse internally — no software sleep or encoder math required. Position hold/correction pattern bridges the gap between the low-level firmware command and ASCOM coordinate expectations.
 - **Pier side**: `SideOfPier` reports actual pier side via the HC `p` command (`W` = pierWest, `E` = pierEast).
 
+</details>
+
 ### iOptron
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
@@ -248,7 +336,8 @@ This document lists all hardware vendors and device types that are verified to w
 | HAE43 series | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/HAE43) |
 
 
-### iOptron Driver Notes
+<details>
+<summary><strong>iOptron Driver Notes</strong></summary>
 
 - **Protocol**: iOptron Mount RS-232 Command Language Version 3.10 (January 4th, 2021)
 - **Connection**: USB/Serial or Wi-Fi (TCP). Auto-detection supported for both — `connectionType: "auto"` scans serial ports first, then falls back to network discovery if no serial mount is found.
@@ -259,13 +348,16 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested firmware**: Driver tested on **HEM27** with main board firmware **V240121** and hand controller firmware **V241201**. Other firmware versions and models may work but have not been individually verified.
 - **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues on both USB and Wi-Fi, on Linux arm64.
 
+</details>
+
 ### SynScan V3/V4
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | Sky-Watcher HEQ5 PRO | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/Sky-Watcher%20HEQ5%20PRO/) |
 
-### SynScan Driver Notes
+<details>
+<summary><strong>SynScan Driver Notes</strong></summary>
 
 - **Protocol**: Sky-Watcher SynScan V3/V4 protocol
 - **Connection**: USB/Serial via hand controller (tested). Auto-detection supported — `connectionType: "auto"` scans serial ports for SynScan hand controllers and connects to the first responding mount.
@@ -273,6 +365,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **Sky-Watcher HEQ5 PRO Firmware**: Hand controller firmware 4.42.00, motor controller firmware 3.46
 - **Pulse guiding**: Software-timed variable-rate slew (SynScan has no hardware pulse guide command). Driver issues a variable-rate axis slew at the configured guide rate, times the pulse duration in a background thread, then stops the axis and restores sidereal tracking. GEM pier-side DEC direction flip applied automatically. Position reporting uses accumulated `rate × duration` deltas in the target coordinate frame for ConformU tolerance compliance.
 - **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues (pulse guide tested across N/S/E/W at declinations -9, +9, -3, +3).
+
+</details>
 
 ### ZWO
 
@@ -283,8 +377,13 @@ This document lists all hardware vendors and device types that are verified to w
 | AM5N | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
 | AM7 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
 
-### ZWO Telescope (ASI Mount) Driver Notes
+<details>
+<summary><strong>ZWO Telescope (ASI Mount) Driver Notes</strong></summary>
 
 - **Protocol**: ZWO Mount Serial Communication Protocol (see `AlpacaCore/external/ZWO/AM/ZWO_Mount_Protocol.md`)
 - **Connection**: Serial over USB or network (TCP). **Tested and working with USB and WiFi**. PulseGuide and slew behavior validated over both USB and WiFi; timing tuned for high-latency (WiFi) connections.
 - **Tested firmware**: Driver tested on ZWO **firmware 1.8.8\***. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
+
+</details>
+
+[↑ Back to top](#alpacabridge-supported-drivers)
