@@ -18,12 +18,12 @@ jobs:
       pull-requests: write
       id-token: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           fetch-depth: 1
           persist-credentials: false
 
-      - uses: anthropics/claude-code-action@36a69b6a90b850823f86de06fdfd56264772ad98  # v1
+      - uses: anthropics/claude-code-action@593d7a5c4e0073569f74772c2b7b64c30ec14707  # v1
         with:
           # Subscription (Pro/Max) auth. Generate locally with `claude setup-token`
           # and store as an org or repo secret named CLAUDE_CODE_OAUTH_TOKEN.
