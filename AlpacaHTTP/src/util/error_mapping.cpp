@@ -82,13 +82,6 @@ std::int32_t map_error_code(int error_code) {
         case AE::ActionNotImplemented:
             return ErrorCode::ACTION_NOT_IMPLEMENTED;
         case AE::InvalidOperation:
-        case AE::InvalidOperationException:
-        case AE::InvalidOperationException2:
-        case AE::Parked:
-        case AE::InvalidWhileSlewing:
-        case AE::NotSupported:
-        case AE::NotAtHome:
-        case AE::Slaved:
             return ErrorCode::INVALID_OPERATION;
         case AE::InvalidWhileParked:
             return ErrorCode::INVALID_WHILE_PARKED;
@@ -121,10 +114,6 @@ std::string map_error_message(std::int32_t alpaca_error_code) {
             return "Action not implemented";
         case ErrorCode::DRIVER_ERROR:
             return "Driver error";
-        case ErrorCode::DRIVER_NOT_READY:
-            return "Driver not ready";
-        case ErrorCode::NOT_SAFE:
-            return "Not safe";
         default:
             return "Unknown error";
     }
