@@ -16,6 +16,8 @@
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
 
+#include <cstdint>
+
 namespace alpacacore {
 
 /**
@@ -27,6 +29,25 @@ namespace alpacacore {
 class FocuserDriver : public AlpacaDriver {
 public:
     virtual ~FocuserDriver() = default;
+
+    // Platform 7 operational state (IFocuserV4): IsMoving, Position, Temperature
+    // (omitted if not implemented) plus a TimeStamp. Inline so the vtable stays
+    // weak; values come from the same getters as the GET endpoints.
+    std::vector<DeviceState> get_device_state() const override {
+        std::vector<DeviceState> state;
+        auto add = [&state](const char* name, auto getter) {
+            try {
+                state.push_back({name, DeviceStateValue{getter()}});
+            } catch (const AlpacaException&) {
+                // Not currently known: omit per the DeviceState contract.
+            }
+        };
+        add("IsMoving", [this] { return get_is_moving(); });
+        add("Position", [this] { return static_cast<std::int32_t>(get_position()); });
+        add("Temperature", [this] { return get_temperature(); });
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
+    }
 
     // Focuser-specific properties
 

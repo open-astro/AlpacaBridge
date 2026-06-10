@@ -339,9 +339,7 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    int get_interface_version() const override {
-        return 3;
-    }
+    int get_interface_version() const override { return 4; }
 
     bool get_connected() const override {
         return connected_.load();
@@ -607,42 +605,6 @@ public:
             return;
         }
 
-    }
-
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        state.push_back({"Connected", connected_.load()});
-        state.push_back({"Connecting", connecting_.load()});
-
-        if (!connected_.load()) {
-            return state;
-        }
-
-        try {
-            state.push_back({"Tracking", get_tracking()});
-        } catch (const std::exception&) {
-        }
-        try {
-            state.push_back({"Slewing", get_slewing()});
-        } catch (const std::exception&) {
-        }
-        try {
-            state.push_back({"AtHome", get_at_home()});
-        } catch (const std::exception&) {
-        }
-        try {
-            state.push_back({"AtPark", get_at_park()});
-        } catch (const std::exception&) {
-        }
-        try {
-            state.push_back({"RightAscension", get_right_ascension()});
-            state.push_back({"Declination", get_declination()});
-            state.push_back({"Altitude", get_altitude()});
-            state.push_back({"Azimuth", get_azimuth()});
-        } catch (const std::exception&) {
-        }
-
-        return state;
     }
 
     std::vector<std::string> get_supported_actions() const override {

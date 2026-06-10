@@ -118,7 +118,7 @@ TEST_CASE("SynScan Telescope Driver - Device metadata", "[synscan][telescope][un
     CHECK(driver->get_description() == "Sky-Watcher SynScan V3/V4 Mount Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore SynScan Driver v0.1");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_interface_version() == 4);
     CHECK(driver->get_unique_id() == "SynScan_3");
 }
 

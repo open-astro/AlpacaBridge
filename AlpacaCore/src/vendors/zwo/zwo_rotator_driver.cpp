@@ -93,9 +93,7 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    int get_interface_version() const override {
-        return 3;
-    }
+    int get_interface_version() const override { return 4; }
 
     bool get_connected() const override {
         return connected_.load();
@@ -160,31 +158,6 @@ public:
             rotator_type_.clear();
         }
         connected_.store(false);
-    }
-
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        state.push_back({"Connected", connected_.load()});
-        if (!connected_.load()) {
-            return state;
-        }
-        try {
-            state.push_back({"IsMoving", get_is_moving()});
-        } catch (const std::exception&) {
-        }
-        try {
-            state.push_back({"Position", get_position()});
-        } catch (const std::exception&) {
-        }
-        try {
-            state.push_back({"Reverse", get_reverse()});
-        } catch (const std::exception&) {
-        }
-        try {
-            state.push_back({"Temperature", ZWOCAASDKWrapper::instance().get_temperature(rotator_id_value())});
-        } catch (const std::exception&) {
-        }
-        return state;
     }
 
     std::vector<std::string> get_supported_actions() const override {

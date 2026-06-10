@@ -49,10 +49,18 @@ TEST_CASE("ZWO CAA Rotator Driver - Disconnected Behavior", "[zwo][rotator][unit
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_supported_actions().empty());
 
+    // Platform 7 DeviceState: while disconnected the operational getters throw
+    // and are omitted, leaving just the TimeStamp; the old non-compliant
+    // "Connected" entry is gone.
     const auto state = driver->get_device_state();
-    REQUIRE(state.size() == 1);
-    REQUIRE(state[0].name == "Connected");
-    REQUIRE(std::get<bool>(state[0].value) == false);
+    bool has_timestamp = false;
+    for (const auto& entry : state) {
+        REQUIRE(entry.name != "Connected");
+        if (entry.name == "TimeStamp") {
+            has_timestamp = true;
+        }
+    }
+    REQUIRE(has_timestamp);
 
     require_alpaca_error([&]() { driver->get_reverse(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_reverse(true); }, alpacacore::AlpacaError::NotConnected);
@@ -80,7 +88,7 @@ TEST_CASE("ZWO CAA Rotator Driver - Device metadata", "[zwo][rotator][unit]") {
     CHECK(driver->get_description() == "ZWO CAA Rotator Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore ZWO CAA Rotator Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_interface_version() == 4);
     CHECK(driver->get_unique_id() == "ZWO_CAA_3");
 }
 

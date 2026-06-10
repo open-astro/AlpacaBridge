@@ -28,6 +28,25 @@ class RotatorDriver : public AlpacaDriver {
 public:
     virtual ~RotatorDriver() = default;
 
+    // Platform 7 operational state (IRotatorV4): IsMoving, MechanicalPosition,
+    // Position plus a TimeStamp. Inline so the vtable stays weak; values come
+    // from the same getters as the GET endpoints.
+    std::vector<DeviceState> get_device_state() const override {
+        std::vector<DeviceState> state;
+        auto add = [&state](const char* name, auto getter) {
+            try {
+                state.push_back({name, DeviceStateValue{getter()}});
+            } catch (const AlpacaException&) {
+                // Not currently known: omit per the DeviceState contract.
+            }
+        };
+        add("IsMoving", [this] { return get_is_moving(); });
+        add("MechanicalPosition", [this] { return get_mechanical_position(); });
+        add("Position", [this] { return get_position(); });
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
+    }
+
     // Rotator-specific properties
 
     /**

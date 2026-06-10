@@ -78,7 +78,7 @@ TEST_CASE("Celestron Telescope Driver - Device metadata", "[celestron][telescope
     CHECK(driver->get_description() == "Celestron NexStar Mount Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore Celestron NexStar Driver v0.1");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_interface_version() == 4);
     CHECK(driver->get_unique_id() == "Celestron_3");
 }
 

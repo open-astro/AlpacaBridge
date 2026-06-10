@@ -77,7 +77,7 @@ TEST_CASE("WeeWX ObservingConditions Driver - Device metadata", "[weewx]") {
     CHECK(driver->get_description() == "WeeWX ObservingConditions from HTTP JSON");
     CHECK(driver->get_driver_info() == "AlpacaCore WeeWX ObservingConditions Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 1);
+    CHECK(driver->get_interface_version() == 2);
     CHECK(driver->get_unique_id() == "WEEWX_OC_3");
 }
 

@@ -15,9 +15,11 @@
 
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
+
 #include <chrono>
-#include <vector>
+#include <cstdint>
 #include <utility>
+#include <vector>
 
 namespace alpacacore {
 
@@ -58,6 +60,36 @@ struct GuideRate {
 class TelescopeDriver : public AlpacaDriver {
 public:
     virtual ~TelescopeDriver() = default;
+
+    // Platform 7 operational state (ITelescopeV4): built from the individual
+    // property getters (omit-on-throw keeps DeviceState consistent with the GET
+    // endpoints) plus a TimeStamp. Inline so the vtable stays weak and the
+    // per-vendor static libraries link without a base-library ordering
+    // dependency. UTCDate is intentionally omitted to avoid format drift versus
+    // the /utcdate endpoint; it is optional ("if known").
+    std::vector<DeviceState> get_device_state() const override {
+        std::vector<DeviceState> state;
+        auto add = [&state](const char* name, auto getter) {
+            try {
+                state.push_back({name, DeviceStateValue{getter()}});
+            } catch (const AlpacaException&) {
+                // Not currently known: omit per the DeviceState contract.
+            }
+        };
+        add("Altitude", [this] { return get_altitude(); });
+        add("AtHome", [this] { return get_at_home(); });
+        add("AtPark", [this] { return get_at_park(); });
+        add("Azimuth", [this] { return get_azimuth(); });
+        add("Declination", [this] { return get_declination(); });
+        add("IsPulseGuiding", [this] { return get_is_pulse_guiding(); });
+        add("RightAscension", [this] { return get_right_ascension(); });
+        add("SideOfPier", [this] { return static_cast<std::int32_t>(get_side_of_pier()); });
+        add("SiderealTime", [this] { return get_sidereal_time(); });
+        add("Slewing", [this] { return get_slewing(); });
+        add("Tracking", [this] { return get_tracking(); });
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
+    }
 
     // Telescope-specific properties
 

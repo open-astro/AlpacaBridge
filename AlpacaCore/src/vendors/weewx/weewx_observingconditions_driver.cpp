@@ -283,9 +283,7 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    int get_interface_version() const override {
-        return 1;
-    }
+    int get_interface_version() const override { return 2; }
 
     bool get_connected() const override {
         return connected_.load();
@@ -324,16 +322,6 @@ public:
             stop_polling();
             connected_.store(false);
         }
-    }
-
-    std::vector<DeviceState> get_device_state() const override {
-        std::lock_guard<std::mutex> lock(data_mutex_);
-        return {
-            {"Temperature", last_snapshot_.temperature_c},
-            {"Humidity", last_snapshot_.humidity},
-            {"Pressure", last_snapshot_.pressure_hpa},
-            {"WindSpeed", last_snapshot_.wind_speed_ms}
-        };
     }
 
     std::vector<std::string> get_supported_actions() const override {

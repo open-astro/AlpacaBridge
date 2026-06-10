@@ -78,7 +78,7 @@ TEST_CASE("Bisque Telescope Driver - Device metadata", "[bisque][telescope][unit
     CHECK(driver->get_description() == "Bisque Paramount / TheSkyX Mount Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore Bisque TheSkyX Driver v0.1");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_interface_version() == 4);
     CHECK(driver->get_unique_id() == "Bisque_3");
 }
 
