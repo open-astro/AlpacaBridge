@@ -62,10 +62,18 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 - **Do not** write a per-vendor `get_device_state()`. Each device base class
   (`CameraDriver`, `TelescopeDriver`, …) implements it once, inline, building the
   operational-property list by calling that device's own property getters inside a
-  `try { … } catch (const AlpacaException&) {}` (a getter that throws is omitted) and
+  `try { … } catch (const std::exception&) {}` (a getter that throws — `AlpacaException`
+  or any unwrapped vendor error — is omitted, never propagated) and
   appending a `TimeStamp` via the inline `device_state_timestamp()` helper. Using the
   same getters as the GET endpoints guarantees DeviceState ↔ GET consistency, which is
   what ConformU checks. A new vendor driver inherits the compliant DeviceState for free.
+- DeviceState is **not an atomic snapshot**: each getter locks the driver mutex
+  separately, so e.g. `RightAscension` and `Slewing` can straddle a state change, and a
+  device dropping mid-call yields a partially populated response. The old per-vendor
+  overrides read everything under one mutex. ASCOM doesn't require atomicity and
+  ConformU only checks DeviceState ↔ GET consistency, so don't "fix" this by adding a
+  snapshot lock — but don't build features that assume mutual consistency within one
+  DeviceState response either.
 - The base `get_device_state()` and `device_state_timestamp()` are **inline in the
   headers on purpose**: an out-of-line virtual would make the device class's vtable a
   "key function" emitted only in the core library, and the per-vendor static libraries
