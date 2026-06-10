@@ -649,17 +649,8 @@ const std::unordered_set<std::string> kSafetyMonitorMethods = {
 
 bool is_known_device_type_name(const std::string& type_name) {
     static const std::unordered_set<std::string> kDeviceTypes = {
-        "camera",
-        "telescope",
-        "mount",
-        "filterwheel",
-        "focuser",
-        "rotator",
-        "dome",
-        "switch",
-        "covercalibrator",
-        "observingconditions",
-        "safetymonitor",
+        "camera", "telescope", "mount",           "filterwheel",         "focuser",       "rotator",
+        "dome",   "switch",    "covercalibrator", "observingconditions", "safetymonitor",
     };
     return kDeviceTypes.count(type_name) > 0;
 }
@@ -2260,7 +2251,7 @@ Response Router::dispatch_telescope_method(
             if (auto value = get_form_value(request.body(), "Value")) {
                 return parse_bool_value(*value, param_name);
             }
-            
+
             throw_invalid_value("Missing parameter: " + param_name);
         };
         

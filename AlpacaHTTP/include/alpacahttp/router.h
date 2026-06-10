@@ -12,28 +12,30 @@
 
 #pragma once
 
+#include <alpacacore/alpaca_defs.h>
+#include <alpacacore/camera_driver.h>
+#include <alpacacore/covercalibrator_driver.h>
+#include <alpacacore/device_registry.h>
+#include <alpacacore/dome_driver.h>
+#include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/focuser_driver.h>
+#include <alpacacore/managementdriver.h>
+#include <alpacacore/observingconditions_driver.h>
+#include <alpacacore/rotator_driver.h>
+#include <alpacacore/safetymonitor_driver.h>
+#include <alpacacore/switch_driver.h>
+#include <alpacacore/telescope_driver.h>
+
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <nlohmann/json.hpp>
+#include <string>
+#include <vector>
+
 #include "request.h"
 #include "response.h"
 #include "version.h"
-#include <alpacacore/device_registry.h>
-#include <alpacacore/alpaca_defs.h>
-#include <alpacacore/managementdriver.h>
-#include <alpacacore/telescope_driver.h>
-#include <alpacacore/camera_driver.h>
-#include <alpacacore/switch_driver.h>
-#include <alpacacore/filterwheel_driver.h>
-#include <alpacacore/focuser_driver.h>
-#include <alpacacore/rotator_driver.h>
-#include <alpacacore/dome_driver.h>
-#include <alpacacore/covercalibrator_driver.h>
-#include <alpacacore/observingconditions_driver.h>
-#include <alpacacore/safetymonitor_driver.h>
-#include <string>
-#include <memory>
-#include <functional>
-#include <vector>
-#include <mutex>
-#include <nlohmann/json.hpp>
 
 namespace alpacahttp {
 
