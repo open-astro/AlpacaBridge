@@ -135,7 +135,7 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     int get_interface_version() const override {
-        return 3;
+        return 4;  // ICameraV4 (Platform 7)
     }
 
     bool get_connected() const override {
@@ -215,23 +215,6 @@ public:
         }
         reset_exposure_state_locked();
         connected_.store(false);
-    }
-
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        state.push_back({"Connected", connected_.load()});
-        if (!connected_.load()) {
-            return state;
-        }
-        state.push_back({"CameraState", static_cast<std::int32_t>(get_camera_state())});
-        if (can_get_control(ZWOControlType::Temperature)) {
-            state.push_back({"CCDTemperature", get_ccd_temperature()});
-        }
-        if (can_get_control(ZWOControlType::CoolerOn)) {
-            state.push_back({"CoolerOn", get_cooler_on()});
-        }
-        state.push_back({"ImageReady", get_image_ready()});
-        return state;
     }
 
     std::vector<std::string> get_supported_actions() const override {

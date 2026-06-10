@@ -48,7 +48,7 @@ TEST_CASE("SVBONY Camera Driver - Device metadata", "[svbony][camera][unit]") {
     CHECK(driver->get_description() == "SVBONY Camera Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore SVBONY Camera Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_interface_version() == 4);  // ICameraV4 (Platform 7)
     CHECK(driver->get_unique_id() == "SVBONY_3");
 }
 

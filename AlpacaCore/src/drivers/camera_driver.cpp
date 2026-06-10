@@ -15,6 +15,6 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
 
-// Base implementations are provided by concrete driver classes
-// This file exists for future base class implementations if needed
-
+// CameraDriver::get_device_state() is defined inline in camera_driver.h so the
+// CameraDriver vtable stays weak (no out-of-line key function), which keeps the
+// vendor static libraries linkable without a base-library ordering dependency.

@@ -47,7 +47,7 @@ TEST_CASE("QHY Camera Driver - Device metadata", "[qhy][camera][unit]") {
     CHECK(driver->get_device_number() == 3);
     CHECK(driver->get_description() == "QHY CCD Camera Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_interface_version() == 4);  // ICameraV4 (Platform 7)
     CHECK(driver->get_unique_id() == "QHY_3");
 }
 

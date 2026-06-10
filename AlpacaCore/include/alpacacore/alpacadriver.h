@@ -15,9 +15,13 @@
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/util/error_handling.h>
+
+#include <chrono>
+#include <cstdio>
+#include <ctime>
+#include <memory>
 #include <string>
 #include <string_view>
-#include <memory>
 #include <vector>
 
 namespace alpacacore {
@@ -153,5 +157,36 @@ public:
      */
     virtual std::string command_string(std::string_view command, bool raw = false) = 0;
 };
+
+/**
+ * @brief Current UTC time formatted for a DeviceState "TimeStamp" entry.
+ *
+ * Returns an ISO 8601 / round-trippable string (YYYY-MM-DDTHH:MM:SS.mmmZ).
+ * Every Platform 7 DeviceState response includes a TimeStamp recording when the
+ * state snapshot was taken; this is the shared helper the device base classes
+ * use to produce it. Defined inline so it is available in every translation
+ * unit (including the per-vendor static libraries) without a link-order
+ * dependency on the core library.
+ */
+inline std::string device_state_timestamp() {
+    using clock = std::chrono::system_clock;
+    const auto now = clock::now();
+    const std::time_t secs = clock::to_time_t(now);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+
+    std::tm utc_tm{};
+#if defined(_WIN32)
+    gmtime_s(&utc_tm, &secs);
+#else
+    gmtime_r(&secs, &utc_tm);
+#endif
+
+    char date_buf[24];
+    std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%dT%H:%M:%S", &utc_tm);
+
+    char out[40];
+    std::snprintf(out, sizeof(out), "%s.%03lldZ", date_buf, static_cast<long long>(ms));
+    return out;
+}
 
 } // namespace alpacacore

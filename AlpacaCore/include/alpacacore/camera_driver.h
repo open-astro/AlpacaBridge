@@ -66,6 +66,36 @@ class CameraDriver : public AlpacaDriver {
 public:
     virtual ~CameraDriver() = default;
 
+    // Platform 7 operational state (ICameraV4). Built once here from the
+    // individual property getters so the reported values always agree with the
+    // corresponding GET endpoints (a consistency ConformU verifies). Properties
+    // that throw (not implemented / not currently known) are omitted; a
+    // TimeStamp entry is always added. Defined inline to keep the CameraDriver
+    // vtable weak so the per-vendor static libraries link without a base-library
+    // ordering dependency.
+    std::vector<DeviceState> get_device_state() const override {
+        std::vector<DeviceState> state;
+
+        auto add = [&state](const char* name, auto getter) {
+            try {
+                state.push_back({name, DeviceStateValue{getter()}});
+            } catch (const AlpacaException&) {
+                // Not currently known: omit per the DeviceState contract.
+            }
+        };
+
+        add("CameraState", [this] { return static_cast<std::int32_t>(get_camera_state()); });
+        add("CCDTemperature", [this] { return get_ccd_temperature(); });
+        add("CoolerPower", [this] { return get_cooler_power(); });
+        add("HeatSinkTemperature", [this] { return get_heat_sink_temperature(); });
+        add("ImageReady", [this] { return get_image_ready(); });
+        add("IsPulseGuiding", [this] { return get_is_pulse_guiding(); });
+        add("PercentCompleted", [this] { return get_percent_completed(); });
+
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
+    }
+
     // Camera-specific properties
 
     virtual int get_bayer_offset_x() const = 0;
