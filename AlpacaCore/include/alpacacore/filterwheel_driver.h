@@ -39,8 +39,8 @@ public:
         std::vector<DeviceState> state;
         try {
             state.push_back({"Position", DeviceStateValue{static_cast<std::int32_t>(get_position())}});
-        } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
-            // Not currently known: omit per the DeviceState contract.
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
         }
         state.push_back({"TimeStamp", device_state_timestamp()});
         return state;

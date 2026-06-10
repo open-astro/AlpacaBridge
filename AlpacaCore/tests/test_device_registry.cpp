@@ -11,15 +11,18 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include "catch2_compat.h"
-
-#include <alpacacore/device_registry.h>
 #include <alpacacore/alpaca_defs.h>
+#include <alpacacore/device_registry.h>
+#include <alpacacore/focuser_driver.h>
+
+#include <algorithm>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
-#include <algorithm>
+
+#include "catch2_compat.h"
 
 namespace {
 
@@ -144,4 +147,66 @@ TEST_CASE("DeviceRegistry reports device capabilities", "[registry]") {
     REQUIRE(cap0->driver_info == "fake driver");
     REQUIRE(cap0->driver_version == "0.0.1");
     REQUIRE(cap0->interface_version == 1);
+}
+
+namespace {
+
+// Minimal focuser used to pin the DeviceState omit-on-throw contract: a getter
+// that throws -- AlpacaException or any unwrapped vendor exception -- means the
+// property is omitted, never that get_device_state() itself throws.
+class ThrowingFocuser final : public alpacacore::FocuserDriver {
+public:
+    int get_device_number() const override { return 0; }
+    std::string get_name() const override { return "ThrowingFocuser"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Focuser; }
+    std::string get_unique_id() const override { return "throwing-focuser"; }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 4; }
+    bool get_connected() const override { return true; }
+    void set_connected(bool) override {}
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return ""; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return ""; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return ""; }
+
+    bool get_absolute() const override { return true; }
+    bool get_is_moving() const override { return false; }
+    int get_max_step() const override { return 1000; }
+    int get_max_increment() const override { return 1000; }
+    int get_position() const override { throw std::runtime_error("unwrapped vendor SDK error"); }
+    double get_step_size() const override { return 1.0; }
+    bool get_temp_comp_available() const override { return false; }
+    bool get_temp_comp() const override { return false; }
+    void set_temp_comp(bool) override {}
+    double get_temperature() const override {
+        throw alpacacore::AlpacaException("not implemented", alpacacore::AlpacaError::NotImplemented);
+    }
+    void halt() override {}
+    void move(int) override {}
+};
+
+}  // namespace
+
+TEST_CASE("DeviceState omits properties whose getters throw", "[driver]") {
+    ThrowingFocuser focuser;
+
+    std::vector<alpacacore::DeviceState> state;
+    REQUIRE_NOTHROW(state = focuser.get_device_state());
+
+    auto has = [&state](const std::string& name) {
+        return std::any_of(state.begin(), state.end(),
+                           [&](const alpacacore::DeviceState& entry) { return entry.name == name; });
+    };
+
+    // Healthy getter and the mandatory TimeStamp are reported.
+    CHECK(has("IsMoving"));
+    CHECK(has("TimeStamp"));
+    // Position throws an unwrapped std::runtime_error, Temperature a proper
+    // AlpacaException -- both are omitted rather than propagated.
+    CHECK_FALSE(has("Position"));
+    CHECK_FALSE(has("Temperature"));
 }

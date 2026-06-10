@@ -40,8 +40,8 @@ public:
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});
-            } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
-                // Sensor not implemented: omit per the DeviceState contract.
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Sensor not implemented -- or an unwrapped vendor error -- so omit per the DeviceState contract.
             }
         };
         add("CloudCover", [this] { return get_cloud_cover(); });

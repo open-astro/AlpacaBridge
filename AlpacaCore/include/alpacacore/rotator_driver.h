@@ -36,8 +36,8 @@ public:
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});
-            } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
-                // Not currently known: omit per the DeviceState contract.
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
             }
         };
         add("IsMoving", [this] { return get_is_moving(); });
