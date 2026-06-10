@@ -66,7 +66,6 @@ AlpacaCore defines pure virtual interfaces for all ASCOM device types:
 | ObservingConditions | `observingconditions_driver.h` |
 | Rotator | `rotator_driver.h` |
 | SafetyMonitor | `safetymonitor_driver.h` |
-| Shutter | `shutter_driver.h` |
 | Switch | `switch_driver.h` |
 | Telescope | `telescope_driver.h` |
 

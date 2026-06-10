@@ -12,26 +12,28 @@
 
 #pragma once
 
-#include <string>
-#include <exception>
+#include <alpacacore/alpaca_errors.h>
+
 #include <cstdint>
+#include <exception>
+#include <string>
 
 namespace alpacahttp::util {
 
-// Alpaca error codes
+// AlpacaHTTP-facing names for the canonical ASCOM error numbers defined in
+// alpacacore::AlpacaError (the single source of truth). Aliased — not
+// re-declared — so the two layers can never drift apart.
 namespace ErrorCode {
-    constexpr std::int32_t SUCCESS = 0;
-    constexpr std::int32_t NOT_IMPLEMENTED = 0x400;  // 1024
-    constexpr std::int32_t INVALID_VALUE = 0x401;  // 1025
-    constexpr std::int32_t VALUE_NOT_SET = 0x402;  // 1026
-    constexpr std::int32_t NOT_CONNECTED = 0x407;  // 1031
-    constexpr std::int32_t INVALID_WHILE_PARKED = 0x408; // 1032
-    constexpr std::int32_t INVALID_WHILE_SLAVED = 0x409; // 1033
-    constexpr std::int32_t INVALID_OPERATION = 0x40B; // 1035
-    constexpr std::int32_t ACTION_NOT_IMPLEMENTED = 0x40C; // 1036
-    constexpr std::int32_t DRIVER_ERROR = 0x500; // 1280
-    constexpr std::int32_t DRIVER_NOT_READY = 0x501; // 1281
-    constexpr std::int32_t NOT_SAFE = 0x502; // 1282
+constexpr std::int32_t SUCCESS = alpacacore::AlpacaError::Success;
+constexpr std::int32_t NOT_IMPLEMENTED = alpacacore::AlpacaError::NotImplemented;
+constexpr std::int32_t INVALID_VALUE = alpacacore::AlpacaError::InvalidValue;
+constexpr std::int32_t VALUE_NOT_SET = alpacacore::AlpacaError::ValueNotSet;
+constexpr std::int32_t NOT_CONNECTED = alpacacore::AlpacaError::NotConnected;
+constexpr std::int32_t INVALID_WHILE_PARKED = alpacacore::AlpacaError::InvalidWhileParked;
+constexpr std::int32_t INVALID_WHILE_SLAVED = alpacacore::AlpacaError::InvalidWhileSlaved;
+constexpr std::int32_t INVALID_OPERATION = alpacacore::AlpacaError::InvalidOperation;
+constexpr std::int32_t ACTION_NOT_IMPLEMENTED = alpacacore::AlpacaError::ActionNotImplemented;
+constexpr std::int32_t DRIVER_ERROR = alpacacore::AlpacaError::DriverException;
 }
 
 // Map exception to Alpaca error code and message

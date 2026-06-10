@@ -66,6 +66,40 @@ int main() {
     EXPECT(request.has_query_param("RightAscension"));
     EXPECT(request.has_query_param("Declination"));
 
+    // Conformance: "Parameter names are not case sensitive, so clients and
+    // drivers should be prepared for parameter names to be supplied ... with
+    // any casing." Query parameter lookups must match regardless of casing.
+    EXPECT(request.has_query_param("rightascension"));
+    EXPECT(request.has_query_param("DECLINATION"));
+    EXPECT(request.get_query_param("RIGHTASCENSION") == "1.5");
+    EXPECT(request.get_query_param("declination") == "-20.3");
+    EXPECT(!request.has_query_param("nonexistent"));
+
+    // Conformance: HTTP 400 "indicates that the device could not interpret the
+    // request e.g. an invalid device number or misspelt device type". These
+    // must be 400 (Bad Request), not 404, and carry a non-zero ErrorNumber.
+    {
+        // Misspelt / unknown device type.
+        const auto resp = route_request(router, "GET", "/api/v1/wibble/0/connected");
+        EXPECT(resp.status_code() == 400);
+        const auto json = nlohmann::json::parse(resp.body());
+        EXPECT(json.value("ErrorNumber", 0) != 0);
+    }
+    {
+        // Valid device type, unknown method.
+        const auto resp = route_request(router, "GET", "/api/v1/telescope/0/notarealmethod");
+        EXPECT(resp.status_code() == 400);
+        const auto json = nlohmann::json::parse(resp.body());
+        EXPECT(json.value("ErrorNumber", 0) != 0);
+    }
+    {
+        // Valid type and method, but no device registered at that number.
+        const auto resp = route_request(router, "GET", "/api/v1/telescope/4242/connected");
+        EXPECT(resp.status_code() == 400);
+        const auto json = nlohmann::json::parse(resp.body());
+        EXPECT(json.value("ErrorNumber", 0) != 0);
+    }
+
 #ifdef ALPACACORE_ENABLE_ZWO
     // Ensure idempotent behavior across repeated test runs.
     {

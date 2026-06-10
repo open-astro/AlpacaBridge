@@ -22,7 +22,7 @@ This file is the single source of truth for agent behavior in this repository.
 - Call flow is always:
   - `AlpacaHTTP -> AlpacaCore driver -> vendor implementation`.
 
-Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Telescope, FilterWheel, Focuser, Rotator, Dome, Shutter, Switch, CoverCalibrator, ObservingConditions, SafetyMonitor.
+Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Telescope, FilterWheel, Focuser, Rotator, Dome, Switch, CoverCalibrator, ObservingConditions, SafetyMonitor. These are exactly the 10 ASCOM Alpaca device types — do not invent new top-level device types.
 
 ## Language, Style, and Safety
 
@@ -119,6 +119,18 @@ When adding a new vendor/device type in AlpacaCore, also update AlpacaHTTP:
 8. **Routing/config tests** — add or update tests in `AlpacaHTTP/tests/`.
 
 Vendor registration alone is not enough for HTTP/UI visibility. All eight steps must be completed for a new vendor/device to be fully functional end-to-end.
+
+## Alpaca Protocol Conformance (AlpacaHTTP)
+
+These rules come straight from the ASCOM Alpaca API definition (https://ascom-standards.org/api/) and are enforced by ConformU. Do not regress them:
+
+- **Parameter names are case-insensitive.** The spec: "Parameter names are not case sensitive, so clients and drivers should be prepared for parameter names to be supplied ... with any casing." This applies to **both** GET query params and PUT form-body params. `Request::get_query_param`/`has_query_param` and the router's `get_form_value` all match case-insensitively. Never special-case behavior on `User-Agent` (e.g. a "strict only for ConformU" path) — test behavior must equal production behavior.
+- **URLs are case-sensitive and lowercase.** Device type and method path segments must be lower-case; that check stays.
+- **HTTP status codes:**
+  - `200` — request was interpreted and reached the driver. Driver exceptions (NotImplemented, InvalidValue, NotConnected, etc.) ride in the JSON `ErrorNumber`/`ErrorMessage` fields with a `200`. `apply_error_status` exists to keep these at 200 — never downgrade a driver error to 4xx/5xx.
+  - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, and unregistered device number. A genuinely unroutable URL (no device/management match) stays 404.
+  - `500` — unexpected internal error only.
+- Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging
 
@@ -472,3 +484,4 @@ No external SDK — reads weather data from a local WeeWX weather station instan
 - Do not add HTTP/server code to AlpacaCore.
 - Do not add vendor SDK usage to AlpacaHTTP.
 - Do not add desktop GUI frameworks (Qt, GTK, wxWidgets, etc.). The web UI in `AlpacaHTTP/web/` is the only user interface.
+- Do not invent device types outside the ASCOM Alpaca standard set (Camera, CoverCalibrator, Dome, FilterWheel, Focuser, ObservingConditions, Rotator, SafetyMonitor, Switch, Telescope). Shutter control is part of the **Dome** interface (`OpenShutter`/`CloseShutter`/`ShutterStatus`), not a standalone device. A non-standard `Shutter` device type existed as unused scaffolding and was removed 2026-06-09 — clients (NINA, ConformU) cannot consume non-standard types, so they break interoperability.

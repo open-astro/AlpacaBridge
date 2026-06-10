@@ -284,6 +284,13 @@ std::string to_lower_copy(std::string value) {
     return value;
 }
 
+// Throw a parameter-validation failure with an explicit ASCOM error code, so
+// the ErrorNumber on the wire is deterministic rather than inferred from the
+// message text. A missing or unparseable parameter is InvalidValue (0x401).
+[[noreturn]] void throw_invalid_value(const std::string& message) {
+    throw alpacacore::AlpacaException(message, alpacacore::AlpacaError::InvalidValue);
+}
+
 std::string url_decode(const std::string& value) {
     std::string result;
     result.reserve(value.size());
@@ -339,7 +346,7 @@ double parse_double_value(const std::string& raw, const std::string& param_name)
         }
         return value;
     } catch (const std::exception&) {
-        throw std::runtime_error("Invalid value for parameter: " + param_name);
+        throw_invalid_value("Invalid value for parameter: " + param_name);
     }
 }
 
@@ -355,7 +362,7 @@ int parse_int_value(const std::string& raw, const std::string& param_name) {
         }
         return static_cast<int>(value);
     } catch (const std::exception&) {
-        throw std::runtime_error("Invalid value for parameter: " + param_name);
+        throw_invalid_value("Invalid value for parameter: " + param_name);
     }
 }
 
@@ -367,7 +374,7 @@ bool parse_bool_value(const std::string& raw, const std::string& param_name) {
     if (lowered == "false" || lowered == "0") {
         return false;
     }
-    throw std::runtime_error("Invalid value for parameter: " + param_name);
+    throw_invalid_value("Invalid value for parameter: " + param_name);
 }
 
 const std::unordered_set<std::string> kCommonMethods = {
@@ -581,12 +588,6 @@ const std::unordered_set<std::string> kDomeMethods = {
     "synctoazimuth",
 };
 
-const std::unordered_set<std::string> kShutterMethods = {
-    "close",
-    "open",
-    "shutterstate",
-};
-
 const std::unordered_set<std::string> kSwitchMethods = {
     "cancelasync",
     "canasync",
@@ -648,18 +649,8 @@ const std::unordered_set<std::string> kSafetyMonitorMethods = {
 
 bool is_known_device_type_name(const std::string& type_name) {
     static const std::unordered_set<std::string> kDeviceTypes = {
-        "camera",
-        "telescope",
-        "mount",
-        "filterwheel",
-        "focuser",
-        "rotator",
-        "dome",
-        "shutter",
-        "switch",
-        "covercalibrator",
-        "observingconditions",
-        "safetymonitor",
+        "camera", "telescope", "mount",           "filterwheel",         "focuser",       "rotator",
+        "dome",   "switch",    "covercalibrator", "observingconditions", "safetymonitor",
     };
     return kDeviceTypes.count(type_name) > 0;
 }
@@ -681,8 +672,6 @@ bool is_valid_method(alpacacore::DeviceType type, const std::string& method_name
             return kRotatorMethods.count(method_name) > 0;
         case alpacacore::DeviceType::Dome:
             return kDomeMethods.count(method_name) > 0;
-        case alpacacore::DeviceType::Shutter:
-            return kShutterMethods.count(method_name) > 0;
         case alpacacore::DeviceType::Switch:
             return kSwitchMethods.count(method_name) > 0;
         case alpacacore::DeviceType::CoverCalibrator:
@@ -731,25 +720,9 @@ std::optional<std::string> get_query_param_case_insensitive(const alpacahttp::Re
 }
 
 std::optional<std::string> get_form_value(std::string_view body, const std::string& key) {
-    if (body.empty()) {
-        return std::nullopt;
-    }
-    std::istringstream iss{std::string(body)};
-    std::string pair;
-    while (std::getline(iss, pair, '&')) {
-        auto eq_pos = pair.find('=');
-        if (eq_pos != std::string::npos) {
-            std::string form_key = url_decode(pair.substr(0, eq_pos));
-            std::string value = url_decode(pair.substr(eq_pos + 1));
-            if (form_key == key) {
-                return value;
-            }
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::string> get_form_value_case_insensitive(std::string_view body, const std::string& key) {
+    // Alpaca spec: "Parameter names are not case sensitive, so clients and
+    // drivers should be prepared for parameter names to be supplied ... with
+    // any casing." Match PUT form-body parameter names case-insensitively.
     if (body.empty()) {
         return std::nullopt;
     }
@@ -1630,8 +1603,6 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         } else {
             if (auto value = get_form_value(request.body(), "ClientTransactionID")) {
                 client_tx_id = parse_client_transaction_id(*value);
-            } else if (auto value = get_form_value_case_insensitive(request.body(), "ClientTransactionID")) {
-                client_tx_id = parse_client_transaction_id(*value);
             }
         }
     } else if (request.method() == HttpMethod::GET) {
@@ -1641,7 +1612,9 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
     }
 
     if (!is_lowercase_ascii(match.device_type) || !is_known_device_type_name(match.device_type)) {
-        response.set_status(404, "Not Found");
+        // Alpaca spec: HTTP 400 indicates the device could not interpret the
+        // request, e.g. a misspelt device type or invalid device number.
+        response.set_status(400, "Bad Request");
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
             util::ErrorCode::INVALID_VALUE,
@@ -1656,7 +1629,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         alpacacore::DeviceType device_type = string_to_device_type(match.device_type);
 
         if (!is_lowercase_ascii(match.method_name) || !is_valid_method(device_type, match.method_name)) {
-            response.set_status(404, "Not Found");
+            response.set_status(400, "Bad Request");
             AlpacaResponse alpaca_response = make_error_response(
                 client_tx_id, server_tx_id,
                 util::ErrorCode::INVALID_VALUE,
@@ -1671,7 +1644,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         auto device = registry.get_device(device_type, static_cast<int>(match.device_number));
         
         if (!device) {
-            response.set_status(404, "Not Found");
+            response.set_status(400, "Bad Request");
             AlpacaResponse alpaca_response = make_error_response(
                 client_tx_id, server_tx_id,
                 util::ErrorCode::INVALID_VALUE,
@@ -1706,7 +1679,6 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
     if (type_str == "focuser") return alpacacore::DeviceType::Focuser;
     if (type_str == "rotator") return alpacacore::DeviceType::Rotator;
     if (type_str == "dome") return alpacacore::DeviceType::Dome;
-    if (type_str == "shutter") return alpacacore::DeviceType::Shutter;
     if (type_str == "switch") return alpacacore::DeviceType::Switch;
     if (type_str == "covercalibrator") return alpacacore::DeviceType::CoverCalibrator;
     if (type_str == "observingconditions") return alpacacore::DeviceType::ObservingConditions;
@@ -1786,7 +1758,7 @@ Response Router::dispatch_device_method(
                         } else if (val->is_string()) {
                             connected = parse_bool_value(val->get<std::string>(), "Connected");
                         } else {
-                            throw std::runtime_error("Invalid JSON value for parameter: Connected");
+                            throw_invalid_value("Invalid JSON value for parameter: Connected");
                         }
                         found = true;
                     } else if (const auto* val = find_json_value(*json_opt, "Value")) {
@@ -1795,7 +1767,7 @@ Response Router::dispatch_device_method(
                         } else if (val->is_string()) {
                             connected = parse_bool_value(val->get<std::string>(), "Connected");
                         } else {
-                            throw std::runtime_error("Invalid JSON value for parameter: Connected");
+                            throw_invalid_value("Invalid JSON value for parameter: Connected");
                         }
                         found = true;
                     }
@@ -1813,7 +1785,7 @@ Response Router::dispatch_device_method(
                 }
                 
                 if (!found) {
-                    throw std::runtime_error("Missing parameter: Connected");
+                    throw_invalid_value("Missing parameter: Connected");
                 }
 
                 if (connected && !device->get_connected()) {
@@ -1873,7 +1845,7 @@ Response Router::dispatch_device_method(
                 if (json_opt) {
                     if (const auto* val = find_json_value(*json_opt, "Action")) {
                         if (!val->is_string()) {
-                            throw std::runtime_error("Invalid JSON value for parameter: Action");
+                            throw_invalid_value("Invalid JSON value for parameter: Action");
                         }
                         action_name = val->get<std::string>();
                     }
@@ -1893,7 +1865,7 @@ Response Router::dispatch_device_method(
                 }
 
                 if (action_name.empty()) {
-                    throw std::runtime_error("Missing parameter: Action");
+                    throw_invalid_value("Missing parameter: Action");
                 }
                 
                 std::string result = device->action(action_name, action_parameters);
@@ -1912,7 +1884,7 @@ Response Router::dispatch_device_method(
                 if (json_opt) {
                     if (const auto* val = find_json_value(*json_opt, "Command")) {
                         if (!val->is_string()) {
-                            throw std::runtime_error("Invalid JSON value for parameter: Command");
+                            throw_invalid_value("Invalid JSON value for parameter: Command");
                         }
                         command = val->get<std::string>();
                     }
@@ -1922,7 +1894,7 @@ Response Router::dispatch_device_method(
                         } else if (val->is_string()) {
                             raw = parse_bool_value(val->get<std::string>(), "Raw");
                         } else {
-                            throw std::runtime_error("Invalid JSON value for parameter: Raw");
+                            throw_invalid_value("Invalid JSON value for parameter: Raw");
                         }
                     }
                 }
@@ -1937,7 +1909,7 @@ Response Router::dispatch_device_method(
                 }
 
                 if (command.empty()) {
-                    throw std::runtime_error("Missing parameter: Command");
+                    throw_invalid_value("Missing parameter: Command");
                 }
                 
                 device->command_blind(command, raw);
@@ -1955,7 +1927,7 @@ Response Router::dispatch_device_method(
                 if (json_opt) {
                     if (const auto* val = find_json_value(*json_opt, "Command")) {
                         if (!val->is_string()) {
-                            throw std::runtime_error("Invalid JSON value for parameter: Command");
+                            throw_invalid_value("Invalid JSON value for parameter: Command");
                         }
                         command = val->get<std::string>();
                     }
@@ -1965,7 +1937,7 @@ Response Router::dispatch_device_method(
                         } else if (val->is_string()) {
                             raw = parse_bool_value(val->get<std::string>(), "Raw");
                         } else {
-                            throw std::runtime_error("Invalid JSON value for parameter: Raw");
+                            throw_invalid_value("Invalid JSON value for parameter: Raw");
                         }
                     }
                 }
@@ -1980,7 +1952,7 @@ Response Router::dispatch_device_method(
                 }
 
                 if (command.empty()) {
-                    throw std::runtime_error("Missing parameter: Command");
+                    throw_invalid_value("Missing parameter: Command");
                 }
                 
                 bool result = device->command_bool(command, raw);
@@ -1999,7 +1971,7 @@ Response Router::dispatch_device_method(
                 if (json_opt) {
                     if (const auto* val = find_json_value(*json_opt, "Command")) {
                         if (!val->is_string()) {
-                            throw std::runtime_error("Invalid JSON value for parameter: Command");
+                            throw_invalid_value("Invalid JSON value for parameter: Command");
                         }
                         command = val->get<std::string>();
                     }
@@ -2009,7 +1981,7 @@ Response Router::dispatch_device_method(
                         } else if (val->is_string()) {
                             raw = parse_bool_value(val->get<std::string>(), "Raw");
                         } else {
-                            throw std::runtime_error("Invalid JSON value for parameter: Raw");
+                            throw_invalid_value("Invalid JSON value for parameter: Raw");
                         }
                     }
                 }
@@ -2024,7 +1996,7 @@ Response Router::dispatch_device_method(
                 }
 
                 if (command.empty()) {
-                    throw std::runtime_error("Missing parameter: Command");
+                    throw_invalid_value("Missing parameter: Command");
                 }
                 
                 std::string result = device->command_string(command, raw);
@@ -2119,12 +2091,6 @@ Response Router::dispatch_device_method(
                 return dispatch_dome_method(dome, method_name, request, client_tx_id, server_tx_id);
             }
         }
-        if (device_type == alpacacore::DeviceType::Shutter) {
-            auto shutter = std::dynamic_pointer_cast<alpacacore::ShutterDriver>(device);
-            if (shutter) {
-                return dispatch_shutter_method(shutter, method_name, request, client_tx_id, server_tx_id);
-            }
-        }
         if (device_type == alpacacore::DeviceType::CoverCalibrator) {
             auto covercalibrator = std::dynamic_pointer_cast<alpacacore::CoverCalibratorDriver>(device);
             if (covercalibrator) {
@@ -2206,7 +2172,7 @@ Response Router::dispatch_telescope_method(
                         if (val->is_string()) {
                             return parse_double_value(val->get<std::string>(), param_name);
                         }
-                        throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                        throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                     }
                 }
             }
@@ -2214,7 +2180,7 @@ Response Router::dispatch_telescope_method(
             if (auto value = get_form_value(request.body(), param_name)) {
                 return parse_double_value(*value, param_name);
             }
-            throw std::runtime_error("Missing parameter: " + param_name);
+            throw_invalid_value("Missing parameter: " + param_name);
         };
         
         // Helper function to parse int from query param, JSON body, or form-encoded body
@@ -2237,7 +2203,7 @@ Response Router::dispatch_telescope_method(
                         if (val->is_string()) {
                             return parse_int_value(val->get<std::string>(), param_name);
                         }
-                        throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                        throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                     }
                 }
             }
@@ -2245,7 +2211,7 @@ Response Router::dispatch_telescope_method(
             if (auto value = get_form_value(request.body(), param_name)) {
                 return parse_int_value(*value, param_name);
             }
-            throw std::runtime_error("Missing parameter: " + param_name);
+            throw_invalid_value("Missing parameter: " + param_name);
         };
         
         // Helper function to parse bool from query param, JSON body, or form-encoded body
@@ -2265,7 +2231,7 @@ Response Router::dispatch_telescope_method(
                     if (val->is_string()) {
                         return parse_bool_value(val->get<std::string>(), param_name);
                     }
-                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                 }
                 if (const auto* val = find_json_value(*json_opt, "Value")) {
                     if (val->is_boolean()) {
@@ -2274,7 +2240,7 @@ Response Router::dispatch_telescope_method(
                     if (val->is_string()) {
                         return parse_bool_value(val->get<std::string>(), param_name);
                     }
-                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                 }
             }
             
@@ -2285,8 +2251,8 @@ Response Router::dispatch_telescope_method(
             if (auto value = get_form_value(request.body(), "Value")) {
                 return parse_bool_value(*value, param_name);
             }
-            
-            throw std::runtime_error("Missing parameter: " + param_name);
+
+            throw_invalid_value("Missing parameter: " + param_name);
         };
         
         // Helper function to parse string from query param or JSON body
@@ -2298,13 +2264,13 @@ Response Router::dispatch_telescope_method(
             if (json_opt) {
                 if (const auto* val = find_json_value(*json_opt, param_name)) {
                     if (!val->is_string()) {
-                        throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                        throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                     }
                     return val->get<std::string>();
                 }
                 if (const auto* val = find_json_value(*json_opt, "Value")) {
                     if (!val->is_string()) {
-                        throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                        throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                     }
                     return val->get<std::string>();
                 }
@@ -2315,7 +2281,7 @@ Response Router::dispatch_telescope_method(
             if (auto value = get_form_value(request.body(), "Value")) {
                 return *value;
             }
-            throw std::runtime_error("Missing parameter: " + param_name);
+            throw_invalid_value("Missing parameter: " + param_name);
         };
         
         // GET-only boolean properties
@@ -2492,11 +2458,11 @@ Response Router::dispatch_telescope_method(
             else if (method_name == "destinationsideofpier") {
                 auto ra_value = get_query_param_case_insensitive(request, "RightAscension");
                 if (!ra_value) {
-                    throw std::runtime_error("Missing parameter: RightAscension");
+                    throw_invalid_value("Missing parameter: RightAscension");
                 }
                 auto dec_value = get_query_param_case_insensitive(request, "Declination");
                 if (!dec_value) {
-                    throw std::runtime_error("Missing parameter: Declination");
+                    throw_invalid_value("Missing parameter: Declination");
                 }
                 double ra = parse_double_value(*ra_value, "RightAscension");
                 double dec = parse_double_value(*dec_value, "Declination");
@@ -2723,7 +2689,7 @@ Response Router::dispatch_telescope_method(
                     }
                 }
                 if (date_str.empty()) {
-                    throw std::runtime_error("Missing parameter: UTCDate or Value");
+                    throw_invalid_value("Missing parameter: UTCDate or Value");
                 }
                 std::string cleaned = date_str;
                 if (!cleaned.empty() && (cleaned.back() == 'Z' || cleaned.back() == 'z')) {
@@ -2744,7 +2710,7 @@ Response Router::dispatch_telescope_method(
                     try {
                         millis = std::stoi(frac);
                     } catch (const std::exception&) {
-                        throw std::runtime_error("Invalid UTC date format: " + date_str);
+                        throw_invalid_value("Invalid UTC date format: " + date_str);
                     }
                 }
 
@@ -2752,11 +2718,11 @@ Response Router::dispatch_telescope_method(
                 std::istringstream ss(base);
                 ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
                 if (ss.fail()) {
-                    throw std::runtime_error("Invalid UTC date format: " + date_str);
+                    throw_invalid_value("Invalid UTC date format: " + date_str);
                 }
                 auto utc_time = timegm(&tm);
                 if (utc_time == static_cast<std::time_t>(-1)) {
-                    throw std::runtime_error("Failed to convert UTC date: " + date_str);
+                    throw_invalid_value("Failed to convert UTC date: " + date_str);
                 }
                 auto time_point = std::chrono::system_clock::from_time_t(utc_time) +
                     std::chrono::milliseconds(millis);
@@ -3147,7 +3113,7 @@ Response Router::dispatch_camera_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number()) {
@@ -3156,7 +3122,7 @@ Response Router::dispatch_camera_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -3165,7 +3131,7 @@ Response Router::dispatch_camera_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_int = [&](const std::string& param_name) -> int {
@@ -3184,7 +3150,7 @@ Response Router::dispatch_camera_method(
                 if (val->is_string()) {
                     return parse_int_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number_integer()) {
@@ -3196,7 +3162,7 @@ Response Router::dispatch_camera_method(
                 if (val->is_string()) {
                     return parse_int_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -3205,7 +3171,7 @@ Response Router::dispatch_camera_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_int_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
@@ -3221,7 +3187,7 @@ Response Router::dispatch_camera_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_boolean()) {
@@ -3230,7 +3196,7 @@ Response Router::dispatch_camera_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -3239,7 +3205,7 @@ Response Router::dispatch_camera_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_string = [&](const std::string& param_name) -> std::string {
@@ -3253,13 +3219,13 @@ Response Router::dispatch_camera_method(
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
                 if (!val->is_string()) {
-                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                 }
                 return val->get<std::string>();
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (!val->is_string()) {
-                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                 }
                 return val->get<std::string>();
             }
@@ -3270,7 +3236,7 @@ Response Router::dispatch_camera_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return *value;
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto format_utc = [](std::chrono::system_clock::time_point time_point) -> std::string {
@@ -3762,7 +3728,7 @@ Response Router::dispatch_switch_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number()) {
@@ -3771,7 +3737,7 @@ Response Router::dispatch_switch_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -3780,7 +3746,7 @@ Response Router::dispatch_switch_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_int = [&](const std::string& param_name) -> int {
@@ -3799,7 +3765,7 @@ Response Router::dispatch_switch_method(
                 if (val->is_string()) {
                     return parse_int_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number_integer()) {
@@ -3811,7 +3777,7 @@ Response Router::dispatch_switch_method(
                 if (val->is_string()) {
                     return parse_int_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -3820,7 +3786,7 @@ Response Router::dispatch_switch_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_int_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
@@ -3836,7 +3802,7 @@ Response Router::dispatch_switch_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_boolean()) {
@@ -3845,7 +3811,7 @@ Response Router::dispatch_switch_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -3854,7 +3820,7 @@ Response Router::dispatch_switch_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_string = [&](const std::string& param_name) -> std::string {
@@ -3865,13 +3831,13 @@ Response Router::dispatch_switch_method(
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
                 if (!val->is_string()) {
-                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                 }
                 return val->get<std::string>();
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (!val->is_string()) {
-                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                 }
                 return val->get<std::string>();
             }
@@ -3882,7 +3848,7 @@ Response Router::dispatch_switch_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return *value;
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     try {
@@ -4073,7 +4039,7 @@ Response Router::dispatch_filterwheel_method(
                 if (val->is_string()) {
                     return parse_int_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number_integer()) {
@@ -4085,7 +4051,7 @@ Response Router::dispatch_filterwheel_method(
                 if (val->is_string()) {
                     return parse_int_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -4094,7 +4060,7 @@ Response Router::dispatch_filterwheel_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_int_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     try {
@@ -4134,7 +4100,7 @@ Response Router::dispatch_filterwheel_method(
                 auto json_opt = parse_json(request.body());
                 const auto* names_val = json_opt ? find_json_value(*json_opt, "Names") : nullptr;
                 if (!names_val) {
-                    throw std::runtime_error("Missing parameter: Names");
+                    throw_invalid_value("Missing parameter: Names");
                 }
                 std::vector<std::string> names = names_val->get<std::vector<std::string>>();
                 filterwheel->set_names(names);
@@ -4145,7 +4111,7 @@ Response Router::dispatch_filterwheel_method(
                 auto json_opt = parse_json(request.body());
                 const auto* offsets_val = json_opt ? find_json_value(*json_opt, "FocusOffsets") : nullptr;
                 if (!offsets_val) {
-                    throw std::runtime_error("Missing parameter: FocusOffsets");
+                    throw_invalid_value("Missing parameter: FocusOffsets");
                 }
                 std::vector<int> offsets = offsets_val->get<std::vector<int>>();
                 filterwheel->set_focus_offsets(offsets);
@@ -4212,7 +4178,7 @@ Response Router::dispatch_focuser_method(
                 if (val->is_string()) {
                     return parse_int_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number_integer()) {
@@ -4224,7 +4190,7 @@ Response Router::dispatch_focuser_method(
                 if (val->is_string()) {
                     return parse_int_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -4233,7 +4199,7 @@ Response Router::dispatch_focuser_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_int_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
@@ -4249,7 +4215,7 @@ Response Router::dispatch_focuser_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_boolean()) {
@@ -4258,7 +4224,7 @@ Response Router::dispatch_focuser_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -4267,7 +4233,7 @@ Response Router::dispatch_focuser_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     try {
@@ -4395,7 +4361,7 @@ Response Router::dispatch_rotator_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number()) {
@@ -4404,7 +4370,7 @@ Response Router::dispatch_rotator_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -4413,7 +4379,7 @@ Response Router::dispatch_rotator_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
@@ -4429,7 +4395,7 @@ Response Router::dispatch_rotator_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_boolean()) {
@@ -4438,7 +4404,7 @@ Response Router::dispatch_rotator_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -4447,7 +4413,7 @@ Response Router::dispatch_rotator_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     try {
@@ -4589,7 +4555,7 @@ Response Router::dispatch_dome_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number()) {
@@ -4598,7 +4564,7 @@ Response Router::dispatch_dome_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -4607,7 +4573,7 @@ Response Router::dispatch_dome_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
@@ -4623,7 +4589,7 @@ Response Router::dispatch_dome_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_boolean()) {
@@ -4632,7 +4598,7 @@ Response Router::dispatch_dome_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -4641,7 +4607,7 @@ Response Router::dispatch_dome_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     try {
@@ -4819,71 +4785,6 @@ Response Router::dispatch_dome_method(
     }
 }
 
-Response Router::dispatch_shutter_method(
-    std::shared_ptr<alpacacore::ShutterDriver> shutter,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
-
-    try {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "shutterstate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, static_cast<int>(shutter->get_shutter_state()));
-                response.set_body(alpaca_response);
-                return response;
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "open") {
-                shutter->open();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
-            } else if (method_name == "close") {
-                shutter->close();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
-            }
-        }
-
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for Shutter"
-        );
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in shutter method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in shutter method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
-}
-
 Response Router::dispatch_covercalibrator_method(
     std::shared_ptr<alpacacore::CoverCalibratorDriver> covercalibrator,
     const std::string& method_name,
@@ -4909,7 +4810,7 @@ Response Router::dispatch_covercalibrator_method(
                 if (val->is_string()) {
                     return parse_int_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number_integer()) {
@@ -4921,7 +4822,7 @@ Response Router::dispatch_covercalibrator_method(
                 if (val->is_string()) {
                     return parse_int_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -4930,7 +4831,7 @@ Response Router::dispatch_covercalibrator_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_int_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     try {
@@ -5052,7 +4953,7 @@ Response Router::dispatch_observingconditions_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number()) {
@@ -5061,7 +4962,7 @@ Response Router::dispatch_observingconditions_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5070,7 +4971,7 @@ Response Router::dispatch_observingconditions_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_string = [&](const std::string& param_name) -> std::string {
@@ -5081,13 +4982,13 @@ Response Router::dispatch_observingconditions_method(
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
                 if (!val->is_string()) {
-                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                 }
                 return val->get<std::string>();
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (!val->is_string()) {
-                    throw std::runtime_error("Invalid JSON value for parameter: " + param_name);
+                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
                 }
                 return val->get<std::string>();
             }
@@ -5098,7 +4999,7 @@ Response Router::dispatch_observingconditions_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return *value;
         }
-        throw std::runtime_error("Missing parameter: " + param_name);
+        throw_invalid_value("Missing parameter: " + param_name);
     };
 
     auto parse_property_name = [&]() -> std::string {
@@ -5112,13 +5013,13 @@ Response Router::dispatch_observingconditions_method(
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, "PropertyName")) {
                 if (!val->is_string()) {
-                    throw std::runtime_error("Invalid JSON value for parameter: PropertyName");
+                    throw_invalid_value("Invalid JSON value for parameter: PropertyName");
                 }
                 return val->get<std::string>();
             }
             if (const auto* val = find_json_value(*json_opt, "SensorName")) {
                 if (!val->is_string()) {
-                    throw std::runtime_error("Invalid JSON value for parameter: SensorName");
+                    throw_invalid_value("Invalid JSON value for parameter: SensorName");
                 }
                 return val->get<std::string>();
             }
@@ -5129,7 +5030,7 @@ Response Router::dispatch_observingconditions_method(
         if (auto value = get_form_value(request.body(), "SensorName")) {
             return *value;
         }
-        throw std::runtime_error("Missing parameter: PropertyName");
+        throw_invalid_value("Missing parameter: PropertyName");
     };
 
     try {

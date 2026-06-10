@@ -22,8 +22,8 @@ const char* device_type_to_string(DeviceType type) {
         case DeviceType::FilterWheel:       return "FilterWheel";
         case DeviceType::Focuser:           return "Focuser";
         case DeviceType::Rotator:           return "Rotator";
-        case DeviceType::Dome:              return "Dome";
-        case DeviceType::Shutter:           return "Shutter";
+        case DeviceType::Dome:
+            return "Dome";
         case DeviceType::Switch:             return "Switch";
         case DeviceType::CoverCalibrator:    return "CoverCalibrator";
         case DeviceType::ObservingConditions: return "ObservingConditions";

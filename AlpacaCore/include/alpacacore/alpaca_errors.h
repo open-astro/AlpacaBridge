@@ -16,10 +16,12 @@
 namespace alpacacore {
 
 /**
- * @brief Alpaca error numbers.
+ * @brief Canonical ASCOM Alpaca error numbers.
  *
- * These correspond to ASCOM Alpaca error codes.
- * Higher layers map AlpacaException to these error numbers.
+ * This namespace is the single source of truth for Alpaca error codes;
+ * AlpacaHTTP's util::ErrorCode aliases these values so the two layers cannot
+ * drift. 0x400-0x4FF are the ASCOM-reserved range; 0x500-0xFFF is the
+ * driver-specific range (DriverException is the generic catch-all there).
  */
 namespace AlpacaError {
     constexpr int Success = 0;
@@ -35,14 +37,7 @@ namespace AlpacaError {
     constexpr int ActionNotImplemented = 0x40C;   // 1036
     constexpr int NotInCacheException = 0x40D;    // 1037
     constexpr int UnspecifiedError = 0x4FF;       // 1279
-    constexpr int DriverException = 0x500;        // 1280
-    constexpr int NotSupported = 0x500;           // 1280
-    constexpr int Slaved = 0x501;                 // 1281
-    constexpr int Parked = 0x502;                 // 1282
-    constexpr int InvalidWhileSlewing = 0x503;    // 1283
-    constexpr int NotAtHome = 0x504;              // 1284
-    constexpr int InvalidOperationException = 0x505; // 1285
-    constexpr int InvalidOperationException2 = 0x506; // 1286
+    constexpr int DriverException = 0x500;        // 1280 (generic driver error)
 }
 
 } // namespace alpacacore
