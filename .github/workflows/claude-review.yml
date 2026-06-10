@@ -12,6 +12,14 @@ concurrency:
 
 jobs:
   review:
+    # CLAUDE_CODE_OAUTH_TOKEN is a repository secret, which GitHub withholds from
+    # Dependabot-triggered and fork-triggered pull_request runs as a security
+    # boundary. Without the token the claude-code-action can't authenticate and
+    # the job fails spuriously. Skip the review in those cases (it is not a
+    # required status check; a maintainer reviews bot and fork PRs by hand).
+    if: >-
+      github.actor != 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
