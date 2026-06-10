@@ -40,7 +40,7 @@ public:
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});
-            } catch (const AlpacaException&) {
+            } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
                 // Sensor not implemented: omit per the DeviceState contract.
             }
         };
