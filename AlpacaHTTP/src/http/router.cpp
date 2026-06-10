@@ -722,25 +722,9 @@ std::optional<std::string> get_query_param_case_insensitive(const alpacahttp::Re
 }
 
 std::optional<std::string> get_form_value(std::string_view body, const std::string& key) {
-    if (body.empty()) {
-        return std::nullopt;
-    }
-    std::istringstream iss{std::string(body)};
-    std::string pair;
-    while (std::getline(iss, pair, '&')) {
-        auto eq_pos = pair.find('=');
-        if (eq_pos != std::string::npos) {
-            std::string form_key = url_decode(pair.substr(0, eq_pos));
-            std::string value = url_decode(pair.substr(eq_pos + 1));
-            if (form_key == key) {
-                return value;
-            }
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::string> get_form_value_case_insensitive(std::string_view body, const std::string& key) {
+    // Alpaca spec: "Parameter names are not case sensitive, so clients and
+    // drivers should be prepared for parameter names to be supplied ... with
+    // any casing." Match PUT form-body parameter names case-insensitively.
     if (body.empty()) {
         return std::nullopt;
     }
@@ -1621,8 +1605,6 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         } else {
             if (auto value = get_form_value(request.body(), "ClientTransactionID")) {
                 client_tx_id = parse_client_transaction_id(*value);
-            } else if (auto value = get_form_value_case_insensitive(request.body(), "ClientTransactionID")) {
-                client_tx_id = parse_client_transaction_id(*value);
             }
         }
     } else if (request.method() == HttpMethod::GET) {
@@ -1632,7 +1614,9 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
     }
 
     if (!is_lowercase_ascii(match.device_type) || !is_known_device_type_name(match.device_type)) {
-        response.set_status(404, "Not Found");
+        // Alpaca spec: HTTP 400 indicates the device could not interpret the
+        // request, e.g. a misspelt device type or invalid device number.
+        response.set_status(400, "Bad Request");
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
             util::ErrorCode::INVALID_VALUE,
@@ -1647,7 +1631,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         alpacacore::DeviceType device_type = string_to_device_type(match.device_type);
 
         if (!is_lowercase_ascii(match.method_name) || !is_valid_method(device_type, match.method_name)) {
-            response.set_status(404, "Not Found");
+            response.set_status(400, "Bad Request");
             AlpacaResponse alpaca_response = make_error_response(
                 client_tx_id, server_tx_id,
                 util::ErrorCode::INVALID_VALUE,
@@ -1662,7 +1646,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         auto device = registry.get_device(device_type, static_cast<int>(match.device_number));
         
         if (!device) {
-            response.set_status(404, "Not Found");
+            response.set_status(400, "Bad Request");
             AlpacaResponse alpaca_response = make_error_response(
                 client_tx_id, server_tx_id,
                 util::ErrorCode::INVALID_VALUE,

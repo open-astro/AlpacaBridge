@@ -64,7 +64,6 @@ private:
 
     void parse_query_string();
     HttpMethod parse_method(std::string_view method_str);
-    bool strict_casing_enabled() const;
 };
 
 } // namespace alpacahttp

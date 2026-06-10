@@ -120,6 +120,18 @@ When adding a new vendor/device type in AlpacaCore, also update AlpacaHTTP:
 
 Vendor registration alone is not enough for HTTP/UI visibility. All eight steps must be completed for a new vendor/device to be fully functional end-to-end.
 
+## Alpaca Protocol Conformance (AlpacaHTTP)
+
+These rules come straight from the ASCOM Alpaca API definition (https://ascom-standards.org/api/) and are enforced by ConformU. Do not regress them:
+
+- **Parameter names are case-insensitive.** The spec: "Parameter names are not case sensitive, so clients and drivers should be prepared for parameter names to be supplied ... with any casing." This applies to **both** GET query params and PUT form-body params. `Request::get_query_param`/`has_query_param` and the router's `get_form_value` all match case-insensitively. Never special-case behavior on `User-Agent` (e.g. a "strict only for ConformU" path) — test behavior must equal production behavior.
+- **URLs are case-sensitive and lowercase.** Device type and method path segments must be lower-case; that check stays.
+- **HTTP status codes:**
+  - `200` — request was interpreted and reached the driver. Driver exceptions (NotImplemented, InvalidValue, NotConnected, etc.) ride in the JSON `ErrorNumber`/`ErrorMessage` fields with a `200`. `apply_error_status` exists to keep these at 200 — never downgrade a driver error to 4xx/5xx.
+  - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, and unregistered device number. A genuinely unroutable URL (no device/management match) stays 404.
+  - `500` — unexpected internal error only.
+- Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
+
 ## Debian Packaging
 
 - Package files live in `debian/` (control, rules, changelog, copyright, service file, maintainer scripts).
