@@ -25,7 +25,6 @@ TEST_CASE("Device type to string mapping", "[alpaca_defs]") {
     REQUIRE(std::string(device_type_to_string(DeviceType::Focuser)) == "Focuser");
     REQUIRE(std::string(device_type_to_string(DeviceType::Rotator)) == "Rotator");
     REQUIRE(std::string(device_type_to_string(DeviceType::Dome)) == "Dome");
-    REQUIRE(std::string(device_type_to_string(DeviceType::Shutter)) == "Shutter");
     REQUIRE(std::string(device_type_to_string(DeviceType::Switch)) == "Switch");
     REQUIRE(std::string(device_type_to_string(DeviceType::CoverCalibrator)) == "CoverCalibrator");
     REQUIRE(std::string(device_type_to_string(DeviceType::ObservingConditions)) == "ObservingConditions");

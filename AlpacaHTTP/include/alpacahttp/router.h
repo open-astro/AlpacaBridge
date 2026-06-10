@@ -25,7 +25,6 @@
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/dome_driver.h>
-#include <alpacacore/shutter_driver.h>
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/observingconditions_driver.h>
 #include <alpacacore/safetymonitor_driver.h>
@@ -169,14 +168,6 @@ private:
 
     Response dispatch_dome_method(
         std::shared_ptr<alpacacore::DomeDriver> dome,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
-
-    Response dispatch_shutter_method(
-        std::shared_ptr<alpacacore::ShutterDriver> shutter,
         const std::string& method_name,
         const Request& request,
         std::uint32_t client_tx_id,

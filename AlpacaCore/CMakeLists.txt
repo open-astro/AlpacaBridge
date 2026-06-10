@@ -76,7 +76,6 @@ set(ALPACACORE_DRIVER_SOURCES
     src/drivers/focuser_driver.cpp
     src/drivers/rotator_driver.cpp
     src/drivers/dome_driver.cpp
-    src/drivers/shutter_driver.cpp
     src/drivers/switch_driver.cpp
     src/drivers/covercalibrator_driver.cpp
     src/drivers/observingconditions_driver.cpp

@@ -22,7 +22,7 @@ This file is the single source of truth for agent behavior in this repository.
 - Call flow is always:
   - `AlpacaHTTP -> AlpacaCore driver -> vendor implementation`.
 
-Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Telescope, FilterWheel, Focuser, Rotator, Dome, Shutter, Switch, CoverCalibrator, ObservingConditions, SafetyMonitor.
+Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Telescope, FilterWheel, Focuser, Rotator, Dome, Switch, CoverCalibrator, ObservingConditions, SafetyMonitor. These are exactly the 10 ASCOM Alpaca device types — do not invent new top-level device types.
 
 ## Language, Style, and Safety
 
@@ -472,3 +472,4 @@ No external SDK — reads weather data from a local WeeWX weather station instan
 - Do not add HTTP/server code to AlpacaCore.
 - Do not add vendor SDK usage to AlpacaHTTP.
 - Do not add desktop GUI frameworks (Qt, GTK, wxWidgets, etc.). The web UI in `AlpacaHTTP/web/` is the only user interface.
+- Do not invent device types outside the ASCOM Alpaca standard set (Camera, CoverCalibrator, Dome, FilterWheel, Focuser, ObservingConditions, Rotator, SafetyMonitor, Switch, Telescope). Shutter control is part of the **Dome** interface (`OpenShutter`/`CloseShutter`/`ShutterStatus`), not a standalone device. A non-standard `Shutter` device type existed as unused scaffolding and was removed 2026-06-09 — clients (NINA, ConformU) cannot consume non-standard types, so they break interoperability.

@@ -30,7 +30,6 @@ enum class DeviceType {
     Focuser,
     Rotator,
     Dome,
-    Shutter,
     Switch,
     CoverCalibrator,
     ObservingConditions,

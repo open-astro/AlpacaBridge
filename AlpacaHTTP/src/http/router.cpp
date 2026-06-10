@@ -581,12 +581,6 @@ const std::unordered_set<std::string> kDomeMethods = {
     "synctoazimuth",
 };
 
-const std::unordered_set<std::string> kShutterMethods = {
-    "close",
-    "open",
-    "shutterstate",
-};
-
 const std::unordered_set<std::string> kSwitchMethods = {
     "cancelasync",
     "canasync",
@@ -655,7 +649,6 @@ bool is_known_device_type_name(const std::string& type_name) {
         "focuser",
         "rotator",
         "dome",
-        "shutter",
         "switch",
         "covercalibrator",
         "observingconditions",
@@ -681,8 +674,6 @@ bool is_valid_method(alpacacore::DeviceType type, const std::string& method_name
             return kRotatorMethods.count(method_name) > 0;
         case alpacacore::DeviceType::Dome:
             return kDomeMethods.count(method_name) > 0;
-        case alpacacore::DeviceType::Shutter:
-            return kShutterMethods.count(method_name) > 0;
         case alpacacore::DeviceType::Switch:
             return kSwitchMethods.count(method_name) > 0;
         case alpacacore::DeviceType::CoverCalibrator:
@@ -1706,7 +1697,6 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
     if (type_str == "focuser") return alpacacore::DeviceType::Focuser;
     if (type_str == "rotator") return alpacacore::DeviceType::Rotator;
     if (type_str == "dome") return alpacacore::DeviceType::Dome;
-    if (type_str == "shutter") return alpacacore::DeviceType::Shutter;
     if (type_str == "switch") return alpacacore::DeviceType::Switch;
     if (type_str == "covercalibrator") return alpacacore::DeviceType::CoverCalibrator;
     if (type_str == "observingconditions") return alpacacore::DeviceType::ObservingConditions;
@@ -2117,12 +2107,6 @@ Response Router::dispatch_device_method(
             auto dome = std::dynamic_pointer_cast<alpacacore::DomeDriver>(device);
             if (dome) {
                 return dispatch_dome_method(dome, method_name, request, client_tx_id, server_tx_id);
-            }
-        }
-        if (device_type == alpacacore::DeviceType::Shutter) {
-            auto shutter = std::dynamic_pointer_cast<alpacacore::ShutterDriver>(device);
-            if (shutter) {
-                return dispatch_shutter_method(shutter, method_name, request, client_tx_id, server_tx_id);
             }
         }
         if (device_type == alpacacore::DeviceType::CoverCalibrator) {
@@ -4807,71 +4791,6 @@ Response Router::dispatch_dome_method(
         return response;
     } catch (const std::exception& e) {
         util::log_error("Exception in dome method '" + method_name + "': " + std::string(e.what()));
-        auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    }
-}
-
-Response Router::dispatch_shutter_method(
-    std::shared_ptr<alpacacore::ShutterDriver> shutter,
-    const std::string& method_name,
-    const Request& request,
-    std::uint32_t client_tx_id,
-    std::uint32_t server_tx_id) {
-    
-    Response response;
-
-    try {
-        if (request.method() == HttpMethod::GET) {
-            if (method_name == "shutterstate") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, static_cast<int>(shutter->get_shutter_state()));
-                response.set_body(alpaca_response);
-                return response;
-            }
-        }
-
-        if (request.method() == HttpMethod::PUT) {
-            if (method_name == "open") {
-                shutter->open();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
-            } else if (method_name == "close") {
-                shutter->close();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
-            }
-        }
-
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::NOT_IMPLEMENTED,
-            "Method '" + method_name + "' not yet implemented for Shutter"
-        );
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const alpacacore::AlpacaException& e) {
-        log_alpaca_exception("AlpacaException in shutter method '" + method_name + "'", e);
-        auto error_code = util::map_error_code(e.error_code());
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            std::string(e.what())
-        );
-        apply_error_status(response, error_code);
-        response.set_body(alpaca_response);
-        return response;
-    } catch (const std::exception& e) {
-        util::log_error("Exception in shutter method '" + method_name + "': " + std::string(e.what()));
         auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
