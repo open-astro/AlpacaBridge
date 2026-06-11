@@ -897,7 +897,7 @@ async function loadServerInfo() {
         // build time) into the header badge.
         const headerVersion = document.getElementById('header-version');
         if (headerVersion) {
-            headerVersion.textContent = manufacturerVersion !== '—' ? manufacturerVersion : '';
+            headerVersion.textContent = manufacturerVersion !== '—' ? 'v' + manufacturerVersion : '';
         }
 
         serverInfo.innerHTML = `

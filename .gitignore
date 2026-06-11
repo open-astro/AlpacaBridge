@@ -73,3 +73,12 @@ __pycache__/
 
 # SVBONY SDK auto-generated camera config files
 U2SM*.bin
+
+# debian/changelog is generated from CHANGELOG.md by scripts/build_deb.sh
+# (single source of truth for release history)
+debian/changelog
+
+# Built package artifacts (when dpkg-buildpackage outputs land in the tree)
+*.deb
+*.buildinfo
+*.changes
