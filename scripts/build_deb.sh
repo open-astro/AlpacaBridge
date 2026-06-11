@@ -34,4 +34,4 @@ echo "[STEP] debian/changelog generated and parses cleanly."
 echo "[STEP] Building .deb with dpkg-buildpackage..."
 dpkg-buildpackage -us -uc -b "$@"
 
-echo "[DONE] Package built. See ../${PACKAGE}_${VERSION}_arm64.deb (or ../ for artifacts)."
+echo "[DONE] Package built. See ../${PACKAGE}_${VERSION}_$(dpkg --print-architecture).deb (or ../ for artifacts)."

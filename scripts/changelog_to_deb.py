@@ -10,7 +10,8 @@ from the VERSION file, and the in-progress section is written as
 
 Mapping:
   - Every "## [X.Y.Z] - YYYY-MM-DD" section becomes one Debian changelog
-    stanza for X.Y.Z, dated noon local time on the release date.
+    stanza for X.Y.Z, dated noon UTC on the release date (UTC so the
+    generated output is byte-identical across build environments).
   - Bullets keep their "### Added/Changed/..." category as a prefix and are
     re-wrapped to Debian's continuation-line layout. Markdown emphasis,
     inline code, and links are stripped.
@@ -102,8 +103,10 @@ def emit_stanza(out, package, version, distribution, bullets, date, maintainer):
 
 
 def section_date(section):
+    # Noon UTC, not local noon: keeps generated stanza dates byte-identical
+    # across build environments and DST transitions.
     d = datetime.date.fromisoformat(section["date"])
-    return datetime.datetime(d.year, d.month, d.day, 12, 0, 0).astimezone()
+    return datetime.datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
 
 def main():
@@ -114,6 +117,9 @@ def main():
     ap.add_argument("--version", required=True, help="version being built (from VERSION)")
     ap.add_argument("--maintainer", required=True, help='"Name <email>"')
     args = ap.parse_args()
+
+    if not VERSION_RE.match(args.version):
+        sys.exit("error: --version %r is not a valid Debian version" % args.version)
 
     sections = parse_changelog(args.changelog)
     released = [
