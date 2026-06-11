@@ -893,6 +893,13 @@ async function loadServerInfo() {
         const manufacturerVersion = resolveDescriptionValue(desc, ['ManufacturerVersion', 'manufacturerVersion', 'Version', 'version']) || '—';
         const location = resolveDescriptionValue(desc, ['Location', 'location']) || '';
 
+        // Mirror the server-reported version (sourced from the VERSION file at
+        // build time) into the header badge.
+        const headerVersion = document.getElementById('header-version');
+        if (headerVersion) {
+            headerVersion.textContent = manufacturerVersion !== '—' ? manufacturerVersion : '';
+        }
+
         serverInfo.innerHTML = `
             <div class="server-info-grid">
                 ${renderServerInfoRow('Server Name', serverName)}
