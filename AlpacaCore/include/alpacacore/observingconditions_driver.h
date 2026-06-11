@@ -31,6 +31,36 @@ class ObservingConditionsDriver : public AlpacaDriver {
 public:
     virtual ~ObservingConditionsDriver() = default;
 
+    // Platform 7 operational state (IObservingConditionsV2): the sensor
+    // properties (each omitted if that sensor is not implemented) plus a
+    // TimeStamp. Inline so the vtable stays weak; values come from the same
+    // getters as the GET endpoints.
+    std::vector<DeviceState> get_device_state() const override {
+        std::vector<DeviceState> state;
+        auto add = [&state](const char* name, auto getter) {
+            try {
+                state.push_back({name, DeviceStateValue{getter()}});
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Sensor not implemented -- or an unwrapped vendor error -- so omit per the DeviceState contract.
+            }
+        };
+        add("CloudCover", [this] { return get_cloud_cover(); });
+        add("DewPoint", [this] { return get_dew_point(); });
+        add("Humidity", [this] { return get_humidity(); });
+        add("Pressure", [this] { return get_pressure(); });
+        add("RainRate", [this] { return get_rain_rate(); });
+        add("SkyBrightness", [this] { return get_sky_brightness(); });
+        add("SkyQuality", [this] { return get_sky_quality(); });
+        add("SkyTemperature", [this] { return get_sky_temperature(); });
+        add("StarFWHM", [this] { return get_star_fwhm(); });
+        add("Temperature", [this] { return get_temperature(); });
+        add("WindDirection", [this] { return get_wind_direction(); });
+        add("WindGust", [this] { return get_wind_gust(); });
+        add("WindSpeed", [this] { return get_wind_speed(); });
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
+    }
+
     // ObservingConditions-specific properties
 
     /**

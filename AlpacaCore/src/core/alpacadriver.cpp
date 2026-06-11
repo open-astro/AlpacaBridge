@@ -13,5 +13,5 @@
 
 #include <alpacacore/alpacadriver.h>
 
-// Base class implementation is pure virtual interface
-
+// Base class implementation is pure virtual interface; shared device helpers
+// (e.g. device_state_timestamp) are defined inline in the headers.

@@ -50,7 +50,7 @@ TEST_CASE("Player One Camera Driver - Device metadata", "[playerone][camera][uni
     CHECK(driver->get_description() == "Player One Camera Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore Player One Camera Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_interface_version() == 4);  // ICameraV4 (Platform 7)
     // Without a connected camera the serial number is unknown, so the unique id falls
     // back to the device number.
     CHECK(driver->get_unique_id() == "PLAYERONE_3");

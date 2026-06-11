@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-06-07
+## Updated 2026-06-10
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -110,7 +110,7 @@ This document lists all hardware vendors and device types that are verified to w
 | ASI174MM Mini | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI174MM%20Mini/) |
 | ASI2600MC Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MC%20Pro/) |
 | ASI2600MM Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MM%20Pro/) |
-| ASI290MM Mini | USB |  | pending arm64 re-validation |
+| ASI290MM Mini | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI290MM%20Mini/) |
 | ASI462MM | USB |  | pending arm64 re-validation |
 | ASI662MC | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI662MC/) |
 

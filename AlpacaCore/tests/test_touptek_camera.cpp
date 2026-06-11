@@ -49,7 +49,7 @@ TEST_CASE("ToupTek Camera Driver - Device metadata", "[touptek][camera][unit]") 
     CHECK(driver->get_description() == "ToupTek Camera Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore ToupTek Camera Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_interface_version() == 4);  // ICameraV4 (Platform 7)
     // Without a connected camera the serial number is unknown, so the unique id falls
     // back to the device number.
     CHECK(driver->get_unique_id() == "TOUPTEK_3");

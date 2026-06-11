@@ -130,7 +130,7 @@ TEST_CASE("iOptron Telescope Driver - Device metadata", "[ioptron][telescope][un
     CHECK(driver->get_description() == "iOptron CEM120,70,40,26, GEM, HEM, HAE, HAZ series and SkyHunter Mount Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore iOptron Driver v1.0");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_interface_version() == 4);
     CHECK(driver->get_unique_id() == "iOptron_3");
 }
 

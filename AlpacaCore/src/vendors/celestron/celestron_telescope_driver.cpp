@@ -197,9 +197,7 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    int get_interface_version() const override {
-        return 3;
-    }
+    int get_interface_version() const override { return 4; }
 
     bool get_connected() const override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -379,21 +377,6 @@ public:
             skip_next_ra_learn_ = false;
             flip_in_progress_ = false;
         }
-    }
-
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            state.push_back({"Connected", connected_});
-            state.push_back({"Slewing", connected_ ? get_slewing_locked() : false});
-            state.push_back({"Tracking", connected_ ? get_tracking_locked() : false});
-            state.push_back({"RightAscension", cached_ra_hours_});
-            state.push_back({"Declination", cached_dec_degrees_});
-            state.push_back({"Altitude", cached_alt_degrees_});
-            state.push_back({"Azimuth", cached_az_degrees_});
-        }
-        return state;
     }
 
     std::vector<std::string> get_supported_actions() const override {

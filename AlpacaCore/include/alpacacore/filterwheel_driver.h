@@ -15,8 +15,10 @@
 
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
-#include <vector>
+
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace alpacacore {
 
@@ -29,6 +31,20 @@ namespace alpacacore {
 class FilterWheelDriver : public AlpacaDriver {
 public:
     virtual ~FilterWheelDriver() = default;
+
+    // Platform 7 operational state (IFilterWheelV3): Position (-1 while moving)
+    // plus a TimeStamp. Inline so the vtable stays weak; the value comes from
+    // the same getter as the GET endpoint.
+    std::vector<DeviceState> get_device_state() const override {
+        std::vector<DeviceState> state;
+        try {
+            state.push_back({"Position", DeviceStateValue{static_cast<std::int32_t>(get_position())}});
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
+        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
+    }
 
     // FilterWheel-specific properties
 

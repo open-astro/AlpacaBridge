@@ -146,18 +146,6 @@ public:
         connected_.store(false);
     }
 
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        if (!connected_.load()) {
-            return state;
-        }
-        try {
-            state.push_back({"Position", get_position()});
-        } catch (const std::exception&) {
-        }
-        return state;
-    }
-
     std::vector<std::string> get_supported_actions() const override {
         return {};
     }

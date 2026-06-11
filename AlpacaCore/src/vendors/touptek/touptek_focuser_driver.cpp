@@ -91,9 +91,7 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    int get_interface_version() const override {
-        return 3;
-    }
+    int get_interface_version() const override { return 4; }
 
     bool get_connected() const override {
         return connected_.load();
@@ -149,31 +147,6 @@ public:
             handle_ = nullptr;
         }
         connected_.store(false);
-    }
-
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        state.push_back({"Connected", connected_.load()});
-        if (!connected_.load()) {
-            return state;
-        }
-        auto& sdk = ToupTekSDKWrapper::instance();
-        HToupcam handle = handle_;
-        try {
-            state.push_back({"IsMoving",
-                             sdk.aaf_get(handle, ToupAAF::IsMoving, "Toupcam_AAF(ISMOVING)") != 0});
-            state.push_back({"Position",
-                             static_cast<std::int32_t>(
-                                 sdk.aaf_get(handle, ToupAAF::GetPosition,
-                                              "Toupcam_AAF(GETPOSITION)"))});
-        } catch (const std::exception&) {
-        }
-        try {
-            int t = sdk.aaf_get(handle, ToupAAF::GetTemp, "Toupcam_AAF(GETTEMP)");
-            state.push_back({"Temperature", static_cast<double>(t) / 10.0});
-        } catch (const std::exception&) {
-        }
-        return state;
     }
 
     std::vector<std::string> get_supported_actions() const override {

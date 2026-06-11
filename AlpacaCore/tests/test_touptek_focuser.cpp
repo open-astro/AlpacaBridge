@@ -51,7 +51,7 @@ TEST_CASE("ToupTek AAF Focuser Driver - Device metadata", "[touptek][focuser][un
     CHECK(driver->get_description() == "ToupTek AAF Focuser Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore ToupTek AAF Focuser Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 3);
+    CHECK(driver->get_interface_version() == 4);
     CHECK(driver->get_unique_id() == "TOUPTEK_AAF_3");
 }
 
@@ -132,10 +132,18 @@ TEST_CASE("ToupTek AAF Focuser Driver - State machine", "[touptek][focuser][unit
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_connecting() == false);
 
+    // Platform 7 DeviceState: while disconnected the operational getters throw
+    // and are omitted, leaving just the TimeStamp; the old non-compliant
+    // "Connected" entry is gone.
     const auto state = driver->get_device_state();
-    REQUIRE(state.size() == 1);
-    REQUIRE(state[0].name == "Connected");
-    REQUIRE(std::get<bool>(state[0].value) == false);
+    bool has_timestamp = false;
+    for (const auto& entry : state) {
+        REQUIRE(entry.name != "Connected");
+        if (entry.name == "TimeStamp") {
+            has_timestamp = true;
+        }
+    }
+    REQUIRE(has_timestamp);
 
     // Disconnected reads return NotConnected, never a generic driver error.
     require_alpaca_error([&]() { driver->get_is_moving(); },

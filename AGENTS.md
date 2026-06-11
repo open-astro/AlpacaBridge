@@ -54,6 +54,36 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
   - Clean thread/task shutdown in destructors.
 - Add TODO comments where vendor protocol/SDK behavior is uncertain.
 
+### Platform 7 InterfaceVersion + DeviceState
+
+- Drivers advertise ASCOM Platform 7 interface versions: Camera 4 (ICameraV4),
+  Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, ObservingConditions 2.
+  Keep `get_interface_version()` and its unit-test assertion in sync when adding a driver.
+- **Do not** write a per-vendor `get_device_state()`. Each device base class
+  (`CameraDriver`, `TelescopeDriver`, …) implements it once, inline, building the
+  operational-property list by calling that device's own property getters inside a
+  `try { … } catch (const std::exception&) {}` (a getter that throws — `AlpacaException`
+  or any unwrapped vendor error — is omitted, never propagated) and
+  appending a `TimeStamp` via the inline `device_state_timestamp()` helper. Using the
+  same getters as the GET endpoints guarantees DeviceState ↔ GET consistency, which is
+  what ConformU checks. A new vendor driver inherits the compliant DeviceState for free.
+- DeviceState is **not an atomic snapshot**: each getter locks the driver mutex
+  separately, so e.g. `RightAscension` and `Slewing` can straddle a state change, and a
+  device dropping mid-call yields a partially populated response. The old per-vendor
+  overrides read everything under one mutex. ASCOM doesn't require atomicity and
+  ConformU only checks DeviceState ↔ GET consistency, so don't "fix" this by adding a
+  snapshot lock — but don't build features that assume mutual consistency within one
+  DeviceState response either.
+- The base `get_device_state()` and `device_state_timestamp()` are **inline in the
+  headers on purpose**: an out-of-line virtual would make the device class's vtable a
+  "key function" emitted only in the core library, and the per-vendor static libraries
+  (linked before it) would fail to resolve `vtable for XDriver`. Keep them inline.
+- ConformU is lenient about DeviceState contents (it does not require a fixed property
+  set or even a TimeStamp — the iOptron switch passed at ISwitchV3 with neither), but it
+  does flag values inconsistent with the individual GETs. The getter-based pattern above
+  satisfies it. Still, bumping any InterfaceVersion **requires a fresh ConformU V4 run on
+  real hardware** before release, since it switches ConformU to the stricter test suite.
+
 ## CMake and Vendor Integration
 
 - Guard each vendor behind explicit build options.

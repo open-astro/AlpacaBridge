@@ -122,7 +122,7 @@ public:
     std::string get_description() const override { return "Player One Camera Driver"; }
     std::string get_driver_info() const override { return "AlpacaCore Player One Camera Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
-    int get_interface_version() const override { return 3; }
+    int get_interface_version() const override { return 4; }  // ICameraV4 (Platform 7)
 
     bool get_connected() const override { return connected_.load(); }
 
@@ -248,23 +248,6 @@ public:
         caps_ = {};
         reset_exposure_state_locked();
         connected_.store(false);
-    }
-
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        state.push_back({"Connected", connected_.load()});
-        if (!connected_.load()) return state;
-        state.push_back({"CameraState", static_cast<std::int32_t>(get_camera_state())});
-        if (cooler_available_copy()) {
-            try { state.push_back({"CCDTemperature", get_ccd_temperature()}); } catch (...) {}
-            try { state.push_back({"CoolerOn", get_cooler_on()}); } catch (...) {}
-            try { state.push_back({"CoolerPower", get_cooler_power()}); } catch (...) {}
-        }
-        state.push_back({"ImageReady", get_image_ready()});
-        if (exposure_active_.load()) {
-            state.push_back({"PercentCompleted", get_percent_completed()});
-        }
-        return state;
     }
 
     std::vector<std::string> get_supported_actions() const override { return {}; }

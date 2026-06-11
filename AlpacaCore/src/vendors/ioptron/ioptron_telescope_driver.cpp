@@ -153,10 +153,8 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    int get_interface_version() const override {
-        return 3;
-    }
-    
+    int get_interface_version() const override { return 4; }
+
     bool get_connected() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
@@ -334,40 +332,6 @@ public:
         return {};  // No custom actions
     }
 
-    std::vector<DeviceState> get_device_state() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        std::vector<DeviceState> state;
-        state.push_back({"Connected", connected_});
-        state.push_back({"Connecting", connecting_.load()});
-
-        if (!connected_) {
-            return state;
-        }
-
-        refresh_status_cache_locked();
-        refresh_position_cache_locked();
-        refresh_altaz_cache_locked();
-
-        state.push_back({"AtHome", cached_status_.is_at_home});
-        bool at_park = cached_status_.is_parked;
-        auto now = std::chrono::steady_clock::now();
-        if (park_override_until_ > now) {
-            at_park = false;
-        }
-        state.push_back({"AtPark", at_park});
-        state.push_back({"Slewing", cached_status_.is_slewing});
-        state.push_back({"Tracking", cached_status_.is_tracking});
-        state.push_back({"TrackingRate", static_cast<std::int32_t>(cached_status_.tracking_rate)});
-        state.push_back({"PulseGuiding", get_is_pulse_guiding()});
-        state.push_back({"SideOfPier", static_cast<std::int32_t>(cached_side_of_pier_)});
-        state.push_back({"RightAscension", cached_ra_hours_});
-        state.push_back({"Declination", cached_dec_degrees_});
-        state.push_back({"Altitude", cached_alt_degrees_});
-        state.push_back({"Azimuth", cached_az_degrees_});
-
-        return state;
-    }
-    
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
         (void)action_parameters;  // Unused - no actions supported
         throw AlpacaException("Action not supported: " + std::string(action_name));
