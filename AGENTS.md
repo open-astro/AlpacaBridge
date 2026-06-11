@@ -164,7 +164,8 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
 
 ## Debian Packaging
 
-- Package files live in `debian/` (control, rules, changelog, copyright, service file, maintainer scripts).
+- Package files live in `debian/` (control, rules, copyright, service file, maintainer scripts).
+- **`debian/changelog` is generated, never edited.** It is untracked/gitignored and derived from the root `CHANGELOG.md` by `scripts/changelog_to_deb.py` (same design as the OpenAstro Guider). Build the package with `scripts/build_deb.sh`, which generates the changelog (version from the `VERSION` file, validated with `dpkg-parsechangelog`) and then runs `dpkg-buildpackage -us -uc -b`. Do not run `dpkg-buildpackage` directly on a fresh checkout — it will fail on the missing `debian/changelog`. The in-progress CHANGELOG section uses this repo's `## [X.Y.Z] - UNRELEASED` convention; the generator synthesizes an `UNRELEASED` stanza from it when `VERSION` has not been released yet, and warns when `VERSION` and the section label disagree.
 - The `.deb` installs to:
   - `/usr/bin/alpacabridge` — server binary.
   - `/usr/lib/alpacabridge/` — vendor shared libraries (e.g. `libqhyccd.so`, `libASICamera2.so`).
