@@ -53,7 +53,7 @@ header {
     letter-spacing: 0.2px;
 }
 
-.title span {
+.title .brand-name {
     color: var(--accent);
 }
 
@@ -374,6 +374,7 @@ h2 {
 .form-group select:focus {
     outline: none;
     border-color: var(--accent-2);
+    box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
 }
 
 .form-group small {
@@ -434,6 +435,7 @@ input[type="range"] {
 .filterwheel-slot-row input:focus {
     outline: none;
     border-color: var(--accent-2);
+    box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
 }
 
 .filterwheel-slot-row input[type="text"] {
@@ -593,6 +595,7 @@ input[type="range"] {
 .server-location input:focus {
     outline: none;
     border-color: var(--accent-2);
+    box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
 }
 
 .server-status {
