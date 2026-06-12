@@ -318,7 +318,19 @@ for candidate in \
   "${HTTP_DIR}/build/Debug/alpacahttp_server" \
   "${HTTP_DIR}/build/Release/alpacahttp_server"; do
   if [[ -x "${candidate}" ]]; then
-    echo "AlpacaHTTP is running. Open http://localhost:6800/ in your browser."
+    echo "AlpacaHTTP is running. Open one of these in your browser:"
+    echo "  http://localhost:6800/  (on this machine)"
+    host_name="$(hostname 2>/dev/null || true)"
+    if [[ -n "${host_name}" ]]; then
+      echo "  http://${host_name}:6800/  (from your network, if the name resolves)"
+    fi
+    # hostname -I is Linux-only; one URL per IPv4 address (e.g. Ethernet +
+    # Wi-Fi). IPv6 is skipped — it needs URL brackets and nobody types it.
+    for addr in $(hostname -I 2>/dev/null || true); do
+      case "${addr}" in
+        *.*.*.*) echo "  http://${addr}:6800/" ;;
+      esac
+    done
     exec "${candidate}"
   fi
 done
