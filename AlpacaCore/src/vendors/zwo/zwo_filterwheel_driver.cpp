@@ -134,9 +134,10 @@ public:
             return;
         }
 
-        if (wheel_id_.has_value()) {
-            sdk.close_wheel(wheel_id_.value());
-        }
+        // Clear driver state before the SDK close: if the close throws (e.g.
+        // device unplugged) the error still surfaces, but the driver must not
+        // stay half-connected.
+        const std::optional<int> close_id = wheel_id_;
         if (wheel_index_.has_value()) {
             wheel_id_.reset();
             wheel_info_ = {};
@@ -144,6 +145,9 @@ public:
             serial_number_.clear();
         }
         connected_.store(false);
+        if (close_id.has_value()) {
+            sdk.close_wheel(close_id.value());
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override {

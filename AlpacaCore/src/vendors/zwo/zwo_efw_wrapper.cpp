@@ -176,8 +176,11 @@ void ZWOEFWSDKWrapper::close_wheel(int wheel_id) {
     }
     --it->second.open_count;
     if (it->second.open_count == 0) {
-        throw_on_error(EFWClose(wheel_id), "EFWClose");
+        // Erase the bookkeeping first: a failing SDK close (e.g. device
+        // unplugged) must not leave a zero-count entry that turns every
+        // later close into a no-op and leaks the handle.
         pimpl_->usage_.erase(it);
+        throw_on_error(EFWClose(wheel_id), "EFWClose");
     }
 }
 

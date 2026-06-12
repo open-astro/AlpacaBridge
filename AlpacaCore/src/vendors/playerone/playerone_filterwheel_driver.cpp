@@ -107,13 +107,17 @@ public:
             return;
         }
 
-        if (handle_ >= 0) {
-            sdk.close_wheel(handle_);
-            handle_ = -1;
-        }
+        // Clear driver state before the SDK close: if the close throws (e.g.
+        // device unplugged) the error still surfaces, but the driver must not
+        // stay half-connected.
+        const int close_handle = handle_;
+        handle_ = -1;
         wheel_info_ = {};
         wheel_info_valid_ = false;
         connected_.store(false);
+        if (close_handle >= 0) {
+            sdk.close_wheel(close_handle);
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override { return {}; }

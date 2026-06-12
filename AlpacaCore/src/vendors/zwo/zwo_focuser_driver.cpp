@@ -130,9 +130,10 @@ public:
             return;
         }
 
-        if (focuser_id_.has_value()) {
-            sdk.close_focuser(focuser_id_.value());
-        }
+        // Clear driver state before the SDK close: if the close throws (e.g.
+        // device unplugged) the error still surfaces, but the driver must not
+        // stay half-connected.
+        const std::optional<int> close_id = focuser_id_;
         if (focuser_index_.has_value()) {
             focuser_id_.reset();
             focuser_info_ = {};
@@ -140,6 +141,9 @@ public:
             serial_number_.clear();
         }
         connected_.store(false);
+        if (close_id.has_value()) {
+            sdk.close_focuser(close_id.value());
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override {
