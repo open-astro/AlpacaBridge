@@ -64,6 +64,7 @@ jobs:
             libudev-dev \
             libgpiod-dev \
             nlohmann-json3-dev \
+            zlib1g-dev \
             libcurl4-openssl-dev
 
       - name: Verify toolchain
@@ -100,6 +101,7 @@ jobs:
             libusb-1.0-0-dev \
             libudev-dev \
             nlohmann-json3-dev \
+            zlib1g-dev \
             libcurl4-openssl-dev
 
       - name: Build libgpiod v2 from source
@@ -175,6 +177,7 @@ jobs:
             libudev-dev \
             libgpiod-dev \
             nlohmann-json3-dev \
+            zlib1g-dev \
             libcurl4-openssl-dev
 
       - name: Build + run tests with sanitizers (vendor-neutral)
@@ -256,6 +259,7 @@ jobs:
             libusb-1.0-0-dev \
             libudev-dev \
             nlohmann-json3-dev \
+            zlib1g-dev \
             libcurl4-openssl-dev
 
       - name: Build libgpiod v2 from source

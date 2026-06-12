@@ -834,9 +834,6 @@
                         <p id="log-level-status" class="log-status">Detecting log level...</p>
                         <div class="log-levels">
                             <div id="log-level-toggles" class="log-levels-grid"></div>
-                            <div class="log-download">
-                                <button class="btn btn-secondary" type="button" onclick="downloadLogs()">Download Logs</button>
-                            </div>
                         </div>
                         <div class="log-files">
                             <div class="log-files-header">
@@ -845,7 +842,11 @@
                                     <p>Daily files saved to disk for long-term review.</p>
                                     <p id="log-files-directory" class="log-files-directory"></p>
                                 </div>
-                                <button id="log-files-refresh" class="btn btn-secondary" type="button">Refresh</button>
+                                <div class="log-files-actions">
+                                    <button id="log-files-refresh" class="btn btn-secondary" type="button">Refresh</button>
+                                    <button class="btn btn-secondary" type="button" onclick="downloadAllLogs()">Download All Logs</button>
+                                    <button id="log-files-delete-all" class="btn btn-danger" type="button">Delete All Logs</button>
+                                </div>
                             </div>
                             <p id="log-files-status" class="log-status">Loading log files...</p>
                             <div id="log-files-list" class="log-files-list"></div>

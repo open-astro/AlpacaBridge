@@ -715,10 +715,11 @@ input[type="range"] {
     gap: 8px;
 }
 
-.log-download {
-    margin-top: 12px;
+.log-files-actions {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
 }
 
 .log-level-toggle {

@@ -1,7 +1,6 @@
 // AlpacaHTTP Web UI
 const API_BASE = '';
 const LOGGING_ENDPOINT = '/management/v1/loglevel';
-const LOGS_ENDPOINT = '/management/v1/logs';
 const LOG_FILES_ENDPOINT = '/management/v1/logfiles';
 const QUIET_LOG_LEVEL = 'WARNING';
 const LOG_LEVEL_ORDER = ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
@@ -1182,23 +1181,18 @@ async function handleLogLevelToggleChange(event) {
     await requestLogLevelUpdate(minLevel);
 }
 
-async function downloadLogs() {
-    const statusEl = document.getElementById('log-level-status');
-    const previousStatus = statusEl ? statusEl.textContent : '';
-    if (statusEl) {
-        statusEl.textContent = 'Preparing log download...';
-    }
+async function downloadAllLogs() {
+    setLogFilesStatus('Preparing log archive…');
 
     try {
-        const response = await fetch(API_BASE + LOGS_ENDPOINT + '?format=plain&download=1');
+        const response = await fetch(API_BASE + LOG_FILES_ENDPOINT + '?download=1');
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
 
         const blob = await response.blob();
-        const now = new Date();
-        const timestamp = now.toISOString().replace(/[:.]/g, '-');
-        const filename = `alpacahttp-logs-${timestamp}.txt`;
+        const date = new Date().toISOString().slice(0, 10);
+        const filename = `alpacabridge-logs-${date}.txt.gz`;
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
         anchor.href = url;
@@ -1207,17 +1201,9 @@ async function downloadLogs() {
         anchor.click();
         anchor.remove();
         URL.revokeObjectURL(url);
-
-        if (statusEl) {
-            statusEl.textContent = previousStatus;
-        }
+        setLogFilesStatus(`Downloaded ${filename}`);
     } catch (error) {
-        if (statusEl) {
-            statusEl.textContent = `Failed to download logs: ${error.message}`;
-            setTimeout(() => {
-                statusEl.textContent = previousStatus;
-            }, 4000);
-        }
+        setLogFilesStatus(`Failed to download logs: ${error.message}`);
     }
 }
 
@@ -1409,6 +1395,27 @@ async function downloadLogFile(filename) {
         setLogFilesStatus(`Downloaded ${filename}`);
     } catch (error) {
         setLogFilesStatus(`Failed to download ${filename}: ${error.message}`);
+    }
+}
+
+async function deleteAllLogFiles() {
+    if (!confirm('Delete ALL stored log files? This cannot be undone.')) {
+        return;
+    }
+    setLogFilesStatus('Deleting all log files…');
+    try {
+        const response = await fetch(API_BASE + LOG_FILES_ENDPOINT, { method: 'DELETE' });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = JSON.parse(await response.text());
+        if (payload.ErrorNumber !== 0) {
+            throw new Error(payload.ErrorMessage || `Server error ${payload.ErrorNumber}`);
+        }
+        clearLogFileViewer();
+        await loadLogFiles();
+    } catch (error) {
+        setLogFilesStatus(`Failed to delete log files: ${error.message}`);
     }
 }
 
@@ -2701,6 +2708,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const refreshLogFiles = document.getElementById('log-files-refresh');
     if (refreshLogFiles) {
         refreshLogFiles.addEventListener('click', loadLogFiles);
+    }
+    const deleteAllLogFilesBtn = document.getElementById('log-files-delete-all');
+    if (deleteAllLogFilesBtn) {
+        deleteAllLogFilesBtn.addEventListener('click', deleteAllLogFiles);
     }
     const closeLogViewer = document.getElementById('log-file-viewer-close');
     if (closeLogViewer) {

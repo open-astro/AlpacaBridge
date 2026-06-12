@@ -23,6 +23,7 @@
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/util/logging.h>
 #include <nlohmann/json.hpp>
+#include <zlib.h>
 #include <sstream>
 #include <regex>
 #include <stdexcept>
@@ -122,6 +123,32 @@ std::string log_level_to_string(LogLevel level) {
         case LogLevel::Critical: return "CRITICAL";
         default: return "INFO";
     }
+}
+
+// Gzip-compress a buffer (RFC 1952 framing via zlib windowBits 15+16).
+// Throws std::runtime_error on any zlib failure.
+std::string gzip_compress(const std::string& input) {
+    z_stream stream{};
+    if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                     15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        throw std::runtime_error("deflateInit2 failed");
+    }
+
+    std::string output;
+    output.resize(deflateBound(&stream, static_cast<uLong>(input.size())));
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
+    stream.avail_in = static_cast<uInt>(input.size());
+    stream.next_out = reinterpret_cast<Bytef*>(output.data());
+    stream.avail_out = static_cast<uInt>(output.size());
+
+    const int rc = deflate(&stream, Z_FINISH);
+    if (rc != Z_STREAM_END) {
+        deflateEnd(&stream);
+        throw std::runtime_error("deflate failed (rc=" + std::to_string(rc) + ")");
+    }
+    output.resize(stream.total_out);
+    deflateEnd(&stream);
+    return output;
 }
 
 std::string escape_yaml_string(const std::string& value) {
@@ -5801,6 +5828,31 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
+    if (request.method() == HttpMethod::DELETE_) {
+        try {
+            std::size_t deleted = 0;
+            for (const auto& info : util::list_log_files()) {
+                util::delete_log_file(info.name);
+                ++deleted;
+            }
+            util::log_info("Deleted " + std::to_string(deleted) + " log file(s)");
+            AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+            nlohmann::json payload;
+            payload["DeletedCount"] = deleted;
+            alpaca_response.value = payload;
+            response.set_body(alpaca_response);
+            return response;
+        } catch (const std::exception& e) {
+            AlpacaResponse err = make_error_response(
+                client_tx_id, server_tx_id,
+                util::ErrorCode::DRIVER_ERROR,
+                std::string("Failed to delete log files: ") + e.what()
+            );
+            response.set_body(err);
+            return response;
+        }
+    }
+
     if (request.method() != HttpMethod::GET) {
         AlpacaResponse err = make_error_response(
             client_tx_id, server_tx_id,
@@ -5809,6 +5861,41 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
         );
         response.set_body(err);
         return response;
+    }
+
+    if (request.has_query_param("download")) {
+        try {
+            auto files = util::list_log_files();
+            // list_log_files() is newest-first; emit oldest-first so the
+            // combined file reads chronologically.
+            std::string combined;
+            for (auto it = files.rbegin(); it != files.rend(); ++it) {
+                combined += "===== " + it->name + " =====\n";
+                try {
+                    combined += util::read_log_file(it->name);
+                } catch (const std::exception& e) {
+                    combined += std::string("[unable to read: ") + e.what() + "]\n";
+                }
+                if (!combined.empty() && combined.back() != '\n') {
+                    combined += '\n';
+                }
+                combined += '\n';
+            }
+            response.set_content_type("application/gzip");
+            response.set_header("Content-Disposition",
+                                "attachment; filename=\"alpacabridge-logs.txt.gz\"");
+            response.set_body(gzip_compress(combined));
+            return response;
+        } catch (const std::exception& e) {
+            response.set_content_type("application/json");
+            AlpacaResponse err = make_error_response(
+                client_tx_id, server_tx_id,
+                util::ErrorCode::DRIVER_ERROR,
+                std::string("Failed to build log archive: ") + e.what()
+            );
+            response.set_body(err);
+            return response;
+        }
     }
 
     try {

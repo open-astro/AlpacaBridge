@@ -173,10 +173,14 @@ endif()
 add_library(alpacahttp STATIC ${ALPACAHTTP_SOURCES})
 target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_VERSION=\"${PROJECT_VERSION}\")
 
+# zlib: gzip framing for the combined log download endpoint
+find_package(ZLIB REQUIRED)
+
 target_link_libraries(alpacahttp
     PUBLIC
         nlohmann_json::nlohmann_json
         AlpacaCore::alpacacore
+        ZLIB::ZLIB
 )
 
 # Both QHY and ZWO SDKs define isLeapYear() at file scope — silence the
