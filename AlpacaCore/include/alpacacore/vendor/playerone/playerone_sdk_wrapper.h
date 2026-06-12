@@ -101,7 +101,15 @@ struct PlayerOneConfigCaps {
     long usb_bandwidth_min{};
     long usb_bandwidth_max{};
     bool has_fan_power{};
+    bool fan_power_writable{};
+    long fan_power_min{};
+    long fan_power_max{};
+    long fan_power_default{};
     bool has_heater_power{};
+    bool heater_power_writable{};
+    long heater_power_min{};
+    long heater_power_max{};
+    long heater_power_default{};
     bool has_guide_st4{};       // at least one of POA_GUIDE_NORTH/SOUTH/EAST/WEST
 };
 
@@ -126,7 +134,9 @@ public:
 
     std::vector<PlayerOneCameraInfo> enumerate_cameras();
 
-    // Opens + inits the camera. Safe to call once per connect.
+    // Opens + inits the camera. Open/close are reference-counted so the
+    // camera and switch (dew heater / fan) devices can share one SDK handle:
+    // the camera is physically closed only when the last user disconnects.
     void open_camera(int camera_id);
     void init_camera(int camera_id);
     void close_camera(int camera_id);
@@ -183,6 +193,12 @@ public:
     void set_target_temp_c(int camera_id, int target_c);
     int get_cooler_power_percent(int camera_id);
     double get_egain(int camera_id);
+
+    // Dew heater ("lens heater") and radiator fan power, percent [0-100].
+    int get_heater_power_percent(int camera_id);
+    void set_heater_power_percent(int camera_id, int percent);
+    int get_fan_power_percent(int camera_id);
+    void set_fan_power_percent(int camera_id, int percent);
 
     // Sensor mode (optional — 0 means not supported).
     int get_sensor_mode_count(int camera_id);

@@ -18,6 +18,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -60,6 +62,35 @@ bool format_is_supported(const std::vector<PlayerOneImageFormat>& supported,
     return std::find(supported.begin(), supported.end(), candidate) != supported.end();
 }
 
+std::string to_lower_copy(std::string_view s) {
+    std::string out(s);
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
+// Action parameters arrive as the raw HTTP form value; accept an optionally
+// whitespace-padded integer and nothing else.
+int parse_power_percent(std::string_view parameters, const char* action_name) {
+    std::string trimmed(parameters);
+    const auto first = trimmed.find_first_not_of(" \t\r\n");
+    const auto last = trimmed.find_last_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        throw AlpacaException(std::string(action_name) + " requires an integer percent parameter",
+                              AlpacaError::InvalidValue);
+    }
+    trimmed = trimmed.substr(first, last - first + 1);
+    int value = 0;
+    const auto* begin = trimmed.data();
+    const auto* end = trimmed.data() + trimmed.size();
+    auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end) {
+        throw AlpacaException(std::string(action_name) + " parameter must be an integer percent: '" + trimmed + "'",
+                              AlpacaError::InvalidValue);
+    }
+    return value;
+}
+
 PlayerOneImageFormat choose_default_format(const PlayerOneCameraInfo& info) {
     // Prefer RAW16 for anything >8-bit so we keep the sensor's full dynamic
     // range; fall back to RAW8 on 8-bit-only sensors.
@@ -80,9 +111,7 @@ PlayerOneImageFormat choose_default_format(const PlayerOneCameraInfo& info) {
 class PlayerOneCameraDriver : public CameraDriver {
 public:
     PlayerOneCameraDriver(int device_number, int camera_index)
-        : device_number_(device_number)
-        , camera_index_(camera_index)
-    {
+        : device_number_(device_number), camera_index_(camera_index) {
         preload_camera_info();
     }
 
@@ -250,12 +279,46 @@ public:
         connected_.store(false);
     }
 
-    std::vector<std::string> get_supported_actions() const override { return {}; }
-    std::string action(std::string_view action_name, std::string_view) override {
+    std::vector<std::string> get_supported_actions() const override {
+        // Static driver capability list per the ASCOM spec; whether the
+        // connected model actually has a heater/fan is reported at call time.
+        return {"GetHeaterPower", "SetHeaterPower", "GetFanPower", "SetFanPower"};
+    }
+    std::string action(std::string_view action_name, std::string_view parameters) override {
+        const std::string name = to_lower_copy(action_name);
+        if (name == "getheaterpower") {
+            ensure_connected();
+            ensure_heater_supported();
+            return std::to_string(PlayerOneSDKWrapper::instance().get_heater_power_percent(camera_id_copy()));
+        }
+        if (name == "setheaterpower") {
+            ensure_connected();
+            ensure_heater_supported();
+            int percent = parse_power_percent(parameters, "SetHeaterPower");
+            validate_heater_range(percent);
+            PlayerOneSDKWrapper::instance().set_heater_power_percent(camera_id_copy(), percent);
+            return "";
+        }
+        if (name == "getfanpower") {
+            ensure_connected();
+            ensure_fan_supported();
+            return std::to_string(PlayerOneSDKWrapper::instance().get_fan_power_percent(camera_id_copy()));
+        }
+        if (name == "setfanpower") {
+            ensure_connected();
+            ensure_fan_supported();
+            int percent = parse_power_percent(parameters, "SetFanPower");
+            validate_fan_range(percent);
+            PlayerOneSDKWrapper::instance().set_fan_power_percent(camera_id_copy(), percent);
+            return "";
+        }
         throw AlpacaException("Action not supported: " + std::string(action_name),
                               AlpacaError::ActionNotImplemented);
     }
-    bool can_action(std::string_view) const override { return false; }
+    bool can_action(std::string_view action_name) const override {
+        const std::string name = to_lower_copy(action_name);
+        return name == "getheaterpower" || name == "setheaterpower" || name == "getfanpower" || name == "setfanpower";
+    }
     std::string command_blind(std::string_view, bool) override {
         throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
     }
@@ -968,6 +1031,44 @@ private:
     bool cooler_available_copy() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return camera_info_valid_ && camera_info_.has_cooler && caps_.has_cooler;
+    }
+
+    void ensure_heater_supported() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!caps_.has_heater_power) {
+            throw AlpacaException("Dew heater not supported by this camera", AlpacaError::NotImplemented);
+        }
+    }
+
+    void ensure_fan_supported() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!caps_.has_fan_power) {
+            throw AlpacaException("Radiator fan not supported by this camera", AlpacaError::NotImplemented);
+        }
+    }
+
+    void validate_heater_range(int percent) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!caps_.heater_power_writable) {
+            throw AlpacaException("Dew heater is read-only", AlpacaError::InvalidOperation);
+        }
+        if (percent < caps_.heater_power_min || percent > caps_.heater_power_max) {
+            throw AlpacaException("Heater power out of range [" + std::to_string(caps_.heater_power_min) + ", " +
+                                      std::to_string(caps_.heater_power_max) + "]",
+                                  AlpacaError::InvalidValue);
+        }
+    }
+
+    void validate_fan_range(int percent) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!caps_.fan_power_writable) {
+            throw AlpacaException("Radiator fan is read-only", AlpacaError::InvalidOperation);
+        }
+        if (percent < caps_.fan_power_min || percent > caps_.fan_power_max) {
+            throw AlpacaException("Fan power out of range [" + std::to_string(caps_.fan_power_min) + ", " +
+                                      std::to_string(caps_.fan_power_max) + "]",
+                                  AlpacaError::InvalidValue);
+        }
     }
 
     void reset_exposure_state_locked() {

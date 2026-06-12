@@ -10,11 +10,11 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
-#include <alpacacore/util/error_handling.h>
-
 #include <PlayerOneCamera.h>
+#include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
 
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -135,7 +135,13 @@ PlayerOneCameraInfo props_to_info(int index, const POACameraProperties& p) {
 
 class PlayerOneSDKWrapper::Impl {
 public:
+    struct CameraUsage {
+        int open_count{0};
+        bool initialized{false};
+    };
+
     std::mutex mutex_;
+    std::map<int, CameraUsage> usage_;
 };
 
 PlayerOneSDKWrapper::PlayerOneSDKWrapper()
@@ -175,17 +181,33 @@ std::vector<PlayerOneCameraInfo> PlayerOneSDKWrapper::enumerate_cameras() {
 
 void PlayerOneSDKWrapper::open_camera(int camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(POAOpenCamera(camera_id), "POAOpenCamera");
+    auto& usage = pimpl_->usage_[camera_id];
+    if (usage.open_count == 0) {
+        throw_on_error(POAOpenCamera(camera_id), "POAOpenCamera");
+    }
+    ++usage.open_count;
 }
 
 void PlayerOneSDKWrapper::init_camera(int camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(POAInitCamera(camera_id), "POAInitCamera");
+    auto& usage = pimpl_->usage_[camera_id];
+    if (!usage.initialized) {
+        throw_on_error(POAInitCamera(camera_id), "POAInitCamera");
+        usage.initialized = true;
+    }
 }
 
 void PlayerOneSDKWrapper::close_camera(int camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    POACloseCamera(camera_id);
+    auto it = pimpl_->usage_.find(camera_id);
+    if (it == pimpl_->usage_.end() || it->second.open_count <= 0) {
+        return;
+    }
+    --it->second.open_count;
+    if (it->second.open_count == 0) {
+        POACloseCamera(camera_id);
+        pimpl_->usage_.erase(it);
+    }
 }
 
 PlayerOneCameraInfo PlayerOneSDKWrapper::get_camera_properties_by_id(int camera_id) {
@@ -251,9 +273,17 @@ PlayerOneConfigCaps PlayerOneSDKWrapper::probe_config_caps(int camera_id) {
             break;
         case POA_FAN_POWER:
             caps.has_fan_power = true;
+            caps.fan_power_writable = (a.isWritable == POA_TRUE);
+            caps.fan_power_min = a.minValue.intValue;
+            caps.fan_power_max = a.maxValue.intValue;
+            caps.fan_power_default = a.defaultValue.intValue;
             break;
         case POA_HEATER_POWER:
             caps.has_heater_power = true;
+            caps.heater_power_writable = (a.isWritable == POA_TRUE);
+            caps.heater_power_min = a.minValue.intValue;
+            caps.heater_power_max = a.maxValue.intValue;
+            caps.heater_power_default = a.defaultValue.intValue;
             break;
         case POA_GUIDE_NORTH:
         case POA_GUIDE_SOUTH:
@@ -454,6 +484,22 @@ int PlayerOneSDKWrapper::get_cooler_power_percent(int camera_id) {
 
 double PlayerOneSDKWrapper::get_egain(int camera_id) {
     return get_config_float(camera_id, POA_EGAIN);
+}
+
+int PlayerOneSDKWrapper::get_heater_power_percent(int camera_id) {
+    return static_cast<int>(get_config_int(camera_id, POA_HEATER_POWER));
+}
+
+void PlayerOneSDKWrapper::set_heater_power_percent(int camera_id, int percent) {
+    set_config_int(camera_id, POA_HEATER_POWER, static_cast<long>(percent));
+}
+
+int PlayerOneSDKWrapper::get_fan_power_percent(int camera_id) {
+    return static_cast<int>(get_config_int(camera_id, POA_FAN_POWER));
+}
+
+void PlayerOneSDKWrapper::set_fan_power_percent(int camera_id, int percent) {
+    set_config_int(camera_id, POA_FAN_POWER, static_cast<long>(percent));
 }
 
 int PlayerOneSDKWrapper::get_sensor_mode_count(int camera_id) {
