@@ -79,6 +79,7 @@ endif()
 if(TARGET alpacacore_playerone)
     list(APPEND TEST_SOURCES test_playerone_camera.cpp)
     list(APPEND TEST_SOURCES test_playerone_filterwheel.cpp)
+    list(APPEND TEST_SOURCES test_playerone_switch.cpp)
 endif()
 
 # Create test executable

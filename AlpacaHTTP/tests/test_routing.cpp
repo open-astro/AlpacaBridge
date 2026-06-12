@@ -225,6 +225,54 @@ int main() {
     }
 #endif
 
+    // --- Player One thermal switch routing test ---
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+    {
+        // Runtime heater/fan control is switch-only by design: no connect-time
+        // heater/fan camera config exists (a persisted "heater on" would
+        // silently re-apply months later), so there is nothing camera-side to
+        // round-trip beyond cameraIndex.
+        nlohmann::json configure_body = {
+            {"vendor", "playerone"}, {"deviceType", "camera"}, {"deviceNumber", 9210}, {"cameraIndex", 0}};
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        nlohmann::json remove_body = {{"vendor", "playerone"}, {"deviceType", "camera"}, {"deviceNumber", 9210}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        EXPECT(nlohmann::json::parse(remove_response.body()).value("ErrorNumber", -1) == 0);
+    }
+    {
+        // Thermal switch (dew heater / fan) registers without hardware and
+        // persists its camera index.
+        nlohmann::json configure_body = {
+            {"vendor", "playerone"}, {"deviceType", "switch"}, {"deviceNumber", 9211}, {"cameraIndex", 1}};
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        bool found_playerone_switch = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Switch" && entry.value("DeviceNumber", -1) == 9211) {
+                const auto& cfg = entry["Config"];
+                EXPECT(cfg.value("vendor", "") == "playerone");
+                EXPECT(cfg.value("cameraIndex", -1) == 1);
+                found_playerone_switch = true;
+                break;
+            }
+        }
+        EXPECT(found_playerone_switch);
+
+        nlohmann::json remove_body = {{"vendor", "playerone"}, {"deviceType", "switch"}, {"deviceNumber", 9211}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        EXPECT(nlohmann::json::parse(remove_response.body()).value("ErrorNumber", -1) == 0);
+    }
+#endif
+
     // --- Celestron telescope routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_CELESTRON
     {

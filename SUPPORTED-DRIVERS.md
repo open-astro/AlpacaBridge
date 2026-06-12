@@ -43,15 +43,16 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | Ceres 462M | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Ceres%20462M/) |
+| Uranus-C PRO | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Uranus-C%20PRO/) |
 
 <details>
 <summary><strong>Player One Driver Notes</strong></summary>
 
 - **SDK**: Player One Camera SDK v3.10.0 (build target)
 - **Connection**: USB (requires udev rules `99-player_one_astronomy.rules`)
-- **Tested model**: Ceres 462M (uncooled) on Linux arm64.
-- **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control paths (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) are implemented but untested against physical cooled hardware.
-- **Dew Heater**: Not exposed. The SDK advertises `POA_HEATER_POWER` on cooled models, but we do not currently have a cooled Player One camera available to implement and validate the Switch device. Will be added when hardware is available.
+- **Tested models**: Ceres 462M (uncooled) and Uranus-C PRO (cooled, IMX585) on Linux arm64.
+- **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) validated on Uranus-C PRO hardware: reaches and holds the target temperature with closed-loop power regulation.
+- **Dew Heater / Fan**: Cooled models expose the lens heater and radiator fan two ways — camera custom Actions (`GetHeaterPower`/`SetHeaterPower`/`GetFanPower`/`SetFanPower`, percent) and the **Player One Thermal Switch** device (see Switch Drivers below) for slider control in clients like NINA. Both are runtime-only by design; no setting persists across connects. Note the fan does not auto-vary with temperature — `CoolerOn` turns cooler + fan on and the fan runs at its set power.
 - **Pulse guiding**: Capability-gated on `isHasST4Port`. Driver times the pulse duration via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
 
 </details>
@@ -281,6 +282,20 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **iMate PowerBox** (`vendor: ioptron`, `deviceType: switch`) — the iMate's on-board DC power ports via libgpiod v2 on `/dev/gpiochip1` (override with `gpioChip`). Exposes three switches: `DC3 (always on)` — the hardwired pass-through jack, read-only; `DC1` — GPIO line 118 (PD22); `DC2` — GPIO line 114 (PD18). Ports default to boolean on/off; DC1/DC2 can each opt into 0–100% soft-PWM dimming (per-port `pwm` flag, `pwmFrequencyHz` default 50 Hz) for dew heaters and flat panels — 50 Hz dims panels, confirmed on iMate hardware. Local GPIO only — independent of the iOptron mount RS-232 protocol; runs on the iMate itself under the [OpenAstro](https://github.com/open-astro/aw-flashtool) Armbian image (mainline kernel, Debian 13), which already ships libgpiod v2 plus a `gpio`-group udev rule for `/dev/gpiochip*`. Connecting powers the ports on; disconnecting does not power them off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#ioptron-imate).
   - **ConformU** 4.3.0 — ✓ validated on iMate hardware (Linux arm64; OpenAstro Armbian / mainline kernel, `/dev/gpiochip1`): 0 errors, 0 issues, 0 timing issues. Run against a mixed config (DC1 PWM, DC2 boolean, DC3 read-only pass-through) so all three port types were exercised in one pass. [Report](AlpacaCore/conformu/iOptron/iMate%20PowerBox/Linux-arm64.txt).
+
+</details>
+
+### Player One
+
+| Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
+|-------------|--------------|------------|------------------|--------|
+| Thermal Switch (Dew Heater + Fan) | Cooled cameras (Uranus-C PRO) | USB (via Camera) | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Uranus-C%20PRO%20Thermal%20Switch/) |
+
+<details>
+<summary><strong>Player One Switch Driver Notes</strong></summary>
+
+- **Thermal Switch** (`vendor: playerone`, `deviceType: switch`) — exposes a cooled Player One camera's dew (lens) heater and radiator fan (`POA_HEATER_POWER` / `POA_FAN_POWER`) as 0–100% multi-value switch elements, giving clients like NINA sliders for runtime control. Binds to the camera by `cameraIndex` and shares the camera's SDK handle via reference-counted open/close, so it can connect alongside the camera device or on its own. The element list is probed per model at connect; connecting against an uncooled camera (no heater, no fan) fails with `NotImplemented`. Heater/fan are deliberately runtime-only — nothing persists across connects, so a heater turned on in December cannot silently re-apply months later. Cooling itself stays on the standard Camera interface (`CoolerOn` / `SetCCDTemperature`); the cooler is intentionally not a switch element.
+  - **ConformU** 4.3.0 — ✓ validated on Uranus-C PRO hardware (Linux arm64, Raspberry Pi): 0 errors, 0 issues, 0 timing issues; slowest member 38 ms vs the 100 ms FAST target. Heater additionally verified by calorimetry: at a held −10 °C target, heater 0→100% raised steady-state cooler power ~34%→~44%, symmetric on heater-off. [Report](AlpacaCore/conformu/Player%20One/Uranus-C%20PRO%20Thermal%20Switch/Linux-arm64.txt).
 
 </details>
 

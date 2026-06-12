@@ -12,19 +12,23 @@
 
 #pragma once
 
-#include <alpacacore/camera_driver.h>
+#include <alpacacore/switch_driver.h>
 
 #include <memory>
 
 namespace alpacacore::vendor::playerone {
 
 /**
- * @brief Create a Player One camera driver by camera index (enumeration order).
+ * @brief Create a Player One thermal switch device (dew heater + radiator fan).
+ *
+ * Exposes the camera's POA_HEATER_POWER and POA_FAN_POWER controls as
+ * multi-value switch elements (percent, typically 0-100). The switch shares
+ * the camera's SDK handle via the reference-counted PlayerOneSDKWrapper, so
+ * it can be connected alongside the camera device or on its own.
  *
  * @param device_number Alpaca device number
- * @param camera_index Player One SDK camera index (0-based)
- * @return Unique pointer to camera driver
+ * @param camera_index Player One SDK camera index (0-based, enumeration order)
  */
-std::unique_ptr<CameraDriver> create_playerone_camera(int device_number, int camera_index);
+std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index);
 
-} // namespace alpacacore::vendor::playerone
+}  // namespace alpacacore::vendor::playerone

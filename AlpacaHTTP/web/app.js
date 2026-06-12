@@ -699,6 +699,7 @@ function startEditDevice(device) {
         setFormValue('touptek-focuser-id', config.focuserId);
     } else if (vendor === 'playerone') {
         setFormValue('playerone-camera-index', config.cameraIndex);
+        setFormValue('playerone-switch-camera-index', config.cameraIndex);
         setFormValue('playerone-filterwheel-index', config.filterwheelIndex);
         const playerOneFilterNamesField = document.getElementById('playerone-filter-names');
         if (playerOneFilterNamesField) {
@@ -1513,8 +1514,9 @@ function updateVendorOptions() {
     }
     const playerOneOption = vendorSelect.querySelector('option[value="playerone"]');
     if (playerOneOption) {
-        // Player One provides cameras and the Phoenix filter wheel.
-        const playerOneAllowed = isCamera || isFilterWheel;
+        // Player One provides cameras, the Phoenix filter wheel, and the
+        // thermal switch (cooled-camera dew heater / fan).
+        const playerOneAllowed = isCamera || isFilterWheel || isSwitch;
         playerOneOption.disabled = !playerOneAllowed;
         playerOneOption.hidden = !playerOneAllowed;
     }
@@ -1554,7 +1556,7 @@ function updateVendorOptions() {
     if (!isCamera && !isFocuser && !isSwitch && vendorSelect.value === 'touptek') {
         vendorSelect.value = '';
     }
-    if (!isCamera && !isFilterWheel && vendorSelect.value === 'playerone') {
+    if (!isCamera && !isFilterWheel && !isSwitch && vendorSelect.value === 'playerone') {
         vendorSelect.value = '';
     }
     if (!isObservingConditions && vendorSelect.value === 'weewx') {
@@ -2061,9 +2063,11 @@ function updatePlayerOneConfigFields() {
     }
     const cameraFields = document.getElementById('playerone-camera-fields');
     const filterwheelFields = document.getElementById('playerone-filterwheel-fields');
+    const switchFields = document.getElementById('playerone-switch-fields');
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
     const isCamera = deviceType === 'camera';
     const isFilterWheel = deviceType === 'filterwheel';
+    const isSwitch = deviceType === 'switch';
     if (cameraFields) {
         cameraFields.style.display = isCamera ? 'block' : 'none';
         setFieldGroupEnabled(cameraFields, isCamera);
@@ -2071,6 +2075,10 @@ function updatePlayerOneConfigFields() {
     if (filterwheelFields) {
         filterwheelFields.style.display = isFilterWheel ? 'block' : 'none';
         setFieldGroupEnabled(filterwheelFields, isFilterWheel);
+    }
+    if (switchFields) {
+        switchFields.style.display = isSwitch ? 'block' : 'none';
+        setFieldGroupEnabled(switchFields, isSwitch);
     }
 }
 
@@ -2457,6 +2465,9 @@ document.getElementById('device-form').addEventListener('submit', async function
             if (playerOneFilterNames.length > 0) {
                 deviceData.filterNames = playerOneFilterNames;
             }
+        } else if (normalizeDeviceType(deviceData.deviceType) === 'switch') {
+            const playerOneSwitchCameraIndex = readOptionalNumber(formData, 'playerOneSwitchCameraIndex');
+            deviceData.cameraIndex = playerOneSwitchCameraIndex !== null ? playerOneSwitchCameraIndex : 0;
         } else {
             const playerOneCameraIndex = readOptionalNumber(formData, 'cameraIndex');
             deviceData.cameraIndex = playerOneCameraIndex !== null ? playerOneCameraIndex : 0;

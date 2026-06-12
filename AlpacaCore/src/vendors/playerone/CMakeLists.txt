@@ -42,6 +42,7 @@ if(ALPACACORE_ENABLE_PLAYERONE)
     set(PLAYERONE_SOURCES
         playerone_sdk_wrapper.cpp
         playerone_camera_driver.cpp
+        playerone_switch_driver.cpp
         playerone_pw_wrapper.cpp
         playerone_filterwheel_driver.cpp
     )

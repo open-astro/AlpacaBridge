@@ -82,12 +82,31 @@ TEST_CASE("Player One Camera Driver - Disconnected state", "[playerone][camera][
     CHECK(driver->get_has_shutter() == false);
 }
 
-TEST_CASE("Player One Camera Driver - Unsupported actions", "[playerone][camera][unit]") {
+TEST_CASE("Player One Camera Driver - Actions", "[playerone][camera][unit]") {
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0);
 
-    CHECK(driver->get_supported_actions().empty());
+    // Dew heater / fan power actions are a static driver capability.
+    const auto actions = driver->get_supported_actions();
+    REQUIRE(actions.size() == 4);
+    CHECK(actions[0] == "GetHeaterPower");
+    CHECK(actions[1] == "SetHeaterPower");
+    CHECK(actions[2] == "GetFanPower");
+    CHECK(actions[3] == "SetFanPower");
+
+    // ASCOM action names are case-insensitive.
+    CHECK(driver->can_action("GetHeaterPower"));
+    CHECK(driver->can_action("setheaterpower"));
+    CHECK(driver->can_action("GETFANPOWER"));
+    CHECK(driver->can_action("SetFanPower"));
     CHECK(driver->can_action("anything") == false);
-    CHECK_THROWS_AS(driver->action("anything", ""), alpacacore::AlpacaException);
+
+    // Unknown action -> ActionNotImplemented; known actions need a connection.
+    require_alpaca_error([&]() { driver->action("anything", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
+    require_alpaca_error([&]() { driver->action("GetHeaterPower", ""); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->action("SetHeaterPower", "50"); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->action("GetFanPower", ""); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->action("SetFanPower", "50"); }, alpacacore::AlpacaError::NotConnected);
+
     CHECK_THROWS_AS(driver->command_blind("", false), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->command_bool("", false), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->command_string("", false), alpacacore::AlpacaException);
