@@ -5836,9 +5836,10 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
     }
 
     if (request.method() == HttpMethod::DELETE_) {
+        const auto files = util::list_log_files();
+        std::size_t deleted = 0;
         try {
-            std::size_t deleted = 0;
-            for (const auto& info : util::list_log_files()) {
+            for (const auto& info : files) {
                 util::delete_log_file(info.name);
                 ++deleted;
             }
@@ -5850,8 +5851,12 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             response.set_body(alpaca_response);
             return response;
         } catch (const std::exception& e) {
+            // Partial deletion is possible — tell the caller exactly how far
+            // it got rather than leaving the outcome ambiguous.
             AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
-                                                     std::string("Failed to delete log files: ") + e.what());
+                                                     std::string("Failed to delete log files: ") + e.what() +
+                                                         " (deleted " + std::to_string(deleted) + " of " +
+                                                         std::to_string(files.size()) + " before the failure)");
             response.set_body(err);
             return response;
         }
