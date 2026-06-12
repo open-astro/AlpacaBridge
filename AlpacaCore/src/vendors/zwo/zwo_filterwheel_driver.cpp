@@ -323,12 +323,18 @@ private:
         if (filter_names_.empty()) {
             filter_names_.assign(slots, std::string());
         } else if (filter_names_.size() != slots) {
+            ALPACA_LOG_WARN("ZWO", "Configured filterNames count (" + std::to_string(filter_names_.size()) +
+                                       ") does not match wheel slot count (" + std::to_string(slots) +
+                                       "); resizing to match the wheel");
             filter_names_.resize(slots);
         }
         apply_default_names_locked();
         if (focus_offsets_.empty()) {
             focus_offsets_.assign(slots, 0);
         } else if (focus_offsets_.size() != slots) {
+            ALPACA_LOG_WARN("ZWO", "Configured focusOffsets count (" + std::to_string(focus_offsets_.size()) +
+                                       ") does not match wheel slot count (" + std::to_string(slots) +
+                                       "); resizing to match the wheel");
             focus_offsets_.resize(slots);
         }
     }

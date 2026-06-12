@@ -252,6 +252,9 @@ private:
                 }
             }
         } else if (filter_names_.size() != slots) {
+            ALPACA_LOG_WARN("PlayerOne", "Configured filterNames count (" + std::to_string(filter_names_.size()) +
+                                             ") does not match wheel position count (" + std::to_string(slots) +
+                                             "); resizing to match the wheel");
             filter_names_.resize(slots);
         }
         apply_default_names_locked();
@@ -267,6 +270,9 @@ private:
                 }
             }
         } else if (focus_offsets_.size() != slots) {
+            ALPACA_LOG_WARN("PlayerOne", "Configured focusOffsets count (" + std::to_string(focus_offsets_.size()) +
+                                             ") does not match wheel position count (" + std::to_string(slots) +
+                                             "); resizing to match the wheel");
             focus_offsets_.resize(slots);
         }
     }

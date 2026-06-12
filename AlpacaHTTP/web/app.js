@@ -566,6 +566,11 @@ function startEditDevice(device) {
     setFormValue('vendor', vendor);
     updateVendorOptions();
 
+    // The 'change' handler runs every vendor sub-section toggler
+    // (updateZwoConfigFields / updateTouptekConfigFields /
+    // updatePlayerOneConfigFields), so device-type-aware blocks like
+    // playerone-filterwheel-fields are shown for edits through this
+    // dispatch — no explicit toggler calls are needed here.
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
     if (vendor === 'ioptron' && deviceType === 'switch') {
