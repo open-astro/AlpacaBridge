@@ -193,6 +193,13 @@ run_system_setup() {
     sudo ldconfig
   fi
 
+  playerone_pw_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64"
+  if [[ -f "${playerone_pw_lib_dir}/libPlayerOnePW.so" ]]; then
+    echo "Installing Player One Phoenix Filter Wheel shared library to /usr/local/lib"
+    sudo cp -a "${playerone_pw_lib_dir}/libPlayerOnePW.so"* /usr/local/lib/
+    sudo ldconfig
+  fi
+
   sudo udevadm control --reload-rules
   sudo udevadm trigger
 

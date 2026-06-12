@@ -88,6 +88,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
+#include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
 #endif
 
 namespace {
@@ -6916,6 +6917,34 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "playerone" && device_type_str == "filterwheel") {
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+        int wheel_index = config.value("filterwheelIndex", 0);
+
+        auto wheel = alpacacore::vendor::playerone::create_playerone_filterwheel(device_number, wheel_index);
+
+        if (config.contains("filterNames")) {
+            const auto& names_value = config.at("filterNames");
+            if (!names_value.is_array()) {
+                error_message = "Player One filter wheel filterNames must be an array";
+                return false;
+            }
+            wheel->set_names(names_value.get<std::vector<std::string>>());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(wheel.release()))) {
+            util::log_info("Registered Player One Phoenix filter wheel");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "gemini" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_GEMINI
         std::string conn_type = config.value("connectionType", "auto");
@@ -7057,7 +7086,12 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("focuserId");
         }
     } else if (vendor == "playerone") {
-        copy_if_present("cameraIndex");
+        if (device_type == "filterwheel") {
+            copy_if_present("filterwheelIndex");
+            copy_if_present("filterNames");
+        } else {
+            copy_if_present("cameraIndex");
+        }
     } else if (vendor == "weewx") {
         copy_if_present("weewxUrl");
         copy_if_present("pollIntervalSeconds");

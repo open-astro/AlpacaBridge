@@ -78,6 +78,7 @@ if(TARGET alpacacore_touptek)
 endif()
 if(TARGET alpacacore_playerone)
     list(APPEND TEST_SOURCES test_playerone_camera.cpp)
+    list(APPEND TEST_SOURCES test_playerone_filterwheel.cpp)
 endif()
 
 # Create test executable
