@@ -1,7 +1,6 @@
 // AlpacaHTTP Web UI
 const API_BASE = '';
 const LOGGING_ENDPOINT = '/management/v1/loglevel';
-const LOGS_ENDPOINT = '/management/v1/logs';
 const LOG_FILES_ENDPOINT = '/management/v1/logfiles';
 const QUIET_LOG_LEVEL = 'WARNING';
 const LOG_LEVEL_ORDER = ['TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
@@ -567,6 +566,11 @@ function startEditDevice(device) {
     setFormValue('vendor', vendor);
     updateVendorOptions();
 
+    // The 'change' handler runs every vendor sub-section toggler
+    // (updateZwoConfigFields / updateTouptekConfigFields /
+    // updatePlayerOneConfigFields), so device-type-aware blocks like
+    // playerone-filterwheel-fields are shown for edits through this
+    // dispatch — no explicit toggler calls are needed here.
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
     if (vendor === 'ioptron' && deviceType === 'switch') {
@@ -695,6 +699,14 @@ function startEditDevice(device) {
         setFormValue('touptek-focuser-id', config.focuserId);
     } else if (vendor === 'playerone') {
         setFormValue('playerone-camera-index', config.cameraIndex);
+        setFormValue('playerone-filterwheel-index', config.filterwheelIndex);
+        const playerOneFilterNamesField = document.getElementById('playerone-filter-names');
+        if (playerOneFilterNamesField) {
+            playerOneFilterNamesField.value = Array.isArray(config.filterNames)
+                ? config.filterNames.join('\n')
+                : '';
+            playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
+        }
     } else if (vendor === 'weewx') {
         setFormValue('weewx-url', config.weewxUrl);
         setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
@@ -724,7 +736,7 @@ function startEditDevice(device) {
         } else {
             filterNamesField.value = '';
         }
-        syncFilterwheelSlotsFromTextarea();
+        zwoFilterwheelSlotUI.syncSlotsFromTextarea();
     }
 
     setFormValue('focuser-index', config.focuserIndex);
@@ -1174,23 +1186,18 @@ async function handleLogLevelToggleChange(event) {
     await requestLogLevelUpdate(minLevel);
 }
 
-async function downloadLogs() {
-    const statusEl = document.getElementById('log-level-status');
-    const previousStatus = statusEl ? statusEl.textContent : '';
-    if (statusEl) {
-        statusEl.textContent = 'Preparing log download...';
-    }
+async function downloadAllLogs() {
+    setLogFilesStatus('Preparing log archive…');
 
     try {
-        const response = await fetch(API_BASE + LOGS_ENDPOINT + '?format=plain&download=1');
+        const response = await fetch(API_BASE + LOG_FILES_ENDPOINT + '?download=1');
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
 
         const blob = await response.blob();
-        const now = new Date();
-        const timestamp = now.toISOString().replace(/[:.]/g, '-');
-        const filename = `alpacahttp-logs-${timestamp}.txt`;
+        const date = new Date().toISOString().slice(0, 10);
+        const filename = `alpacabridge-logs-${date}.txt.gz`;
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
         anchor.href = url;
@@ -1199,17 +1206,9 @@ async function downloadLogs() {
         anchor.click();
         anchor.remove();
         URL.revokeObjectURL(url);
-
-        if (statusEl) {
-            statusEl.textContent = previousStatus;
-        }
+        setLogFilesStatus(`Downloaded ${filename}`);
     } catch (error) {
-        if (statusEl) {
-            statusEl.textContent = `Failed to download logs: ${error.message}`;
-            setTimeout(() => {
-                statusEl.textContent = previousStatus;
-            }, 4000);
-        }
+        setLogFilesStatus(`Failed to download logs: ${error.message}`);
     }
 }
 
@@ -1404,6 +1403,30 @@ async function downloadLogFile(filename) {
     }
 }
 
+async function deleteAllLogFiles() {
+    if (!confirm('Delete ALL stored log files? This cannot be undone.')) {
+        return;
+    }
+    setLogFilesStatus('Deleting all log files…');
+    try {
+        const response = await fetch(API_BASE + LOG_FILES_ENDPOINT, { method: 'DELETE' });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = JSON.parse(await response.text());
+        if (payload.ErrorNumber !== 0) {
+            throw new Error(payload.ErrorMessage || `Server error ${payload.ErrorNumber}`);
+        }
+        const value = parseResponseValue(payload.Value) || {};
+        clearLogFileViewer();
+        await loadLogFiles();
+        const count = Number.isFinite(value.DeletedCount) ? value.DeletedCount : 0;
+        setLogFilesStatus(`Deleted ${count} log file${count === 1 ? '' : 's'}.`);
+    } catch (error) {
+        setLogFilesStatus(`Failed to delete log files: ${error.message}`);
+    }
+}
+
 async function deleteLogFile(filename) {
     if (!confirm(`Delete log file ${filename}? This cannot be undone.`)) {
         return;
@@ -1490,8 +1513,10 @@ function updateVendorOptions() {
     }
     const playerOneOption = vendorSelect.querySelector('option[value="playerone"]');
     if (playerOneOption) {
-        playerOneOption.disabled = !isCamera;
-        playerOneOption.hidden = !isCamera;
+        // Player One provides cameras and the Phoenix filter wheel.
+        const playerOneAllowed = isCamera || isFilterWheel;
+        playerOneOption.disabled = !playerOneAllowed;
+        playerOneOption.hidden = !playerOneAllowed;
     }
     const weewxOption = vendorSelect.querySelector('option[value="weewx"]');
     if (weewxOption) {
@@ -1529,7 +1554,7 @@ function updateVendorOptions() {
     if (!isCamera && !isFocuser && !isSwitch && vendorSelect.value === 'touptek') {
         vendorSelect.value = '';
     }
-    if (!isCamera && vendorSelect.value === 'playerone') {
+    if (!isCamera && !isFilterWheel && vendorSelect.value === 'playerone') {
         vendorSelect.value = '';
     }
     if (!isObservingConditions && vendorSelect.value === 'weewx') {
@@ -1576,6 +1601,7 @@ document.getElementById('vendor').addEventListener('change', function() {
 
     updateZwoConfigFields();
     updateTouptekConfigFields();
+    updatePlayerOneConfigFields();
     updateAutoNumbering();
 });
 
@@ -1666,44 +1692,22 @@ if (filterwheelIndexInput) {
     });
 }
 
-const filterwheelSlotCountSelect = document.getElementById('filterwheel-slot-count');
-const filterwheelSlotCustomInput = document.getElementById('filterwheel-slot-custom');
-const filterwheelNamesTextarea = document.getElementById('filterwheel-names');
+// Slot-count + per-slot filter name pickers. Every filterwheel vendor config
+// gets an instance (see AGENTS.md "FilterWheel web UI" note); the factory
+// wires all events and keeps the slot rows and names textarea in sync.
+const zwoFilterwheelSlotUI = createFilterwheelSlotUI({
+    countSelectId: 'filterwheel-slot-count',
+    customInputId: 'filterwheel-slot-custom',
+    slotListId: 'filterwheel-slot-list',
+    namesTextareaId: 'filterwheel-names'
+});
 
-if (filterwheelSlotCountSelect) {
-    updateFilterwheelSlotCountVisibility();
-    filterwheelSlotCountSelect.addEventListener('change', () => {
-        updateFilterwheelSlotCountVisibility();
-        const slotCount = getFilterwheelSlotCount();
-        if (!slotCount) {
-            renderFilterwheelSlots(0, []);
-            return;
-        }
-        renderFilterwheelSlots(slotCount, []);
-        syncFilterwheelNamesFromSlots();
-    });
-}
-
-if (filterwheelSlotCustomInput) {
-    filterwheelSlotCustomInput.addEventListener('input', () => {
-        if (!filterwheelSlotCountSelect || filterwheelSlotCountSelect.value !== 'custom') {
-            return;
-        }
-        const slotCount = getFilterwheelSlotCount();
-        if (!slotCount) {
-            renderFilterwheelSlots(0, []);
-            return;
-        }
-        renderFilterwheelSlots(slotCount, []);
-        syncFilterwheelNamesFromSlots();
-    });
-}
-
-if (filterwheelNamesTextarea) {
-    filterwheelNamesTextarea.addEventListener('input', () => {
-        syncFilterwheelSlotsFromTextarea();
-    });
-}
+const playerOneFilterwheelSlotUI = createFilterwheelSlotUI({
+    countSelectId: 'playerone-filterwheel-slot-count',
+    customInputId: 'playerone-filterwheel-slot-custom',
+    slotListId: 'playerone-filterwheel-slot-list',
+    namesTextareaId: 'playerone-filter-names'
+});
 
 const focuserIndexInput = document.getElementById('focuser-index');
 if (focuserIndexInput) {
@@ -1793,192 +1797,225 @@ function formatFilterNamesShort(names) {
     return mapped.join(', ');
 }
 
-function getFilterwheelSlotCount() {
-    const countSelect = document.getElementById('filterwheel-slot-count');
-    const customInput = document.getElementById('filterwheel-slot-custom');
-    if (!countSelect) {
-        return null;
-    }
-    const selected = countSelect.value;
-    if (!selected) {
-        return null;
-    }
-    if (selected === 'custom') {
-        if (!customInput) {
+function createFilterwheelSlotUI(ids) {
+    const countSelect = document.getElementById(ids.countSelectId);
+    const customInput = document.getElementById(ids.customInputId);
+    const slotList = document.getElementById(ids.slotListId);
+    const textarea = document.getElementById(ids.namesTextareaId);
+    let syncInProgress = false;
+
+    function getSlotCount() {
+        if (!countSelect) {
             return null;
         }
-        const customValue = Number.parseInt(customInput.value, 10);
-        return Number.isFinite(customValue) && customValue > 0 ? customValue : null;
-    }
-    const parsed = Number.parseInt(selected, 10);
-    return Number.isFinite(parsed) ? parsed : null;
-}
-
-function updateFilterwheelSlotCountVisibility() {
-    const countSelect = document.getElementById('filterwheel-slot-count');
-    const customInput = document.getElementById('filterwheel-slot-custom');
-    if (!countSelect || !customInput) {
-        return;
-    }
-    const showCustom = countSelect.value === 'custom';
-    customInput.style.display = showCustom ? 'block' : 'none';
-    if (!showCustom) {
-        customInput.value = '';
-    }
-}
-
-function buildFilterwheelSlotRow(index, name) {
-    const row = document.createElement('div');
-    row.className = 'filterwheel-slot-row';
-
-    const label = document.createElement('span');
-    label.className = 'filterwheel-slot-label';
-    label.textContent = `Slot ${index}`;
-
-    const select = document.createElement('select');
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = 'Select filter';
-    select.appendChild(placeholder);
-
-    FILTERWHEEL_PRESET_OPTIONS.forEach(option => {
-        const opt = document.createElement('option');
-        opt.value = option.value;
-        opt.textContent = option.label;
-        select.appendChild(opt);
-    });
-
-    const customOpt = document.createElement('option');
-    customOpt.value = FILTERWHEEL_CUSTOM_VALUE;
-    customOpt.textContent = 'Custom';
-    select.appendChild(customOpt);
-
-    const customInput = document.createElement('input');
-    customInput.type = 'text';
-    customInput.placeholder = 'Custom name';
-
-    const resolvedPreset = resolveFilterPreset(name);
-    if (resolvedPreset) {
-        select.value = resolvedPreset;
-    } else if (name) {
-        select.value = FILTERWHEEL_CUSTOM_VALUE;
-        customInput.value = name;
-    } else {
-        select.value = '';
+        const selected = countSelect.value;
+        if (!selected) {
+            return null;
+        }
+        if (selected === 'custom') {
+            if (!customInput) {
+                return null;
+            }
+            const customValue = Number.parseInt(customInput.value, 10);
+            return Number.isFinite(customValue) && customValue > 0 ? customValue : null;
+        }
+        const parsed = Number.parseInt(selected, 10);
+        return Number.isFinite(parsed) ? parsed : null;
     }
 
-    const updateCustomState = () => {
-        const isCustom = select.value === FILTERWHEEL_CUSTOM_VALUE;
-        row.classList.toggle('custom-active', isCustom);
-        customInput.disabled = !isCustom;
-        if (!isCustom) {
+    function updateCustomVisibility() {
+        if (!countSelect || !customInput) {
+            return;
+        }
+        const showCustom = countSelect.value === 'custom';
+        customInput.style.display = showCustom ? 'block' : 'none';
+        if (!showCustom) {
             customInput.value = '';
         }
-    };
+    }
 
-    select.addEventListener('change', () => {
+    function buildSlotRow(index, name) {
+        const row = document.createElement('div');
+        row.className = 'filterwheel-slot-row';
+
+        const label = document.createElement('span');
+        label.className = 'filterwheel-slot-label';
+        label.textContent = `Slot ${index}`;
+
+        const select = document.createElement('select');
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = 'Select filter';
+        select.appendChild(placeholder);
+
+        FILTERWHEEL_PRESET_OPTIONS.forEach(option => {
+            const opt = document.createElement('option');
+            opt.value = option.value;
+            opt.textContent = option.label;
+            select.appendChild(opt);
+        });
+
+        const customOpt = document.createElement('option');
+        customOpt.value = FILTERWHEEL_CUSTOM_VALUE;
+        customOpt.textContent = 'Custom';
+        select.appendChild(customOpt);
+
+        const rowCustomInput = document.createElement('input');
+        rowCustomInput.type = 'text';
+        rowCustomInput.placeholder = 'Custom name';
+
+        const resolvedPreset = resolveFilterPreset(name);
+        if (resolvedPreset) {
+            select.value = resolvedPreset;
+        } else if (name) {
+            select.value = FILTERWHEEL_CUSTOM_VALUE;
+            rowCustomInput.value = name;
+        } else {
+            select.value = '';
+        }
+
+        const updateCustomState = () => {
+            const isCustom = select.value === FILTERWHEEL_CUSTOM_VALUE;
+            row.classList.toggle('custom-active', isCustom);
+            rowCustomInput.disabled = !isCustom;
+            if (!isCustom) {
+                rowCustomInput.value = '';
+            }
+        };
+
+        select.addEventListener('change', () => {
+            updateCustomState();
+            syncNamesFromSlots();
+        });
+
+        rowCustomInput.addEventListener('input', () => {
+            syncNamesFromSlots();
+        });
+
         updateCustomState();
-        syncFilterwheelNamesFromSlots();
-    });
 
-    customInput.addEventListener('input', () => {
-        syncFilterwheelNamesFromSlots();
-    });
+        row.appendChild(label);
+        row.appendChild(select);
+        row.appendChild(rowCustomInput);
+        return row;
+    }
 
-    updateCustomState();
-
-    row.appendChild(label);
-    row.appendChild(select);
-    row.appendChild(customInput);
-    return row;
-}
-
-let filterwheelSyncInProgress = false;
-
-function renderFilterwheelSlots(slotCount, names) {
-    const slotList = document.getElementById('filterwheel-slot-list');
-    if (!slotList) {
-        return;
-    }
-    slotList.innerHTML = '';
-    if (!slotCount || slotCount <= 0) {
-        return;
-    }
-    for (let i = 0; i < slotCount; i += 1) {
-        const defaultName = `Filter ${i + 1}`;
-        const name = names[i] || defaultName;
-        slotList.appendChild(buildFilterwheelSlotRow(i + 1, name));
-    }
-}
-
-function syncFilterwheelNamesFromSlots() {
-    if (filterwheelSyncInProgress) {
-        return;
-    }
-    const textarea = document.getElementById('filterwheel-names');
-    const slotList = document.getElementById('filterwheel-slot-list');
-    if (!textarea || !slotList) {
-        return;
-    }
-    const rows = Array.from(slotList.querySelectorAll('.filterwheel-slot-row'));
-    if (rows.length === 0) {
-        return;
-    }
-    filterwheelSyncInProgress = true;
-    const names = rows.map((row, index) => {
-        const select = row.querySelector('select');
-        const customInput = row.querySelector('input[type="text"]');
-        const selected = select ? select.value : '';
-        if (selected === FILTERWHEEL_CUSTOM_VALUE) {
-            const customName = customInput ? customInput.value.trim() : '';
-            return customName || `Filter ${index + 1}`;
+    function renderSlots(slotCount, names) {
+        if (!slotList) {
+            return;
         }
-        if (selected) {
-            return selected;
+        slotList.innerHTML = '';
+        if (!slotCount || slotCount <= 0) {
+            return;
         }
-        return `Filter ${index + 1}`;
-    });
-    textarea.value = names.join('\n');
-    filterwheelSyncInProgress = false;
-}
-
-function syncFilterwheelSlotsFromTextarea() {
-    if (filterwheelSyncInProgress) {
-        return;
-    }
-    const textarea = document.getElementById('filterwheel-names');
-    const countSelect = document.getElementById('filterwheel-slot-count');
-    const customInput = document.getElementById('filterwheel-slot-custom');
-    if (!textarea || !countSelect) {
-        return;
-    }
-    filterwheelSyncInProgress = true;
-    const names = parseFilterNamesInput(textarea.value);
-    if (names.length === 0) {
-        countSelect.value = '';
-        if (customInput) {
-            customInput.value = '';
-        }
-        updateFilterwheelSlotCountVisibility();
-        renderFilterwheelSlots(0, []);
-        filterwheelSyncInProgress = false;
-        return;
-    }
-    const countOption = countSelect.querySelector(`option[value="${names.length}"]`);
-    if (countOption) {
-        countSelect.value = String(names.length);
-        if (customInput) {
-            customInput.value = '';
-        }
-    } else {
-        countSelect.value = 'custom';
-        if (customInput) {
-            customInput.value = String(names.length);
+        for (let i = 0; i < slotCount; i += 1) {
+            const defaultName = `Filter ${i + 1}`;
+            const name = names[i] || defaultName;
+            slotList.appendChild(buildSlotRow(i + 1, name));
         }
     }
-    updateFilterwheelSlotCountVisibility();
-    renderFilterwheelSlots(names.length, names);
-    filterwheelSyncInProgress = false;
+
+    function syncNamesFromSlots() {
+        if (syncInProgress) {
+            return;
+        }
+        if (!textarea || !slotList) {
+            return;
+        }
+        const rows = Array.from(slotList.querySelectorAll('.filterwheel-slot-row'));
+        if (rows.length === 0) {
+            return;
+        }
+        syncInProgress = true;
+        const names = rows.map((row, index) => {
+            const select = row.querySelector('select');
+            const rowCustomInput = row.querySelector('input[type="text"]');
+            const selected = select ? select.value : '';
+            if (selected === FILTERWHEEL_CUSTOM_VALUE) {
+                const customName = rowCustomInput ? rowCustomInput.value.trim() : '';
+                return customName || `Filter ${index + 1}`;
+            }
+            if (selected) {
+                return selected;
+            }
+            return `Filter ${index + 1}`;
+        });
+        textarea.value = names.join('\n');
+        syncInProgress = false;
+    }
+
+    function syncSlotsFromTextarea() {
+        if (syncInProgress) {
+            return;
+        }
+        if (!textarea || !countSelect) {
+            return;
+        }
+        syncInProgress = true;
+        const names = parseFilterNamesInput(textarea.value);
+        if (names.length === 0) {
+            countSelect.value = '';
+            if (customInput) {
+                customInput.value = '';
+            }
+            updateCustomVisibility();
+            renderSlots(0, []);
+            syncInProgress = false;
+            return;
+        }
+        const countOption = countSelect.querySelector(`option[value="${names.length}"]`);
+        if (countOption) {
+            countSelect.value = String(names.length);
+            if (customInput) {
+                customInput.value = '';
+            }
+        } else {
+            countSelect.value = 'custom';
+            if (customInput) {
+                customInput.value = String(names.length);
+            }
+        }
+        updateCustomVisibility();
+        renderSlots(names.length, names);
+        syncInProgress = false;
+    }
+
+    if (countSelect) {
+        updateCustomVisibility();
+        countSelect.addEventListener('change', () => {
+            updateCustomVisibility();
+            const slotCount = getSlotCount();
+            if (!slotCount) {
+                renderSlots(0, []);
+                return;
+            }
+            renderSlots(slotCount, []);
+            syncNamesFromSlots();
+        });
+    }
+
+    if (customInput) {
+        customInput.addEventListener('input', () => {
+            if (!countSelect || countSelect.value !== 'custom') {
+                return;
+            }
+            const slotCount = getSlotCount();
+            if (!slotCount) {
+                renderSlots(0, []);
+                return;
+            }
+            renderSlots(slotCount, []);
+            syncNamesFromSlots();
+        });
+    }
+
+    if (textarea) {
+        textarea.addEventListener('input', () => {
+            syncSlotsFromTextarea();
+        });
+    }
+
+    return { syncSlotsFromTextarea };
 }
 
 function setFieldGroupEnabled(groupEl, enabled) {
@@ -2014,6 +2051,26 @@ function updateTouptekConfigFields() {
     if (switchFields) {
         switchFields.style.display = isSwitch ? 'block' : 'none';
         setFieldGroupEnabled(switchFields, isSwitch);
+    }
+}
+
+function updatePlayerOneConfigFields() {
+    const deviceTypeSelect = document.getElementById('device-type');
+    if (!deviceTypeSelect) {
+        return;
+    }
+    const cameraFields = document.getElementById('playerone-camera-fields');
+    const filterwheelFields = document.getElementById('playerone-filterwheel-fields');
+    const deviceType = normalizeDeviceType(deviceTypeSelect.value);
+    const isCamera = deviceType === 'camera';
+    const isFilterWheel = deviceType === 'filterwheel';
+    if (cameraFields) {
+        cameraFields.style.display = isCamera ? 'block' : 'none';
+        setFieldGroupEnabled(cameraFields, isCamera);
+    }
+    if (filterwheelFields) {
+        filterwheelFields.style.display = isFilterWheel ? 'block' : 'none';
+        setFieldGroupEnabled(filterwheelFields, isFilterWheel);
     }
 }
 
@@ -2393,8 +2450,17 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.cameraIndex = touptekCameraIndex !== null ? touptekCameraIndex : 0;
         }
     } else if (deviceData.vendor === 'playerone') {
-        const playerOneCameraIndex = readOptionalNumber(formData, 'cameraIndex');
-        deviceData.cameraIndex = playerOneCameraIndex !== null ? playerOneCameraIndex : 0;
+        if (normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
+            const playerOneWheelIndex = readOptionalNumber(formData, 'playerOneFilterwheelIndex');
+            deviceData.filterwheelIndex = playerOneWheelIndex !== null ? playerOneWheelIndex : 0;
+            const playerOneFilterNames = parseFilterNamesInput(formData.get('playerOneFilterNames'));
+            if (playerOneFilterNames.length > 0) {
+                deviceData.filterNames = playerOneFilterNames;
+            }
+        } else {
+            const playerOneCameraIndex = readOptionalNumber(formData, 'cameraIndex');
+            deviceData.cameraIndex = playerOneCameraIndex !== null ? playerOneCameraIndex : 0;
+        }
     } else if (deviceData.vendor === 'weewx') {
         deviceData.weewxUrl = formData.get('weewxUrl');
         const pollInterval = readOptionalNumber(formData, 'pollIntervalSeconds');
@@ -2650,6 +2716,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const refreshLogFiles = document.getElementById('log-files-refresh');
     if (refreshLogFiles) {
         refreshLogFiles.addEventListener('click', loadLogFiles);
+    }
+    const deleteAllLogFilesBtn = document.getElementById('log-files-delete-all');
+    if (deleteAllLogFilesBtn) {
+        deleteAllLogFilesBtn.addEventListener('click', deleteAllLogFiles);
     }
     const closeLogViewer = document.getElementById('log-file-viewer-close');
     if (closeLogViewer) {

@@ -57,6 +57,16 @@ If no files exist, confirm: "This will be a brand-new vendor driver. Correct?"
 
 Ask: "How does this device connect? (serial, USB, TCP/Wi-Fi, or vendor SDK library)"
 
+### Question 4b: FilterWheel slot lineup (FilterWheel drivers only)
+
+If the device type is FilterWheel, ask: "What slot counts does this manufacturer offer
+across its filter wheel lineup? (e.g. ZWO EFW and Player One Phoenix Wheel both come in
+5, 7, and 8-slot models)"
+
+The answer drives the web UI slot-count selector in Step 6 — the select must list
+exactly the manufacturer's offered slot counts (with model names in the labels where
+known) plus a Custom option. See "FilterWheel vendors — required web UI" in AGENTS.md.
+
 ### Question 5: Protocol documentation
 
 Ask: "Do you have protocol docs, a PDF, or SDK headers to reference? If so, where are they?"
@@ -331,6 +341,12 @@ All 8 steps required for end-to-end functionality:
 3. Config sanitization fields preserved.
 4. Web UI vendor dropdown in `AlpacaHTTP/web/app.js`.
 5. Web UI vendor-specific form fields.
+   - **FilterWheel vendors**: the form MUST include the standard slot UI — a slot-count
+     select listing the manufacturer's actual lineup (from Question 4b) plus Custom,
+     per-slot filter name dropdowns, and the advanced names textarea. Instantiate
+     `createFilterwheelSlotUI({...})` in `app.js` with vendor-prefixed element IDs and
+     copy the markup pattern from an existing filterwheel vendor in `index.html`. Use
+     vendor-prefixed form field names to avoid FormData collisions.
 6. Frontend validation logic.
 7. Build-flag propagation from AlpacaCore to AlpacaHTTP.
 8. Routing/config tests in `AlpacaHTTP/tests/`.

@@ -150,6 +150,27 @@ When adding a new vendor/device type in AlpacaCore, also update AlpacaHTTP:
 
 Vendor registration alone is not enough for HTTP/UI visibility. All eight steps must be completed for a new vendor/device to be fully functional end-to-end.
 
+### FilterWheel vendors — required web UI (slot count + filter name pickers)
+
+Every filterwheel vendor's config form MUST include the standard slot UI, not just a
+names textarea. It consists of: a **slot-count select listing the manufacturer's actual
+wheel lineup** plus a Custom option, the per-slot filter dropdowns (LRGB/narrowband/Sloan
+presets + Custom), and the "Advanced: edit filter names as lines" textarea. The whole
+widget is one reusable component — instantiate `createFilterwheelSlotUI({...})` in
+`AlpacaHTTP/web/app.js` with vendor-prefixed element IDs and copy the markup pattern from
+an existing vendor in `index.html`. The component keeps the slot rows and the textarea in
+sync; the form submit reads the textarea.
+
+- **When building a new filterwheel driver, ask the user what slot counts the
+  manufacturer offers** and put exactly those in the select (with model names in the
+  labels where known). Known lineups: ZWO EFW 5/7/8; Player One Phoenix Wheel 5/7/8
+  (PW5/PW7/PW8).
+- Use unique, vendor-prefixed form field `name`s (e.g. `playerOneFilterwheelIndex`,
+  `playerOneFilterNames`) — generic names collide in FormData with other vendors'
+  hidden-but-enabled fields (ZWO's `filterwheelIndex` shadows any later duplicate).
+- When editing an existing device, populate the textarea from `config.filterNames` and
+  call the instance's `syncSlotsFromTextarea()` so the dropdowns reflect the saved names.
+
 ## Alpaca Protocol Conformance (AlpacaHTTP)
 
 These rules come straight from the ASCOM Alpaca API definition (https://ascom-standards.org/api/) and are enforced by ConformU. Do not regress them:
@@ -241,6 +262,7 @@ When adding a test file for a new vendor device:
 - Use AlpacaCore logging sink flow; do not use ad-hoc stdout/stderr logging in runtime paths.
 - Avoid global mutable state; protect shared state with mutexes.
 - Use `AlpacaException` for error paths; AlpacaHTTP maps exceptions to Alpaca error responses.
+- **Disconnect paths must be exception-safe**: in ref-counted SDK wrappers, erase the usage bookkeeping **before** the SDK close call so a throwing close (device unplugged) cannot leave a zero-count entry that turns later closes into no-ops; in driver `set_connected(false)`, clear driver state (`connected_`, handle/id, cached info) **before** the SDK close so a throw cannot trap the driver half-connected. Fixed across the PlayerOne PW + ZWO EFW/EAF/CAA wrappers and their drivers 2026-06-12 — use those as the template.
 - AlpacaHTTP must return Alpaca-style JSON envelopes and stable error mapping behavior.
 - On-disk logging writes daily files `alpacabridge-YYYY-MM-DD.log` to `logging.directory` (default `/var/log/AlpacaBridge`, per-config override, env `ALPACAHTTP_LOG_DIRECTORY`). The sink falls back to `$XDG_STATE_HOME/AlpacaBridge/logs` (or `~/.local/state/AlpacaBridge/logs`) when the configured path is not writable. systemd unit uses `LogsDirectory=AlpacaBridge`; the deb postinst pre-creates the directory for non-systemd starts. There is no in-memory log buffer — `/management/v1/logs` reads today's daily file directly from disk.
 - Retention: `logging.retention_days` (default 90, 0 = forever, env `ALPACAHTTP_LOG_RETENTION_DAYS`) auto-deletes daily files whose embedded date is older than `today − retention_days`. Pruning runs once on startup and again on day-rollover inside the file sink. Today's active file is never pruned.
@@ -379,6 +401,20 @@ The StellaVita is a **Raspberry Pi CM4 (BCM2711)** observatory controller. Its f
 - **Boot-high preserve**: `op,dh` drives all ports high at boot. The wrapper requests each line with an initial value of high and defaults its cached state to "on", so connecting the driver does not glitch power on attached gear. `close()` releases the request without driving a boolean line low (PWM ports are first driven to a defined steady level) — disconnecting never cuts power.
 - **PWM frequency — 100 Hz is the StellaVita sweet spot**: tested best on hardware; it dims flat panels smoothly without the visible flicker some panels show at the iMate/ASIAIR 50 Hz default. `default_stellavita_config()` uses `pwm_frequency_hz = 100`. (Contrast: iMate and ASIAIR Plus default to 50 Hz — the right value is panel-dependent, so the default is per-driver, not global.)
 - All four ports are writable and boolean by default, each switchable to soft-PWM (0–100%) — unlike the iMate there is no always-on read-only pass-through port.
+
+### Player One
+
+Devices: Camera, FilterWheel (Phoenix Wheel).
+
+SDK locations: `AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/` (cameras) and `AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/` (Phoenix Wheel). These are **two unrelated SDK libraries** (`libPlayerOneCamera`, `libPlayerOnePW`) with separate C APIs — the filter wheel has its own wrapper (`playerone_pw_wrapper`, mirroring `zwo_efw_wrapper`) rather than extending `playerone_sdk_wrapper`. Both `.so` files ship in the `.deb` and via the install scripts.
+
+- **Guide direction mapping (camera)**: Player One ST4 guide config IDs map North=0/South=1/East=2/West=3 — already matching ASCOM order.
+- **ROI alignment (camera)**: SDK requires width%4==0, height%2==0. The driver aligns down for SDK calls and preserves the requested values for the Alpaca interface.
+- **Wheel stores filter aliases and focus offsets on-device** (`POAGetPWFilterAlias`, `POAGetPWFocusOffset`, settable via Player One's own software). The filterwheel driver seeds `Names`/`FocusOffsets` from the wheel at connect; `filterNames` from config (set via `set_names`) takes precedence. The driver does not write aliases/offsets back to the wheel.
+- **Position while moving**: `POAGetCurrentPosition` returns `PW_ERROR_IS_MOVING` while the wheel is rotating. The wrapper's `get_position` checks `POAGetPWState` first and maps the moving window to `-1`, which is exactly the ASCOM `Position` contract — don't translate that SDK error into an exception on the read path.
+- **`PW_ERROR_FIRMWARE_ERROR`** means filter position and hole are misaligned; the SDK doc says to call `POAResetPW` (exposed as `reset_wheel` in the wrapper) to recover.
+- **udev rules are identical** between the camera and filter wheel SDKs (`99-player_one_astronomy.rules`) — the camera SDK's copy already installed by packaging covers both device types; don't install it twice.
+- **PW SDK `.so` symlink chain**: upstream ships only `libPlayerOnePW.so.1.2.3`; the `libPlayerOnePW.so` / `.so.1` / `.so.1.2` symlinks needed for linking were created by hand in `lib/arm64/`. Recreate them on an SDK version bump.
 
 ### SynScan (SkyWatcher)
 

@@ -173,7 +173,14 @@ void ZWOCAASDKWrapper::open_rotator(int rotator_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     auto& usage = pimpl_->usage_[rotator_id];
     if (usage.open_count == 0) {
-        throw_on_error(CAAOpen(rotator_id), "CAAOpen");
+        try {
+            throw_on_error(CAAOpen(rotator_id), "CAAOpen");
+        } catch (...) {
+            // Nothing was opened — drop the zero-count entry inserted by
+            // operator[] above rather than leaving a stale map node.
+            pimpl_->usage_.erase(rotator_id);
+            throw;
+        }
     }
     ++usage.open_count;
 }
@@ -186,8 +193,14 @@ void ZWOCAASDKWrapper::close_rotator(int rotator_id) {
     }
     --it->second.open_count;
     if (it->second.open_count == 0) {
-        throw_on_error(CAAClose(rotator_id), "CAAClose");
+        // Erase the bookkeeping first: a failing SDK close (e.g. device
+        // unplugged) must not leave a zero-count entry that turns every
+        // later close into a no-op and leaks the handle. This assumes an
+        // SDK close error means the handle is unusable on the SDK side —
+        // a later open performs a fresh SDK open instead of reusing
+        // half-closed state.
         pimpl_->usage_.erase(it);
+        throw_on_error(CAAClose(rotator_id), "CAAClose");
     }
 }
 

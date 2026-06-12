@@ -10,40 +10,42 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include <alpacahttp/router.h>
-#include <alpacahttp/version.h>
-#include <alpacahttp/json_utils.h>
-#include <alpacahttp/util/error_mapping.h>
-#include <alpacahttp/util/logging_adapter.h>
-#include <alpacacore/device_registry.h>
+#include <alpacacore/alpaca_defs.h>
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/device_registry.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
-#include <alpacacore/alpaca_defs.h>
 #include <alpacacore/util/logging.h>
-#include <nlohmann/json.hpp>
-#include <sstream>
-#include <regex>
-#include <stdexcept>
+#include <alpacahttp/json_utils.h>
+#include <alpacahttp/router.h>
+#include <alpacahttp/util/error_mapping.h>
+#include <alpacahttp/util/logging_adapter.h>
+#include <alpacahttp/version.h>
+#include <zlib.h>
+
 #include <algorithm>
-#include <cctype>
-#include <string_view>
-#include <cmath>
-#include <ctime>
-#include <cstdlib>
-#include <cstdint>
-#include <vector>
-#include <chrono>
-#include <iomanip>
-#include <fstream>
-#include <filesystem>
-#include <thread>
-#include <optional>
 #include <array>
-#include <variant>
-#include <unordered_set>
+#include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <regex>
+#include <sstream>
+#include <stdexcept>
+#include <string_view>
+#include <thread>
+#include <unordered_set>
+#include <variant>
+#include <vector>
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
@@ -88,6 +90,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
+#include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
 #endif
 
 namespace {
@@ -121,6 +124,41 @@ std::string log_level_to_string(LogLevel level) {
         case LogLevel::Critical: return "CRITICAL";
         default: return "INFO";
     }
+}
+
+// Gzip-compress a buffer (RFC 1952 framing via zlib windowBits 15+16).
+// Throws std::runtime_error on any zlib failure.
+std::string gzip_compress(const std::string& input) {
+    // zlib's avail_in/avail_out are 32-bit; refuse rather than truncate.
+    if (input.size() >= std::numeric_limits<uInt>::max() / 2) {
+        throw std::runtime_error("Input too large to gzip in one pass");
+    }
+
+    z_stream stream{};
+    if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        throw std::runtime_error("deflateInit2 failed");
+    }
+    struct ZStreamGuard {
+        z_stream* stream;
+        ~ZStreamGuard() { deflateEnd(stream); }
+    } guard{&stream};
+
+    std::string output;
+    // The input-size guard above keeps deflateBound's result (slightly larger
+    // than the input) within uInt range, so both avail casts below are safe.
+    // Tighten one only together with the other.
+    output.resize(deflateBound(&stream, static_cast<uLong>(input.size())));
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
+    stream.avail_in = static_cast<uInt>(input.size());
+    stream.next_out = reinterpret_cast<Bytef*>(output.data());
+    stream.avail_out = static_cast<uInt>(output.size());
+
+    const int rc = deflate(&stream, Z_FINISH);
+    if (rc != Z_STREAM_END) {
+        throw std::runtime_error("deflate failed (rc=" + std::to_string(rc) + ")");
+    }
+    output.resize(stream.total_out);
+    return output;
 }
 
 std::string escape_yaml_string(const std::string& value) {
@@ -5800,6 +5838,45 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
+    if (request.method() == HttpMethod::DELETE_) {
+        const auto files = util::list_log_files();
+        const std::filesystem::path log_directory = util::get_log_directory();
+        std::size_t deleted = 0;
+        try {
+            for (const auto& info : files) {
+                try {
+                    util::delete_log_file(info.name);
+                } catch (const std::exception&) {
+                    // A concurrent request may have deleted it between the
+                    // snapshot and now; the goal state is reached either way.
+                    std::error_code exists_ec;
+                    if (log_directory.empty() || std::filesystem::exists(log_directory / info.name, exists_ec)) {
+                        throw;
+                    }
+                }
+                ++deleted;
+            }
+            util::log_info("Deleted " + std::to_string(deleted) + " log file(s)");
+            AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+            nlohmann::json payload;
+            payload["DeletedCount"] = deleted;
+            alpaca_response.value = payload;
+            response.set_body(alpaca_response);
+            return response;
+        } catch (const std::exception& e) {
+            // Partial deletion is possible — tell the caller exactly how far
+            // it got rather than leaving the outcome ambiguous. Details (which
+            // can include errno text) go to the server log, not the response.
+            util::log_warning("Delete log files failed: " + std::string(e.what()));
+            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+                                                     "Failed to delete log files (deleted " + std::to_string(deleted) +
+                                                         " of " + std::to_string(files.size()) +
+                                                         " before the failure); see the server log for details");
+            response.set_body(err);
+            return response;
+        }
+    }
+
     if (request.method() != HttpMethod::GET) {
         AlpacaResponse err = make_error_response(
             client_tx_id, server_tx_id,
@@ -5808,6 +5885,65 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
         );
         response.set_body(err);
         return response;
+    }
+
+    if (request.has_query_param("download")) {
+        try {
+            auto files = util::list_log_files();
+            // Cap the combined archive so a long retention window cannot
+            // build an OOM-sized string on a small SBC. Keep the newest
+            // files (the relevant ones for debugging) and drop the oldest;
+            // the newest file is always included.
+            constexpr std::uint64_t kMaxArchiveBytes = 200ull * 1024 * 1024;
+            // Must stay within gzip_compress's input-size guard (uInt-based);
+            // raising the cap past it would make the download always fail.
+            static_assert(kMaxArchiveBytes < std::numeric_limits<uInt>::max() / 2,
+                          "archive cap must fit gzip_compress's single-pass input guard");
+            std::size_t included = 0;
+            std::uint64_t total_bytes = 0;
+            for (const auto& info : files) {
+                // Budget what read_log_file can actually return: a file over
+                // its per-file cap contributes only a short error note, so it
+                // must not consume its full on-disk size from the budget and
+                // crowd out smaller, readable files.
+                const std::uint64_t effective = std::min<std::uint64_t>(info.size, util::kMaxLogFileReadBytes);
+                if (included > 0 && total_bytes + effective > kMaxArchiveBytes) {
+                    break;
+                }
+                total_bytes += effective;
+                ++included;
+            }
+            // list_log_files() is newest-first; emit oldest-first so the
+            // combined file reads chronologically.
+            std::string combined;
+            if (included < files.size()) {
+                combined += "===== " + std::to_string(files.size() - included) +
+                            " older log file(s) omitted: archive capped at 200 MiB =====\n\n";
+            }
+            for (std::size_t i = included; i-- > 0;) {
+                const auto& info = files[i];
+                combined += "===== " + info.name + " =====\n";
+                try {
+                    combined += util::read_log_file(info.name);
+                } catch (const std::exception& e) {
+                    combined += std::string("[unable to read: ") + e.what() + "]\n";
+                }
+                if (!combined.empty() && combined.back() != '\n') {
+                    combined += '\n';
+                }
+                combined += '\n';
+            }
+            response.set_content_type("application/gzip");
+            response.set_header("Content-Disposition", "attachment; filename=\"alpacabridge-logs.txt.gz\"");
+            response.set_body(gzip_compress(combined));
+            return response;
+        } catch (const std::exception& e) {
+            response.set_content_type("application/json");
+            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+                                                     std::string("Failed to build log archive: ") + e.what());
+            response.set_body(err);
+            return response;
+        }
     }
 
     try {
@@ -6916,6 +7052,34 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "playerone" && device_type_str == "filterwheel") {
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+        int wheel_index = config.value("filterwheelIndex", 0);
+
+        auto wheel = alpacacore::vendor::playerone::create_playerone_filterwheel(device_number, wheel_index);
+
+        if (config.contains("filterNames")) {
+            const auto& names_value = config.at("filterNames");
+            if (!names_value.is_array()) {
+                error_message = "Player One filter wheel filterNames must be an array";
+                return false;
+            }
+            wheel->set_names(names_value.get<std::vector<std::string>>());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(wheel.release()))) {
+            util::log_info("Registered Player One Phoenix filter wheel");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "gemini" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_GEMINI
         std::string conn_type = config.value("connectionType", "auto");
@@ -7057,7 +7221,12 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("focuserId");
         }
     } else if (vendor == "playerone") {
-        copy_if_present("cameraIndex");
+        if (device_type == "filterwheel") {
+            copy_if_present("filterwheelIndex");
+            copy_if_present("filterNames");
+        } else {
+            copy_if_present("cameraIndex");
+        }
     } else if (vendor == "weewx") {
         copy_if_present("weewxUrl");
         copy_if_present("pollIntervalSeconds");

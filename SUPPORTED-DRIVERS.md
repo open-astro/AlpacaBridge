@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-06-10
+## Updated 2026-06-12
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -138,6 +138,24 @@ This document lists all hardware vendors and device types that are verified to w
 [↑ Back to top](#alpacabridge-supported-drivers)
 
 ## FilterWheel Drivers
+
+### Player One
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Phoenix Wheel (PW8) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/PW8/) |
+
+<details>
+<summary><strong>Player One FilterWheel Driver Notes</strong></summary>
+
+- **SDK**: Player One FilterWheel SDK v1.2.3 (`libPlayerOnePW`, separate library from the camera SDK)
+- **Connection**: USB
+- **Tested model**: Phoenix Wheel PW8 (8-position) on Linux arm64
+- **ConformU**: 4.3.0 — 0 errors, 0 issues, 0 timing issues
+- **Filter names / focus offsets**: per-slot aliases and focus offsets stored on the wheel (set via Player One's own software) are read as defaults at connect; `filterNames` from the AlpacaBridge config overrides them and nothing is written back to the wheel.
+- **Position** reports −1 while the wheel is rotating, per the ASCOM IFilterWheelV3 contract.
+
+</details>
 
 ### ZWO
 

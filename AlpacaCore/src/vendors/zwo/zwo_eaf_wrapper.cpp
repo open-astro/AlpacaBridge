@@ -192,7 +192,14 @@ void ZWOEAFSDKWrapper::open_focuser(int focuser_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     auto& usage = pimpl_->usage_[focuser_id];
     if (usage.open_count == 0) {
-        throw_on_error(EAFOpen(focuser_id), "EAFOpen");
+        try {
+            throw_on_error(EAFOpen(focuser_id), "EAFOpen");
+        } catch (...) {
+            // Nothing was opened — drop the zero-count entry inserted by
+            // operator[] above rather than leaving a stale map node.
+            pimpl_->usage_.erase(focuser_id);
+            throw;
+        }
     }
     ++usage.open_count;
 }
@@ -205,8 +212,14 @@ void ZWOEAFSDKWrapper::close_focuser(int focuser_id) {
     }
     --it->second.open_count;
     if (it->second.open_count == 0) {
-        throw_on_error(EAFClose(focuser_id), "EAFClose");
+        // Erase the bookkeeping first: a failing SDK close (e.g. device
+        // unplugged) must not leave a zero-count entry that turns every
+        // later close into a no-op and leaks the handle. This assumes an
+        // SDK close error means the handle is unusable on the SDK side —
+        // a later open performs a fresh SDK open instead of reusing
+        // half-closed state.
         pimpl_->usage_.erase(it);
+        throw_on_error(EAFClose(focuser_id), "EAFClose");
     }
 }
 

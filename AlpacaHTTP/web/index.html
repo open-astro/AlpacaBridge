@@ -579,14 +579,47 @@
                     </div>
                 </div>
 
-                <!-- Player One Camera Configuration -->
+                <!-- Player One Configuration -->
                 <div id="playerone-config" class="vendor-config" style="display: none;">
-                    <h3>Player One Camera Configuration</h3>
+                    <h3>Player One Configuration</h3>
 
-                    <div class="form-group">
-                        <label for="playerone-camera-index">Camera Index:</label>
-                        <input type="number" id="playerone-camera-index" name="cameraIndex" value="0" min="0">
-                        <small>0-based index from the Player One SDK enumeration.</small>
+                    <div id="playerone-camera-fields">
+                        <div class="form-group">
+                            <label for="playerone-camera-index">Camera Index:</label>
+                            <input type="number" id="playerone-camera-index" name="cameraIndex" value="0" min="0">
+                            <small>0-based index from the Player One SDK enumeration.</small>
+                        </div>
+                    </div>
+
+                    <div id="playerone-filterwheel-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="playerone-filterwheel-index">Filter Wheel Index:</label>
+                            <input type="number" id="playerone-filterwheel-index" name="playerOneFilterwheelIndex" value="0" min="0">
+                            <small>0-based index from the Player One PW SDK enumeration.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="playerone-filterwheel-slot-count">Filter Wheel Slots:</label>
+                            <div class="filterwheel-slot-controls">
+                                <select id="playerone-filterwheel-slot-count">
+                                    <option value="">Select slot count</option>
+                                    <option value="5">5 slots (PW5)</option>
+                                    <option value="7">7 slots (PW7)</option>
+                                    <option value="8">8 slots (PW8)</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                                <input type="number" id="playerone-filterwheel-slot-custom" min="1" max="16" placeholder="Custom">
+                            </div>
+                            <small>Pick a slot count to build filter dropdowns, or leave blank to use the filter aliases stored on the wheel.</small>
+                        </div>
+                        <div id="playerone-filterwheel-slot-list" class="filterwheel-slot-list"></div>
+                        <details class="filterwheel-advanced">
+                            <summary>Advanced: edit filter names as lines</summary>
+                            <div class="form-group">
+                                <label for="playerone-filter-names">Filter Names (optional):</label>
+                                <textarea id="playerone-filter-names" name="playerOneFilterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                                <small>One name per line. Leave blank to use the filter aliases stored on the wheel.</small>
+                            </div>
+                        </details>
                     </div>
 
                 </div>
@@ -801,9 +834,6 @@
                         <p id="log-level-status" class="log-status">Detecting log level...</p>
                         <div class="log-levels">
                             <div id="log-level-toggles" class="log-levels-grid"></div>
-                            <div class="log-download">
-                                <button class="btn btn-secondary" type="button" onclick="downloadLogs()">Download Logs</button>
-                            </div>
                         </div>
                         <div class="log-files">
                             <div class="log-files-header">
@@ -812,7 +842,11 @@
                                     <p>Daily files saved to disk for long-term review.</p>
                                     <p id="log-files-directory" class="log-files-directory"></p>
                                 </div>
-                                <button id="log-files-refresh" class="btn btn-secondary" type="button">Refresh</button>
+                                <div class="log-files-actions">
+                                    <button id="log-files-refresh" class="btn btn-secondary" type="button">Refresh</button>
+                                    <button class="btn btn-secondary" type="button" onclick="downloadAllLogs()">Download All Logs</button>
+                                    <button id="log-files-delete-all" class="btn btn-danger" type="button">Delete All Logs</button>
+                                </div>
                             </div>
                             <p id="log-files-status" class="log-status">Loading log files...</p>
                             <div id="log-files-list" class="log-files-list"></div>

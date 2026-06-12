@@ -390,10 +390,9 @@ std::string read_log_file(const std::string& name) {
     // Guard against pathological single-day log volumes (e.g., a runaway driver
     // error loop) blowing up a single HTTP response into a multi-GB allocation.
     // Callers can still read large files manually via the on-disk path.
-    constexpr std::uintmax_t kMaxReadBytes = 10ull * 1024 * 1024;  // 10 MiB
     std::error_code size_ec;
     const auto file_size = std::filesystem::file_size(path, size_ec);
-    if (!size_ec && file_size > kMaxReadBytes) {
+    if (!size_ec && file_size > kMaxLogFileReadBytes) {
         throw std::runtime_error(
             "Log file exceeds 10 MiB; download the file directly from disk");
     }

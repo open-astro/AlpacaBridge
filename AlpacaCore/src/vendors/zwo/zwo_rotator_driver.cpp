@@ -147,9 +147,10 @@ public:
             return;
         }
 
-        if (rotator_id_.has_value()) {
-            sdk.close_rotator(rotator_id_.value());
-        }
+        // Clear driver state before the SDK close: if the close throws (e.g.
+        // device unplugged) the error still surfaces, but the driver must not
+        // stay half-connected.
+        const std::optional<int> close_id = rotator_id_;
         if (rotator_index_.has_value()) {
             rotator_id_.reset();
             rotator_info_ = {};
@@ -158,6 +159,9 @@ public:
             rotator_type_.clear();
         }
         connected_.store(false);
+        if (close_id.has_value()) {
+            sdk.close_rotator(close_id.value());
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override {

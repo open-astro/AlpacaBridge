@@ -64,6 +64,7 @@ jobs:
             libudev-dev \
             libgpiod-dev \
             nlohmann-json3-dev \
+            zlib1g-dev \
             libcurl4-openssl-dev
 
       - name: Verify toolchain
@@ -100,6 +101,7 @@ jobs:
             libusb-1.0-0-dev \
             libudev-dev \
             nlohmann-json3-dev \
+            zlib1g-dev \
             libcurl4-openssl-dev
 
       - name: Build libgpiod v2 from source
@@ -138,6 +140,7 @@ jobs:
             "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
             "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
             "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
             "$core/QHY/sdk_Arm64_25.09.29/usr/local/lib/libqhyccd.so"
           )
           for lib in "${libs[@]}"; do
@@ -175,6 +178,7 @@ jobs:
             libudev-dev \
             libgpiod-dev \
             nlohmann-json3-dev \
+            zlib1g-dev \
             libcurl4-openssl-dev
 
       - name: Build + run tests with sanitizers (vendor-neutral)
@@ -256,6 +260,7 @@ jobs:
             libusb-1.0-0-dev \
             libudev-dev \
             nlohmann-json3-dev \
+            zlib1g-dev \
             libcurl4-openssl-dev
 
       - name: Build libgpiod v2 from source
@@ -280,16 +285,20 @@ jobs:
           sudo make install
           sudo ldconfig
 
-      - name: Generate compile_commands.json (vendor-neutral)
+      - name: Generate compile_commands.json (all vendors)
         # AlpacaHTTP pulls AlpacaCore in as a subdirectory, so this single
         # configure+build yields a compile DB covering both source trees and
-        # materializes any generated headers before analysis.
+        # materializes any generated headers before analysis. Vendors are ON so
+        # vendor driver/wrapper sources get their real compile commands — with
+        # vendors OFF they are absent from the DB and clang-tidy interpolates a
+        # command without the vendored SDK include dirs, failing on e.g.
+        # <PlayerOnePW.h> with a spurious clang-diagnostic-error.
         run: |
           set -euo pipefail
           cmake -S AlpacaHTTP -B AlpacaHTTP/build \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DALPACAHTTP_BUILD_TESTS=ON \
-            -DALPACACORE_ENABLE_ALL_VENDORS=OFF
+            -DALPACACORE_ENABLE_ALL_VENDORS=ON
           cmake --build AlpacaHTTP/build --parallel "$(nproc)"
 
       - name: Run clang-tidy on changed lines
