@@ -129,10 +129,19 @@ std::string log_level_to_string(LogLevel level) {
 // Gzip-compress a buffer (RFC 1952 framing via zlib windowBits 15+16).
 // Throws std::runtime_error on any zlib failure.
 std::string gzip_compress(const std::string& input) {
+    // zlib's avail_in/avail_out are 32-bit; refuse rather than truncate.
+    if (input.size() >= std::numeric_limits<uInt>::max() / 2) {
+        throw std::runtime_error("Input too large to gzip in one pass");
+    }
+
     z_stream stream{};
     if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
         throw std::runtime_error("deflateInit2 failed");
     }
+    struct ZStreamGuard {
+        z_stream* stream;
+        ~ZStreamGuard() { deflateEnd(stream); }
+    } guard{&stream};
 
     std::string output;
     output.resize(deflateBound(&stream, static_cast<uLong>(input.size())));
@@ -143,11 +152,9 @@ std::string gzip_compress(const std::string& input) {
 
     const int rc = deflate(&stream, Z_FINISH);
     if (rc != Z_STREAM_END) {
-        deflateEnd(&stream);
         throw std::runtime_error("deflate failed (rc=" + std::to_string(rc) + ")");
     }
     output.resize(stream.total_out);
-    deflateEnd(&stream);
     return output;
 }
 
