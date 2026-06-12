@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -31,7 +32,7 @@ namespace {
 // bound while disconnected, before the per-model element list is probed.
 constexpr int kMaxThermalElements = 2;
 
-enum class ThermalElementKind { DewHeater, Fan };
+enum class ThermalElementKind : std::uint8_t { DewHeater, Fan };
 
 struct ThermalElement {
     ThermalElementKind kind{};
@@ -57,7 +58,9 @@ public:
         stop_connection_thread();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                // Qualified: virtual dispatch is gone in a destructor anyway;
+                // saying so explicitly keeps clang-analyzer's VirtualCall happy.
+                PlayerOneSwitchDriver::set_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("PlayerOne", "Error during switch destruction: " + std::string(e.what()));
             }
