@@ -5883,10 +5883,15 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             std::size_t included = 0;
             std::uint64_t total_bytes = 0;
             for (const auto& info : files) {
-                if (included > 0 && total_bytes + info.size > kMaxArchiveBytes) {
+                // Budget what read_log_file can actually return: a file over
+                // its per-file cap contributes only a short error note, so it
+                // must not consume its full on-disk size from the budget and
+                // crowd out smaller, readable files.
+                const std::uint64_t effective = std::min<std::uint64_t>(info.size, util::kMaxLogFileReadBytes);
+                if (included > 0 && total_bytes + effective > kMaxArchiveBytes) {
                     break;
                 }
-                total_bytes += info.size;
+                total_bytes += effective;
                 ++included;
             }
             // list_log_files() is newest-first; emit oldest-first so the

@@ -60,8 +60,13 @@ std::string get_log_directory();
 // List the log files currently stored in the log directory.
 std::vector<LogFileInfo> list_log_files();
 
+// Per-file ceiling enforced by read_log_file. Shared so callers budgeting
+// multi-file reads (the combined log download) account with the same limit.
+inline constexpr std::uintmax_t kMaxLogFileReadBytes = 10ull * 1024 * 1024;  // 10 MiB
+
 // Read the contents of a named log file. Throws std::runtime_error on
-// validation or I/O failure. The `name` must be a basename only (no path).
+// validation or I/O failure (including files over kMaxLogFileReadBytes).
+// The `name` must be a basename only (no path).
 std::string read_log_file(const std::string& name);
 
 // Delete the named log file. If the targeted file is today's active daily

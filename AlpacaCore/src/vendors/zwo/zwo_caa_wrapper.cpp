@@ -188,7 +188,10 @@ void ZWOCAASDKWrapper::close_rotator(int rotator_id) {
     if (it->second.open_count == 0) {
         // Erase the bookkeeping first: a failing SDK close (e.g. device
         // unplugged) must not leave a zero-count entry that turns every
-        // later close into a no-op and leaks the handle.
+        // later close into a no-op and leaks the handle. This assumes an
+        // SDK close error means the handle is unusable on the SDK side —
+        // a later open performs a fresh SDK open instead of reusing
+        // half-closed state.
         pimpl_->usage_.erase(it);
         throw_on_error(CAAClose(rotator_id), "CAAClose");
     }
