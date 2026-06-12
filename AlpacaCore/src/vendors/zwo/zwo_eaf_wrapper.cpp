@@ -192,7 +192,14 @@ void ZWOEAFSDKWrapper::open_focuser(int focuser_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     auto& usage = pimpl_->usage_[focuser_id];
     if (usage.open_count == 0) {
-        throw_on_error(EAFOpen(focuser_id), "EAFOpen");
+        try {
+            throw_on_error(EAFOpen(focuser_id), "EAFOpen");
+        } catch (...) {
+            // Nothing was opened — drop the zero-count entry inserted by
+            // operator[] above rather than leaving a stale map node.
+            pimpl_->usage_.erase(focuser_id);
+            throw;
+        }
     }
     ++usage.open_count;
 }

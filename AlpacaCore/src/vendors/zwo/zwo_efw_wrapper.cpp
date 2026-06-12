@@ -163,7 +163,14 @@ void ZWOEFWSDKWrapper::open_wheel(int wheel_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     auto& usage = pimpl_->usage_[wheel_id];
     if (usage.open_count == 0) {
-        throw_on_error(EFWOpen(wheel_id), "EFWOpen");
+        try {
+            throw_on_error(EFWOpen(wheel_id), "EFWOpen");
+        } catch (...) {
+            // Nothing was opened — drop the zero-count entry inserted by
+            // operator[] above rather than leaving a stale map node.
+            pimpl_->usage_.erase(wheel_id);
+            throw;
+        }
     }
     ++usage.open_count;
 }

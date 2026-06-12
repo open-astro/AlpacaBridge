@@ -5840,10 +5840,20 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
 
     if (request.method() == HttpMethod::DELETE_) {
         const auto files = util::list_log_files();
+        const std::filesystem::path log_directory = util::get_log_directory();
         std::size_t deleted = 0;
         try {
             for (const auto& info : files) {
-                util::delete_log_file(info.name);
+                try {
+                    util::delete_log_file(info.name);
+                } catch (const std::exception&) {
+                    // A concurrent request may have deleted it between the
+                    // snapshot and now; the goal state is reached either way.
+                    std::error_code exists_ec;
+                    if (log_directory.empty() || std::filesystem::exists(log_directory / info.name, exists_ec)) {
+                        throw;
+                    }
+                }
                 ++deleted;
             }
             util::log_info("Deleted " + std::to_string(deleted) + " log file(s)");
@@ -5855,11 +5865,13 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             return response;
         } catch (const std::exception& e) {
             // Partial deletion is possible — tell the caller exactly how far
-            // it got rather than leaving the outcome ambiguous.
+            // it got rather than leaving the outcome ambiguous. Details (which
+            // can include errno text) go to the server log, not the response.
+            util::log_warning("Delete log files failed: " + std::string(e.what()));
             AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
-                                                     std::string("Failed to delete log files: ") + e.what() +
-                                                         " (deleted " + std::to_string(deleted) + " of " +
-                                                         std::to_string(files.size()) + " before the failure)");
+                                                     "Failed to delete log files (deleted " + std::to_string(deleted) +
+                                                         " of " + std::to_string(files.size()) +
+                                                         " before the failure); see the server log for details");
             response.set_body(err);
             return response;
         }
@@ -5883,6 +5895,10 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             // files (the relevant ones for debugging) and drop the oldest;
             // the newest file is always included.
             constexpr std::uint64_t kMaxArchiveBytes = 200ull * 1024 * 1024;
+            // Must stay within gzip_compress's input-size guard (uInt-based);
+            // raising the cap past it would make the download always fail.
+            static_assert(kMaxArchiveBytes < std::numeric_limits<uInt>::max() / 2,
+                          "archive cap must fit gzip_compress's single-pass input guard");
             std::size_t included = 0;
             std::uint64_t total_bytes = 0;
             for (const auto& info : files) {

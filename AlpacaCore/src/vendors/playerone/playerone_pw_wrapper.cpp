@@ -114,7 +114,14 @@ void PlayerOnePWSDKWrapper::open_wheel(int handle) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     auto& usage = pimpl_->usage_[handle];
     if (usage.open_count == 0) {
-        throw_on_error(POAOpenPW(handle), "POAOpenPW");
+        try {
+            throw_on_error(POAOpenPW(handle), "POAOpenPW");
+        } catch (...) {
+            // Nothing was opened — drop the zero-count entry inserted by
+            // operator[] above rather than leaving a stale map node.
+            pimpl_->usage_.erase(handle);
+            throw;
+        }
     }
     ++usage.open_count;
 }

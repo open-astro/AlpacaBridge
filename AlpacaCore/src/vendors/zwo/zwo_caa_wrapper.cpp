@@ -173,7 +173,14 @@ void ZWOCAASDKWrapper::open_rotator(int rotator_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     auto& usage = pimpl_->usage_[rotator_id];
     if (usage.open_count == 0) {
-        throw_on_error(CAAOpen(rotator_id), "CAAOpen");
+        try {
+            throw_on_error(CAAOpen(rotator_id), "CAAOpen");
+        } catch (...) {
+            // Nothing was opened — drop the zero-count entry inserted by
+            // operator[] above rather than leaving a stale map node.
+            pimpl_->usage_.erase(rotator_id);
+            throw;
+        }
     }
     ++usage.open_count;
 }
