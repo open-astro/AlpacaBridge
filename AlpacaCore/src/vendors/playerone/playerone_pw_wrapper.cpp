@@ -10,9 +10,9 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
+#include <PlayerOnePW.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/playerone/playerone_pw_wrapper.h>
-#include <PlayerOnePW.h>
 
 #include <mutex>
 #include <unordered_map>
@@ -23,17 +23,17 @@ namespace {
 
 int map_error_code(PWErrors code) {
     switch (code) {
-    case PW_ERROR_INVALID_INDEX:
-    case PW_ERROR_INVALID_HANDLE:
-    case PW_ERROR_INVALID_ARGU:
-        return AlpacaError::InvalidValue;
-    case PW_ERROR_NOT_OPENED:
-    case PW_ERROR_NOT_FOUND:
-        return AlpacaError::NotConnected;
-    case PW_ERROR_IS_MOVING:
-        return AlpacaError::InvalidOperation;
-    default:
-        return AlpacaError::DriverException;
+        case PW_ERROR_INVALID_INDEX:
+        case PW_ERROR_INVALID_HANDLE:
+        case PW_ERROR_INVALID_ARGU:
+            return AlpacaError::InvalidValue;
+        case PW_ERROR_NOT_OPENED:
+        case PW_ERROR_NOT_FOUND:
+            return AlpacaError::NotConnected;
+        case PW_ERROR_IS_MOVING:
+            return AlpacaError::InvalidOperation;
+        default:
+            return AlpacaError::DriverException;
     }
 }
 
@@ -42,8 +42,7 @@ void throw_on_error(PWErrors code, const std::string& context) {
         return;
     }
     const char* error_string = POAGetPWErrorString(code);
-    throw AlpacaException(context + ": " + (error_string ? error_string : "unknown error"),
-                          map_error_code(code));
+    throw AlpacaException(context + ": " + (error_string ? error_string : "unknown error"), map_error_code(code));
 }
 
 PlayerOnePWInfo convert_wheel_info(const PWProperties& props) {
@@ -55,7 +54,7 @@ PlayerOnePWInfo convert_wheel_info(const PWProperties& props) {
     return out;
 }
 
-} // namespace
+}  // namespace
 
 class PlayerOnePWSDKWrapper::Impl {
 public:
@@ -66,8 +65,7 @@ public:
     std::unordered_map<int, WheelUsage> usage_;
 };
 
-PlayerOnePWSDKWrapper::PlayerOnePWSDKWrapper()
-    : pimpl_(std::make_unique<Impl>()) {}
+PlayerOnePWSDKWrapper::PlayerOnePWSDKWrapper() : pimpl_(std::make_unique<Impl>()) {}
 
 PlayerOnePWSDKWrapper::~PlayerOnePWSDKWrapper() = default;
 
@@ -179,8 +177,7 @@ void PlayerOnePWSDKWrapper::set_one_way(int handle, bool one_way) {
 std::string PlayerOnePWSDKWrapper::get_filter_alias(int handle, int position) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     char alias[MAX_NAME_LEN + 1] = {};
-    throw_on_error(POAGetPWFilterAlias(handle, position, alias, MAX_NAME_LEN),
-                   "POAGetPWFilterAlias");
+    throw_on_error(POAGetPWFilterAlias(handle, position, alias, MAX_NAME_LEN), "POAGetPWFilterAlias");
     return alias;
 }
 
@@ -204,8 +201,6 @@ std::string PlayerOnePWSDKWrapper::get_sdk_version() {
     return version;
 }
 
-int PlayerOnePWSDKWrapper::get_api_version() {
-    return POAGetPWAPIVer();
-}
+int PlayerOnePWSDKWrapper::get_api_version() { return POAGetPWAPIVer(); }
 
-} // namespace alpacacore::vendor::playerone
+}  // namespace alpacacore::vendor::playerone

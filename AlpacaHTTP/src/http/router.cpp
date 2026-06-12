@@ -10,41 +10,42 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
-#include <alpacahttp/router.h>
-#include <alpacahttp/version.h>
-#include <alpacahttp/json_utils.h>
-#include <alpacahttp/util/error_mapping.h>
-#include <alpacahttp/util/logging_adapter.h>
-#include <alpacacore/device_registry.h>
+#include <alpacacore/alpaca_defs.h>
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/device_registry.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
-#include <alpacacore/alpaca_defs.h>
 #include <alpacacore/util/logging.h>
-#include <nlohmann/json.hpp>
+#include <alpacahttp/json_utils.h>
+#include <alpacahttp/router.h>
+#include <alpacahttp/util/error_mapping.h>
+#include <alpacahttp/util/logging_adapter.h>
+#include <alpacahttp/version.h>
 #include <zlib.h>
-#include <sstream>
-#include <regex>
-#include <stdexcept>
+
 #include <algorithm>
-#include <cctype>
-#include <string_view>
-#include <cmath>
-#include <ctime>
-#include <cstdlib>
-#include <cstdint>
-#include <vector>
-#include <chrono>
-#include <iomanip>
-#include <fstream>
-#include <filesystem>
-#include <thread>
-#include <optional>
 #include <array>
-#include <variant>
-#include <unordered_set>
+#include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <regex>
+#include <sstream>
+#include <stdexcept>
+#include <string_view>
+#include <thread>
+#include <unordered_set>
+#include <variant>
+#include <vector>
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
@@ -129,8 +130,7 @@ std::string log_level_to_string(LogLevel level) {
 // Throws std::runtime_error on any zlib failure.
 std::string gzip_compress(const std::string& input) {
     z_stream stream{};
-    if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
-                     15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+    if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
         throw std::runtime_error("deflateInit2 failed");
     }
 
@@ -5843,11 +5843,8 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
             response.set_body(alpaca_response);
             return response;
         } catch (const std::exception& e) {
-            AlpacaResponse err = make_error_response(
-                client_tx_id, server_tx_id,
-                util::ErrorCode::DRIVER_ERROR,
-                std::string("Failed to delete log files: ") + e.what()
-            );
+            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+                                                     std::string("Failed to delete log files: ") + e.what());
             response.set_body(err);
             return response;
         }
@@ -5882,17 +5879,13 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
                 combined += '\n';
             }
             response.set_content_type("application/gzip");
-            response.set_header("Content-Disposition",
-                                "attachment; filename=\"alpacabridge-logs.txt.gz\"");
+            response.set_header("Content-Disposition", "attachment; filename=\"alpacabridge-logs.txt.gz\"");
             response.set_body(gzip_compress(combined));
             return response;
         } catch (const std::exception& e) {
             response.set_content_type("application/json");
-            AlpacaResponse err = make_error_response(
-                client_tx_id, server_tx_id,
-                util::ErrorCode::DRIVER_ERROR,
-                std::string("Failed to build log archive: ") + e.what()
-            );
+            AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+                                                     std::string("Failed to build log archive: ") + e.what());
             response.set_body(err);
             return response;
         }

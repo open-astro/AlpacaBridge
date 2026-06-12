@@ -32,7 +32,7 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     }
 }
 
-} // namespace
+}  // namespace
 
 TEST_CASE("Player One PW Filter Wheel Driver - Defaults", "[playerone][filterwheel][unit]") {
     auto driver = alpacacore::vendor::playerone::create_playerone_filterwheel(0, 0);
@@ -71,9 +71,11 @@ TEST_CASE("Player One PW Filter Wheel Driver - Disconnected Behavior", "[playero
     REQUIRE(driver->get_names() == std::vector<std::string>{"L"});
 
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
-    require_alpaca_error([&]() { driver->command_blind("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("noop", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->command_bool("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&]() { driver->command_string("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_string("noop", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("Player One PW Filter Wheel Driver - Device metadata", "[playerone][filterwheel][unit]") {

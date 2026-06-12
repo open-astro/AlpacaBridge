@@ -230,10 +230,12 @@ if [ "${#SRC_CPP_FILES[@]}" -eq 0 ]; then
   record SKIP "clang-tidy (no source changes)"
 elif ensure_tool clang-tidy clang-tidy; then
   # Compile DB covering both trees (AlpacaHTTP pulls AlpacaCore in as a subdir).
+  # Vendors ON so vendor sources get real compile commands (mirrors CI; with
+  # vendors OFF clang-tidy interpolates commands missing the SDK include dirs).
   cmake -S AlpacaHTTP -B AlpacaHTTP/build \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DALPACAHTTP_BUILD_TESTS=ON \
-    -DALPACACORE_ENABLE_ALL_VENDORS=OFF >/dev/null
+    -DALPACACORE_ENABLE_ALL_VENDORS=ON >/dev/null
   cmake --build AlpacaHTTP/build --parallel "${PARALLEL}" >/dev/null
   tidy_diff="$(dpkg -L clang-tidy 2>/dev/null | grep -m1 -E 'clang-tidy-diff.*\.py' || true)"
   if [ -z "${tidy_diff}" ]; then

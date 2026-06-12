@@ -19,10 +19,10 @@
 namespace alpacacore::vendor::playerone {
 
 struct PlayerOnePWInfo {
-    int handle{-1};            // SDK handle (PWProperties::Handle)
-    std::string name;          // PWProperties::Name (e.g. "PhoenixWheel")
-    int position_count{};      // filter capacity (e.g. 5-position)
-    std::string serial_number; // PWProperties::SN
+    int handle{-1};             // SDK handle (PWProperties::Handle)
+    std::string name;           // PWProperties::Name (e.g. "PhoenixWheel")
+    int position_count{};       // filter capacity (e.g. 5-position)
+    std::string serial_number;  // PWProperties::SN
 };
 
 /**
@@ -75,4 +75,4 @@ private:
     ~PlayerOnePWSDKWrapper();
 };
 
-} // namespace alpacacore::vendor::playerone
+}  // namespace alpacacore::vendor::playerone

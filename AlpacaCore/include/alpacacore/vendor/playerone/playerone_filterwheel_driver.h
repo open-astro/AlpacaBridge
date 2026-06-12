@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/filterwheel_driver.h>
+
 #include <memory>
 
 namespace alpacacore::vendor::playerone {
@@ -27,4 +28,4 @@ namespace alpacacore::vendor::playerone {
  */
 std::unique_ptr<FilterWheelDriver> create_playerone_filterwheel(int device_number, int wheel_index);
 
-} // namespace alpacacore::vendor::playerone
+}  // namespace alpacacore::vendor::playerone

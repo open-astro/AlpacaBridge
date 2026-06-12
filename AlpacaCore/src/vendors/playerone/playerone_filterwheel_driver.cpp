@@ -26,32 +26,30 @@ namespace alpacacore::vendor::playerone {
 class PlayerOnePWFilterWheelDriver : public FilterWheelDriver {
 public:
     PlayerOnePWFilterWheelDriver(int device_number, int wheel_index)
-        : device_number_(device_number)
-        , wheel_index_(wheel_index)
-        , handle_(-1)
-        , wheel_info_()
-        , wheel_info_valid_(false)
-        , filter_names_()
-        , focus_offsets_()
-        , connected_(false)
-        , connecting_(false)
-    {
-    }
+        : device_number_(device_number),
+          wheel_index_(wheel_index),
+          handle_(-1),
+          wheel_info_(),
+          wheel_info_valid_(false),
+          filter_names_(),
+          focus_offsets_(),
+          connected_(false),
+          connecting_(false) {}
 
     ~PlayerOnePWFilterWheelDriver() override {
         stop_connection_thread();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                // Qualified: virtual dispatch is gone in a destructor anyway;
+                // saying so explicitly keeps clang-analyzer's VirtualCall happy.
+                PlayerOnePWFilterWheelDriver::set_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("PlayerOne", "Error during PW destruction: " + std::string(e.what()));
             }
         }
     }
 
-    int get_device_number() const override {
-        return device_number_;
-    }
+    int get_device_number() const override { return device_number_; }
 
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -61,9 +59,7 @@ public:
         return "Player One Phoenix Wheel";
     }
 
-    DeviceType get_device_type() const override {
-        return DeviceType::FilterWheel;
-    }
+    DeviceType get_device_type() const override { return DeviceType::FilterWheel; }
 
     std::string get_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -73,35 +69,21 @@ public:
         return "PlayerOne_PW_" + std::to_string(device_number_);
     }
 
-    std::string get_description() const override {
-        return "Player One Phoenix Filter Wheel Driver";
-    }
+    std::string get_description() const override { return "Player One Phoenix Filter Wheel Driver"; }
 
-    std::string get_driver_info() const override {
-        return "AlpacaCore Player One Phoenix Filter Wheel Driver";
-    }
+    std::string get_driver_info() const override { return "AlpacaCore Player One Phoenix Filter Wheel Driver"; }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    int get_interface_version() const override {
-        return 3;
-    }
+    int get_interface_version() const override { return 3; }
 
-    bool get_connected() const override {
-        return connected_.load();
-    }
+    bool get_connected() const override { return connected_.load(); }
 
-    void connect() override {
-        start_connection_task(true);
-    }
+    void connect() override { start_connection_task(true); }
 
-    void disconnect() override {
-        start_connection_task(false);
-    }
+    void disconnect() override { start_connection_task(false); }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connecting_.load(); }
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -134,18 +116,13 @@ public:
         connected_.store(false);
     }
 
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
 
     std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name),
-                              AlpacaError::ActionNotImplemented);
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
-    bool can_action(std::string_view) const override {
-        return false;
-    }
+    bool can_action(std::string_view) const override { return false; }
 
     std::string command_blind(std::string_view, bool) override {
         throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
@@ -241,7 +218,7 @@ private:
         }
         if (wheel_index_ < 0 || wheel_index_ >= static_cast<int>(wheels.size())) {
             ALPACA_LOG_WARN("PlayerOne", "Filter wheel index out of range: " + std::to_string(wheel_index_) +
-                                          " (count=" + std::to_string(wheels.size()) + ")");
+                                             " (count=" + std::to_string(wheels.size()) + ")");
             throw AlpacaException("Filter wheel index not found", AlpacaError::InvalidValue);
         }
         const auto& info = wheels[static_cast<std::size_t>(wheel_index_)];
@@ -266,8 +243,8 @@ private:
                 try {
                     filter_names_[i] = sdk.get_filter_alias(handle_, static_cast<int>(i));
                 } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("PlayerOne", "PW filter alias unavailable for slot " +
-                                                  std::to_string(i) + ": " + std::string(e.what()));
+                    ALPACA_LOG_WARN("PlayerOne", "PW filter alias unavailable for slot " + std::to_string(i) + ": " +
+                                                     std::string(e.what()));
                 }
             }
         } else if (filter_names_.size() != slots) {
@@ -281,8 +258,8 @@ private:
                 try {
                     focus_offsets_[i] = sdk.get_focus_offset(handle_, static_cast<int>(i));
                 } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("PlayerOne", "PW focus offset unavailable for slot " +
-                                                  std::to_string(i) + ": " + std::string(e.what()));
+                    ALPACA_LOG_WARN("PlayerOne", "PW focus offset unavailable for slot " + std::to_string(i) + ": " +
+                                                     std::string(e.what()));
                 }
             }
         } else if (focus_offsets_.size() != slots) {
@@ -300,8 +277,8 @@ private:
 
     void validate_slot_count_locked(int provided_size, std::string_view field_name) const {
         if (provided_size != wheel_info_.position_count) {
-            throw AlpacaException("Invalid " + std::string(field_name) +
-                                  " length: expected " + std::to_string(wheel_info_.position_count),
+            throw AlpacaException("Invalid " + std::string(field_name) + " length: expected " +
+                                      std::to_string(wheel_info_.position_count),
                                   AlpacaError::InvalidValue);
         }
     }
@@ -340,4 +317,4 @@ std::unique_ptr<FilterWheelDriver> create_playerone_filterwheel(int device_numbe
     return std::make_unique<PlayerOnePWFilterWheelDriver>(device_number, wheel_index);
 }
 
-} // namespace alpacacore::vendor::playerone
+}  // namespace alpacacore::vendor::playerone
