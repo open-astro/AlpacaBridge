@@ -5870,13 +5870,32 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
     if (request.has_query_param("download")) {
         try {
             auto files = util::list_log_files();
+            // Cap the combined archive so a long retention window cannot
+            // build an OOM-sized string on a small SBC. Keep the newest
+            // files (the relevant ones for debugging) and drop the oldest;
+            // the newest file is always included.
+            constexpr std::uint64_t kMaxArchiveBytes = 200ull * 1024 * 1024;
+            std::size_t included = 0;
+            std::uint64_t total_bytes = 0;
+            for (const auto& info : files) {
+                if (included > 0 && total_bytes + info.size > kMaxArchiveBytes) {
+                    break;
+                }
+                total_bytes += info.size;
+                ++included;
+            }
             // list_log_files() is newest-first; emit oldest-first so the
             // combined file reads chronologically.
             std::string combined;
-            for (auto it = files.rbegin(); it != files.rend(); ++it) {
-                combined += "===== " + it->name + " =====\n";
+            if (included < files.size()) {
+                combined += "===== " + std::to_string(files.size() - included) +
+                            " older log file(s) omitted: archive capped at 200 MiB =====\n\n";
+            }
+            for (std::size_t i = included; i-- > 0;) {
+                const auto& info = files[i];
+                combined += "===== " + info.name + " =====\n";
                 try {
-                    combined += util::read_log_file(it->name);
+                    combined += util::read_log_file(info.name);
                 } catch (const std::exception& e) {
                     combined += std::string("[unable to read: ") + e.what() + "]\n";
                 }
