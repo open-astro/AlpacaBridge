@@ -1417,8 +1417,11 @@ async function deleteAllLogFiles() {
         if (payload.ErrorNumber !== 0) {
             throw new Error(payload.ErrorMessage || `Server error ${payload.ErrorNumber}`);
         }
+        const value = parseResponseValue(payload.Value) || {};
         clearLogFileViewer();
         await loadLogFiles();
+        const count = Number.isFinite(value.DeletedCount) ? value.DeletedCount : 0;
+        setLogFilesStatus(`Deleted ${count} log file${count === 1 ? '' : 's'}.`);
     } catch (error) {
         setLogFilesStatus(`Failed to delete log files: ${error.message}`);
     }

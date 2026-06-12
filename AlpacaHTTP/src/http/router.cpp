@@ -144,6 +144,9 @@ std::string gzip_compress(const std::string& input) {
     } guard{&stream};
 
     std::string output;
+    // The input-size guard above keeps deflateBound's result (slightly larger
+    // than the input) within uInt range, so both avail casts below are safe.
+    // Tighten one only together with the other.
     output.resize(deflateBound(&stream, static_cast<uLong>(input.size())));
     stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
     stream.avail_in = static_cast<uInt>(input.size());
