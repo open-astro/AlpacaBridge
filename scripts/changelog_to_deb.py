@@ -71,8 +71,10 @@ def parse_changelog(path):
             if current is None:
                 continue
             # Skip the <details>/</details> wrappers around collapsed versions so they
-            # aren't folded into the previous bullet as continuation text.
-            if line.strip() in ("<details>", "</details>"):
+            # aren't folded into the previous bullet as continuation text. Use startswith
+            # (not an exact match) so a future "<details open>" or any attribute is caught.
+            stripped = line.strip()
+            if stripped.startswith("<details") or stripped.startswith("</details"):
                 continue
             m = CATEGORY_RE.match(line)
             if m:
