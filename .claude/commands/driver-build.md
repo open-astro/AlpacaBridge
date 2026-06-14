@@ -31,17 +31,20 @@ Run this check:
 SPEC_LOCAL="docs/AlpacaDeviceAPI_v1.yaml"
 SPEC_URL="https://www.ascom-standards.org/api/AlpacaDeviceAPI_v1.yaml"
 SPEC_REMOTE="$(mktemp)"
+trap 'rm -f "$SPEC_REMOTE"' EXIT   # always clean up the temp download
 
 # Fetch the live spec. If the site is unreachable, warn and proceed with the vendored copy.
 if ! curl -fsSL "$SPEC_URL" -o "$SPEC_REMOTE"; then
   echo "WARN: could not reach $SPEC_URL — proceeding with the existing vendored spec."
 elif [ ! -f "$SPEC_LOCAL" ]; then
-  echo "No vendored spec found — installing the upstream copy."
+  # No vendored copy yet — install it, normalizing CRLF→LF to match the repo (.gitattributes).
+  tr -d '\r' < "$SPEC_REMOTE" > "$SPEC_LOCAL"
+  echo "No vendored spec found — installed the upstream copy at $SPEC_LOCAL."
 # Compare content only, ignoring line endings: the repo stores the spec as LF (.gitattributes
 # `* text=auto eol=lf`) but ascom-standards.org serves CRLF, so a raw cmp would always report a
 # false difference. --strip-trailing-cr makes the check line-ending-insensitive.
 elif diff -q --strip-trailing-cr "$SPEC_LOCAL" "$SPEC_REMOTE" >/dev/null; then
-  echo "ASCOM Alpaca spec is CURRENT ($(grep -m1 -E '^  version:' "$SPEC_LOCAL" | tr -d ' \r'))."
+  echo "ASCOM Alpaca spec is CURRENT (version $(grep -m1 -E '^  version:' "$SPEC_LOCAL" | sed 's/.*version:[[:space:]]*//; s/\r$//'))."
 else
   echo "Spec DIFFERS from upstream — classifying the change:"
   echo "--- info (title/version) ---"
@@ -59,9 +62,10 @@ fi
 - **No difference** → spec is current. Note the version and continue to Step 1.
 - **Major change** — the `version:` field changed, OR the endpoint set changed (any `<`/`>`
   lines in the path diff), OR the operation count changed. Treat this as a real spec revision:
-  1. Download the updated file over the vendored copy:
+  1. Write the already-fetched remote over the vendored copy, normalizing CRLF→LF so the working
+     tree stays LF (matching `.gitattributes`) — reuse `$SPEC_REMOTE`, don't re-download:
      ```bash
-     curl -fsSL "$SPEC_URL" -o docs/AlpacaDeviceAPI_v1.yaml
+     tr -d '\r' < "$SPEC_REMOTE" > docs/AlpacaDeviceAPI_v1.yaml
      ```
   2. Show the user a short summary of what changed (version bump, added/removed endpoints,
      affected device types) and call out anything that touches the device type they're about
@@ -69,8 +73,9 @@ fi
   3. The updated `docs/AlpacaDeviceAPI_v1.yaml` will be committed on the driver's feature
      branch as part of this session (mention it in the plan summary in Step 1).
 - **Minor/cosmetic change only** (wording in `description:`/`summary:` lines, no endpoint or
-  version change) → still refresh the vendored copy with the `curl` command above so it stays
-  byte-identical to upstream, but note it as non-breaking.
+  version change) → still refresh the vendored copy with the same `tr -d '\r' < "$SPEC_REMOTE" >
+  docs/AlpacaDeviceAPI_v1.yaml` command so it stays content-identical to upstream (LF-normalized),
+  but note it as non-breaking.
 
 Do not skip this step even when the user passes a vendor + device type as arguments — the spec
 check always runs first.
