@@ -14,6 +14,72 @@ The user invoked this command with: $ARGUMENTS
 - If arguments include only a vendor name, skip the vendor question in Step 1 but still present the device type menu.
 - If no arguments are provided, start from the top of Step 1.
 
+## Step 0 — Verify the ASCOM Alpaca API spec is current (run first, EVERY time)
+
+Before asking any questions or writing any code, confirm the project's vendored copy of the
+ASCOM Alpaca API specification matches the live spec published by ASCOM. The vendored copy is
+the source of truth that Step 3 builds against — if it has drifted from upstream, every driver
+built this session would be aligned to a stale contract.
+
+- **Vendored spec:** `docs/AlpacaDeviceAPI_v1.yaml`
+- **Upstream spec:** `https://www.ascom-standards.org/api/AlpacaDeviceAPI_v1.yaml`
+  (this is the raw OpenAPI YAML behind the Swagger UI at https://ascom-standards.org/api/)
+
+Run this check:
+
+```bash
+SPEC_LOCAL="docs/AlpacaDeviceAPI_v1.yaml"
+SPEC_URL="https://www.ascom-standards.org/api/AlpacaDeviceAPI_v1.yaml"
+SPEC_REMOTE="$(mktemp)"
+trap 'rm -f "$SPEC_REMOTE"' EXIT   # always clean up the temp download
+
+# Fetch the live spec. If the site is unreachable, warn and proceed with the vendored copy.
+if ! curl -fsSL "$SPEC_URL" -o "$SPEC_REMOTE"; then
+  echo "WARN: could not reach $SPEC_URL — proceeding with the existing vendored spec."
+elif [ ! -f "$SPEC_LOCAL" ]; then
+  # No vendored copy yet — install it, normalizing CRLF→LF to match the repo (.gitattributes).
+  tr -d '\r' < "$SPEC_REMOTE" > "$SPEC_LOCAL"
+  echo "No vendored spec found — installed the upstream copy at $SPEC_LOCAL."
+# Compare content only, ignoring line endings: the repo stores the spec as LF (.gitattributes
+# `* text=auto eol=lf`) but ascom-standards.org serves CRLF, so a raw cmp would always report a
+# false difference. --strip-trailing-cr makes the check line-ending-insensitive.
+elif diff -q --strip-trailing-cr "$SPEC_LOCAL" "$SPEC_REMOTE" >/dev/null; then
+  echo "ASCOM Alpaca spec is CURRENT (version $(grep -m1 -E '^  version:' "$SPEC_LOCAL" | sed 's/.*version:[[:space:]]*//; s/\r$//'))."
+else
+  echo "Spec DIFFERS from upstream — classifying the change:"
+  echo "--- info (title/version) ---"
+  diff --strip-trailing-cr <(grep -E "^  (title|version):" "$SPEC_LOCAL") \
+                           <(grep -E "^  (title|version):" "$SPEC_REMOTE") || true
+  echo "--- endpoint set (added '>' / removed '<' = MAJOR change) ---"
+  diff <(grep -oE "^  '/[^']+'" "$SPEC_LOCAL" | sort) \
+       <(grep -oE "^  '/[^']+'" "$SPEC_REMOTE" | sort) || true
+  echo "--- HTTP-operation count: local=$(grep -cE '^    (get|put|post):' "$SPEC_LOCAL") remote=$(grep -cE '^    (get|put|post):' "$SPEC_REMOTE") ---"
+fi
+```
+
+**Classify and act:**
+
+- **No difference** → spec is current. Note the version and continue to Step 1.
+- **Major change** — the `version:` field changed, OR the endpoint set changed (any `<`/`>`
+  lines in the path diff), OR the operation count changed. Treat this as a real spec revision:
+  1. Write the already-fetched remote over the vendored copy, normalizing CRLF→LF so the working
+     tree stays LF (matching `.gitattributes`) — reuse `$SPEC_REMOTE`, don't re-download:
+     ```bash
+     tr -d '\r' < "$SPEC_REMOTE" > docs/AlpacaDeviceAPI_v1.yaml
+     ```
+  2. Show the user a short summary of what changed (version bump, added/removed endpoints,
+     affected device types) and call out anything that touches the device type they're about
+     to build.
+  3. The updated `docs/AlpacaDeviceAPI_v1.yaml` will be committed on the driver's feature
+     branch as part of this session (mention it in the plan summary in Step 1).
+- **Minor/cosmetic change only** (wording in `description:`/`summary:` lines, no endpoint or
+  version change) → still refresh the vendored copy with the same `tr -d '\r' < "$SPEC_REMOTE" >
+  docs/AlpacaDeviceAPI_v1.yaml` command so it stays content-identical to upstream (LF-normalized),
+  but note it as non-breaking.
+
+Do not skip this step even when the user passes a vendor + device type as arguments — the spec
+check always runs first.
+
 ## Step 1 — Ask the user what they are building
 
 Before writing any code, ask the user the following questions **one at a time**. Wait for each answer before asking the next.
@@ -200,22 +266,34 @@ Every new `.h`, `.hpp`, `.cpp` file must include the SSPL v1 license header. Cop
 
 ### ASCOM Alpaca API compliance (non-negotiable)
 
-The driver MUST implement the official ASCOM Alpaca API specification exactly. The spec is the contract — every property, method, return type, error code, and behavior must match.
+The driver MUST implement the official ASCOM Alpaca API specification **exactly — to the letter**. The spec is the contract: every property, method, parameter, return type, value range, error code, and behavior must match. Following the API "to a T" is non-negotiable — this is what keeps every AlpacaBridge driver aligned with ASCOM Alpaca and passing ConformU.
 
-**Primary reference**: https://ascom-standards.org/api/#/
+**Primary reference (source of truth)**: the vendored spec at `docs/AlpacaDeviceAPI_v1.yaml`, which Step 0 just verified is current. Read it directly — do not work from memory of the API.
 
-Before writing any code, use WebFetch to load the API page for the device type being implemented and review every method and property. The device-type API sections are:
+**Human-readable cross-check (optional)**: https://ascom-standards.org/api/#/ renders the same spec in Swagger UI if you want to browse it visually.
 
-- Camera: `ASCOM Methods Common to all devices` + `Camera Specific Methods`
-- CoverCalibrator: common + `CoverCalibrator Specific Methods`
-- Dome: common + `Dome Specific Methods`
-- FilterWheel: common + `FilterWheel Specific Methods`
-- Focuser: common + `Focuser Specific Methods`
-- ObservingConditions: common + `ObservingConditions Specific Methods`
-- Rotator: common + `Rotator Specific Methods`
-- SafetyMonitor: common + `SafetyMonitor Specific Methods`
-- Switch: common + `Switch Specific Methods`
-- Telescope: common + `Telescope Specific Methods`
+Before writing any code, extract the exact contract for the device type from the vendored YAML. The common endpoints (every device implements these) use `/{device_type}/...`; the device-specific endpoints use `/<devicetype>/...`:
+
+```bash
+DEV=filterwheel   # lowercase device type being built
+# Every endpoint this driver must implement (common + device-specific):
+grep -oE "^  '/[^']+'" docs/AlpacaDeviceAPI_v1.yaml | grep -E "^  '/(\{device_type\}|$DEV)/"
+```
+
+For each endpoint, open the relevant section of `docs/AlpacaDeviceAPI_v1.yaml` and read the HTTP verb, parameters, value ranges, response schema, and the documented error behavior. Implement against exactly what the YAML says — parameter names, casing, ranges, and the NotImplemented/NotConnected/InvalidValue semantics are all part of the contract.
+
+The device-type API surfaces are:
+
+- Camera: common methods + `Camera`-specific endpoints
+- CoverCalibrator: common + `CoverCalibrator`-specific endpoints
+- Dome: common + `Dome`-specific endpoints
+- FilterWheel: common + `FilterWheel`-specific endpoints (`names`, `focusoffsets`, `position`)
+- Focuser: common + `Focuser`-specific endpoints
+- ObservingConditions: common + `ObservingConditions`-specific endpoints
+- Rotator: common + `Rotator`-specific endpoints
+- SafetyMonitor: common + `SafetyMonitor`-specific endpoints
+- Switch: common + `Switch`-specific endpoints
+- Telescope: common + `Telescope`-specific endpoints
 
 Key compliance rules:
 - **Every property and method** listed in the API for the device type must be implemented. If the hardware doesn't support a capability, the method must still exist and throw the appropriate ASCOM error (e.g., `PropertyNotImplemented`, `NotConnected`, `InvalidValue`).
@@ -228,7 +306,12 @@ Key compliance rules:
 
 When in doubt about a behavior, check the spec first, then check how existing drivers in this project handle it, then check INDI/INDIGO for reference.
 
-### Use an existing driver as a template
+### Use an existing driver as a template (cross-driver consistency)
+
+Always study the existing drivers of the **same device type** before writing a new one, and
+match their structure, naming, and behavior so every driver of a given type behaves the same
+way. The ASCOM spec defines *what* the contract is; the existing drivers define *how this
+project* satisfies it. New drivers must not invent a divergent shape.
 
 Find the closest matching existing driver for the same device type:
 
@@ -236,6 +319,23 @@ Find the closest matching existing driver for the same device type:
 ls AlpacaCore/src/vendors/*/
 ls AlpacaCore/include/alpacacore/vendor/*/
 ```
+
+**FilterWheel consistency (important).** All filter wheel drivers must share the same filter
+setup and UI as the existing ones — use the **ZWO EFW** (`zwo_filterwheel_driver`) and **Player
+One Phoenix Wheel** drivers as the canonical templates. Specifically match:
+- the slot-count handling and the default/standard filter name set,
+- `Names` and `FocusOffsets` semantics (array length tied to slot count, defaults, persistence),
+- the web UI slot lineup built with `createFilterwheelSlotUI({...})` (see Step 6 and AGENTS.md).
+
+A new filter wheel should differ from ZWO/Player One only where the hardware genuinely differs
+(slot counts offered, enumeration/SDK details) — never in how filters are named, stored, or
+presented. The same "match the existing drivers" rule applies to every device type (cameras
+follow the ZWO/QHY/SVBONY shape, telescopes follow iOptron/SynScan, etc.), but filter wheels
+are the most common place divergence slips in.
+
+Reconcile both sources: where an existing driver and the spec appear to disagree, the spec
+(`docs/AlpacaDeviceAPI_v1.yaml`) wins — and that likely means the existing driver has a bug to
+fix across all drivers, per the project's "fix shared patterns everywhere" rule.
 
 ### Required runtime semantics
 - Async `connect()/disconnect()` with `get_connecting()`.

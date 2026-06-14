@@ -125,11 +125,15 @@ Driver Notes format:
 Every commit that changes code or adds features should have a corresponding `CHANGELOG.md` entry. The project uses [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
 1. Read the current `CHANGELOG.md` to find the active UNRELEASED section
-2. If no UNRELEASED section exists, create one at the top (below the header):
-   ```
-   ## [x.x.x] - UNRELEASED
-   ```
-   Increment the version from the last released version (patch for fixes, minor for features, major for breaking changes).
+2. Set the UNRELEASED version per the **Versioning policy** below.
+   - If no UNRELEASED section exists, create one at the top (below the header):
+     ```
+     ## [x.x.x] - UNRELEASED
+     ```
+     with the version computed from the last **released** version + this change's bump level.
+   - If an UNRELEASED section already exists, ensure its version is **at least** the bump this
+     change warrants — **upgrade, never downgrade**. (e.g. UNRELEASED is `[2.0.1]` from earlier
+     docs changes and you're now committing a new driver → relabel the heading to `[2.1.0]`.)
 3. Add entries under the appropriate subsection within the UNRELEASED block:
    - `### Added` — new drivers, new features, new files
    - `### Changed` — modifications to existing functionality
@@ -160,6 +164,32 @@ Use component-tagged bullet points matching the project style:
 - **Group related changes** under one bullet with sub-points for complex entries (see existing entries for style)
 - **Don't duplicate**: if an entry for this driver/feature already exists in UNRELEASED, update it rather than adding a new one
 - If the current UNRELEASED section already has the right version number, add to it — don't create a new one
+
+### Versioning policy (Semantic Versioning)
+
+AlpacaBridge is an end-user appliance, so "breaking" means **breaks an existing user's install/
+setup**, not a code-API break. Bump relative to the last **released** version:
+
+| Bump | When | Examples |
+|------|------|----------|
+| **MAJOR** `x.0.0` | Breaks an existing user | Drop a platform (amd64 → 2.0.0), remove a driver, config-format change needing migration, change a default that alters behavior |
+| **MINOR** `x.Y.0` | New backward-compatible capability (resets patch to 0) | **A new driver**, new device/model support, a new optional feature/flag |
+| **PATCH** `x.y.Z` | No new capability | Bug fix to an existing driver, ConformU re-validation, packaging fix, docs/skill/spec changes |
+
+Quick test: **broke** an existing user → major; **added** something new → minor; **fixed/
+polished** what already existed → patch.
+
+**Cumulative carry-forward.** The UNRELEASED version reflects the **highest-severity** change
+accumulated since the last release. A new driver is always a minor bump, never a patch —
+e.g. `2.0.0` → docs `2.0.1` → (later) driver `2.1.0` (minor resets patch, not `2.0.2`) → docs
+`2.1.1`. Within one UNRELEASED cycle, only ever raise the version, never lower it.
+
+**`/commit` touches only `CHANGELOG.md` for versioning** — it sets the `UNRELEASED` heading and
+nothing else. Do **not** modify the `VERSION` file or the `#### [x.x.x] - …` version badge in
+`README.md` in this flow. Those are release actions: `/submit-pr` asks whether to bump them when
+a release is being cut. `VERSION` is the canonical version read by `scripts/build_deb.sh`. If you
+notice `VERSION` or the README badge disagrees with what a release should be, flag it for the
+user — don't silently edit it here.
 
 ## Step 6 — Stage the right files
 
