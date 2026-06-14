@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [2.0.1] - UNRELEASED
+## [2.0.1] - 2026-06-14
 
 ### Added
 - **Vendored ASCOM Alpaca API spec** (docs): the upstream OpenAPI YAML behind https://ascom-standards.org/api/ is now committed at `docs/AlpacaDeviceAPI_v1.yaml` (OpenAPI 3.1.1, MIT-licensed) as the in-repo source of truth for driver development.
@@ -19,6 +19,9 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **`/commit` skill**: documented the project Semantic Versioning policy (driver=minor, fix/docs=patch, breaking=major) with cumulative carry-forward; `/commit` now only sets the CHANGELOG `UNRELEASED` heading and never edits `VERSION` or the README badge.
 - **`/submit-pr` skill**: verifies the UNRELEASED version matches the versioning policy for the branch, and asks whether the PR is cutting a release — offering to bump the `VERSION` file and `README.md` version badge (and date the CHANGELOG entry) when it is.
 - **Collapsible CHANGELOG**: every released version section is now wrapped in a `<details>`/`<summary>` block (same pattern as `SUPPORTED-DRIVERS.md`) so the file folds to a scannable list of versions while the current/unreleased version stays expanded. `scripts/changelog_to_deb.py` now parses the collapsed `<summary>` heading form too, so Debian changelog generation is unaffected. The `/commit` skill documents the convention so new entries keep it.
+
+### Fixed
+- **GPIO Switch drivers failed to connect under the systemd service** (debian/packaging): the `.deb` postinst added the `alpacabridge` service user to `plugdev`/`dialout`/`input` but not `gpio`, so the libgpiod-based Switch drivers — iOptron iMate PowerBox, ToupTek StellaVita, and ZWO ASIAIR Pro / Plus (Pi CM4) — got `Permission denied` opening `/dev/gpiochip*` (owned `root:gpio` by the OpenAstro images' udev rule) and Switch connect failed with "Failed to open GPIO chip ...". The postinst now also runs `usermod -aG gpio alpacabridge` (guarded by `getent group gpio`, matching the existing group grants); `dh_installsystemd` restarts the service after upgrade so the new membership takes effect without a manual restart. Only affected the packaged service user — dev runs via `build_and_run.sh` already add the invoking user to `gpio`.
 
 <details>
 <summary><strong>[2.0.0] - 2026-06-13</strong></summary>
