@@ -18,8 +18,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **`/driver-build` skill**: added Step 0 that verifies the vendored ASCOM Alpaca spec is current against ascom-standards.org on every run (diffs version/endpoints, re-downloads on major changes); Step 3 now drives off the vendored `docs/AlpacaDeviceAPI_v1.yaml` to follow the API exactly; reinforced cross-driver consistency (filter wheels match ZWO EFW / Player One Phoenix setup).
 - **`/commit` skill**: documented the project Semantic Versioning policy (driver=minor, fix/docs=patch, breaking=major) with cumulative carry-forward; `/commit` now only sets the CHANGELOG `UNRELEASED` heading and never edits `VERSION` or the README badge.
 - **`/submit-pr` skill**: verifies the UNRELEASED version matches the versioning policy for the branch, and asks whether the PR is cutting a release — offering to bump the `VERSION` file and `README.md` version badge (and date the CHANGELOG entry) when it is.
+- **Collapsible CHANGELOG**: every released version section is now wrapped in a `<details>`/`<summary>` block (same pattern as `SUPPORTED-DRIVERS.md`) so the file folds to a scannable list of versions while the current/unreleased version stays expanded. `scripts/changelog_to_deb.py` now parses the collapsed `<summary>` heading form too, so Debian changelog generation is unaffected. The `/commit` skill documents the convention so new entries keep it.
 
-## [2.0.0] - 2026-06-13
+<details>
+<summary><strong>[2.0.0] - 2026-06-13</strong></summary>
 
 ### Added
 - **ASCOM Platform 7 interface versions + compliant DeviceState** (AlpacaCore): every driver now advertises its Platform 7 interface version and returns a spec-compliant `DeviceState` (the `connect`/`connecting`/`devicestate`/`disconnect` endpoints were already wired in AlpacaHTTP). `InterfaceVersion` bumped to ICameraV4 (4), ITelescopeV4 (4), IFocuserV4 (4), IRotatorV4 (4), and IObservingConditionsV2 (2); FilterWheel and Switch already reported their Platform 7 versions (IFilterWheelV3 / ISwitchV3). The per-vendor `DeviceState` overrides — which emitted non-standard names (`Connected`, `CoolerOn`) and omitted the `TimeStamp` — are replaced by one spec-compliant implementation in each device base class (`CameraDriver`, `TelescopeDriver`, `FocuserDriver`, `RotatorDriver`, `ObservingConditionsDriver`, `FilterWheelDriver`). Each base builds the operational-property list by calling the device's own property getters inside a try/catch (a property whose getter throws — `AlpacaException` or any unwrapped vendor `std::exception` — is omitted rather than failing the whole call), so `DeviceState` always agrees with the matching GET endpoint, which is the consistency ConformU verifies (note: the response is no longer an atomic snapshot — each getter locks separately, which the ASCOM spec permits); a shared inline `device_state_timestamp()` helper appends the ISO 8601 `TimeStamp`. The base `get_device_state()` and the timestamp helper are defined inline so the device-class vtables stay weak and the per-vendor static libraries link without a base-library ordering dependency. Telescope omits `UTCDate` (optional "if known") to avoid format drift versus the `/utcdate` endpoint. Camera DeviceState reports `CameraState`, `CCDTemperature`, `CoolerPower`, `HeatSinkTemperature`, `ImageReady`, `IsPulseGuiding`, `PercentCompleted`. Per-driver `InterfaceVersion` unit assertions updated, disconnected-state tests updated to the new contract, and DeviceState regression tests added (TimeStamp present, no `Connected`/`CoolerOn`, all names valid, and omit-on-throw covering unwrapped vendor exceptions). Full AlpacaCore suite green (179 tests, vendors ON). All device types are ConformU-validated on Linux arm64 under their Platform 7 interface versions — Camera (ICameraV4), Telescope (ITelescopeV4), Focuser (IFocuserV4), Rotator (IRotatorV4), ObservingConditions (IObservingConditionsV2), FilterWheel (IFilterWheelV3), and Switch (ISwitchV3) — each reporting 0 errors, 0 issues, 0 timing issues against the new `DeviceState` and async `Connect`/`Disconnect` lifecycle.
@@ -106,7 +108,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Alpaca parameter names now case-insensitive for every client** (AlpacaHTTP): the ASCOM Alpaca API definition states "Parameter names are not case sensitive, so clients and drivers should be prepared for parameter names to be supplied … with any casing." The server previously enforced case-sensitive matching *only* when the `User-Agent` was ConformU and accepted any casing otherwise — so conformance-test behavior differed from production — and PUT form-body parameter names were effectively case-sensitive for every client. Query and form parameter lookups are now consistently case-insensitive and the `User-Agent`-gated strict path was deleted, so test behavior equals production behavior. Added vendor-free regression tests.
 - **HTTP 400 for requests the device cannot interpret** (AlpacaHTTP): per the Alpaca spec ("HTTP 400 indicates that the device could not interpret the request e.g. an invalid device number or misspelt device type"), an unknown device type, unknown method, or unregistered device number now returns HTTP **400** instead of 404. Genuinely unroutable URLs still return 404, and driver exceptions still return HTTP 200 with `ErrorNumber` (unchanged). Added regression tests for the three 400 cases.
 
-## [1.0.3] - 2026-05-07
+</details>
+
+<details>
+<summary><strong>[1.0.3] - 2026-05-07</strong></summary>
 
 ### Added
 - **ToupTek AAF Focuser Driver** (AlpacaCore): new `FocuserDriver` implementation for ToupTek Astro Auto Focuser devices, sharing the existing `toupcamsdk.20260128/` SDK with the camera driver.
@@ -213,7 +218,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Celestron Telescope Driver** (AlpacaCore)
   - Fixed SideOfPier race condition in RA offset learning: async slew lambda now captures target RA at dispatch time so back-to-back slews don't corrupt the running-average residual.
 
-## [1.0.2] - 2026-04-18
+</details>
+
+<details>
+<summary><strong>[1.0.2] - 2026-04-18</strong></summary>
 
 ### Added
 - **SVBONY Camera Driver** (AlpacaCore)
@@ -280,7 +288,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 ### Removed
 - `build_and_run.cmd` (Windows-only build script; workspace has been Linux-only since 1.0.0).
 
-## [1.0.1] - 2026-03-27
+</details>
+
+<details>
+<summary><strong>[1.0.1] - 2026-03-27</strong></summary>
 
 ### Added
 - SynScan Telescope: Sky-Watcher HEQ5 PRO ConformU validation (x64 and ARM64).
@@ -290,7 +301,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - SynScan `SideOfPier` mapping: swapped `pierEast`/`pierWest` values to match ASCOM convention.
 - SUPPORTED-DRIVERS.md: Added Sky-Watcher HEQ5 PRO to SynScan mount table.
 
-## [1.0.0] - 2026-03-26
+</details>
+
+<details>
+<summary><strong>[1.0.0] - 2026-03-26</strong></summary>
 
 ### Added
 - Gemini Automatic Astro Focuser Pro driver (AlpacaCore/AlpacaHTTP)
@@ -330,7 +344,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 ### Removed
 - Windows/macOS scripts, ConformU reports, and platform-specific code paths.
 
-## [0.13.0] - 2026-03-12
+</details>
+
+<details>
+<summary><strong>[0.13.0] - 2026-03-12</strong></summary>
 
 ### Added
 - **QHY Camera Driver** (AlpacaCore)
@@ -367,7 +384,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Supported Drivers Documentation** (AlpacaCore)
   - Added QHY Camera Drivers section to SUPPORTED-DRIVERS.md with QHY268C entry, ConformU link, and driver notes (SDK version, color detection behavior, firmware/udev install requirements, Linux ARM64 and x86_64 platform support).
 
-## [0.12.1] - 2026-02-25
+</details>
+
+<details>
+<summary><strong>[0.12.1] - 2026-02-25</strong></summary>
 
 ### Fixed
 - **Linux x64 Build** (AlpacaCore)
@@ -385,7 +405,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Added Linux Notes section with Linux x64 testing and serial port access: user must run `sudo usermod -aG dialout $USER` and log out/back in for USB/serial device access.
   - Updated ZWO telescope entry to document AM5 / AM5N row and Linux ARMv8 (e.g., Raspberry Pi 5) verification, plus Linux ARM testing notes consistent with other ZWO drivers.
 
-## [0.12.0] - 2026-02-21
+</details>
+
+<details>
+<summary><strong>[0.12.0] - 2026-02-21</strong></summary>
 
 ### Added
 - **ZWO Telescope (ASI Mount) Driver** (AlpacaCore)
@@ -403,20 +426,29 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Documented ZWO AM5N in Telescope drivers table; ConformU validation (macOS arm64); driver notes (protocol, connection, tested firmware 1.8.8, USB/serial only—Bluetooth not tested).
   - ZWO AM5N known issue: firmware issue—guiding on its own can be sporadic; guiding via ST4 cable to the guide camera should still be fine.
 
-## [0.11.2] - 2026-02-20
+</details>
+
+<details>
+<summary><strong>[0.11.2] - 2026-02-20</strong></summary>
 
 ### Fixed
 - **Discovery service** (AlpacaHTTP)
   - Discovery loop now uses `select()` with a 200 ms timeout so `stop()` can terminate promptly on all platforms instead of blocking on `recvfrom()`. Removed socket close from `stop()` so the discovery thread exits cleanly; added error handling for `select()` and `recvfrom()` (interrupted / would-block continue; other errors logged and break).
 
-## [0.11.1] - 2026-02-19
+</details>
+
+<details>
+<summary><strong>[0.11.1] - 2026-02-19</strong></summary>
 
 ### Changed
 - **AlpacaCore tests** (AlpacaCore)
   - Tests now require Catch2 only (doctest fallback removed). CMake supports both `Catch2::Catch2WithMain` and `Catch2::Catch2Main` for Catch2 v2/v3 compatibility.
   - SynScan tests use `catch2_compat.h` for Catch2 include compatibility.
 
-## [0.11.0] - 2026-02-19
+</details>
+
+<details>
+<summary><strong>[0.11.0] - 2026-02-19</strong></summary>
 
 ### Added
 - **vcpkg support** (Workspace)
@@ -436,7 +468,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **.gitignore**
   - Ignore `build-curl-check/` (build/check artifact).
 
-## [0.10.0] - 2026-02-03
+</details>
+
+<details>
+<summary><strong>[0.10.0] - 2026-02-03</strong></summary>
 
 ### Added
 - **WeeWX ObservingConditions Driver** (AlpacaCore)
@@ -453,7 +488,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Build & Router** (AlpacaCore, AlpacaHTTP)
   - CMake option `ALPACACORE_ENABLE_WEEWX` and router/config updates for ObservingConditions.
 
-## [0.9.0] - 2026-02-03
+</details>
+
+<details>
+<summary><strong>[0.9.0] - 2026-02-03</strong></summary>
 
 ### Added
 - **SynScan Telescope Driver** (AlpacaCore)
@@ -477,7 +515,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Build Artifacts** (AlpacaCore)
   - Removed stray `build-synscan` build outputs from the repo root.
 
-## [0.8.6] - 2026-01-20
+</details>
+
+<details>
+<summary><strong>[0.8.6] - 2026-01-20</strong></summary>
 
 ### Changed
 - **HTTP Request Handling** (AlpacaHTTP)
@@ -486,7 +527,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Standardized image-bytes element type codes for 64-bit variants and accepted `long`/`ulong` aliases.
   - Added visibility logging when `imagearray`/`imagearrayvariant` evaluate image-bytes negotiation.
 
-## [0.8.5] - 2026-01-19
+</details>
+
+<details>
+<summary><strong>[0.8.5] - 2026-01-19</strong></summary>
 
 ### Changed
 - **iOptron Network Reliability** (AlpacaCore)
@@ -494,7 +538,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Allow partial responses when a terminator is not required to avoid unnecessary timeouts.
   - Treat missing :MS1/:MS2 replies over network as accepted slews with a warning, matching WiFi bridge behavior.
 
-## [0.8.4] - 2026-01-17
+</details>
+
+<details>
+<summary><strong>[0.8.4] - 2026-01-17</strong></summary>
 
 ### Added
 - **ImageBytes Streaming** (AlpacaHTTP)
@@ -502,7 +549,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Honored `camera.imagearrayvariant` metadata, inferred transmission element widths, and included numeric metadata plus transaction IDs alongside the pixel data.
   - Streamed structured error payloads with the same metadata layout so Alpaca exceptions can still be parsed when image bytes responses fail.
 
-## [0.8.3] - 2026-01-13
+</details>
+
+<details>
+<summary><strong>[0.8.3] - 2026-01-13</strong></summary>
 
 ### Changed
 - **Web UI Enhancements** (AlpacaHTTP)
@@ -517,7 +567,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Better visual organization of device information and settings
   - Enhanced CSS styling for device cards, toggles, and filter wheel controls
 
-## [0.8.2] - 2026-01-12
+</details>
+
+<details>
+<summary><strong>[0.8.2] - 2026-01-12</strong></summary>
 
 ### Added
 - **Windows 11 x64 Platform Support** (AlpacaCore)
@@ -551,7 +604,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Build Scripts** (AlpacaBridge)
   - Updated Windows build script (`build_and_run.cmd`)
 
-## [0.8.1] - 2026-01-11
+</details>
+
+<details>
+<summary><strong>[0.8.1] - 2026-01-11</strong></summary>
 
 ### Added
 - **Linux Installation Script** (AlpacaBridge)
@@ -591,7 +647,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Added vendor SDK allowlist rules in `.gitignore` for ZWO SDK directories (CAA, EFW, EAF)
   - Allows vendor SDK files to be tracked in repository for easier distribution
 
-## [0.8.0] - 2026-01-10
+</details>
+
+<details>
+<summary><strong>[0.8.0] - 2026-01-10</strong></summary>
 
 ### Added
 - **ZWO EFW Filter Wheel Driver** (AlpacaCore)
@@ -628,7 +687,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Updated `.gitignore` to allow `AlpacaCore/external/ZWO` folder and subfolders
   - ZWO SDK files (CAA, EAF, and EFW) now included in repository for easier distribution
 
-## [0.7.0] - 2026-01-09
+</details>
+
+<details>
+<summary><strong>[0.7.0] - 2026-01-09</strong></summary>
 
 ### Added
 - **ZWO CAA Rotator Driver** (AlpacaCore)
@@ -668,7 +730,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Documented CAA SDK version and platform support
   - Added Linux USB permissions documentation for CAA devices
 
-## [0.6.1] - 2026-01-08
+</details>
+
+<details>
+<summary><strong>[0.6.1] - 2026-01-08</strong></summary>
 
 ### Added
 - **ZWO Camera Support** (AlpacaCore)
@@ -691,7 +756,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Enhanced building guide with workspace-level script documentation
   - Improved documentation for ZWO driver support (camera, switch, focuser)
 
-## [0.6.0] - 2026-01-06
+</details>
+
+<details>
+<summary><strong>[0.6.0] - 2026-01-06</strong></summary>
 
 ### Added
 - **ZWO EAF Focuser Driver** (AlpacaCore)
@@ -731,7 +799,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Documented EAF SDK version and platform support
   - Added note about EAF Pro Bluetooth limitation (USB only)
 
-## [0.5.0] - 2026-01-05
+</details>
+
+<details>
+<summary><strong>[0.5.0] - 2026-01-05</strong></summary>
 
 ### Added
 - **ZWO Camera Driver** (AlpacaCore)
@@ -826,7 +897,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Updated ConformU README with ZWO test results
   - Documented dew heater switch functionality and camera binding
 
-## [0.4.0] - 2026-01-03
+</details>
+
+<details>
+<summary><strong>[0.4.0] - 2026-01-03</strong></summary>
 
 ### Added
 - **Logging System Enhancements** (AlpacaCore & AlpacaHTTP)
@@ -897,7 +971,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Enhanced external documentation
   - Added full SSPL v1 license text to repository
 
-## [0.3.0] - 2025-12-16
+</details>
+
+<details>
+<summary><strong>[0.3.0] - 2025-12-16</strong></summary>
 
 ### Added
 - **iOptron Telescope Driver** (AlpacaCore 0.3.0)
@@ -934,7 +1011,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Updated to modern Catch2 integration
   - Enhanced test file consistency
 
-## [0.2.1] - 2025-12-04
+</details>
+
+<details>
+<summary><strong>[0.2.1] - 2025-12-04</strong></summary>
 
 ### Changed
 - **License Headers** (AlpacaHTTP 0.2.1)
@@ -942,7 +1022,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Changed license URL to GitHub repository location
   - Added SSPL v1 compliance notice to all headers
 
-## [0.2.0] - 2025-12-02
+</details>
+
+<details>
+<summary><strong>[0.2.0] - 2025-12-02</strong></summary>
 
 ### Added
 - **DeviceRegistry** (AlpacaCore 0.2.0)
@@ -965,7 +1048,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Refactored to use AlpacaCore interfaces
   - Replaced placeholder DeviceManager with AlpacaCore DeviceRegistry
 
-## [0.1.0] - 2025-12-02
+</details>
+
+<details>
+<summary><strong>[0.1.0] - 2025-12-02</strong></summary>
 
 ### Added
 - **Initial Release**
@@ -977,3 +1063,4 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
   - Example servers and device implementations
   - Comprehensive documentation
 
+</details>

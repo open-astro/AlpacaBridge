@@ -131,6 +131,8 @@ Every commit that changes code or adds features should have a corresponding `CHA
      ## [x.x.x] - UNRELEASED
      ```
      with the version computed from the last **released** version + this change's bump level.
+     The previous top section is now a dated, released version and is no longer current, so
+     **collapse it** into a `<details>` block per "Collapsible version sections" below.
    - If an UNRELEASED section already exists, ensure its version is **at least** the bump this
      change warrants — **upgrade, never downgrade**. (e.g. UNRELEASED is `[2.0.1]` from earlier
      docs changes and you're now committing a new driver → relabel the heading to `[2.1.0]`.)
@@ -164,6 +166,35 @@ Use component-tagged bullet points matching the project style:
 - **Group related changes** under one bullet with sub-points for complex entries (see existing entries for style)
 - **Don't duplicate**: if an entry for this driver/feature already exists in UNRELEASED, update it rather than adding a new one
 - If the current UNRELEASED section already has the right version number, add to it — don't create a new one
+
+### Collapsible version sections
+
+`CHANGELOG.md` keeps every version section collapsible so the file folds to a scannable list of
+versions (same `<details>`/`<summary>` pattern as `SUPPORTED-DRIVERS.md`). The rule:
+
+- **The current section stays expanded** — the top section (the `## [x.x.x] - UNRELEASED`
+  heading, or the latest dated release when there's no UNRELEASED yet) is a plain `##` markdown
+  heading, NOT wrapped in `<details>`. This is the section `/commit` edits; leave it expanded.
+- **Every older, released version is collapsed.** Each is wrapped like:
+  ```
+  <details>
+  <summary><strong>[2.0.0] - 2026-06-13</strong></summary>
+
+  ### Added
+  - ...
+
+  </details>
+  ```
+  Note the blank line after `</summary>` and before `</details>` (GitHub needs it to render the
+  markdown inside). The version + date go in `<summary><strong>…</strong></summary>`, replacing
+  the `## [x.x.x] - date` heading.
+
+When you open a **new** UNRELEASED section at the top (step 2), collapse the section it displaces
+— the now-released top version — into this `<details>` form so only the current one stays open.
+Don't touch the already-collapsed older sections.
+
+`scripts/changelog_to_deb.py` parses both the `## [..]` heading and the collapsed `<summary>`
+form, so Debian changelog generation is unaffected by collapsing — no need to special-case it.
 
 ### Versioning policy (Semantic Versioning)
 

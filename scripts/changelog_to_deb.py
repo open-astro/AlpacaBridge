@@ -29,6 +29,12 @@ import re
 import sys
 
 HEADING_RE = re.compile(r"^## \[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}|UNRELEASED))?\s*$")
+# Released versions are collapsed into <details> blocks in CHANGELOG.md (only the
+# current/unreleased version stays an uncollapsed "## [..]" heading), so the version
+# heading also appears as a <summary> line. Match that form too.
+SUMMARY_HEADING_RE = re.compile(
+    r"^<summary><strong>\[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}|UNRELEASED))?\s*</strong></summary>\s*$"
+)
 CATEGORY_RE = re.compile(r"^### (.+?)\s*$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+[A-Za-z0-9.~+-]*$")
 
@@ -56,13 +62,17 @@ def parse_changelog(path):
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.rstrip("\n")
-            m = HEADING_RE.match(line)
+            m = HEADING_RE.match(line) or SUMMARY_HEADING_RE.match(line)
             if m:
                 current = {"label": m.group(1), "date": m.group(2), "bullets": []}
                 sections.append(current)
                 category = None
                 continue
             if current is None:
+                continue
+            # Skip the <details>/</details> wrappers around collapsed versions so they
+            # aren't folded into the previous bullet as continuation text.
+            if line.strip() in ("<details>", "</details>"):
                 continue
             m = CATEGORY_RE.match(line)
             if m:
