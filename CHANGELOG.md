@@ -20,6 +20,9 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **`/submit-pr` skill**: verifies the UNRELEASED version matches the versioning policy for the branch, and asks whether the PR is cutting a release — offering to bump the `VERSION` file and `README.md` version badge (and date the CHANGELOG entry) when it is.
 - **Collapsible CHANGELOG**: every released version section is now wrapped in a `<details>`/`<summary>` block (same pattern as `SUPPORTED-DRIVERS.md`) so the file folds to a scannable list of versions while the current/unreleased version stays expanded. `scripts/changelog_to_deb.py` now parses the collapsed `<summary>` heading form too, so Debian changelog generation is unaffected. The `/commit` skill documents the convention so new entries keep it.
 
+### Fixed
+- **GPIO Switch drivers failed to connect under the systemd service** (debian/packaging): the `.deb` postinst added the `alpacabridge` service user to `plugdev`/`dialout`/`input` but not `gpio`, so the libgpiod-based Switch drivers — iOptron iMate PowerBox, ToupTek StellaVita, and ZWO ASIAIR Pro / Plus (Pi CM4) — got `Permission denied` opening `/dev/gpiochip*` (owned `root:gpio` by the OpenAstro images' udev rule) and Switch connect failed with "Failed to open GPIO chip ...". The postinst now also runs `usermod -aG gpio alpacabridge` (guarded by `getent group gpio`, matching the existing group grants); `dh_installsystemd` restarts the service after upgrade so the new membership takes effect without a manual restart. Only affected the packaged service user — dev runs via `build_and_run.sh` already add the invoking user to `gpio`.
+
 <details>
 <summary><strong>[2.0.0] - 2026-06-13</strong></summary>
 
