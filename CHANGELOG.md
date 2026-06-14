@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [2.0.1] - UNRELEASED
+## [2.0.1] - 2026-06-14
 
 ### Added
 - **Vendored ASCOM Alpaca API spec** (docs): the upstream OpenAPI YAML behind https://ascom-standards.org/api/ is now committed at `docs/AlpacaDeviceAPI_v1.yaml` (OpenAPI 3.1.1, MIT-licensed) as the in-repo source of truth for driver development.
