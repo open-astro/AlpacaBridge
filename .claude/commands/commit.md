@@ -120,7 +120,10 @@ Driver Notes format:
 - **Tested model**: Model on Linux arm64
 ```
 
-### Also update docs/architecture.md (vendor / SDK table)
+## Step 4b — Also update docs/architecture.md (vendor / SDK table)
+
+**Action required whenever this commit adds or changes vendor/driver/SDK support** (same trigger
+as Step 4) — not just reference material.
 
 `docs/architecture.md` carries a **Vendor drivers** table (`Vendor | Device Types | Wrapper Type
 | Status`) and an `external/` SDK listing that are easy to leave behind. Whenever this commit
