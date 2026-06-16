@@ -105,12 +105,12 @@ See the [Development Guide](development.md) for step-by-step implementation.
 
 | Vendor | Device Types | Wrapper Type | Status |
 |--------|-------------|--------------|--------|
-| ZWO | Camera, Focuser (EAF), Rotator (CAA), Switch (dew heater), FilterWheel (EFW) | SDK wrapper | Production |
+| ZWO | Camera, Focuser (EAF), Rotator (CAA), FilterWheel (EFW), Switch (dew heater, ASIAIR power), Telescope (AM mount) | SDK + protocol wrapper | Production |
 | QHY | Camera | SDK wrapper | Production |
-| Player One | Camera | SDK wrapper | Production |
+| Player One | Camera, FilterWheel (Phoenix Wheel), Switch (dew heater + fan) | SDK wrapper | Production |
 | SVBONY | Camera | SDK wrapper | Production |
-| ToupTek | Camera | SDK wrapper | Production |
-| iOptron | Telescope | Protocol wrapper | Production |
+| ToupTek | Camera, Focuser (AAF), Switch (StellaVita power) | SDK + protocol wrapper | Production |
+| iOptron | Telescope, Switch (iMate PowerBox) | Protocol wrapper | Production |
 | SynScan | Telescope | Protocol wrapper | Production |
 | Celestron | Telescope | Protocol wrapper | Production |
 | Losmandy Gemini | Focuser | Protocol wrapper | Production |
