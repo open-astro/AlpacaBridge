@@ -137,14 +137,16 @@ existing vendor, a new/updated vendor SDK, or a new wrapper).
      `ASIAIR power`; iOptron/ToupTek gaining a Switch driver, etc.). Be specific the way the
      existing cells are (note the model/subtype in parentheses where the table already does).
    - **Wrapper Type** — `SDK wrapper` for a vendor C library, `Protocol wrapper` for
-     serial/network, matching Layer 2 of the three-layer architecture.
+     serial/network/GPIO, matching Layer 2 of the three-layer architecture. Use
+     `SDK + protocol wrapper` when one vendor has both (e.g. ZWO and ToupTek — SDK-based
+     cameras plus a protocol/GPIO wrapper for their mount or PowerBox Switch).
    - **Status** — `In development` until the driver is ConformU-validated, then `Production`
      (keep it consistent with whether SUPPORTED-DRIVERS.md lists it as validated).
 3. If a **new vendor SDK directory** was added under `AlpacaCore/external/`, add it to the
    `external/` listing in the **Workspace structure** tree in the same doc.
-4. Keep the table consistent with the SUPPORTED-DRIVERS.md update from the top-level Step 4
-   above — they describe the same drivers from different angles and must not disagree about
-   which device types a vendor supports.
+4. Keep the table consistent with the SUPPORTED-DRIVERS.md table maintained in the
+   `## Step 4 — Update SUPPORTED-DRIVERS.md` section above — they describe the same drivers
+   from different angles and must not disagree about which device types a vendor supports.
 
 ## Step 5 — Update CHANGELOG.md
 
