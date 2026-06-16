@@ -120,6 +120,37 @@ Driver Notes format:
 - **Tested model**: Model on Linux arm64
 ```
 
+## Step 4b — Also update docs/architecture.md (vendor / SDK table)
+
+**Action required whenever this commit adds or changes vendor/driver/SDK support** (same trigger
+as Step 4) — not just reference material.
+
+`docs/architecture.md` carries a **Vendor drivers** table (`Vendor | Device Types | Wrapper Type
+| Status`) and an `external/` SDK listing that are easy to leave behind. Whenever this commit
+adds or changes vendor/driver/SDK support, bring that doc current in the **same commit** so it
+never drifts — the same trigger as SUPPORTED-DRIVERS.md (new vendor, new device type for an
+existing vendor, a new/updated vendor SDK, or a new wrapper).
+
+1. Read the **Vendor drivers** table in `docs/architecture.md`.
+2. Reconcile it against what's actually in the tree — derive the truth from
+   `ls AlpacaCore/src/vendors/*/` and the vendor's `external/` SDK dir, not from memory:
+   - **New vendor** → add a row.
+   - **New device type for an existing vendor** → add it to that vendor's **Device Types** cell
+     (e.g. Player One `Camera` → `Camera, FilterWheel, Switch`; ZWO Switch `dew heater` → also
+     `ASIAIR power`; iOptron/ToupTek gaining a Switch driver, etc.). Be specific the way the
+     existing cells are (note the model/subtype in parentheses where the table already does).
+   - **Wrapper Type** — `SDK wrapper` for a vendor C library, `Protocol wrapper` for
+     serial/network/GPIO, matching Layer 2 of the three-layer architecture. Use
+     `SDK + protocol wrapper` when one vendor has both (e.g. ZWO and ToupTek — SDK-based
+     cameras plus a protocol/GPIO wrapper for their mount or PowerBox Switch).
+   - **Status** — `In development` until the driver is ConformU-validated, then `Production`
+     (keep it consistent with whether SUPPORTED-DRIVERS.md lists it as validated).
+3. If a **new vendor SDK directory** was added under `AlpacaCore/external/`, add it to the
+   `external/` listing in the **Workspace structure** tree in the same doc.
+4. Keep the table consistent with the SUPPORTED-DRIVERS.md table maintained in the
+   `## Step 4 — Update SUPPORTED-DRIVERS.md` section above — they describe the same drivers
+   from different angles and must not disagree about which device types a vendor supports.
+
 ## Step 5 — Update CHANGELOG.md
 
 Every commit that changes code or adds features should have a corresponding `CHANGELOG.md` entry. The project uses [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.

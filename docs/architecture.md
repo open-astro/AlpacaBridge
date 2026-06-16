@@ -89,7 +89,7 @@ All interfaces inherit from `AlpacaDriver` which provides device information, co
 - Isolates SDK dependencies from core code
 - Only place where vendor SDK headers are included
 
-Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (ZWO, QHY, Player One, SVBONY, ToupTek). Drivers that talk over serial/network protocols use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini).
+Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch). ZWO and ToupTek therefore use both — hence "SDK + protocol wrapper" in the table above.
 
 #### Layer 3: Vendor implementation
 
@@ -105,12 +105,12 @@ See the [Development Guide](development.md) for step-by-step implementation.
 
 | Vendor | Device Types | Wrapper Type | Status |
 |--------|-------------|--------------|--------|
-| ZWO | Camera, Focuser (EAF), Rotator (CAA), Switch (dew heater), FilterWheel (EFW) | SDK wrapper | Production |
+| ZWO | Camera, Focuser (EAF), Rotator (CAA), FilterWheel (EFW), Switch (dew heater, ASIAIR power), Telescope (AM mount) | SDK + protocol wrapper | Production |
 | QHY | Camera | SDK wrapper | Production |
-| Player One | Camera | SDK wrapper | Production |
+| Player One | Camera, FilterWheel (Phoenix Wheel), Switch (dew heater + fan) | SDK wrapper | Production |
 | SVBONY | Camera | SDK wrapper | Production |
-| ToupTek | Camera | SDK wrapper | Production |
-| iOptron | Telescope | Protocol wrapper | Production |
+| ToupTek | Camera, Focuser (AAF), Switch (StellaVita power) | SDK + protocol wrapper | Production |
+| iOptron | Telescope, Switch (iMate PowerBox) | Protocol wrapper | Production |
 | SynScan | Telescope | Protocol wrapper | Production |
 | Celestron | Telescope | Protocol wrapper | Production |
 | Losmandy Gemini | Focuser | Protocol wrapper | Production |

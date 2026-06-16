@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [2.0.1] - 2026-06-14
+## [2.0.2] - UNRELEASED
+
+### Changed
+- **`/commit` skill**: now also keeps `docs/architecture.md` current — Step 4 instructs it to update the **Vendor drivers** table (device types, wrapper type, status) and the `external/` SDK listing whenever a commit adds or changes vendor/driver/SDK support, deriving the truth from the source tree rather than memory.
+- **`docs/architecture.md`**: brought the **Vendor drivers** table up to date with all shipped drivers that had drifted out — Player One (FilterWheel, Switch), ZWO (ASIAIR-power Switch, AM-mount Telescope), ToupTek (AAF Focuser, StellaVita Switch), and iOptron (iMate PowerBox Switch); ZWO and ToupTek wrapper type noted as SDK + protocol.
+
+<details>
+<summary><strong>[2.0.1] - 2026-06-14</strong></summary>
 
 ### Added
 - **Vendored ASCOM Alpaca API spec** (docs): the upstream OpenAPI YAML behind https://ascom-standards.org/api/ is now committed at `docs/AlpacaDeviceAPI_v1.yaml` (OpenAPI 3.1.1, MIT-licensed) as the in-repo source of truth for driver development.
@@ -22,6 +29,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ### Fixed
 - **GPIO Switch drivers failed to connect under the systemd service** (debian/packaging): the `.deb` postinst added the `alpacabridge` service user to `plugdev`/`dialout`/`input` but not `gpio`, so the libgpiod-based Switch drivers — iOptron iMate PowerBox, ToupTek StellaVita, and ZWO ASIAIR Pro / Plus (Pi CM4) — got `Permission denied` opening `/dev/gpiochip*` (owned `root:gpio` by the OpenAstro images' udev rule) and Switch connect failed with "Failed to open GPIO chip ...". The postinst now also runs `usermod -aG gpio alpacabridge` (guarded by `getent group gpio`, matching the existing group grants); `dh_installsystemd` restarts the service after upgrade so the new membership takes effect without a manual restart. Only affected the packaged service user — dev runs via `build_and_run.sh` already add the invoking user to `gpio`.
+
+</details>
 
 <details>
 <summary><strong>[2.0.0] - 2026-06-13</strong></summary>
