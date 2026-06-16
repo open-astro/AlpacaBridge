@@ -142,8 +142,9 @@ existing vendor, a new/updated vendor SDK, or a new wrapper).
      (keep it consistent with whether SUPPORTED-DRIVERS.md lists it as validated).
 3. If a **new vendor SDK directory** was added under `AlpacaCore/external/`, add it to the
    `external/` listing in the **Workspace structure** tree in the same doc.
-4. Keep the table consistent with SUPPORTED-DRIVERS.md (Step 4) — they describe the same drivers
-   from different angles and must not disagree about which device types a vendor supports.
+4. Keep the table consistent with the SUPPORTED-DRIVERS.md update from the top-level Step 4
+   above — they describe the same drivers from different angles and must not disagree about
+   which device types a vendor supports.
 
 ## Step 5 — Update CHANGELOG.md
 
