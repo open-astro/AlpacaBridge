@@ -215,6 +215,9 @@ function resetDeviceForm() {
         return;
     }
     form.reset();
+    // form.reset() already fires the form's 'reset' listener (which calls
+    // setEditMode(false)); call it explicitly too so this helper is
+    // self-contained and doesn't silently rely on that listener existing.
     setEditMode(false);
     // Re-run the vendor option/sub-section toggles against the reset values so
     // stale vendor-specific blocks are hidden and slot UIs reflect empty input.
@@ -2584,7 +2587,6 @@ document.getElementById('device-form').addEventListener('submit', async function
             setTimeout(() => {
                 loadDevices();
                 showTab('devices');
-                document.querySelector('.tab').click();
             }, 1500);
         } else {
             messageDiv.className = 'message error';
