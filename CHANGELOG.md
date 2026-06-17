@@ -15,6 +15,9 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **`/commit` skill**: now also keeps `docs/architecture.md` current — Step 4 instructs it to update the **Vendor drivers** table (device types, wrapper type, status) and the `external/` SDK listing whenever a commit adds or changes vendor/driver/SDK support, deriving the truth from the source tree rather than memory.
 - **`docs/architecture.md`**: brought the **Vendor drivers** table up to date with all shipped drivers that had drifted out — Player One (FilterWheel, Switch), ZWO (ASIAIR-power Switch, AM-mount Telescope), ToupTek (AAF Focuser, StellaVita Switch), and iOptron (iMate PowerBox Switch); ZWO and ToupTek wrapper type noted as SDK + protocol.
 
+### Fixed
+- **Configure tab kept a previous device's settings** (AlpacaHTTP web UI): the device form was only cleared on a successful submit, so after editing or partially filling a device, opening the **Configure** tab to add a new one still showed the old vendor, indexes, ports, filter names, and the "Edit Device" / "Update Device" mode — and submitting from that leaked edit state would remove-and-re-add the wrong device. Opening the Configure tab fresh now resets the form to a clean "Add Device" state via a new `resetDeviceForm()` (native reset, edit mode cleared, vendor sub-sections re-toggled, ZWO/Player One filter-wheel slot UIs resynced); the edit flow switches tabs with `showTab('configure', { preserveForm: true })` so the populated form it just built survives. `showTab` now marks the active tab button by name instead of relying on the global `event`, so the post-submit `showTab('devices')` no longer depends on a stale `event.target`.
+
 <details>
 <summary><strong>[2.0.1] - 2026-06-14</strong></summary>
 

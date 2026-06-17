@@ -181,7 +181,7 @@ async function requestLogLevelUpdate(desiredLevel) {
 }
 
 // Tab management
-function showTab(tabName) {
+function showTab(tabName, options) {
     // Hide all tabs
     document.querySelectorAll('.tab-content').forEach(tab => {
         tab.classList.remove('active');
@@ -190,9 +190,41 @@ function showTab(tabName) {
         btn.classList.remove('active');
     });
 
-    // Show selected tab
+    // Show selected tab. Mark the matching tab button active by name rather
+    // than relying on the global `event`, so showTab works when called
+    // programmatically (e.g. after a successful add, or from an edit flow).
     document.getElementById(tabName + '-tab').classList.add('active');
-    event.target.classList.add('active');
+    const tabButton = document.querySelector('.tab[onclick*="' + tabName + '"]');
+    if (tabButton) {
+        tabButton.classList.add('active');
+    }
+
+    // Opening the Configure tab fresh starts a clean "Add Device" form so a
+    // previously edited/half-filled device's settings never leak in. Edit
+    // flows populate the form first and pass {preserveForm: true} to skip this.
+    if (tabName === 'configure' && !(options && options.preserveForm)) {
+        resetDeviceForm();
+    }
+}
+
+// Restore the configure form to a clean "Add Device" state: native defaults,
+// edit mode cleared, vendor sub-sections and filter-wheel slot UIs resynced.
+function resetDeviceForm() {
+    const form = document.getElementById('device-form');
+    if (!form) {
+        return;
+    }
+    form.reset();
+    setEditMode(false);
+    // Re-run the vendor option/sub-section toggles against the reset values so
+    // stale vendor-specific blocks are hidden and slot UIs reflect empty input.
+    updateVendorOptions();
+    zwoFilterwheelSlotUI.syncSlotsFromTextarea();
+    playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
+    const messageDiv = document.getElementById('form-message');
+    if (messageDiv) {
+        messageDiv.style.display = 'none';
+    }
 }
 
 let currentDevices = [];
@@ -822,10 +854,8 @@ function startEditDevice(device) {
         form.dataset.originalVendor = vendor;
     }
 
-    const configureTabButton = document.querySelector('.tab[onclick*="configure"]');
-    if (configureTabButton) {
-        configureTabButton.click();
-    }
+    // Switch to the Configure tab without resetting the form we just populated.
+    showTab('configure', { preserveForm: true });
 }
 
 // Refresh devices
@@ -2545,10 +2575,12 @@ document.getElementById('device-form').addEventListener('submit', async function
         
         messageDiv.style.display = 'block';
         if (result.ErrorNumber === 0) {
+            // Clear the form first (resetDeviceForm hides the message div), then
+            // surface the success message so it stays visible until we navigate.
+            resetDeviceForm();
+            messageDiv.style.display = 'block';
             messageDiv.className = 'message success';
             messageDiv.textContent = isEditing ? 'Device updated successfully!' : 'Device configured successfully!';
-            this.reset();
-            setEditMode(false);
             setTimeout(() => {
                 loadDevices();
                 showTab('devices');
