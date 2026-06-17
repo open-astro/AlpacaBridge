@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [2.0.2] - UNRELEASED
+## [2.0.2] - 2026-06-16
 
 ### Changed
 - **`/commit` skill**: now also keeps `docs/architecture.md` current — Step 4 instructs it to update the **Vendor drivers** table (device types, wrapper type, status) and the `external/` SDK listing whenever a commit adds or changes vendor/driver/SDK support, deriving the truth from the source tree rather than memory.
