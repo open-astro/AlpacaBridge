@@ -194,7 +194,10 @@ function showTab(tabName, options) {
     // than relying on the global `event`, so showTab works when called
     // programmatically (e.g. after a successful add, or from an edit flow).
     document.getElementById(tabName + '-tab').classList.add('active');
-    const tabButton = document.querySelector('.tab[onclick*="' + tabName + '"]');
+    // Match the full showTab('<name>') call, not just the bare name, so a future
+    // tab whose name is a prefix of another (e.g. 'configure' vs
+    // 'configure-advanced') can't activate the wrong button via substring match.
+    const tabButton = document.querySelector('.tab[onclick*="showTab(\'' + tabName + '\')"]');
     if (tabButton) {
         tabButton.classList.add('active');
     }
