@@ -72,6 +72,9 @@
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+#include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_SVBONY
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #endif
@@ -7134,6 +7137,40 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "wandererastro" && device_type_str == "covercalibrator") {
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::CoverCalibratorDriver> cover;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // No port specified with serial mode — fall through to auto-detect
+                int cover_index = config.value("coverIndex", 0);
+                cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator_by_index(device_number, cover_index);
+            } else {
+                int baud_rate = config.value("baudRate", 19200);
+                cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(device_number, port_path, baud_rate);
+            }
+        } else {
+            // "auto" or unset — auto-detect
+            int cover_index = config.value("coverIndex", 0);
+            cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator_by_index(device_number, cover_index);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(cover.release()))) {
+            util::log_info("Registered WandererAstro CoverCalibrator");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -7267,6 +7304,14 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "gemini") {
         copy_if_present("connectionType");
         copy_if_present("focuserIndex");
+        std::string connection_type = config.value("connectionType", "auto");
+        if (connection_type == "serial") {
+            copy_if_present("portPath");
+            copy_if_present("baudRate");
+        }
+    } else if (vendor == "wandererastro") {
+        copy_if_present("connectionType");
+        copy_if_present("coverIndex");
         std::string connection_type = config.value("connectionType", "auto");
         if (connection_type == "serial") {
             copy_if_present("portPath");

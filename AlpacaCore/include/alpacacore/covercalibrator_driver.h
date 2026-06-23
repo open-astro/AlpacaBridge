@@ -52,6 +52,33 @@ class CoverCalibratorDriver : public AlpacaDriver {
 public:
     virtual ~CoverCalibratorDriver() = default;
 
+    /**
+     * @brief Platform 7 DeviceState snapshot for CoverCalibrator devices.
+     *
+     * Reports the operational properties (Brightness, CalibratorState,
+     * CoverState, CalibratorChanging, CoverMoving) plus a TimeStamp. Each
+     * getter is wrapped so that a property which throws (e.g. NotConnected) is
+     * simply omitted from the snapshot per the DeviceState contract, rather
+     * than failing the whole call.
+     */
+    std::vector<DeviceState> get_device_state() const override {
+        std::vector<DeviceState> state;
+        auto add = [&state](const char* name, auto getter) {
+            try {
+                state.push_back({name, DeviceStateValue{getter()}});
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
+            }
+        };
+        add("Brightness", [this] { return static_cast<std::int32_t>(get_brightness()); });
+        add("CalibratorState", [this] { return static_cast<std::int32_t>(get_calibrator_state()); });
+        add("CoverState", [this] { return static_cast<std::int32_t>(get_cover_state()); });
+        add("CalibratorChanging", [this] { return get_calibrator_changing(); });
+        add("CoverMoving", [this] { return get_cover_moving(); });
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
+    }
+
     // CoverCalibrator-specific properties
 
     /**

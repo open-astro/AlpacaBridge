@@ -307,6 +307,7 @@ const INDEX_FIELDS = [
     { fieldId: 'playerone-camera-index', vendor: 'playerone', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'playerone-filterwheel-index', vendor: 'playerone', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
+    { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
 ];
 
 // Lowest unused value of field.configKey across already-configured devices that
@@ -801,6 +802,19 @@ function startEditDevice(device) {
         const geminiConnTypeEl = document.getElementById('gemini-connection-type');
         if (geminiConnTypeEl) {
             geminiConnTypeEl.dispatchEvent(new Event('change'));
+        }
+    } else if (vendor === 'wandererastro') {
+        const connType = config.connectionType || 'auto';
+        setFormValue('wandererastro-connection-type', connType);
+        if (connType === 'auto') {
+            setFormValue('wandererastro-cover-index', config.coverIndex);
+        } else if (connType === 'serial') {
+            setFormValue('wandererastro-port-path', config.portPath);
+            setFormValue('wandererastro-baud-rate', config.baudRate);
+        }
+        const wandererConnTypeEl = document.getElementById('wandererastro-connection-type');
+        if (wandererConnTypeEl) {
+            wandererConnTypeEl.dispatchEvent(new Event('change'));
         }
     }
     setFormValue('camera-index', config.cameraIndex);
@@ -1541,6 +1555,7 @@ function updateVendorOptions() {
     const isFocuser = deviceType === 'focuser';
     const isRotator = deviceType === 'rotator';
     const isObservingConditions = deviceType === 'observingconditions';
+    const isCoverCalibrator = deviceType === 'covercalibrator';
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
         // iOptron provides the mount (telescope) and the iMate PowerBox (switch).
@@ -1605,6 +1620,12 @@ function updateVendorOptions() {
         geminiOption.disabled = !isFocuser;
         geminiOption.hidden = !isFocuser;
     }
+    const wandererastroOption = vendorSelect.querySelector('option[value="wandererastro"]');
+    if (wandererastroOption) {
+        // WandererAstro provides the WandererCover V4 (CoverCalibrator).
+        wandererastroOption.disabled = !isCoverCalibrator;
+        wandererastroOption.hidden = !isCoverCalibrator;
+    }
 
     if (!isTelescope && !isSwitch && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
@@ -1638,6 +1659,9 @@ function updateVendorOptions() {
         vendorSelect.value = '';
     }
     if (!isFocuser && vendorSelect.value === 'gemini') {
+        vendorSelect.value = '';
+    }
+    if (!isCoverCalibrator && vendorSelect.value === 'wandererastro') {
         vendorSelect.value = '';
     }
 
@@ -1674,6 +1698,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('weewx-config').style.display = 'block';
     } else if (vendor === 'gemini') {
         document.getElementById('gemini-config').style.display = 'block';
+    } else if (vendor === 'wandererastro') {
+        document.getElementById('wandererastro-config').style.display = 'block';
     }
 
     updateZwoConfigFields();
@@ -1745,6 +1771,15 @@ if (geminiConnectionType) {
         const type = this.value;
         document.getElementById('gemini-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
         document.getElementById('gemini-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
+const wandererastroConnectionType = document.getElementById('wandererastro-connection-type');
+if (wandererastroConnectionType) {
+    wandererastroConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('wandererastro-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('wandererastro-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -2550,6 +2585,19 @@ document.getElementById('device-form').addEventListener('submit', async function
         } else if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('portPath') || '';
             const baudRate = readOptionalNumber(formData, 'baudRate');
+            if (baudRate !== null) {
+                deviceData.baudRate = baudRate;
+            }
+        }
+    } else if (deviceData.vendor === 'wandererastro') {
+        const wandererConnType = document.getElementById('wandererastro-connection-type');
+        deviceData.connectionType = wandererConnType ? wandererConnType.value : 'auto';
+        if (deviceData.connectionType === 'auto') {
+            const coverIndex = readOptionalNumber(formData, 'wandererastroCoverIndex');
+            deviceData.coverIndex = coverIndex !== null ? coverIndex : 0;
+        } else if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('wandererastroPortPath') || '';
+            const baudRate = readOptionalNumber(formData, 'wandererastroBaudRate');
             if (baudRate !== null) {
                 deviceData.baudRate = baudRate;
             }
