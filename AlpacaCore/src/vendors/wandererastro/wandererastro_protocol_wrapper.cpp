@@ -354,7 +354,14 @@ public:
     void turn_off_light() { send_command("9999"); }
 
     void set_brightness(int brightness) {
-        if (brightness <= 0) {
+        // Wrapper-level precondition: brightness must be >= 0. 0 is the
+        // intentional off command (9999); a negative value is a caller bug, so
+        // reject it rather than silently treating it as off.
+        if (brightness < 0) {
+            throw AlpacaException("Brightness must be >= 0, got " + std::to_string(brightness),
+                                  AlpacaError::InvalidValue);
+        }
+        if (brightness == 0) {
             send_command("9999");
         } else {
             send_command(std::to_string(brightness));
@@ -513,7 +520,13 @@ private:
             serial_fd_ = -1;
             throw AlpacaException("Failed to configure serial port", AlpacaError::DriverException);
         }
-        opened_port_ = config_.serial_port;
+        // Store the canonical path so the in-use check matches the canonical
+        // paths enumerate_wanderer_ports() compares against — a user may
+        // configure a /dev/serial/by-id/... symlink, which resolves to a
+        // /dev/ttyUSBn node. Fall back to the raw path if it can't be resolved.
+        std::error_code path_ec;
+        std::string canonical_path = std::filesystem::canonical(config_.serial_port, path_ec).string();
+        opened_port_ = path_ec ? config_.serial_port : canonical_path;
         mark_port_open(opened_port_);  // hide this port from concurrent auto-detect scans
 #endif
     }
