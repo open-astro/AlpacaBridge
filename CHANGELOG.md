@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [2.1.0] - UNRELEASED
+## [2.1.0] - 2026-06-23
 
 ### Added
 - **WandererAstro WandererCover V4 CoverCalibrator driver** (AlpacaCore): the project's first CoverCalibrator driver — a motorized dust cover plus EL flat panel over a CH340 USB-serial link (19200 8N1). Protocol wrapper with a background reader thread that parses the device's continuously-streamed `A`-delimited status frame, fire-and-forget commands (open `1001`, close `1000`, brightness `1`–`255`, off `9999`), and CH340/CH341 auto-detection (`/dev/serial/by-id` → `WandererCoverV4` status match). Cover state is inferred from the streamed angle vs. the configured open/close set points (±10° tolerance, INDI-aligned); calibrator state/brightness are tracked synchronously so reads are correct the instant after `CalibratorOn`/`CalibratorOff`. `HaltCover` has no hardware command, so it stops the driver's move-tracking (cover finishes its travel mechanically) rather than throwing `NotImplemented`, per the ASCOM cover-capable-device contract. Validated with ConformU 4.3.0 on real hardware (WandererCover V4 Pro, firmware 20250504, Linux arm64): 0 errors, 0 issues, 0 timing issues.
