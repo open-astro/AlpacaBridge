@@ -284,17 +284,45 @@ function getNextDeviceNumberForType(deviceType) {
     return getNextAvailableNumber(used);
 }
 
-function getNextZwoCameraIndex() {
+// Index-addressed config fields that auto-increment per (vendor, deviceType).
+//
+// The Alpaca device *number* (handled above, vendor-agnostic per type) is how a
+// client addresses a device. A vendor *index* is different: it selects which
+// physical unit a vendor SDK enumerates on the bus (camera 0, 1, 2 ...). Each
+// SDK counts from 0 independently, so the index is scoped per (vendor,
+// deviceType) — a ZWO camera and a Player One camera can both be index 0.
+// Vendors that connect by serial port or network (iOptron, SynScan, Celestron,
+// Bisque) identify the device by path/host and have no index field, so they
+// aren't listed here. `idFieldId`, when present, is a serial/ID input that pins
+// a specific unit; if the user filled it, we don't impose an auto index.
+const INDEX_FIELDS = [
+    { fieldId: 'camera-index', vendor: 'zwo', deviceType: 'camera', configKey: 'cameraIndex', idFieldId: 'camera-id' },
+    { fieldId: 'filterwheel-index', vendor: 'zwo', deviceType: 'filterwheel', configKey: 'filterwheelIndex', idFieldId: 'filterwheel-id' },
+    { fieldId: 'focuser-index', vendor: 'zwo', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'focuser-id' },
+    { fieldId: 'rotator-index', vendor: 'zwo', deviceType: 'rotator', configKey: 'rotatorIndex', idFieldId: 'rotator-id' },
+    { fieldId: 'qhy-camera-index', vendor: 'qhy', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
+    { fieldId: 'playerone-camera-index', vendor: 'playerone', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'playerone-filterwheel-index', vendor: 'playerone', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
+    { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
+];
+
+// Lowest unused value of field.configKey across already-configured devices that
+// match this field's (vendor, deviceType). Each SDK enumerates from 0, so the
+// scan is intentionally scoped to the same vendor and type.
+function getNextIndexForField(field) {
     const used = new Set();
     currentDevices.forEach(device => {
-        const vendor = extractVendor(device);
-        const type = extractDeviceType(device);
-        if (vendor !== 'zwo' || type !== 'camera') {
+        if (extractVendor(device) !== field.vendor) {
+            return;
+        }
+        if (extractDeviceType(device) !== field.deviceType) {
             return;
         }
         const config = extractDeviceConfig(device);
-        const indexValue = config && config.cameraIndex;
-        const parsed = Number.parseInt(indexValue, 10);
+        const parsed = Number.parseInt(config && config[field.configKey], 10);
         if (!Number.isNaN(parsed) && parsed >= 0) {
             used.add(parsed);
         }
@@ -322,37 +350,43 @@ function maybeAutoFillDeviceNumber() {
     deviceNumberInput.value = nextNumber;
 }
 
-function maybeAutoFillZwoCameraIndex() {
+// Auto-fill the vendor index field(s) for the currently selected vendor +
+// device type, so adding a second device of the same vendor/type doesn't
+// silently reuse index 0. Skips a field the user has edited, or whose
+// serial/ID twin is filled in (the ID pins the unit, making the index moot).
+function maybeAutoFillIndexFields() {
     const form = document.getElementById('device-form');
     const vendorSelect = document.getElementById('vendor');
     const deviceTypeSelect = document.getElementById('device-type');
-    const cameraIndexInput = document.getElementById('camera-index');
-    const cameraIdInput = document.getElementById('camera-id');
-    if (!form || !vendorSelect || !deviceTypeSelect || !cameraIndexInput) {
+    if (!form || !vendorSelect || !deviceTypeSelect) {
         return;
     }
     if (form.dataset.editing === 'true') {
         return;
     }
-    if (vendorSelect.value !== 'zwo' || normalizeDeviceType(deviceTypeSelect.value) !== 'camera') {
-        return;
-    }
-    if (cameraIdInput && cameraIdInput.value.trim() !== '') {
-        return;
-    }
-    if (cameraIndexInput.dataset.userModified === 'true') {
-        return;
-    }
-    const nextIndex = getNextZwoCameraIndex();
-    if (nextIndex === null) {
-        return;
-    }
-    cameraIndexInput.value = nextIndex;
+    const vendor = vendorSelect.value;
+    const deviceType = normalizeDeviceType(deviceTypeSelect.value);
+    INDEX_FIELDS.forEach(field => {
+        if (field.vendor !== vendor || field.deviceType !== deviceType) {
+            return;
+        }
+        const input = document.getElementById(field.fieldId);
+        if (!input || input.dataset.userModified === 'true') {
+            return;
+        }
+        if (field.idFieldId) {
+            const idInput = document.getElementById(field.idFieldId);
+            if (idInput && idInput.value.trim() !== '') {
+                return;
+            }
+        }
+        input.value = getNextIndexForField(field);
+    });
 }
 
 function updateAutoNumbering() {
     maybeAutoFillDeviceNumber();
-    maybeAutoFillZwoCameraIndex();
+    maybeAutoFillIndexFields();
 }
 
 // Load devices
@@ -555,13 +589,18 @@ function setEditMode(isEditing) {
             delete form.dataset.originalDeviceNumber;
             delete form.dataset.originalVendor;
             const deviceNumberInput = document.getElementById('device-number');
-            const cameraIndexInput = document.getElementById('camera-index');
             if (deviceNumberInput) {
                 delete deviceNumberInput.dataset.userModified;
             }
-            if (cameraIndexInput) {
-                delete cameraIndexInput.dataset.userModified;
-            }
+            // Clear the manual-edit flag on every vendor index field so the next
+            // fresh "Add Device" re-derives them instead of treating a prior
+            // edit's value as user-pinned.
+            INDEX_FIELDS.forEach(field => {
+                const input = document.getElementById(field.fieldId);
+                if (input) {
+                    delete input.dataset.userModified;
+                }
+            });
             updateAutoNumbering();
         }
     }
@@ -1716,19 +1755,17 @@ if (deviceNumberInput) {
     });
 }
 
-const cameraIndexInput = document.getElementById('camera-index');
-if (cameraIndexInput) {
-    cameraIndexInput.addEventListener('input', () => {
-        cameraIndexInput.dataset.userModified = 'true';
-    });
-}
-
-const filterwheelIndexInput = document.getElementById('filterwheel-index');
-if (filterwheelIndexInput) {
-    filterwheelIndexInput.addEventListener('input', () => {
-        filterwheelIndexInput.dataset.userModified = 'true';
-    });
-}
+// Mark any vendor index field as user-modified once edited, so auto-numbering
+// leaves it alone. Driven off INDEX_FIELDS so every vendor's index field
+// (not just ZWO's) is covered.
+INDEX_FIELDS.forEach(field => {
+    const input = document.getElementById(field.fieldId);
+    if (input) {
+        input.addEventListener('input', () => {
+            input.dataset.userModified = 'true';
+        });
+    }
+});
 
 // Slot-count + per-slot filter name pickers. Every filterwheel vendor config
 // gets an instance (see AGENTS.md "FilterWheel web UI" note); the factory
@@ -1746,20 +1783,6 @@ const playerOneFilterwheelSlotUI = createFilterwheelSlotUI({
     slotListId: 'playerone-filterwheel-slot-list',
     namesTextareaId: 'playerone-filter-names'
 });
-
-const focuserIndexInput = document.getElementById('focuser-index');
-if (focuserIndexInput) {
-    focuserIndexInput.addEventListener('input', () => {
-        focuserIndexInput.dataset.userModified = 'true';
-    });
-}
-
-const rotatorIndexInput = document.getElementById('rotator-index');
-if (rotatorIndexInput) {
-    rotatorIndexInput.addEventListener('input', () => {
-        rotatorIndexInput.dataset.userModified = 'true';
-    });
-}
 
 const apertureDiameterInput = document.getElementById('aperture-diameter');
 if (apertureDiameterInput) {
@@ -2450,11 +2473,11 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (qhyCameraId && qhyCameraId.trim() !== '') {
             deviceData.cameraId = qhyCameraId.trim();
         } else {
-            const qhyCameraIndex = readOptionalNumber(formData, 'cameraIndex');
+            const qhyCameraIndex = readOptionalNumber(formData, 'qhyCameraIndex');
             deviceData.cameraIndex = qhyCameraIndex !== null ? qhyCameraIndex : 0;
         }
     } else if (deviceData.vendor === 'svbony') {
-        const svbonyCameraIndex = readOptionalNumber(formData, 'cameraIndex');
+        const svbonyCameraIndex = readOptionalNumber(formData, 'svbonyCameraIndex');
         deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
     } else if (deviceData.vendor === 'touptek' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
         // StellaVita PowerBox: local GPIO, no camera/focuser index. Optional
@@ -2486,11 +2509,11 @@ document.getElementById('device-form').addEventListener('submit', async function
             if (touptekFocuserId && touptekFocuserId.trim() !== '') {
                 deviceData.focuserId = touptekFocuserId.trim();
             } else {
-                const touptekFocuserIndex = readOptionalNumber(formData, 'focuserIndex');
+                const touptekFocuserIndex = readOptionalNumber(formData, 'touptekFocuserIndex');
                 deviceData.focuserIndex = touptekFocuserIndex !== null ? touptekFocuserIndex : 0;
             }
         } else {
-            const touptekCameraIndex = readOptionalNumber(formData, 'cameraIndex');
+            const touptekCameraIndex = readOptionalNumber(formData, 'touptekCameraIndex');
             deviceData.cameraIndex = touptekCameraIndex !== null ? touptekCameraIndex : 0;
         }
     } else if (deviceData.vendor === 'playerone') {
@@ -2505,7 +2528,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             const playerOneSwitchCameraIndex = readOptionalNumber(formData, 'playerOneSwitchCameraIndex');
             deviceData.cameraIndex = playerOneSwitchCameraIndex !== null ? playerOneSwitchCameraIndex : 0;
         } else {
-            const playerOneCameraIndex = readOptionalNumber(formData, 'cameraIndex');
+            const playerOneCameraIndex = readOptionalNumber(formData, 'playerOneCameraIndex');
             deviceData.cameraIndex = playerOneCameraIndex !== null ? playerOneCameraIndex : 0;
         }
     } else if (deviceData.vendor === 'weewx') {
@@ -2522,7 +2545,7 @@ document.getElementById('device-form').addEventListener('submit', async function
         const geminiConnType = document.getElementById('gemini-connection-type');
         deviceData.connectionType = geminiConnType ? geminiConnType.value : 'auto';
         if (deviceData.connectionType === 'auto') {
-            const focuserIndex = readOptionalNumber(formData, 'focuserIndex');
+            const focuserIndex = readOptionalNumber(formData, 'geminiFocuserIndex');
             deviceData.focuserIndex = focuserIndex !== null ? focuserIndex : 0;
         } else if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('portPath') || '';

@@ -144,11 +144,12 @@ When adding a new vendor/device type in AlpacaCore, also update AlpacaHTTP:
 3. **Config sanitization fields** — ensure vendor-specific config keys are preserved through sanitization.
 4. **Web UI vendor dropdown** — add the vendor to the device-type dropdown in the web frontend (`AlpacaHTTP/web/app.js`) so users can select it.
 5. **Web UI vendor-specific form fields** — add any vendor-specific configuration fields (e.g. serial port, camera index, connection type) to the frontend form.
-6. **Frontend validation** — add any related validation logic in frontend JS.
-7. **Build-flag propagation** — ensure `ALPACACORE_ENABLE_<VENDOR>` compile definitions propagate from AlpacaCore to AlpacaHTTP.
-8. **Routing/config tests** — add or update tests in `AlpacaHTTP/tests/`.
+6. **Web UI index fields** — if the vendor connects by an SDK enumeration index, give each index input a **unique vendor-prefixed `name`** and register it in the `INDEX_FIELDS` array so auto-numbering and manual-edit tracking work. Both are mandatory and easy to miss — see "Enumeration index fields" below for the full rationale (a generic `name` silently saves 0; a missing registry entry reuses index 0 on the next device).
+7. **Frontend validation** — add any related validation logic in frontend JS.
+8. **Build-flag propagation** — ensure `ALPACACORE_ENABLE_<VENDOR>` compile definitions propagate from AlpacaCore to AlpacaHTTP.
+9. **Routing/config tests** — add or update tests in `AlpacaHTTP/tests/`.
 
-Vendor registration alone is not enough for HTTP/UI visibility. All eight steps must be completed for a new vendor/device to be fully functional end-to-end.
+Vendor registration alone is not enough for HTTP/UI visibility. All nine steps must be completed for a new vendor/device to be fully functional end-to-end.
 
 ### FilterWheel vendors — required web UI (slot count + filter name pickers)
 
@@ -170,6 +171,33 @@ sync; the form submit reads the textarea.
   hidden-but-enabled fields (ZWO's `filterwheelIndex` shadows any later duplicate).
 - When editing an existing device, populate the textarea from `config.filterNames` and
   call the instance's `syncSlotsFromTextarea()` so the dropdowns reflect the saved names.
+
+### Enumeration index fields — unique names + auto-numbering (all vendors)
+
+Many vendors connect by an SDK **enumeration index** (camera/focuser/filterwheel/rotator
+index — "which unit on the bus", numbered from 0). Two rules keep these working; a new
+vendor that ignores either ships a silently broken form:
+
+- **Each index input MUST have a unique, vendor-prefixed `name`** — e.g.
+  `playerOneCameraIndex`, `qhyCameraIndex`, `touptekFocuserIndex`, `geminiFocuserIndex` —
+  and the submit handler MUST read that exact name. Hidden vendor sections are **not**
+  disabled, so every index input is still in the form's `FormData`. A generic `name` like
+  `cameraIndex`/`focuserIndex` collides: `formData.get('cameraIndex')` returns the **first**
+  such field in DOM order (ZWO's, which appears first), so the value you typed into a
+  later vendor's field is discarded and `0` is saved instead. This is exactly why a
+  Player One/QHY/SVBONY/ToupTek camera index could not be changed from 0. ZWO keeps the
+  bare `cameraIndex`/`focuserIndex`/`filterwheelIndex`/`rotatorIndex` names (it's the
+  canonical first block); **every other vendor must prefix**. Element `id`s can stay
+  descriptive (`playerone-camera-index`) — `setFormValue`/auto-fill key off `id`, the
+  collision is purely about the `name` used in `FormData`.
+- **Register the field in the `INDEX_FIELDS` array** in `AlpacaHTTP/web/app.js`
+  (`fieldId`, `vendor`, `deviceType`, `configKey`, optional `idFieldId`). That one entry
+  drives auto-increment (so a second device of the same vendor/type doesn't reuse index 0)
+  **and** the manual-edit tracking. The index is scoped per `(vendor, deviceType)` — each
+  SDK enumerates from 0 independently, so a ZWO camera and a Player One camera are both
+  index 0. This is distinct from the Alpaca **device number** (auto-assigned per device
+  type, vendor-agnostic, and what clients address). Serial/network devices (port path or
+  host) have no index and belong in neither place.
 
 ## Alpaca Protocol Conformance (AlpacaHTTP)
 
