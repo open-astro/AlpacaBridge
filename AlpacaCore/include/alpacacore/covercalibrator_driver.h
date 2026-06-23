@@ -56,19 +56,16 @@ public:
      * @brief Platform 7 DeviceState snapshot for CoverCalibrator devices.
      *
      * Reports the operational properties (Brightness, CalibratorState,
-     * CoverState, CalibratorChanging, CoverMoving) plus a TimeStamp. Each
-     * getter is wrapped so that a property which throws (e.g. NotConnected) is
-     * simply omitted from the snapshot per the DeviceState contract, rather
-     * than failing the whole call.
+     * CoverState, CalibratorChanging, CoverMoving) plus a TimeStamp by calling
+     * this device's own property getters — the same ones the GET endpoints use,
+     * which is what guarantees the DeviceState↔GET consistency ConformU checks.
+     * Each getter is wrapped so a property that throws (e.g. NotConnected) is
+     * omitted rather than failing the whole call.
      *
-     * The CalibratorState/CalibratorChanging and CoverState/CoverMoving pairs
-     * are each derived from a single state read so the two entries in one
-     * response can never contradict each other: per the ASCOM ICoverCalibratorV2
-     * contract CalibratorChanging is true iff CalibratorState is NotReady, and
-     * CoverMoving is true iff CoverState is Moving. Reading the "changing" and
-     * "state" properties independently could otherwise straddle a status update
-     * (e.g. report CoverState=Moving with CoverMoving=false) on a device whose
-     * state is polled asynchronously.
+     * Per AGENTS.md, DeviceState is intentionally NOT an atomic snapshot (each
+     * getter locks separately) and vendors must NOT override this with a
+     * single-lock per-vendor version: ASCOM doesn't require cross-property
+     * atomicity and ConformU only checks per-property GET consistency.
      */
     std::vector<DeviceState> get_device_state() const override {
         std::vector<DeviceState> state;
@@ -79,21 +76,11 @@ public:
                 // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
             }
         };
-        auto add_pair = [&state](const char* state_name, const char* changing_name, auto state_getter,
-                                 auto changing_when) {
-            try {
-                const auto value = state_getter();
-                state.push_back({state_name, DeviceStateValue{static_cast<std::int32_t>(value)}});
-                state.push_back({changing_name, DeviceStateValue{value == changing_when}});
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-                // Omit both entries together per the DeviceState contract.
-            }
-        };
         add("Brightness", [this] { return static_cast<std::int32_t>(get_brightness()); });
-        add_pair(
-            "CalibratorState", "CalibratorChanging", [this] { return get_calibrator_state(); },
-            CalibratorState::NotReady);
-        add_pair("CoverState", "CoverMoving", [this] { return get_cover_state(); }, CoverState::Moving);
+        add("CalibratorState", [this] { return static_cast<std::int32_t>(get_calibrator_state()); });
+        add("CoverState", [this] { return static_cast<std::int32_t>(get_cover_state()); });
+        add("CalibratorChanging", [this] { return get_calibrator_changing(); });
+        add("CoverMoving", [this] { return get_cover_moving(); });
         state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
     }

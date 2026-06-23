@@ -7160,7 +7160,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                                                                                                      cover_index);
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(cover.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(cover)))) {
             util::log_info("Registered WandererAstro CoverCalibrator");
             return true;
         }

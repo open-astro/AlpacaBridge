@@ -305,32 +305,11 @@ public:
         return cover_state_locked(s) == CoverState::Moving;
     }
 
-    // Fully-atomic Platform 7 snapshot: every operational property comes from a
-    // single status frame read under one state_mutex_ acquisition, so the bag is
-    // mutually consistent (the base default reads each getter under its own lock,
-    // which a concurrent CalibratorOn/Off or cover command could split — e.g.
-    // Brightness from CalibratorState). Disconnected getters throw and the whole
-    // operational set is omitted, leaving just TimeStamp, per the contract.
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        try {
-            ensure_connected();
-            const WandererStatus s = protocol_.get_status();
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            const CalibratorState cal = calibrator_engaged_ ? CalibratorState::Ready : CalibratorState::Off;
-            const CoverState cover = cover_state_locked(s);
-            state.push_back({"Brightness", DeviceStateValue{static_cast<std::int32_t>(commanded_brightness_)}});
-            state.push_back({"CalibratorState", DeviceStateValue{static_cast<std::int32_t>(cal)}});
-            state.push_back({"CalibratorChanging", DeviceStateValue{cal == CalibratorState::NotReady}});
-            state.push_back({"CoverState", DeviceStateValue{static_cast<std::int32_t>(cover)}});
-            state.push_back({"CoverMoving", DeviceStateValue{cover == CoverState::Moving}});
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-            // Not connected (or a transient vendor error): omit the operational
-            // entries and report only the TimeStamp.
-        }
-        state.push_back({"TimeStamp", device_state_timestamp()});
-        return state;
-    }
+    // Deliberately NO per-vendor get_device_state() override: per AGENTS.md the
+    // CoverCalibratorDriver base builds the DeviceState bag from these same
+    // getters, DeviceState is intentionally non-atomic, and a single-lock vendor
+    // override is explicitly disallowed (ASCOM doesn't require cross-property
+    // atomicity; ConformU only checks per-property DeviceState↔GET consistency).
 
     void open_cover() override {
         ensure_connected();
@@ -421,14 +400,22 @@ private:
             connection_thread_.join();
         }
         connecting_.store(true);
-        connection_thread_ = std::thread([this, do_connect]() {
-            try {
-                set_connected(do_connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("WandererAstro", "Cover connection failed: " + std::string(e.what()));
-            }
+        try {
+            connection_thread_ = std::thread([this, do_connect]() {
+                try {
+                    set_connected(do_connect);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_ERROR("WandererAstro", "Cover connection failed: " + std::string(e.what()));
+                }
+                connecting_.store(false);
+            });
+        } catch (...) {
+            // std::thread ctor can throw (e.g. OS thread limit). Reset the flag
+            // so the driver stays connectable instead of being wedged with
+            // connecting_ == true forever.
             connecting_.store(false);
-        });
+            throw;
+        }
     }
 
     void stop_connection_thread() {
