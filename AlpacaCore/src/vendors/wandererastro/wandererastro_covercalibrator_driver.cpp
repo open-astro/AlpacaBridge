@@ -106,13 +106,18 @@ public:
             protocol_.connect(config_);
             // Seed the calibrator state from the first streamed frame so the
             // initial CalibratorState/Brightness reflect reality if the panel
-            // was already lit from a previous session.
-            const WandererStatus s = protocol_.get_status();
-            {
+            // was already lit from a previous session. If seeding throws, undo
+            // the protocol connect so the open port and reader thread aren't
+            // leaked while the driver still reports disconnected.
+            try {
+                const WandererStatus s = protocol_.get_status();
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 commanded_ = CoverTarget::None;
                 commanded_brightness_ = s.valid ? s.brightness : 0;
                 calibrator_engaged_ = s.valid && s.brightness > 0;
+            } catch (...) {
+                protocol_.disconnect();
+                throw;
             }
             connected_.store(true);
             ALPACA_LOG_INFO("WandererAstro", "Cover connected");
@@ -251,7 +256,17 @@ public:
             std::lock_guard<std::mutex> lock(state_mutex_);
             commanded_ = CoverTarget::Opening;
         }
-        protocol_.open_cover();
+        try {
+            protocol_.open_cover();
+        } catch (...) {
+            // The command never reached the controller, so the cover isn't
+            // moving — clear the target rather than leaving CoverState/
+            // CoverMoving wedged at Moving until a HaltCover the client has no
+            // reason to issue.
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            commanded_ = CoverTarget::None;
+            throw;
+        }
     }
 
     void close_cover() override {
@@ -260,7 +275,13 @@ public:
             std::lock_guard<std::mutex> lock(state_mutex_);
             commanded_ = CoverTarget::Closing;
         }
-        protocol_.close_cover();
+        try {
+            protocol_.close_cover();
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            commanded_ = CoverTarget::None;
+            throw;
+        }
     }
 
     void halt_cover() override {

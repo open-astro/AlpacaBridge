@@ -83,9 +83,13 @@ bool parse_status_line(const std::string& line, WandererStatus& out) {
     std::stringstream ss(line);
     std::string tok;
     while (std::getline(ss, tok, 'A')) {
-        if (!tok.empty()) {
-            tokens.push_back(tok);
-        }
+        // Keep empty tokens so every field stays at a fixed index. A malformed
+        // frame with a blank field is then rejected by the numeric parse below
+        // (std::stod/std::stoi throw on "") rather than silently shifting later
+        // fields left — which could transpose close/open positions and report
+        // the wrong cover state. A well-formed frame's trailing 'A' yields one
+        // trailing empty token past the real fields, which is simply ignored.
+        tokens.push_back(tok);
     }
     // Need at least model + firmware + the three cover angles to be useful.
     if (tokens.size() < 5) {
