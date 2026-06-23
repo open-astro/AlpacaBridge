@@ -435,21 +435,34 @@ Checklist:
 
 ## Step 6 — AlpacaHTTP integration
 
-All 8 steps required for end-to-end functionality:
+All 9 steps required for end-to-end functionality:
 1. Router registration in `AlpacaHTTP/src/http/router.cpp`.
 2. Router includes with `#ifdef ALPACACORE_ENABLE_<VENDOR>` guard.
 3. Config sanitization fields preserved.
 4. Web UI vendor dropdown in `AlpacaHTTP/web/app.js`.
 5. Web UI vendor-specific form fields.
+   - **Unique vendor-prefixed `name` on EVERY field** (not just filter wheels): hidden
+     vendor sections still submit, so a generic `name` like `cameraIndex`/`focuserIndex`
+     collides in `FormData` with ZWO's same-named field (first in DOM wins) and the value
+     you typed is silently dropped — `0` gets saved. Name non-ZWO fields like
+     `playerOneCameraIndex`, `qhyCameraIndex`, `touptekFocuserIndex`, and read that exact
+     name in the submit handler. Element `id`s stay descriptive; only the `name` must be
+     unique. (ZWO keeps the bare names as the canonical first block.)
    - **FilterWheel vendors**: the form MUST include the standard slot UI — a slot-count
      select listing the manufacturer's actual lineup (from Question 4b) plus Custom,
      per-slot filter name dropdowns, and the advanced names textarea. Instantiate
      `createFilterwheelSlotUI({...})` in `app.js` with vendor-prefixed element IDs and
-     copy the markup pattern from an existing filterwheel vendor in `index.html`. Use
-     vendor-prefixed form field names to avoid FormData collisions.
-6. Frontend validation logic.
-7. Build-flag propagation from AlpacaCore to AlpacaHTTP.
-8. Routing/config tests in `AlpacaHTTP/tests/`.
+     copy the markup pattern from an existing filterwheel vendor in `index.html`.
+6. Web UI index auto-numbering — for any SDK-enumeration index field (camera/focuser/
+   filterwheel/rotator), add an entry to the `INDEX_FIELDS` array in `app.js`
+   (`fieldId`, `vendor`, `deviceType`, `configKey`, optional `idFieldId`). That wires up
+   per-`(vendor, deviceType)` auto-increment and manual-edit tracking, so a second device
+   of the same vendor/type doesn't silently reuse index 0. (Distinct from the Alpaca
+   device number, which auto-assigns per type already.) See "Enumeration index fields" in
+   AGENTS.md.
+7. Frontend validation logic.
+8. Build-flag propagation from AlpacaCore to AlpacaHTTP.
+9. Routing/config tests in `AlpacaHTTP/tests/`.
 
 ## Step 7 — Tests (MANDATORY — do not skip)
 

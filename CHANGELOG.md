@@ -9,7 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [2.0.2] - 2026-06-16
+## [2.0.3] - UNRELEASED
+
+### Fixed
+- **Vendor index fields could not be set to anything but 0** (AlpacaHTTP web UI): every camera index input shared `name="cameraIndex"` (and three focuser inputs shared `name="focuserIndex"`). Hidden vendor sections still submit, so `formData.get('cameraIndex')` always returned the first such field in DOM order — ZWO's — and the value typed into a Player One / QHY / SVBONY / ToupTek (or Gemini focuser) field was discarded, persisting `0`. Adding a second device of one of those vendors silently collided on index 0, and the index could not be corrected in the form. Each non-ZWO index input now has a unique vendor-prefixed `name` (`playerOneCameraIndex`, `qhyCameraIndex`, `svbonyCameraIndex`, `touptekCameraIndex`, `touptekFocuserIndex`, `geminiFocuserIndex`) and the submit handler reads it; ZWO keeps the canonical names. Same FormData-collision class already documented for filter names.
+- **Camera index did not auto-increment for non-ZWO vendors** (AlpacaHTTP web UI): auto-numbering was hardcoded to ZWO's camera field, so a second Player One/QHY/SVBONY/ToupTek camera (and ZWO focuser/filterwheel/rotator) defaulted to index 0 instead of the next free value. Replaced the ZWO-only logic with a declarative `INDEX_FIELDS` registry that drives per-`(vendor, deviceType)` auto-increment, manual-edit tracking, and the edit-mode reset for all index-addressed fields. The index is scoped per vendor SDK (each enumerates from 0 independently, so a ZWO camera and a Player One camera are both index 0); this is distinct from the Alpaca device number, which already auto-assigns per device type.
+
+### Changed
+- **`AGENTS.md` + `/driver-build` skill**: documented the two rules a new index-addressed vendor must follow — a unique vendor-prefixed form-field `name` (to avoid the FormData collision above) and an `INDEX_FIELDS` registry entry (for auto-numbering) — with the device-number-vs-index distinction spelled out, so this doesn't resurface when the next camera/focuser is added.
+
+<details>
+<summary><strong>[2.0.2] - 2026-06-16</strong></summary>
 
 ### Changed
 - **`/commit` skill**: now also keeps `docs/architecture.md` current — Step 4 instructs it to update the **Vendor drivers** table (device types, wrapper type, status) and the `external/` SDK listing whenever a commit adds or changes vendor/driver/SDK support, deriving the truth from the source tree rather than memory.
@@ -17,6 +27,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ### Fixed
 - **Configure tab kept a previous device's settings** (AlpacaHTTP web UI): the device form was only cleared on a successful submit, so after editing or partially filling a device, opening the **Configure** tab to add a new one still showed the old vendor, indexes, ports, filter names, and the "Edit Device" / "Update Device" mode — and submitting from that leaked edit state would remove-and-re-add the wrong device. Opening the Configure tab fresh now resets the form to a clean "Add Device" state via a new `resetDeviceForm()` (native reset, edit mode cleared, vendor sub-sections re-toggled, ZWO/Player One filter-wheel slot UIs resynced); the edit flow switches tabs with `showTab('configure', { preserveForm: true })` so the populated form it just built survives. `showTab` now marks the active tab button by name instead of relying on the global `event`, so the post-submit `showTab('devices')` no longer depends on a stale `event.target`.
+
+</details>
 
 <details>
 <summary><strong>[2.0.1] - 2026-06-14</strong></summary>
