@@ -157,6 +157,11 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
                 buffer += ch;
                 if (buffer.size() > MAX_LINE_LEN) buffer.clear();
             }
+        } else if (r < 0 && errno != EINTR) {
+            // Persistent read error (e.g. the device was unplugged mid-probe):
+            // VTIME rate-limits only the no-data path, not errors, so back off
+            // to avoid spinning a CPU core for the rest of the probe window.
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
 
@@ -391,7 +396,15 @@ private:
             }
             if (fd < 0) break;
             ssize_t r = ::read(fd, &ch, 1);
-            if (r == 1) got = true;
+            if (r == 1) {
+                got = true;
+            } else if (r < 0 && errno != EINTR) {
+                // Persistent read error (device unplugged): VTIME rate-limits the
+                // no-data path but not errors, so back off to avoid a CPU spin
+                // until stop_reader() runs. (The Windows branch above does the
+                // same on ReadFile failure.)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
 #endif
             if (!got) {
                 continue;  // VTIME timeout — loop and re-check running_

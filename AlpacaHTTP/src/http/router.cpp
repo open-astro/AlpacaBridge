@@ -7145,15 +7145,14 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         if (conn_type == "serial") {
             std::string port_path = config.value("portPath", "");
             if (port_path.empty()) {
-                // No port specified with serial mode — fall through to auto-detect
-                int cover_index = config.value("coverIndex", 0);
-                cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator_by_index(device_number,
-                                                                                                         cover_index);
-            } else {
-                int baud_rate = config.value("baudRate", 19200);
-                cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(device_number,
-                                                                                                port_path, baud_rate);
+                // Serial mode means an explicit port. Don't silently auto-detect
+                // behind the user's back — surface a clear validation error.
+                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
+                return false;
             }
+            int baud_rate = config.value("baudRate", 19200);
+            cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(device_number, port_path,
+                                                                                            baud_rate);
         } else {
             // "auto" or unset — auto-detect
             int cover_index = config.value("coverIndex", 0);

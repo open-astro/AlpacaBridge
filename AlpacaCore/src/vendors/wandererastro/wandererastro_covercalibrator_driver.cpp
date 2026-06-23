@@ -132,8 +132,17 @@ public:
                 const WandererStatus s = protocol_.get_status();
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 commanded_ = CoverTarget::None;
-                commanded_brightness_ = s.valid ? s.brightness : 0;
-                calibrator_engaged_ = s.valid && s.brightness > 0;
+                if (s.valid) {
+                    commanded_brightness_ = s.brightness;
+                    // A lit panel means Ready. Brightness 0 is physically
+                    // indistinguishable from Off, so keep the prior engaged flag
+                    // rather than forcing Off — this preserves a Ready@0 set via
+                    // CalibratorOn(0) across a reconnect; a freshly-created driver
+                    // starts Off.
+                    if (s.brightness > 0) {
+                        calibrator_engaged_ = true;
+                    }
+                }
             } catch (...) {
                 protocol_.disconnect();
                 throw;
@@ -282,6 +291,33 @@ public:
         const WandererStatus s = protocol_.get_status();
         std::lock_guard<std::mutex> lock(state_mutex_);
         return cover_state_locked(s) == CoverState::Moving;
+    }
+
+    // Fully-atomic Platform 7 snapshot: every operational property comes from a
+    // single status frame read under one state_mutex_ acquisition, so the bag is
+    // mutually consistent (the base default reads each getter under its own lock,
+    // which a concurrent CalibratorOn/Off or cover command could split — e.g.
+    // Brightness from CalibratorState). Disconnected getters throw and the whole
+    // operational set is omitted, leaving just TimeStamp, per the contract.
+    std::vector<DeviceState> get_device_state() const override {
+        std::vector<DeviceState> state;
+        try {
+            ensure_connected();
+            const WandererStatus s = protocol_.get_status();
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const CalibratorState cal = calibrator_engaged_ ? CalibratorState::Ready : CalibratorState::Off;
+            const CoverState cover = cover_state_locked(s);
+            state.push_back({"Brightness", DeviceStateValue{static_cast<std::int32_t>(commanded_brightness_)}});
+            state.push_back({"CalibratorState", DeviceStateValue{static_cast<std::int32_t>(cal)}});
+            state.push_back({"CalibratorChanging", DeviceStateValue{cal == CalibratorState::NotReady}});
+            state.push_back({"CoverState", DeviceStateValue{static_cast<std::int32_t>(cover)}});
+            state.push_back({"CoverMoving", DeviceStateValue{cover == CoverState::Moving}});
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // Not connected (or a transient vendor error): omit the operational
+            // entries and report only the TimeStamp.
+        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
     }
 
     void open_cover() override {
