@@ -11,9 +11,9 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/wandererastro/wandererastro_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/wandererastro/wandererastro_protocol_wrapper.h>
 
 #include <atomic>
 #include <chrono>
@@ -27,10 +27,10 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <errno.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
-#include <errno.h>
 #endif
 
 namespace alpacacore::vendor::wandererastro {
@@ -46,7 +46,7 @@ constexpr int MAX_LINE_LEN = 256;
 // subsequent reopen does not reset the controller again.
 #ifndef _WIN32
 bool configure_serial_fd(int fd) {
-    struct termios tty{};
+    struct termios tty {};
     if (tcgetattr(fd, &tty) != 0) {
         return false;
     }
@@ -58,14 +58,14 @@ bool configure_serial_fd(int fd) {
     tty.c_cflag |= CS8;
     tty.c_cflag &= ~CRTSCTS;
     tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_cflag &= ~HUPCL;   // keep DTR high on close — avoids CH340 MCU reset on reopen
+    tty.c_cflag &= ~HUPCL;  // keep DTR high on close — avoids CH340 MCU reset on reopen
     tty.c_iflag &= ~(IXON | IXOFF | IXANY);
     tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
     tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
     tty.c_oflag &= ~OPOST;
     tty.c_oflag &= ~ONLCR;
     tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 5;   // 0.5s per-read timeout so the reader loop can poll its stop flag
+    tty.c_cc[VTIME] = 5;  // 0.5s per-read timeout so the reader loop can poll its stop flag
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
         return false;
     }
@@ -107,7 +107,7 @@ bool parse_status_line(const std::string& line, WandererStatus& out) {
         if (tokens.size() > 7) s.dew_heater = std::stoi(tokens[7]);
         if (tokens.size() > 8) s.asiair_control = (std::stoi(tokens[8]) != 0);
     } catch (const std::exception&) {
-        return false;   // malformed numeric field — ignore this frame
+        return false;  // malformed numeric field — ignore this frame
     }
     s.valid = true;
     out = s;
@@ -132,8 +132,8 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
     WandererStatus status;
     bool found = false;
     auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::steady_clock::now() - start).count() < 2500) {
+    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
+           2500) {
         char ch = 0;
         ssize_t r = read(fd, &ch, 1);
         if (r == 1) {
@@ -151,7 +151,7 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
     }
 
     // Re-apply HUPCL-clear before closing so DTR stays asserted.
-    struct termios tty{};
+    struct termios tty {};
     if (tcgetattr(fd, &tty) == 0) {
         tty.c_cflag &= ~HUPCL;
         tcsetattr(fd, TCSANOW, &tty);
@@ -171,7 +171,7 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
     return false;
 }
 
-} // namespace
+}  // namespace
 
 std::vector<WandererPortInfo> enumerate_wanderer_ports() {
     std::vector<WandererPortInfo> results;
@@ -185,8 +185,8 @@ std::vector<WandererPortInfo> enumerate_wanderer_ports() {
             ALPACA_LOG_INFO("WandererAstro", "Probing " + port + "...");
             WandererPortInfo info;
             if (probe_port(port, info)) {
-                ALPACA_LOG_INFO("WandererAstro", "Found " + info.model + " on " + port +
-                                " (firmware " + std::to_string(info.firmware_version) + ")");
+                ALPACA_LOG_INFO("WandererAstro", "Found " + info.model + " on " + port + " (firmware " +
+                                                     std::to_string(info.firmware_version) + ")");
                 results.push_back(info);
             }
         }
@@ -199,19 +199,20 @@ std::vector<WandererPortInfo> enumerate_wanderer_ports() {
 
         // WandererCover boards use a CH340/CH341 USB-serial adapter (vendor 1a86).
         bool is_candidate = (name.find("USB_Serial") != std::string::npos) ||
-                            (name.find("CH340") != std::string::npos) ||
-                            (name.find("CH341") != std::string::npos) ||
+                            (name.find("CH340") != std::string::npos) || (name.find("CH341") != std::string::npos) ||
                             (name.find("1a86") != std::string::npos);
         if (!is_candidate) continue;
 
         std::string resolved = std::filesystem::canonical(entry.path()).string();
-        ALPACA_LOG_INFO("WandererAstro", "Probing " + resolved + " (" + name + ")...");
+        std::string probe_msg = "Probing ";
+        probe_msg.append(resolved).append(" (").append(name).append(")...");
+        ALPACA_LOG_INFO("WandererAstro", probe_msg);
 
         WandererPortInfo info;
         if (probe_port(resolved, info)) {
             info.device_id = name;
-            ALPACA_LOG_INFO("WandererAstro", "Found " + info.model + " on " + resolved +
-                            " (firmware " + std::to_string(info.firmware_version) + ")");
+            ALPACA_LOG_INFO("WandererAstro", "Found " + info.model + " on " + resolved + " (firmware " +
+                                                 std::to_string(info.firmware_version) + ")");
             results.push_back(info);
         }
     }
@@ -224,9 +225,7 @@ class WandererProtocolWrapper::Impl {
 public:
     Impl() = default;
 
-    ~Impl() {
-        disconnect();
-    }
+    ~Impl() { disconnect(); }
 
     std::string connect(const ConnectionConfig& config) {
         {
@@ -242,8 +241,8 @@ public:
         // Wait for the first valid frame that identifies a WandererCover.
         auto start = std::chrono::steady_clock::now();
         const int timeout_ms = config.serial_timeout_s * 1000;
-        while (std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::steady_clock::now() - start).count() < timeout_ms) {
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
+               timeout_ms) {
             WandererStatus s = get_status();
             if (s.valid && s.model.rfind(kModelPrefix, 0) == 0) {
                 {
@@ -251,8 +250,8 @@ public:
                     model_ = s.model;
                     connected_ = true;
                 }
-                ALPACA_LOG_INFO("WandererAstro", "Connected to " + s.model +
-                                " (firmware " + std::to_string(s.firmware_version) + ")");
+                ALPACA_LOG_INFO("WandererAstro",
+                                "Connected to " + s.model + " (firmware " + std::to_string(s.firmware_version) + ")");
                 return s.model;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -264,8 +263,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             close_serial();
         }
-        throw AlpacaException("No WandererCover status detected on " + config.serial_port,
-                              AlpacaError::NotConnected);
+        throw AlpacaException("No WandererCover status detected on " + config.serial_port, AlpacaError::NotConnected);
     }
 
     void disconnect() {
@@ -285,7 +283,7 @@ public:
         return status_;
     }
 
-    void open_cover()  { send_command("1001"); }
+    void open_cover() { send_command("1001"); }
     void close_cover() { send_command("1000"); }
     void turn_off_light() { send_command("9999"); }
 
@@ -311,8 +309,7 @@ private:
         ALPACA_LOG_TRACE("WandererAstro", "Command: " + code);
 #ifdef _WIN32
         DWORD written = 0;
-        if (!WriteFile(serial_handle_, payload.c_str(), static_cast<DWORD>(payload.size()),
-                       &written, nullptr)) {
+        if (!WriteFile(serial_handle_, payload.c_str(), static_cast<DWORD>(payload.size()), &written, nullptr)) {
             throw AlpacaException("Serial write failed", AlpacaError::DriverException);
         }
 #else
@@ -346,7 +343,7 @@ private:
             if (r == 1) got = true;
 #endif
             if (!got) {
-                continue;   // VTIME timeout — loop and re-check running_
+                continue;  // VTIME timeout — loop and re-check running_
             }
             if (ch == '\n' || ch == '\r') {
                 WandererStatus parsed;
@@ -372,11 +369,10 @@ private:
     void open_serial() {
 #ifdef _WIN32
         std::string port_name = "\\\\.\\" + config_.serial_port;
-        serial_handle_ = CreateFileA(port_name.c_str(), GENERIC_READ | GENERIC_WRITE,
-                                     0, nullptr, OPEN_EXISTING, 0, nullptr);
+        serial_handle_ =
+            CreateFileA(port_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (serial_handle_ == INVALID_HANDLE_VALUE) {
-            throw AlpacaException("Failed to open serial port: " + config_.serial_port,
-                                  AlpacaError::NotConnected);
+            throw AlpacaException("Failed to open serial port: " + config_.serial_port, AlpacaError::NotConnected);
         }
         DCB dcb = {};
         dcb.DCBlength = sizeof(dcb);
@@ -405,9 +401,9 @@ private:
 #else
         serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
-            throw AlpacaException("Failed to open serial port: " + config_.serial_port +
-                                  " (" + std::strerror(errno) + ")",
-                                  AlpacaError::NotConnected);
+            throw AlpacaException(
+                "Failed to open serial port: " + config_.serial_port + " (" + std::strerror(errno) + ")",
+                AlpacaError::NotConnected);
         }
         if (!configure_serial_fd(serial_fd_)) {
             close(serial_fd_);
@@ -431,8 +427,8 @@ private:
 #endif
     }
 
-    mutable std::mutex mutex_;          // guards serial handle + connected_/config_
-    mutable std::mutex status_mutex_;   // guards the latest status frame
+    mutable std::mutex mutex_;         // guards serial handle + connected_/config_
+    mutable std::mutex status_mutex_;  // guards the latest status frame
     ConnectionConfig config_;
     std::string model_;
     bool connected_ = false;
@@ -450,41 +446,24 @@ private:
 
 // --- WandererProtocolWrapper public interface forwarding ---
 
-WandererProtocolWrapper::WandererProtocolWrapper()
-    : impl_(std::make_unique<Impl>()) {}
+WandererProtocolWrapper::WandererProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
 
 WandererProtocolWrapper::~WandererProtocolWrapper() = default;
 
-std::string WandererProtocolWrapper::connect(const ConnectionConfig& config) {
-    return impl_->connect(config);
-}
+std::string WandererProtocolWrapper::connect(const ConnectionConfig& config) { return impl_->connect(config); }
 
-void WandererProtocolWrapper::disconnect() {
-    impl_->disconnect();
-}
+void WandererProtocolWrapper::disconnect() { impl_->disconnect(); }
 
-bool WandererProtocolWrapper::is_connected() const {
-    return impl_->is_connected();
-}
+bool WandererProtocolWrapper::is_connected() const { return impl_->is_connected(); }
 
-WandererStatus WandererProtocolWrapper::get_status() const {
-    return impl_->get_status();
-}
+WandererStatus WandererProtocolWrapper::get_status() const { return impl_->get_status(); }
 
-void WandererProtocolWrapper::open_cover() {
-    impl_->open_cover();
-}
+void WandererProtocolWrapper::open_cover() { impl_->open_cover(); }
 
-void WandererProtocolWrapper::close_cover() {
-    impl_->close_cover();
-}
+void WandererProtocolWrapper::close_cover() { impl_->close_cover(); }
 
-void WandererProtocolWrapper::set_brightness(int brightness) {
-    impl_->set_brightness(brightness);
-}
+void WandererProtocolWrapper::set_brightness(int brightness) { impl_->set_brightness(brightness); }
 
-void WandererProtocolWrapper::turn_off_light() {
-    impl_->turn_off_light();
-}
+void WandererProtocolWrapper::turn_off_light() { impl_->turn_off_light(); }
 
-} // namespace alpacacore::vendor::wandererastro
+}  // namespace alpacacore::vendor::wandererastro

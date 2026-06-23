@@ -7147,15 +7147,18 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (port_path.empty()) {
                 // No port specified with serial mode — fall through to auto-detect
                 int cover_index = config.value("coverIndex", 0);
-                cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator_by_index(device_number, cover_index);
+                cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator_by_index(device_number,
+                                                                                                         cover_index);
             } else {
                 int baud_rate = config.value("baudRate", 19200);
-                cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(device_number, port_path, baud_rate);
+                cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(device_number,
+                                                                                                port_path, baud_rate);
             }
         } else {
             // "auto" or unset — auto-detect
             int cover_index = config.value("coverIndex", 0);
-            cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator_by_index(device_number, cover_index);
+            cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator_by_index(device_number,
+                                                                                                     cover_index);
         }
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(cover.release()))) {

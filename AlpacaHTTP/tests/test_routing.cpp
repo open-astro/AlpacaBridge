@@ -615,10 +615,7 @@ int main() {
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
     {
         nlohmann::json remove_body = {
-            {"vendor", "wandererastro"},
-            {"deviceType", "covercalibrator"},
-            {"deviceNumber", 9401}
-        };
+            {"vendor", "wandererastro"}, {"deviceType", "covercalibrator"}, {"deviceNumber", 9401}};
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
     }
 #endif
@@ -626,17 +623,12 @@ int main() {
     {
         // Serial mode with an explicit (dummy) port avoids the auto-detect scan
         // and registers the driver without opening a real device.
-        nlohmann::json configure_body = {
-            {"vendor", "wandererastro"},
-            {"deviceType", "covercalibrator"},
-            {"deviceNumber", 9401},
-            {"connectionType", "serial"},
-            {"portPath", "/dev/null"},
-            {"baudRate", 19200}
-        };
+        nlohmann::json configure_body = {{"vendor", "wandererastro"}, {"deviceType", "covercalibrator"},
+                                         {"deviceNumber", 9401},      {"connectionType", "serial"},
+                                         {"portPath", "/dev/null"},   {"baudRate", 19200}};
 
-        const auto configure_response = route_request(
-            router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
@@ -650,8 +642,7 @@ int main() {
 
         bool found_cover = false;
         for (const auto& entry : configured_json["Value"]) {
-            if (entry.value("DeviceType", "") == "CoverCalibrator" &&
-                entry.value("DeviceNumber", -1) == 9401) {
+            if (entry.value("DeviceType", "") == "CoverCalibrator" && entry.value("DeviceNumber", -1) == 9401) {
                 EXPECT(entry.value("Vendor", "") == "wandererastro");
                 EXPECT(entry.contains("Config"));
                 const auto& cfg = entry["Config"];
@@ -667,16 +658,14 @@ int main() {
         EXPECT(found_cover);
 
         // MaxBrightness is a static capability and reports without hardware.
-        const auto maxbright_response =
-            route_request(router, "GET", "/api/v1/covercalibrator/9401/maxbrightness");
+        const auto maxbright_response = route_request(router, "GET", "/api/v1/covercalibrator/9401/maxbrightness");
         const auto maxbright_json = nlohmann::json::parse(maxbright_response.body());
         EXPECT(maxbright_json.value("ErrorNumber", -1) == 0);
         EXPECT(maxbright_json.value("Value", -1) == 255);
 
         nlohmann::json remove_body = {
             {"vendor", "wandererastro"}, {"deviceType", "covercalibrator"}, {"deviceNumber", 9401}};
-        const auto remove_response =
-            route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
         const auto remove_json = nlohmann::json::parse(remove_response.body());
         EXPECT(remove_json.value("ErrorNumber", -1) == 0);
 #else

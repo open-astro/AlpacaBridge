@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <mutex>
 #include <thread>
 
@@ -31,58 +32,48 @@ namespace {
 constexpr double kPositionToleranceDeg = 10.0;
 // Maximum flat panel PWM level per the WandererCover serial protocol.
 constexpr int kMaxBrightness = 255;
-} // namespace
+}  // namespace
 
 class WandererCoverCalibratorDriver : public CoverCalibratorDriver {
 public:
-    enum class CoverTarget { None, Opening, Closing };
+    enum class CoverTarget : std::uint8_t { None, Opening, Closing };
 
     WandererCoverCalibratorDriver(int device_number, ConnectionConfig config)
-        : device_number_(device_number)
-        , config_(std::move(config))
-        , connected_(false)
-        , connecting_(false)
-        , protocol_()
-    {
-    }
+        : device_number_(device_number),
+          config_(std::move(config)),
+          connected_(false),
+          connecting_(false),
+          protocol_() {}
 
     ~WandererCoverCalibratorDriver() override {
         stop_connection_thread();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                // Tear down directly rather than via the virtual set_connected(),
+                // which must not be dispatched during destruction.
+                protocol_.disconnect();
+                connected_.store(false);
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("WandererAstro",
-                                "Error during cover destruction: " + std::string(e.what()));
+                ALPACA_LOG_WARN("WandererAstro", "Error during cover destruction: " + std::string(e.what()));
             }
         }
     }
 
     // --- Common Alpaca device interface ---
 
-    int get_device_number() const override {
-        return device_number_;
-    }
+    int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override {
-        return "WandererAstro WandererCover V4";
-    }
+    std::string get_name() const override { return "WandererAstro WandererCover V4"; }
 
-    DeviceType get_device_type() const override {
-        return DeviceType::CoverCalibrator;
-    }
+    DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
 
     std::string get_unique_id() const override {
         return "WANDERERASTRO_COVERCALIBRATOR_" + std::to_string(device_number_);
     }
 
-    std::string get_description() const override {
-        return "WandererAstro WandererCover V4 CoverCalibrator Driver";
-    }
+    std::string get_description() const override { return "WandererAstro WandererCover V4 CoverCalibrator Driver"; }
 
-    std::string get_driver_info() const override {
-        return "AlpacaCore WandererAstro CoverCalibrator Driver";
-    }
+    std::string get_driver_info() const override { return "AlpacaCore WandererAstro CoverCalibrator Driver"; }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
@@ -90,13 +81,9 @@ public:
     // Connecting and DeviceState, all of which this driver implements.
     int get_interface_version() const override { return 2; }
 
-    bool get_connected() const override {
-        return connected_.load();
-    }
+    bool get_connected() const override { return connected_.load(); }
 
-    void connect() override {
-        start_connection_task(true);
-    }
+    void connect() override { start_connection_task(true); }
 
     void disconnect() override {
         // Disconnect synchronously — closing the port + stopping the reader is
@@ -109,9 +96,7 @@ public:
         }
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connecting_.load(); }
 
     void set_connected(bool connected) override {
         if (connected == connected_.load()) {
@@ -138,18 +123,13 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
 
     std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name),
-                              AlpacaError::ActionNotImplemented);
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
-    bool can_action(std::string_view) const override {
-        return false;
-    }
+    bool can_action(std::string_view) const override { return false; }
 
     std::string command_blind(std::string_view, bool) override {
         throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
@@ -165,9 +145,7 @@ public:
 
     // --- CoverCalibrator interface: calibrator ---
 
-    int get_max_brightness() const override {
-        return kMaxBrightness;
-    }
+    int get_max_brightness() const override { return kMaxBrightness; }
 
     int get_brightness() const override {
         ensure_connected();
@@ -202,15 +180,15 @@ public:
         // InvalidValue regardless of connection state (ConformU exercises the
         // boundaries while connected; the order is equivalent there).
         if (brightness < 0 || brightness > kMaxBrightness) {
-            throw AlpacaException("Brightness " + std::to_string(brightness) +
-                                  " out of range [0, " + std::to_string(kMaxBrightness) + "]",
+            throw AlpacaException("Brightness " + std::to_string(brightness) + " out of range [0, " +
+                                      std::to_string(kMaxBrightness) + "]",
                                   AlpacaError::InvalidValue);
         }
         ensure_connected();
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             commanded_brightness_ = brightness;
-            calibrator_engaged_ = true;   // "on" even at brightness 0 (ASCOM: Ready)
+            calibrator_engaged_ = true;  // "on" even at brightness 0 (ASCOM: Ready)
         }
         protocol_.set_brightness(brightness);
     }
@@ -242,7 +220,7 @@ public:
 
         std::lock_guard<std::mutex> lock(state_mutex_);
         const bool at_close = std::fabs(s.current_position - s.close_position) <= kPositionToleranceDeg;
-        const bool at_open  = std::fabs(s.current_position - s.open_position)  <= kPositionToleranceDeg;
+        const bool at_open = std::fabs(s.current_position - s.open_position) <= kPositionToleranceDeg;
 
         switch (commanded_) {
             case CoverTarget::Opening:
@@ -260,14 +238,12 @@ public:
             case CoverTarget::None:
             default:
                 if (at_close) return CoverState::Closed;
-                if (at_open)  return CoverState::Open;
+                if (at_open) return CoverState::Open;
                 return CoverState::Unknown;
         }
     }
 
-    bool get_cover_moving() const override {
-        return get_cover_state() == CoverState::Moving;
-    }
+    bool get_cover_moving() const override { return get_cover_state() == CoverState::Moving; }
 
     void open_cover() override {
         ensure_connected();
@@ -318,8 +294,7 @@ private:
             try {
                 set_connected(do_connect);
             } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("WandererAstro",
-                                 "Cover connection failed: " + std::string(e.what()));
+                ALPACA_LOG_ERROR("WandererAstro", "Cover connection failed: " + std::string(e.what()));
             }
             connecting_.store(false);
         });
@@ -349,10 +324,9 @@ private:
     std::thread connection_thread_;
 };
 
-std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(
-    int device_number,
-    const std::string& serial_port,
-    int baud_rate) {
+std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(int device_number,
+                                                                            const std::string& serial_port,
+                                                                            int baud_rate) {
     ConnectionConfig config;
     config.type = ConnectionType::Serial;
     config.serial_port = serial_port;
@@ -360,17 +334,15 @@ std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(
     return std::make_unique<WandererCoverCalibratorDriver>(device_number, std::move(config));
 }
 
-std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator_by_index(
-    int device_number,
-    int cover_index) {
+std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator_by_index(int device_number,
+                                                                                     int cover_index) {
     auto ports = enumerate_wanderer_ports();
     if (ports.empty()) {
-        throw AlpacaException("No WandererCover detected on any serial port",
-                              AlpacaError::NotConnected);
+        throw AlpacaException("No WandererCover detected on any serial port", AlpacaError::NotConnected);
     }
     if (cover_index < 0 || cover_index >= static_cast<int>(ports.size())) {
-        throw AlpacaException("Cover index " + std::to_string(cover_index) +
-                              " out of range (detected " + std::to_string(ports.size()) + ")",
+        throw AlpacaException("Cover index " + std::to_string(cover_index) + " out of range (detected " +
+                                  std::to_string(ports.size()) + ")",
                               AlpacaError::InvalidValue);
     }
 
@@ -383,4 +355,4 @@ std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator_by_i
     return std::make_unique<WandererCoverCalibratorDriver>(device_number, std::move(config));
 }
 
-} // namespace alpacacore::vendor::wandererastro
+}  // namespace alpacacore::vendor::wandererastro

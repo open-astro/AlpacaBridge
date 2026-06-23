@@ -14,6 +14,7 @@
 #pragma once
 
 #include <alpacacore/covercalibrator_driver.h>
+
 #include <memory>
 #include <string>
 
@@ -30,10 +31,9 @@ namespace alpacacore::vendor::wandererastro {
  * @param baud_rate Serial baud rate (default 19200)
  * @return Unique pointer to CoverCalibrator driver
  */
-std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(
-    int device_number,
-    const std::string& serial_port,
-    int baud_rate = 19200);
+std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(int device_number,
+                                                                            const std::string& serial_port,
+                                                                            int baud_rate = 19200);
 
 /**
  * @brief Create a WandererCover V4 driver by auto-detecting the serial port.
@@ -45,8 +45,7 @@ std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(
  * @param cover_index 0-based index into the list of detected covers
  * @return Unique pointer to CoverCalibrator driver
  */
-std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator_by_index(
-    int device_number,
-    int cover_index = 0);
+std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator_by_index(int device_number,
+                                                                                     int cover_index = 0);
 
-} // namespace alpacacore::vendor::wandererastro
+}  // namespace alpacacore::vendor::wandererastro

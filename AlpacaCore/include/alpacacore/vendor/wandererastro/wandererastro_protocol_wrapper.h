@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,8 +27,8 @@ namespace alpacacore::vendor::wandererastro {
  * network/Wi-Fi transport. The enum is kept as a single-value type to mirror
  * the other serial protocol wrappers in this project.
  */
-enum class ConnectionType {
-    Serial   // USB serial port
+enum class ConnectionType : std::uint8_t {
+    Serial  // USB serial port
 };
 
 /**
@@ -35,8 +36,8 @@ enum class ConnectionType {
  */
 struct ConnectionConfig {
     ConnectionType type = ConnectionType::Serial;
-    std::string serial_port;             // e.g., "/dev/ttyUSB0"
-    int baud_rate = 19200;               // WandererCover V4 fixed protocol baud
+    std::string serial_port;  // e.g., "/dev/ttyUSB0"
+    int baud_rate = 19200;    // WandererCover V4 fixed protocol baud
     int serial_timeout_s = 3;
 };
 
@@ -44,10 +45,10 @@ struct ConnectionConfig {
  * @brief Information about a detected serial port that may host a WandererCover.
  */
 struct WandererPortInfo {
-    std::string port_path;       // e.g., "/dev/ttyUSB0"
-    std::string device_id;       // e.g., "usb-1a86_USB_Serial-if00-port0"
-    std::string model;           // e.g., "WandererCoverV4Pro"
-    int firmware_version = 0;    // YYYYMMDD, populated after a successful probe
+    std::string port_path;     // e.g., "/dev/ttyUSB0"
+    std::string device_id;     // e.g., "usb-1a86_USB_Serial-if00-port0"
+    std::string model;         // e.g., "WandererCoverV4Pro"
+    int firmware_version = 0;  // YYYYMMDD, populated after a successful probe
 };
 
 /**
@@ -59,16 +60,16 @@ struct WandererPortInfo {
  * The protocol wrapper's background reader thread keeps the most recent frame.
  */
 struct WandererStatus {
-    bool valid = false;          // true once at least one valid frame parsed
-    std::string model;           // device identifier, e.g. "WandererCoverV4Pro"
-    int firmware_version = 0;    // YYYYMMDD
-    double close_position = 0.0; // configured closed angle (degrees)
-    double open_position = 0.0;  // configured open angle (degrees)
-    double current_position = 0.0; // current cover angle (degrees)
-    double voltage = 0.0;        // input voltage (V)
-    int brightness = 0;          // flat panel PWM (0-255)
-    int dew_heater = 0;          // dew heater power (0/50/100/150)
-    bool asiair_control = false; // ASIAIR control enabled flag
+    bool valid = false;             // true once at least one valid frame parsed
+    std::string model;              // device identifier, e.g. "WandererCoverV4Pro"
+    int firmware_version = 0;       // YYYYMMDD
+    double close_position = 0.0;    // configured closed angle (degrees)
+    double open_position = 0.0;     // configured open angle (degrees)
+    double current_position = 0.0;  // current cover angle (degrees)
+    double voltage = 0.0;           // input voltage (V)
+    int brightness = 0;             // flat panel PWM (0-255)
+    int dew_heater = 0;             // dew heater power (0/50/100/150)
+    bool asiair_control = false;    // ASIAIR control enabled flag
 };
 
 /**
@@ -145,4 +146,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace alpacacore::vendor::wandererastro
+}  // namespace alpacacore::vendor::wandererastro
