@@ -364,8 +364,14 @@ private:
             char ch = 0;
             bool got = false;
 #ifdef _WIN32
+            HANDLE handle;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                handle = serial_handle_;
+            }
+            if (handle == INVALID_HANDLE_VALUE) break;
             DWORD bytes_read = 0;
-            if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr)) {
+            if (ReadFile(handle, &ch, 1, &bytes_read, nullptr)) {
                 if (bytes_read == 1) {
                     got = true;
                 }

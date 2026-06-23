@@ -181,6 +181,18 @@ public:
     }
 
     void calibrator_on(int brightness) override {
+        // Brightness 0 is a VALID "on at zero brightness" request, NOT off:
+        // ASCOM ICoverCalibratorV2 and ConformU require CalibratorOn(0) to
+        // leave CalibratorState == Ready (ConformU's CoverCalibratorTester calls
+        // TestCalibratorOn(0) and flags an issue if the state is anything but
+        // Ready, and a separate issue if 0 throws InvalidValue). So 0 must
+        // neither be rejected nor routed through CalibratorOff(). On this EL
+        // panel brightness 0 is physically dark (PWM 0 == the off command 9999),
+        // so CalibratorOn(0) and CalibratorOff() look identical at the hardware
+        // but are intentionally distinct driver states (Ready@0 vs Off) per the
+        // spec — a caller that wants illumination requests a non-zero brightness.
+        // Only values outside [0, MaxBrightness] are invalid.
+        //
         // Validate the range first so an out-of-range request is rejected with
         // InvalidValue regardless of connection state (ConformU exercises the
         // boundaries while connected; the order is equivalent there).
@@ -244,36 +256,21 @@ public:
     CoverState get_cover_state() const override {
         ensure_connected();
         const WandererStatus s = protocol_.get_status();
-        if (!s.valid) {
-            return CoverState::Unknown;
-        }
-
         std::lock_guard<std::mutex> lock(state_mutex_);
-        const bool at_close = std::fabs(s.current_position - s.close_position) <= kPositionToleranceDeg;
-        const bool at_open = std::fabs(s.current_position - s.open_position) <= kPositionToleranceDeg;
-
-        switch (commanded_) {
-            case CoverTarget::Opening:
-                if (at_open) {
-                    commanded_ = CoverTarget::None;
-                    return CoverState::Open;
-                }
-                return CoverState::Moving;
-            case CoverTarget::Closing:
-                if (at_close) {
-                    commanded_ = CoverTarget::None;
-                    return CoverState::Closed;
-                }
-                return CoverState::Moving;
-            case CoverTarget::None:
-            default:
-                if (at_close) return CoverState::Closed;
-                if (at_open) return CoverState::Open;
-                return CoverState::Unknown;
-        }
+        return cover_state_locked(s);
     }
 
-    bool get_cover_moving() const override { return get_cover_state() == CoverState::Moving; }
+    bool get_cover_moving() const override {
+        ensure_connected();
+        // Derive from the same single status snapshot + the active target, the
+        // way get_cover_state() does, rather than calling get_cover_state()
+        // again — so a single caller gets a self-consistent CoverState /
+        // CoverMoving pair. (Two *separate* HTTP reads of a moving cover are
+        // still non-atomic by nature; DeviceState is the atomic snapshot.)
+        const WandererStatus s = protocol_.get_status();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return cover_state_locked(s) == CoverState::Moving;
+    }
 
     void open_cover() override {
         ensure_connected();
@@ -327,6 +324,31 @@ private:
         }
     }
 
+    // Pure cover-state computation from a status snapshot + the active command
+    // target. Caller must hold state_mutex_. No side effects: the move target is
+    // cleared by an explicit command (HaltCover) or overwritten by the next
+    // Open/Close, never as a side effect of a read — so repeated reads of an
+    // idle cover always return the same value and get_cover_moving() agrees
+    // with get_cover_state().
+    CoverState cover_state_locked(const WandererStatus& s) const {
+        if (!s.valid) {
+            return CoverState::Unknown;
+        }
+        const bool at_close = std::fabs(s.current_position - s.close_position) <= kPositionToleranceDeg;
+        const bool at_open = std::fabs(s.current_position - s.open_position) <= kPositionToleranceDeg;
+        switch (commanded_) {
+            case CoverTarget::Opening:
+                return at_open ? CoverState::Open : CoverState::Moving;
+            case CoverTarget::Closing:
+                return at_close ? CoverState::Closed : CoverState::Moving;
+            case CoverTarget::None:
+            default:
+                if (at_close) return CoverState::Closed;
+                if (at_open) return CoverState::Open;
+                return CoverState::Unknown;
+        }
+    }
+
     void start_connection_task(bool do_connect) {
         std::lock_guard<std::mutex> lock(connection_mutex_);
         if (connecting_.load()) {
@@ -360,7 +382,7 @@ private:
     WandererProtocolWrapper protocol_;
 
     mutable std::mutex state_mutex_;
-    mutable CoverTarget commanded_ = CoverTarget::None;
+    CoverTarget commanded_ = CoverTarget::None;
     // Driver-side calibrator state, updated synchronously on CalibratorOn/Off so
     // reads don't wait for the lagging status stream.
     int commanded_brightness_ = 0;
