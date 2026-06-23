@@ -103,7 +103,26 @@ public:
             return;
         }
         if (connected) {
-            protocol_.connect(config_);
+            // Resolve an auto-detect request here (on the background connection
+            // thread), not at registration: enumerate the ports and pick the
+            // requested match. A local copy keeps config_ as the durable intent
+            // so a later reconnect re-scans (robust to the device moving ports).
+            ConnectionConfig effective = config_;
+            if (effective.serial_port.empty() && effective.auto_detect_index >= 0) {
+                auto ports = enumerate_wanderer_ports();
+                if (ports.empty()) {
+                    throw AlpacaException("No WandererCover detected on any serial port", AlpacaError::NotConnected);
+                }
+                if (effective.auto_detect_index >= static_cast<int>(ports.size())) {
+                    throw AlpacaException("Cover index " + std::to_string(effective.auto_detect_index) +
+                                              " out of range (detected " + std::to_string(ports.size()) + ")",
+                                          AlpacaError::NotConnected);
+                }
+                const auto& port = ports[static_cast<std::size_t>(effective.auto_detect_index)];
+                ALPACA_LOG_INFO("WandererAstro", "Auto-detected " + port.model + " at " + port.port_path);
+                effective.serial_port = port.port_path;
+            }
+            protocol_.connect(effective);
             // Seed the calibrator state from the first streamed frame so the
             // initial CalibratorState/Brightness reflect reality if the panel
             // was already lit from a previous session. If seeding throws, undo
@@ -202,22 +221,20 @@ public:
                                   AlpacaError::InvalidValue);
         }
         ensure_connected();
-        int prev_brightness = 0;
-        bool prev_engaged = false;
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            prev_brightness = commanded_brightness_;
-            prev_engaged = calibrator_engaged_;
-            commanded_brightness_ = brightness;
-            calibrator_engaged_ = true;  // "on" even at brightness 0 (ASCOM: Ready)
-        }
+        // Hold state_mutex_ across the write so a concurrent calibrator_off()
+        // can't interleave between the state update and the command (which would
+        // leave the panel on while the driver reports Off, or vice versa).
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const int prev_brightness = commanded_brightness_;
+        const bool prev_engaged = calibrator_engaged_;
+        commanded_brightness_ = brightness;
+        calibrator_engaged_ = true;  // "on" even at brightness 0 (ASCOM: Ready)
         try {
             protocol_.set_brightness(brightness);
         } catch (...) {
             // The command never reached the panel — restore the prior reported
             // state so the driver doesn't claim Ready at a brightness the panel
             // never applied.
-            std::lock_guard<std::mutex> lock(state_mutex_);
             commanded_brightness_ = prev_brightness;
             calibrator_engaged_ = prev_engaged;
             throw;
@@ -226,19 +243,14 @@ public:
 
     void calibrator_off() override {
         ensure_connected();
-        int prev_brightness = 0;
-        bool prev_engaged = false;
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            prev_brightness = commanded_brightness_;
-            prev_engaged = calibrator_engaged_;
-            commanded_brightness_ = 0;
-            calibrator_engaged_ = false;
-        }
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const int prev_brightness = commanded_brightness_;
+        const bool prev_engaged = calibrator_engaged_;
+        commanded_brightness_ = 0;
+        calibrator_engaged_ = false;
         try {
             protocol_.turn_off_light();
         } catch (...) {
-            std::lock_guard<std::mutex> lock(state_mutex_);
             commanded_brightness_ = prev_brightness;
             calibrator_engaged_ = prev_engaged;
             throw;
@@ -274,34 +286,33 @@ public:
 
     void open_cover() override {
         ensure_connected();
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            commanded_ = CoverTarget::Opening;
-        }
+        // Hold state_mutex_ across the write so the target and the command can't
+        // be separated by a concurrent halt_cover()/close_cover(): otherwise that
+        // could reset commanded_ in the gap, the write would still start the
+        // cover moving, and CoverState/CoverMoving would never report Moving.
+        // (Lock order is always state_mutex_ -> protocol mutex; the protocol
+        // never calls back into the driver, so there's no deadlock. The write is
+        // a fire-and-forget 5-byte send.)
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const CoverTarget prev = commanded_;
+        commanded_ = CoverTarget::Opening;
         try {
             protocol_.open_cover();
         } catch (...) {
-            // The command never reached the controller, so the cover isn't
-            // moving — clear the target rather than leaving CoverState/
-            // CoverMoving wedged at Moving until a HaltCover the client has no
-            // reason to issue.
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            commanded_ = CoverTarget::None;
+            commanded_ = prev;  // the command never reached the controller
             throw;
         }
     }
 
     void close_cover() override {
         ensure_connected();
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            commanded_ = CoverTarget::Closing;
-        }
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const CoverTarget prev = commanded_;
+        commanded_ = CoverTarget::Closing;
         try {
             protocol_.close_cover();
         } catch (...) {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            commanded_ = CoverTarget::None;
+            commanded_ = prev;
             throw;
         }
     }
@@ -343,6 +354,10 @@ private:
                 return at_close ? CoverState::Closed : CoverState::Moving;
             case CoverTarget::None:
             default:
+                // If the configured open/close angles are within tolerance of
+                // each other (misconfigured hardware) a single position can match
+                // both — report Unknown rather than silently favouring Closed.
+                if (at_close && at_open) return CoverState::Unknown;
                 if (at_close) return CoverState::Closed;
                 if (at_open) return CoverState::Open;
                 return CoverState::Unknown;
@@ -404,22 +419,13 @@ std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(int 
 
 std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator_by_index(int device_number,
                                                                                      int cover_index) {
-    auto ports = enumerate_wanderer_ports();
-    if (ports.empty()) {
-        throw AlpacaException("No WandererCover detected on any serial port", AlpacaError::NotConnected);
-    }
-    if (cover_index < 0 || cover_index >= static_cast<int>(ports.size())) {
-        throw AlpacaException("Cover index " + std::to_string(cover_index) + " out of range (detected " +
-                                  std::to_string(ports.size()) + ")",
-                              AlpacaError::InvalidValue);
-    }
-
-    const auto& port = ports[static_cast<std::size_t>(cover_index)];
-    ALPACA_LOG_INFO("WandererAstro", "Auto-detected " + port.model + " at " + port.port_path);
-
+    // Defer the (blocking) port scan to connect time, which runs on the driver's
+    // background connection thread. Doing it here would block the caller — the
+    // HTTP handler thread at device registration — for up to ~2.5s per candidate
+    // port while every already-registered device is unreachable.
     ConnectionConfig config;
     config.type = ConnectionType::Serial;
-    config.serial_port = port.port_path;
+    config.auto_detect_index = cover_index;
     return std::make_unique<WandererCoverCalibratorDriver>(device_number, std::move(config));
 }
 

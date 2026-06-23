@@ -36,9 +36,10 @@ enum class ConnectionType : std::uint8_t {
  */
 struct ConnectionConfig {
     ConnectionType type = ConnectionType::Serial;
-    std::string serial_port;  // e.g., "/dev/ttyUSB0"
+    std::string serial_port;  // e.g., "/dev/ttyUSB0"; empty + auto_detect_index>=0 => enumerate at connect
     int baud_rate = 19200;    // WandererCover V4 fixed protocol baud
     int serial_timeout_s = 3;
+    int auto_detect_index = -1;  // >=0: enumerate ports at connect time and use this 0-based match
 };
 
 /**
