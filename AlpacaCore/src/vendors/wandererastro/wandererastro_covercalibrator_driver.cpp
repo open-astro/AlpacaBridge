@@ -190,22 +190,47 @@ public:
                                   AlpacaError::InvalidValue);
         }
         ensure_connected();
+        int prev_brightness = 0;
+        bool prev_engaged = false;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
+            prev_brightness = commanded_brightness_;
+            prev_engaged = calibrator_engaged_;
             commanded_brightness_ = brightness;
             calibrator_engaged_ = true;  // "on" even at brightness 0 (ASCOM: Ready)
         }
-        protocol_.set_brightness(brightness);
+        try {
+            protocol_.set_brightness(brightness);
+        } catch (...) {
+            // The command never reached the panel — restore the prior reported
+            // state so the driver doesn't claim Ready at a brightness the panel
+            // never applied.
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            commanded_brightness_ = prev_brightness;
+            calibrator_engaged_ = prev_engaged;
+            throw;
+        }
     }
 
     void calibrator_off() override {
         ensure_connected();
+        int prev_brightness = 0;
+        bool prev_engaged = false;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
+            prev_brightness = commanded_brightness_;
+            prev_engaged = calibrator_engaged_;
             commanded_brightness_ = 0;
             calibrator_engaged_ = false;
         }
-        protocol_.turn_off_light();
+        try {
+            protocol_.turn_off_light();
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            commanded_brightness_ = prev_brightness;
+            calibrator_engaged_ = prev_engaged;
+            throw;
+        }
     }
 
     void set_brightness(int brightness) override {

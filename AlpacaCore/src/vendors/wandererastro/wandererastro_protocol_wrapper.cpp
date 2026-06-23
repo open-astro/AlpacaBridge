@@ -69,8 +69,14 @@ bool configure_serial_fd(int fd) {
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
         return false;
     }
+    // Clear O_NONBLOCK so the reader's ::read() blocks for the VTIME window
+    // instead of returning EAGAIN immediately. If either fcntl fails, report a
+    // configuration failure rather than risk leaving the fd non-blocking (which
+    // would spin the reader loop at 100% CPU).
     int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+        return false;
+    }
     tcflush(fd, TCIOFLUSH);
     return true;
 }
@@ -359,8 +365,17 @@ private:
             bool got = false;
 #ifdef _WIN32
             DWORD bytes_read = 0;
-            if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
-                got = true;
+            if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr)) {
+                if (bytes_read == 1) {
+                    got = true;
+                }
+                // bytes_read == 0 is the ReadTotalTimeoutConstant window elapsing
+                // with no data — naturally rate-limited, just loop.
+            } else {
+                // I/O error (e.g. device unplugged): back off so the loop doesn't
+                // peg a CPU core until stop_reader() runs. Linux is rate-limited
+                // by the VTIME read timeout and needs no equivalent.
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 #else
             int fd;
