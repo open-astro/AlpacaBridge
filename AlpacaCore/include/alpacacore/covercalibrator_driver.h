@@ -60,6 +60,15 @@ public:
      * getter is wrapped so that a property which throws (e.g. NotConnected) is
      * simply omitted from the snapshot per the DeviceState contract, rather
      * than failing the whole call.
+     *
+     * The CalibratorState/CalibratorChanging and CoverState/CoverMoving pairs
+     * are each derived from a single state read so the two entries in one
+     * response can never contradict each other: per the ASCOM ICoverCalibratorV2
+     * contract CalibratorChanging is true iff CalibratorState is NotReady, and
+     * CoverMoving is true iff CoverState is Moving. Reading the "changing" and
+     * "state" properties independently could otherwise straddle a status update
+     * (e.g. report CoverState=Moving with CoverMoving=false) on a device whose
+     * state is polled asynchronously.
      */
     std::vector<DeviceState> get_device_state() const override {
         std::vector<DeviceState> state;
@@ -70,11 +79,21 @@ public:
                 // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
             }
         };
+        auto add_pair = [&state](const char* state_name, const char* changing_name, auto state_getter,
+                                 auto changing_when) {
+            try {
+                const auto value = state_getter();
+                state.push_back({state_name, DeviceStateValue{static_cast<std::int32_t>(value)}});
+                state.push_back({changing_name, DeviceStateValue{value == changing_when}});
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Omit both entries together per the DeviceState contract.
+            }
+        };
         add("Brightness", [this] { return static_cast<std::int32_t>(get_brightness()); });
-        add("CalibratorState", [this] { return static_cast<std::int32_t>(get_calibrator_state()); });
-        add("CoverState", [this] { return static_cast<std::int32_t>(get_cover_state()); });
-        add("CalibratorChanging", [this] { return get_calibrator_changing(); });
-        add("CoverMoving", [this] { return get_cover_moving(); });
+        add_pair(
+            "CalibratorState", "CalibratorChanging", [this] { return get_calibrator_state(); },
+            CalibratorState::NotReady);
+        add_pair("CoverState", "CoverMoving", [this] { return get_cover_state(); }, CoverState::Moving);
         state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
     }

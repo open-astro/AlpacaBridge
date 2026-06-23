@@ -319,16 +319,30 @@ private:
         ensure_connected_locked();
         const std::string payload = code + "\n";
         ALPACA_LOG_TRACE("WandererAstro", "Command: " + code);
+        // Loop until the whole payload is written: a short write would drop the
+        // trailing '\n', leaving the controller with a buffered partial command.
 #ifdef _WIN32
-        DWORD written = 0;
-        if (!WriteFile(serial_handle_, payload.c_str(), static_cast<DWORD>(payload.size()), &written, nullptr)) {
-            throw AlpacaException("Serial write failed", AlpacaError::DriverException);
+        std::size_t total = 0;
+        while (total < payload.size()) {
+            DWORD written = 0;
+            if (!WriteFile(serial_handle_, payload.data() + total, static_cast<DWORD>(payload.size() - total), &written,
+                           nullptr)) {
+                throw AlpacaException("Serial write failed", AlpacaError::DriverException);
+            }
+            total += written;
         }
 #else
-        ssize_t written = ::write(serial_fd_, payload.c_str(), payload.size());
-        if (written < 0) {
-            throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)),
-                                  AlpacaError::DriverException);
+        std::size_t total = 0;
+        while (total < payload.size()) {
+            ssize_t written = ::write(serial_fd_, payload.data() + total, payload.size() - total);
+            if (written < 0) {
+                if (errno == EINTR) {
+                    continue;  // interrupted before any byte was written — retry
+                }
+                throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)),
+                                      AlpacaError::DriverException);
+            }
+            total += static_cast<std::size_t>(written);
         }
 #endif
     }
