@@ -99,6 +99,13 @@ public:
     bool get_connecting() const override { return connecting_.load(); }
 
     void set_connected(bool connected) override {
+        // Serialize the whole connect/disconnect transition. Without this, two
+        // threads racing to set the same target both pass the load() guard and
+        // both run the body — e.g. concurrent disconnects would call
+        // protocol_.disconnect() -> reader_thread_.join() twice on one thread
+        // object (undefined behavior). Holding this for the duration also makes
+        // the guard check-then-act atomic w.r.t. other transitions.
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         if (connected == connected_.load()) {
             return;
         }
@@ -446,6 +453,7 @@ private:
 
     std::mutex connection_mutex_;
     std::thread connection_thread_;
+    std::mutex transition_mutex_;  // serializes set_connected() connect/disconnect transitions
 };
 
 std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(int device_number,

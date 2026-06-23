@@ -20,6 +20,7 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -39,6 +40,35 @@ namespace {
 
 constexpr char kModelPrefix[] = "WandererCoverV4";
 constexpr int MAX_LINE_LEN = 256;
+
+// Resolved serial-port paths currently held open by a connected wrapper.
+// enumerate_wanderer_ports() skips these so probing a second auto-detect device
+// never opens/reads a /dev node a WandererCover is already streaming on (which
+// would split the shared kernel receive buffer between two readers and freeze
+// the connected device's status for the probe window). Function-local statics
+// avoid static-init-order issues.
+std::mutex& open_ports_mutex() {
+    static std::mutex m;
+    return m;
+}
+std::set<std::string>& open_ports() {
+    static std::set<std::string> s;
+    return s;
+}
+void mark_port_open(const std::string& path) {
+    if (path.empty()) return;
+    std::lock_guard<std::mutex> lock(open_ports_mutex());
+    open_ports().insert(path);
+}
+void mark_port_closed(const std::string& path) {
+    if (path.empty()) return;
+    std::lock_guard<std::mutex> lock(open_ports_mutex());
+    open_ports().erase(path);
+}
+bool is_port_in_use(const std::string& path) {
+    std::lock_guard<std::mutex> lock(open_ports_mutex());
+    return open_ports().count(path) > 0;
+}
 
 // Configure an already-open POSIX fd for 19200 8N1 raw I/O. HUPCL is cleared so
 // DTR stays asserted on close: the CH340 adapter asserts DTR on open, which
@@ -197,6 +227,7 @@ std::vector<WandererPortInfo> enumerate_wanderer_ports() {
         for (int i = 0; i < 10; ++i) {
             std::string port = "/dev/ttyUSB" + std::to_string(i);
             if (!std::filesystem::exists(port)) continue;
+            if (is_port_in_use(port)) continue;  // already held by a connected WandererCover
             ALPACA_LOG_INFO("WandererAstro", "Probing " + port + "...");
             WandererPortInfo info;
             if (probe_port(port, info)) {
@@ -224,6 +255,9 @@ std::vector<WandererPortInfo> enumerate_wanderer_ports() {
         std::error_code ec;
         std::string resolved = std::filesystem::canonical(entry.path(), ec).string();
         if (ec) continue;
+
+        // Don't probe a port another connected WandererCover is streaming on.
+        if (is_port_in_use(resolved)) continue;
         std::string probe_msg = "Probing ";
         probe_msg.append(resolved).append(" (").append(name).append(")...");
         ALPACA_LOG_INFO("WandererAstro", probe_msg);
@@ -479,6 +513,8 @@ private:
             serial_fd_ = -1;
             throw AlpacaException("Failed to configure serial port", AlpacaError::DriverException);
         }
+        opened_port_ = config_.serial_port;
+        mark_port_open(opened_port_);  // hide this port from concurrent auto-detect scans
 #endif
     }
 
@@ -493,6 +529,8 @@ private:
             close(serial_fd_);
             serial_fd_ = -1;
         }
+        mark_port_closed(opened_port_);
+        opened_port_.clear();
 #endif
     }
 
@@ -501,6 +539,7 @@ private:
     ConnectionConfig config_;
     std::string model_;
     bool connected_ = false;
+    std::string opened_port_;  // path registered in the in-use set while open
 
     std::atomic<bool> running_{false};
     std::thread reader_thread_;
