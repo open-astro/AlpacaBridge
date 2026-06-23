@@ -134,11 +134,16 @@ public:
                 commanded_ = CoverTarget::None;
                 if (s.valid) {
                     commanded_brightness_ = s.brightness;
-                    // A lit panel means Ready. Brightness 0 is physically
-                    // indistinguishable from Off, so keep the prior engaged flag
-                    // rather than forcing Off — this preserves a Ready@0 set via
-                    // CalibratorOn(0) across a reconnect; a freshly-created driver
-                    // starts Off.
+                    // A lit panel (brightness > 0) is unambiguously Ready. At
+                    // brightness 0 the panel is physically indistinguishable from
+                    // Off, so we deliberately leave calibrator_engaged_ untouched
+                    // instead of forcing it false. calibrator_engaged_ is a
+                    // persistent member that disconnect() does NOT reset and the
+                    // driver instance survives a Connected=false/true cycle, so a
+                    // Ready@0 state set via CalibratorOn(0) is retained across a
+                    // reconnect of the same device. A freshly-constructed driver
+                    // starts Off via the member initialiser (calibrator_engaged_
+                    // = false), so the very first connect at brightness 0 is Off.
                     if (s.brightness > 0) {
                         calibrator_engaged_ = true;
                     }

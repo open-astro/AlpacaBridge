@@ -218,7 +218,12 @@ std::vector<WandererPortInfo> enumerate_wanderer_ports() {
                             (name.find("1a86") != std::string::npos);
         if (!is_candidate) continue;
 
-        std::string resolved = std::filesystem::canonical(entry.path()).string();
+        // Use the error_code overload: if the device is unplugged between the
+        // directory scan and here the by-id symlink dangles, and the throwing
+        // canonical() would abort the whole enumeration. Skip the stale entry.
+        std::error_code ec;
+        std::string resolved = std::filesystem::canonical(entry.path(), ec).string();
+        if (ec) continue;
         std::string probe_msg = "Probing ";
         probe_msg.append(resolved).append(" (").append(name).append(")...");
         ALPACA_LOG_INFO("WandererAstro", probe_msg);
