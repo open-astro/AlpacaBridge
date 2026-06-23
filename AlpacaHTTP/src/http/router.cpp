@@ -7156,6 +7156,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         } else {
             // "auto" or unset — auto-detect
             int cover_index = config.value("coverIndex", 0);
+            if (cover_index < 0) {
+                error_message = "coverIndex must be >= 0.";
+                return false;
+            }
             cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator_by_index(device_number,
                                                                                                      cover_index);
         }

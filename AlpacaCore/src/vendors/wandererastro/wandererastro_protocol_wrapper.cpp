@@ -168,6 +168,15 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
         return false;
     }
 
+    // Re-check after opening: a driver may have claimed this port (open_serial()
+    // marks it before opening) in the window between the caller's is_port_in_use()
+    // check and this open(). Bail immediately rather than reading for ~2.5s and
+    // stealing bytes from that device's stream.
+    if (is_port_in_use(port_path)) {
+        close(fd);
+        return false;
+    }
+
     std::string buffer;
     WandererStatus status;
     bool found = false;
@@ -509,8 +518,21 @@ private:
         SetCommTimeouts(serial_handle_, &timeouts);
         PurgeComm(serial_handle_, PURGE_RXCLEAR | PURGE_TXCLEAR);
 #else
+        // Claim the port in the in-use set BEFORE opening it, so a concurrent
+        // auto-detect scan can't slip between its is_port_in_use() check and our
+        // open() and probe this same node. Store the canonical path so the check
+        // matches the canonical paths enumerate_wanderer_ports() compares against
+        // (a user may configure a /dev/serial/by-id/... symlink that resolves to
+        // a /dev/ttyUSBn node). Fall back to the raw path if it can't be resolved.
+        std::error_code path_ec;
+        std::string canonical_path = std::filesystem::canonical(config_.serial_port, path_ec).string();
+        opened_port_ = path_ec ? config_.serial_port : canonical_path;
+        mark_port_open(opened_port_);
+
         serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
+            mark_port_closed(opened_port_);
+            opened_port_.clear();
             throw AlpacaException(
                 "Failed to open serial port: " + config_.serial_port + " (" + std::strerror(errno) + ")",
                 AlpacaError::NotConnected);
@@ -518,16 +540,10 @@ private:
         if (!configure_serial_fd(serial_fd_)) {
             close(serial_fd_);
             serial_fd_ = -1;
+            mark_port_closed(opened_port_);
+            opened_port_.clear();
             throw AlpacaException("Failed to configure serial port", AlpacaError::DriverException);
         }
-        // Store the canonical path so the in-use check matches the canonical
-        // paths enumerate_wanderer_ports() compares against — a user may
-        // configure a /dev/serial/by-id/... symlink, which resolves to a
-        // /dev/ttyUSBn node. Fall back to the raw path if it can't be resolved.
-        std::error_code path_ec;
-        std::string canonical_path = std::filesystem::canonical(config_.serial_port, path_ec).string();
-        opened_port_ = path_ec ? config_.serial_port : canonical_path;
-        mark_port_open(opened_port_);  // hide this port from concurrent auto-detect scans
 #endif
     }
 
