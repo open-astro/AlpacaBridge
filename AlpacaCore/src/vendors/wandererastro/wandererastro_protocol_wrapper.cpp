@@ -230,6 +230,18 @@ public:
     std::string connect(const ConnectionConfig& config) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // Precondition: connect() requires a disconnected wrapper. While a
+            // session is live the reader thread is joinable; re-spawning it
+            // would overwrite a joinable std::thread and call std::terminate().
+            // Every connect() failure path joins the reader before returning, so
+            // connected_ == false guarantees no live thread — making this the
+            // single, sufficient guard. Fail fast so any future caller that
+            // relaxes the driver-layer serialization gets a loud error, never a
+            // process abort.
+            if (connected_) {
+                throw AlpacaException("WandererCover already connected; call disconnect() first",
+                                      AlpacaError::InvalidOperation);
+            }
             config_ = config;
             open_serial();
         }
