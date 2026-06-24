@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-06-12
+## Updated 2026-06-23
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -128,7 +128,24 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## CoverCalibrator Drivers
 
-*No drivers currently available.*
+### WandererAstro
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| WandererCover V4 (Pro / EC / EC-IR) | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/WandererAstro/WandererCover%20V4/) |
+
+<details>
+<summary><strong>WandererAstro CoverCalibrator Driver Notes</strong></summary>
+
+- **Protocol**: WandererCover V4 ASCII serial protocol, firmware ≥ 20250405 (no SDK required). Docs in `AlpacaCore/external/WandererAstro/`.
+- **Connection**: USB/Serial (CH340 adapter, fixed **19200 baud, 8N1**). Auto-detection supported.
+- **Auto-detection**: Scans `/dev/serial/by-id/` for CH340/CH341 USB-serial devices (vendor `1a86`) and listens for the continuously-streamed status frame identifying a `WandererCoverV4` model. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
+- **Cover + calibrator**: motorized dust cover (`OpenCover`/`CloseCover`) plus EL flat panel (`CalibratorOn`/`CalibratorOff`, brightness 0–255).
+- **HaltCover**: the protocol has no hardware halt command; `HaltCover` stops the driver's move-tracking so `CoverState`/`CoverMoving` immediately stop reporting `Moving` while the cover completes its current travel mechanically.
+- **Tested model**: WandererCover V4 Pro (firmware 20250504) on Linux arm64 (Debian 13).
+- **ConformU**: 4.3.0 — 0 errors, 0 issues, 0 timing issues.
+
+</details>
 
 [↑ Back to top](#alpacabridge-supported-drivers)
 

@@ -114,6 +114,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | SynScan | Telescope | Protocol wrapper | Production |
 | Celestron | Telescope | Protocol wrapper | Production |
 | Losmandy Gemini | Focuser | Protocol wrapper | Production |
+| WandererAstro | CoverCalibrator (WandererCover V4) | Protocol wrapper | Production |
 | WeeWX | ObservingConditions | HTTP client | Production |
 | Bisque | Telescope | Script/protocol | In development |
 
@@ -174,13 +175,14 @@ AlpacaBridge/
 |   |   |   +- zwo/ qhy/ ioptron/    # One directory per vendor
 |   |   |   +- synscan/ celestron/
 |   |   |   +- playerone/ svbony/ touptek/
-|   |   |   +- gemini/ weewx/ bisque/
+|   |   |   +- gemini/ wandererastro/ weewx/ bisque/
 |   |   +- management/               # Device registry, discovery
 |   +- external/                      # Vendor SDKs and protocol docs
 |   |   +- ZWO/ QHY/ PlayerOne/      # SDK libraries
 |   |   +- SVBONY/ ToupTek/
 |   |   +- iOptron/ SynScan/         # Protocol documentation
 |   |   +- Celestron/ Losmandy/
+|   |   +- WandererAstro/            # WandererCover V4 serial protocol docs
 |   |   +- Bisque/                   # In development
 |   +- tests/                        # Catch2 unit tests
 |   +- conformu/                     # ConformU validation reports

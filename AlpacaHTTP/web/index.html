@@ -36,14 +36,15 @@
                     <label for="device-type">Device Type:</label>
                     <select id="device-type" name="deviceType" required>
                         <option value="">Select device type...</option>
-                        <option value="telescope">Telescope</option>
                         <option value="camera">Camera</option>
+                        <option value="covercalibrator">Cover Calibrator</option>
+                        <option value="dome">Dome</option>
                         <option value="filterwheel">Filter Wheel</option>
                         <option value="focuser">Focuser</option>
-                        <option value="rotator">Rotator</option>
-                        <option value="dome">Dome</option>
                         <option value="observingconditions">Observing Conditions</option>
+                        <option value="rotator">Rotator</option>
                         <option value="switch">Switch</option>
+                        <option value="telescope">Telescope</option>
                     </select>
                 </div>
 
@@ -67,6 +68,7 @@
                         <option value="svbony">SVBONY</option>
                         <option value="synscan">SynScan V3/V4</option>
                         <option value="touptek">ToupTek</option>
+                        <option value="wandererastro">WandererAstro</option>
                         <option value="weewx">WeeWX</option>
                         <option value="zwo">ZWO</option>
                     </select>
@@ -793,6 +795,43 @@
                                 <option value="57600">57600</option>
                                 <option value="115200">115200</option>
                             </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- WandererAstro WandererCover V4 Configuration -->
+                <div id="wandererastro-config" class="vendor-config" style="display: none;">
+                    <h3>WandererAstro WandererCover V4</h3>
+
+                    <div class="form-group">
+                        <label for="wandererastro-connection-type">Connection Type:</label>
+                        <select id="wandererastro-connection-type" name="wandererastroConnectionType">
+                            <option value="auto" selected>Auto-detect (recommended)</option>
+                            <option value="serial">Serial (USB) — manual port</option>
+                        </select>
+                        <small>Auto-detect scans USB serial ports for the WandererCover status stream automatically.</small>
+                    </div>
+
+                    <div id="wandererastro-auto-fields">
+                        <div class="form-group">
+                            <label for="wandererastro-cover-index">Cover Index:</label>
+                            <input type="number" id="wandererastro-cover-index" name="wandererastroCoverIndex" value="0" min="0">
+                            <small>0-based index if multiple covers are detected. Usually 0.</small>
+                        </div>
+                    </div>
+
+                    <div id="wandererastro-serial-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="wandererastro-port-path">Serial Port:</label>
+                            <input type="text" id="wandererastro-port-path" name="wandererastroPortPath" placeholder="/dev/ttyUSB0">
+                            <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="wandererastro-baud-rate">Baud Rate:</label>
+                            <select id="wandererastro-baud-rate" name="wandererastroBaudRate">
+                                <option value="19200" selected>19200</option>
+                            </select>
+                            <small>The WandererCover V4 protocol is fixed at 19200 baud.</small>
                         </div>
                     </div>
                 </div>

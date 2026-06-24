@@ -31,6 +31,7 @@ option(ALPACACORE_ENABLE_CELESTRON "Enable Celestron NexStar vendor support" OFF
 option(ALPACACORE_ENABLE_BISQUE "Enable Bisque/Paramount (TheSkyX) telescope support" OFF)
 option(ALPACACORE_ENABLE_TOUPTEK "Enable ToupTek vendor support" OFF)
 option(ALPACACORE_ENABLE_PLAYERONE "Enable Player One vendor support" OFF)
+option(ALPACACORE_ENABLE_WANDERERASTRO "Enable WandererAstro CoverCalibrator vendor support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
@@ -46,6 +47,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_BISQUE ON)
     set(ALPACACORE_ENABLE_TOUPTEK ON)
     set(ALPACACORE_ENABLE_PLAYERONE ON)
+    set(ALPACACORE_ENABLE_WANDERERASTRO ON)
 endif()
 
 # Compiler warnings (Linux)
@@ -145,6 +147,13 @@ if(ALPACACORE_ENABLE_GEMINI)
     add_subdirectory(src/vendors/gemini)
     if(TARGET alpacacore_gemini)
         target_link_libraries(alpacacore PRIVATE alpacacore_gemini)
+    endif()
+endif()
+
+if(ALPACACORE_ENABLE_WANDERERASTRO)
+    add_subdirectory(src/vendors/wandererastro)
+    if(TARGET alpacacore_wandererastro)
+        target_link_libraries(alpacacore PRIVATE alpacacore_wandererastro)
     endif()
 endif()
 
@@ -269,6 +278,15 @@ endif()
 
 if(ALPACACORE_ENABLE_GEMINI AND TARGET alpacacore_gemini)
     install(TARGETS alpacacore_gemini
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_WANDERERASTRO AND TARGET alpacacore_wandererastro)
+    install(TARGETS alpacacore_wandererastro
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib
