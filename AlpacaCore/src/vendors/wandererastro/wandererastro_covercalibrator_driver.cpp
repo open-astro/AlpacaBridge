@@ -21,7 +21,6 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -81,27 +80,11 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    // Firmware date from the streamed status frame, formatted once and cached.
-    // Surfaced in the web UI only, never in DriverInfo. firmware_version is a
-    // YYYYMMDD integer; render it as YYYY-MM-DD. Guarded solely by
-    // firmware_mutex_: once disconnected the cache is cleared and get_status()
-    // reports valid=false, so this naturally yields nullopt without consulting
-    // connected_ (no atomic-vs-mutex ordering to reason about).
-    std::optional<std::string> get_device_firmware() const override {
-        std::lock_guard<std::mutex> lock(firmware_mutex_);
-        if (!firmware_cache_.empty()) {
-            return firmware_cache_;
-        }
-        const WandererStatus s = protocol_.get_status();
-        if (!s.valid || s.firmware_version <= 0) {
-            return std::nullopt;
-        }
-        const int fw = s.firmware_version;
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", fw / 10000, (fw / 100) % 100, fw % 100);
-        firmware_cache_ = buf;
-        return firmware_cache_;
-    }
+    // Firmware date (YYYY-MM-DD), cached in the protocol wrapper from the first
+    // streamed status frame and cleared there on disconnect. Surfaced in the web
+    // UI only, never in DriverInfo. Cheap and non-blocking — no driver-side cache
+    // to keep coherent and no status re-read/re-format per poll.
+    std::optional<std::string> get_device_firmware() const override { return protocol_.get_firmware_date(); }
 
     // ICoverCalibratorV2 (ASCOM Platform 7): adds CoverMoving, CalibratorChanging,
     // Connecting and DeviceState, all of which this driver implements.
@@ -189,17 +172,7 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("WandererAstro", "Cover connected");
         } else {
-            // Clear the firmware cache and disconnect atomically under
-            // firmware_mutex_: a configureddevices poll can't return the cached
-            // (now stale) firmware in the window around disconnect, and can't
-            // re-populate it from a still-valid status frame either — by the time
-            // any getter re-acquires the lock the cache is empty and
-            // protocol_.disconnect() has invalidated the streamed status.
-            {
-                std::lock_guard<std::mutex> lock(firmware_mutex_);
-                firmware_cache_.clear();
-                protocol_.disconnect();
-            }
+            protocol_.disconnect();  // clears the wrapper's cached firmware date
             connected_.store(false);
             ALPACA_LOG_INFO("WandererAstro", "Cover disconnected");
         }
@@ -467,12 +440,6 @@ private:
     std::atomic<bool> connected_;
     std::atomic<bool> connecting_;
     WandererProtocolWrapper protocol_;
-
-    // Firmware date is a constant YYYYMMDD that never changes while connected, so
-    // format it once and cache it rather than re-locking the status stream and
-    // re-formatting on every configureddevices poll. Cleared at disconnect.
-    mutable std::mutex firmware_mutex_;
-    mutable std::string firmware_cache_;
 
     mutable std::mutex state_mutex_;
     CoverTarget commanded_ = CoverTarget::None;

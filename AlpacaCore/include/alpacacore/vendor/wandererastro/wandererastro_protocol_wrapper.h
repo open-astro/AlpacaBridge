@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -122,6 +123,16 @@ public:
      * @brief Get the most recent decoded status frame.
      */
     WandererStatus get_status() const;
+
+    /**
+     * @brief Get the device firmware date (YYYY-MM-DD), if known.
+     *
+     * Captured once from the first valid status frame and cleared on disconnect,
+     * so the caller gets a cached value without re-reading or re-formatting the
+     * status stream on every poll. Returns std::nullopt before the first frame or
+     * after disconnect.
+     */
+    std::optional<std::string> get_firmware_date() const;
 
     // --- Commands (fire-and-forget; the device streams status, not replies) ---
 

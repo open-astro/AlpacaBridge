@@ -18,9 +18,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -350,6 +352,7 @@ public:
         {
             std::lock_guard<std::mutex> status_lock(status_mutex_);
             status_ = WandererStatus{};
+            firmware_date_.clear();
         }
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
@@ -364,6 +367,14 @@ public:
     WandererStatus get_status() const {
         std::lock_guard<std::mutex> lock(status_mutex_);
         return status_;
+    }
+
+    std::optional<std::string> get_firmware_date() const {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        if (firmware_date_.empty()) {
+            return std::nullopt;
+        }
+        return firmware_date_;
     }
 
     void open_cover() { send_command("1001"); }
@@ -469,6 +480,13 @@ private:
                 if (parse_status_line(buffer, parsed)) {
                     std::lock_guard<std::mutex> lock(status_mutex_);
                     status_ = parsed;
+                    // Cache the firmware date once (YYYYMMDD int -> YYYY-MM-DD).
+                    if (firmware_date_.empty() && parsed.valid && parsed.firmware_version > 0) {
+                        const int fw = parsed.firmware_version;
+                        char buf[16];
+                        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", fw / 10000, (fw / 100) % 100, fw % 100);
+                        firmware_date_ = buf;
+                    }
                 }
                 buffer.clear();
             } else {
@@ -573,6 +591,9 @@ private:
     std::atomic<bool> running_{false};
     std::thread reader_thread_;
     WandererStatus status_;
+    // Firmware date (YYYY-MM-DD), captured once from the first valid frame and
+    // cleared on disconnect; guarded by status_mutex_ alongside status_.
+    std::string firmware_date_;
 
 #ifdef _WIN32
     HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
@@ -594,6 +615,8 @@ void WandererProtocolWrapper::disconnect() { impl_->disconnect(); }
 bool WandererProtocolWrapper::is_connected() const { return impl_->is_connected(); }
 
 WandererStatus WandererProtocolWrapper::get_status() const { return impl_->get_status(); }
+
+std::optional<std::string> WandererProtocolWrapper::get_firmware_date() const { return impl_->get_firmware_date(); }
 
 void WandererProtocolWrapper::open_cover() { impl_->open_cover(); }
 
