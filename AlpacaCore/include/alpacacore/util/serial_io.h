@@ -43,12 +43,14 @@
 
 namespace alpacacore::util {
 
-// Upper bound on how long write_all()/send_all() keep retrying a partial
-// transfer that makes NO further progress (repeated EAGAIN/EWOULDBLOCK under a
-// send timeout). It bounds the only retry path that can loop — a partial write
+// Absolute upper bound on how long write_all()/send_all() keep retrying a
+// partial transfer that hits backpressure (EAGAIN/EWOULDBLOCK under a send
+// timeout). It bounds the only retry path that can loop — a partial write
 // followed by persistent backpressure — so a dead peer can't wedge the calling
-// thread for the multi-minute TCP retransmit window. The clock resets on every
-// byte of progress, so a slow-but-advancing link is never cut off.
+// thread for the multi-minute TCP retransmit window. The deadline starts at the
+// first backpressure stall and is NOT extended by subsequent progress, so even a
+// trickle-then-stall peer is bounded; the payloads here (short device commands)
+// complete in well under this budget once the link drains.
 inline constexpr std::chrono::milliseconds kPartialIoRetryBudget{2000};
 
 /**
@@ -71,9 +73,9 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
             if ((errno == EAGAIN || errno == EWOULDBLOCK) && total > 0) {
                 // Transient backpressure (SO_SNDTIMEO) AFTER a partial write:
                 // retry so the half-written payload completes rather than corrupt
-                // framing — but only within a bounded no-progress budget so a
-                // dead peer can't stall here for the TCP retransmit window. When
-                // total == 0 nothing was written, so fail fast.
+                // framing — but only within a bounded budget so a dead peer can't
+                // stall here for the TCP retransmit window. When total == 0
+                // nothing was written, so fail fast.
                 if (!deadline_set) {
                     deadline = std::chrono::steady_clock::now() + kPartialIoRetryBudget;
                     deadline_set = true;
@@ -97,7 +99,6 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
             return false;
         }
         total += static_cast<std::size_t>(written);
-        deadline_set = false;  // made progress — restart the no-progress budget
     }
     return true;
 }
@@ -126,9 +127,9 @@ inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
             if ((errno == EAGAIN || errno == EWOULDBLOCK) && total > 0) {
                 // Transient backpressure under SO_SNDTIMEO AFTER a partial send:
                 // retry so the half-sent command completes (dropping it would
-                // corrupt framing) — but only within a bounded no-progress budget
-                // so a dead peer can't stall here for the TCP retransmit window.
-                // When total == 0 fail fast.
+                // corrupt framing) — but only within a bounded budget so a dead
+                // peer can't stall here for the TCP retransmit window. When
+                // total == 0 fail fast.
                 if (!deadline_set) {
                     deadline = std::chrono::steady_clock::now() + kPartialIoRetryBudget;
                     deadline_set = true;
@@ -148,7 +149,6 @@ inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
             return false;
         }
         total += static_cast<std::size_t>(sent);
-        deadline_set = false;  // made progress — restart the no-progress budget
     }
     return true;
 }

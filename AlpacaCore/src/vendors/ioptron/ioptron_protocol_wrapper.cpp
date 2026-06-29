@@ -1282,10 +1282,20 @@ private:
         if (data_size > std::numeric_limits<DWORD>::max()) {
             return false;
         }
-        const DWORD requested = static_cast<DWORD>(data_size);
-        DWORD bytes_written = 0;
-        return WriteFile(serial_handle_, data.c_str(), requested, &bytes_written, nullptr) &&
-               bytes_written == requested;
+        // Loop until the whole payload is written so a short WriteFile (which can
+        // return TRUE with bytes_written < requested under backpressure) can't
+        // drop trailing bytes and corrupt framing (mirrors POSIX write_all).
+        std::size_t total = 0;
+        while (total < data_size) {
+            DWORD bytes_written = 0;
+            if (!WriteFile(serial_handle_, data.c_str() + total, static_cast<DWORD>(data_size - total), &bytes_written,
+                           nullptr) ||
+                bytes_written == 0) {
+                return false;
+            }
+            total += bytes_written;
+        }
+        return true;
 #else
         return util::write_all(serial_fd_, data.c_str(), data.length());
 #endif
