@@ -1306,23 +1306,10 @@ private:
         int bytes_sent = send(socket_handle_, data.c_str(), requested, 0);
         return bytes_sent == requested;
 #else
-        // TCP send() may write a short count; loop so partial bytes don't stay
-        // in the kernel buffer and corrupt the framing of the next command.
-        std::size_t total = 0;
-        while (total < data.length()) {
-            ssize_t bytes_sent = send(socket_fd_, data.c_str() + total, data.length() - total, 0);
-            if (bytes_sent < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                return false;
-            }
-            if (bytes_sent == 0) {
-                return false;
-            }
-            total += static_cast<std::size_t>(bytes_sent);
-        }
-        return true;
+        // MSG_NOSIGNAL: a peer disconnect mid-send must not deliver SIGPIPE and
+        // kill the server. send_all loops over short sends so partial bytes
+        // can't corrupt the next command's framing on this connection.
+        return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
 #endif
     }
 

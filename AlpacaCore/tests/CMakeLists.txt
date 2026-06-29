@@ -25,6 +25,7 @@ set(TEST_SOURCES
     test_device_registry.cpp
     test_error_handling.cpp
     test_units.cpp
+    test_version_format.cpp
 )
 
 if(TARGET alpacacore_zwo)

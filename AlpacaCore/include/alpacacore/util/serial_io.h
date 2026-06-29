@@ -33,6 +33,7 @@
 #ifndef _WIN32
 
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -63,6 +64,34 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
             return false;
         }
         total += static_cast<std::size_t>(written);
+    }
+    return true;
+}
+
+/**
+ * @brief Send the entire buffer over socket @p fd, looping over short sends.
+ *
+ * The socket analogue of write_all(): retries EINTR, treats a 0 return as a
+ * hard error, and forwards @p flags. Callers pass MSG_NOSIGNAL so that a peer
+ * disconnect mid-send surfaces as an error return instead of delivering SIGPIPE
+ * (whose default disposition would terminate the process). Returns true only
+ * when the whole payload was sent; a short send that isn't completed would
+ * otherwise leave stray bytes in the kernel buffer and corrupt later framing.
+ */
+inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
+    std::size_t total = 0;
+    while (total < len) {
+        const ssize_t sent = ::send(fd, data + total, len - total, flags);
+        if (sent < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (sent == 0) {
+            return false;
+        }
+        total += static_cast<std::size_t>(sent);
     }
     return true;
 }

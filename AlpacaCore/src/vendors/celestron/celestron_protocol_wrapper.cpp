@@ -1379,6 +1379,14 @@ private:
             serial_fd_ = -1;
             return false;
         }
+        // The fd was opened O_NONBLOCK; clear it so reads honour VMIN/VTIME and
+        // write_all()/read don't spuriously fail with EAGAIN (matches the probe
+        // path and the other serial wrappers).
+        if (!util::clear_nonblocking(serial_fd_)) {
+            close(serial_fd_);
+            serial_fd_ = -1;
+            return false;
+        }
         return true;
     }
 
@@ -1432,8 +1440,9 @@ private:
     bool write_serial(const std::string& data) { return util::write_all(serial_fd_, data.c_str(), data.length()); }
 
     bool write_network(const std::string& data) {
-        ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.length(), 0);
-        return bytes_sent == static_cast<ssize_t>(data.length());
+        // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
+        // the server.
+        return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
     }
 
     std::string read_response(bool require_hash_terminator, int timeout_ms,

@@ -13,6 +13,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -20,7 +21,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -363,24 +363,11 @@ private:
     }
 
     void write_locked(const std::string& data) {
-        // send() may transmit only part of the payload (or be interrupted);
-        // loop until the whole command is on the wire so a trailing '#'
-        // terminator is never silently dropped.
-        std::size_t total = 0;
-        while (total < data.length()) {
-            ssize_t sent = send(socket_fd_, data.c_str() + total, data.length() - total, MSG_NOSIGNAL);
-            if (sent < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                throw AlpacaException("Failed to send command to TheSkyX");
-            }
-            if (sent == 0) {
-                // No progress on a non-empty send — connection closed/stalled.
-                // Fail rather than spin forever.
-                throw AlpacaException("Failed to send command to TheSkyX (connection closed)");
-            }
-            total += static_cast<std::size_t>(sent);
+        // send_all loops over partial/interrupted sends so a trailing '#'
+        // terminator is never dropped; MSG_NOSIGNAL keeps a dropped peer from
+        // delivering SIGPIPE and killing the server.
+        if (!util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL)) {
+            throw AlpacaException("Failed to send command to TheSkyX");
         }
     }
 

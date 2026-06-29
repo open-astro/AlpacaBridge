@@ -54,22 +54,32 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
   - Clean thread/task shutdown in destructors.
 - Add TODO comments where vendor protocol/SDK behavior is uncertain.
 
-### Serial I/O: always use the shared helpers (`util/serial_io.h`)
+### Serial / socket I/O: always use the shared helpers (`util/serial_io.h`)
 
-POSIX serial code has two easy-to-get-wrong patterns that must not be hand-rolled
-in a wrapper. Use `alpacacore/util/serial_io.h` (POSIX-only, included inside the
-existing `#ifndef _WIN32` branches):
+POSIX serial and socket code has several easy-to-get-wrong patterns that must not
+be hand-rolled in a wrapper. Use `alpacacore/util/serial_io.h` (POSIX-only,
+included inside the existing `#ifndef _WIN32` branches):
 
 - **`util::write_all(fd, data, len)`** instead of a bare `write()`. `write()` may
   satisfy only part of the payload (`0 < n < len`) or be interrupted (`EINTR`);
   treating any non-negative return as success silently drops trailing bytes (e.g.
-  a command terminator). `write_all` loops until the whole payload is written.
-- **`util::clear_nonblocking(fd)`** instead of `fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)&~O_NONBLOCK)`.
-  A failed `F_GETFL` returns `-1`; `-1 & ~O_NONBLOCK` can leave the fd non-blocking
-  and spin a reader thread at 100% CPU. The helper checks both `fcntl` calls.
+  a command terminator). `write_all` loops until the whole payload is written and
+  treats a `0` return as a hard error (no infinite spin).
+- **`util::send_all(fd, data, len, MSG_NOSIGNAL)`** for every socket `send()`. The
+  socket analogue of `write_all`; **always pass `MSG_NOSIGNAL`** so a peer drop
+  mid-send returns an error instead of delivering `SIGPIPE` (which would kill the
+  server). A short send that isn't completed corrupts the next command's framing.
+- **`util::clear_nonblocking(fd)`** / **`util::set_nonblocking(fd)`** instead of a
+  raw `fcntl(F_GETFL)`+`F_SETFL`. A failed `F_GETFL` returns `-1`; feeding that into
+  `F_SETFL` can leave the fd in the wrong mode (a stuck-non-blocking fd spins a
+  reader at 100% CPU; a stuck-blocking connect socket hangs for the full ~127s TCP
+  timeout). Both helpers check both `fcntl` calls and return false on failure.
 
-Network/socket sites that set `O_NONBLOCK` for a connect-with-timeout must still
-guard `F_GETFL < 0` before using the result.
+Apply these on **both** the auto-detect probe path **and** the production
+connect/open path — the fd is typically opened `O_NONBLOCK`, so `connect_serial()`
+must `clear_nonblocking()` after `tcsetattr` (not just the probe), or reads ignore
+`VMIN`/`VTIME` and `write_all` fails on `EAGAIN`. Use the **same abort-on-failure
+pattern** (`close(fd); return false/""`) at every call site.
 
 ### Device firmware / SDK version: web UI only, never `DriverInfo`
 

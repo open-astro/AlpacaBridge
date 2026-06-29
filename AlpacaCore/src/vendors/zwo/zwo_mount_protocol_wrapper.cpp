@@ -720,8 +720,9 @@ private:
         const int bytes_sent = send(socket_handle_, data.c_str(), requested, 0);
         return bytes_sent == requested;
 #else
-        const ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.size(), 0);
-        return bytes_sent == static_cast<ssize_t>(data.size());
+        // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
+        // the server.
+        return util::send_all(socket_fd_, data.c_str(), data.size(), MSG_NOSIGNAL);
 #endif
     }
 

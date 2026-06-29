@@ -13,6 +13,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/zwo/zwo_eaf_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
 #include <alpacacore/version.h>
@@ -95,15 +96,7 @@ public:
         if (version.empty() || version == "unknown") {
             return std::nullopt;
         }
-        std::string normalized;
-        normalized.reserve(version.size());
-        for (char c : version) {
-            if (c == ' ') {
-                continue;
-            }
-            normalized.push_back(c == ',' ? '.' : c);
-        }
-        return normalized;
+        return util::normalize_dotted_version(version);
     }
 
     int get_interface_version() const override { return 4; }
