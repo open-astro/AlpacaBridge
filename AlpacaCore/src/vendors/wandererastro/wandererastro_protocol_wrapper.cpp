@@ -101,11 +101,10 @@ bool configure_serial_fd(int fd) {
         return false;
     }
     // Clear O_NONBLOCK so the reader's ::read() blocks for the VTIME window
-    // instead of returning EAGAIN immediately. If either fcntl fails, report a
+    // instead of returning EAGAIN immediately. If it fails, report a
     // configuration failure rather than risk leaving the fd non-blocking (which
     // would spin the reader loop at 100% CPU).
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+    if (!util::clear_nonblocking(fd)) {
         return false;
     }
     tcflush(fd, TCIOFLUSH);

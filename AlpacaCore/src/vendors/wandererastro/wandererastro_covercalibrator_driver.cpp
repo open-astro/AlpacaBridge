@@ -189,12 +189,18 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("WandererAstro", "Cover connected");
         } else {
-            protocol_.disconnect();
-            connected_.store(false);
+            // Clear the firmware cache and disconnect atomically under
+            // firmware_mutex_: a configureddevices poll can't return the cached
+            // (now stale) firmware in the window around disconnect, and can't
+            // re-populate it from a still-valid status frame either — by the time
+            // any getter re-acquires the lock the cache is empty and
+            // protocol_.disconnect() has invalidated the streamed status.
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_cache_.clear();
+                protocol_.disconnect();
             }
+            connected_.store(false);
             ALPACA_LOG_INFO("WandererAstro", "Cover disconnected");
         }
     }
