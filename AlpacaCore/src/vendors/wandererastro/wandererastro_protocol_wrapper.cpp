@@ -13,6 +13,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_protocol_wrapper.h>
 
 #include <atomic>
@@ -409,17 +410,9 @@ private:
             total += written;
         }
 #else
-        std::size_t total = 0;
-        while (total < payload.size()) {
-            ssize_t written = ::write(serial_fd_, payload.data() + total, payload.size() - total);
-            if (written < 0) {
-                if (errno == EINTR) {
-                    continue;  // interrupted before any byte was written — retry
-                }
-                throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)),
-                                      AlpacaError::DriverException);
-            }
-            total += static_cast<std::size_t>(written);
+        if (!util::write_all(serial_fd_, payload.data(), payload.size())) {
+            throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)),
+                                  AlpacaError::DriverException);
         }
 #endif
     }

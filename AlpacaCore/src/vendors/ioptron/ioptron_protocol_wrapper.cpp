@@ -206,7 +206,9 @@ std::string probe_ioptron_network(const std::string& host, int port, int timeout
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     const char cmd[] = ":MountInfo#";
-    if (!util::write_all(fd, cmd, sizeof(cmd) - 1)) {
+    // This is a TCP socket, not a serial fd: use send_all with MSG_NOSIGNAL so a
+    // probed host closing the connection mid-send can't SIGPIPE-kill the server.
+    if (!util::send_all(fd, cmd, sizeof(cmd) - 1, MSG_NOSIGNAL)) {
         close(fd);
         return "";
     }
