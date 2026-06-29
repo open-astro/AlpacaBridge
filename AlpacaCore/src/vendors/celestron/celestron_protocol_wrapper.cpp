@@ -11,28 +11,29 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-#include <mutex>
+#include <alpacacore/util/serial_io.h>
+#include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cctype>
 #include <chrono>
-#include <thread>
-#include <sstream>
+#include <cmath>
 #include <iomanip>
 #include <limits>
-#include <cctype>
-#include <cmath>
-#include <algorithm>
+#include <mutex>
 #include <optional>
-
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <errno.h>
+#include <sstream>
+#include <thread>
 
 #ifndef _WIN32
 #include <filesystem>
@@ -79,14 +80,15 @@ std::string probe_nexstar_port(const std::string& port_path) {
         return "";
     }
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    if (!util::clear_nonblocking(fd)) {
+        close(fd);
+        return "";
+    }
     tcflush(fd, TCIOFLUSH);
 
     // Probe with NexStar echo command: "K" + chr(0x42) -> should return chr(0x42) + "#"
     const char echo_cmd[] = {'K', 0x42};
-    ssize_t written = write(fd, echo_cmd, 2);
-    if (written != 2) {
+    if (!util::write_all(fd, echo_cmd, 2)) {
         close(fd);
         return "";
     }
@@ -121,8 +123,7 @@ std::string probe_nexstar_port(const std::string& port_path) {
     // Echo confirmed — now query firmware version with "V" command
     tcflush(fd, TCIOFLUSH);
     const char ver_cmd[] = {'V'};
-    written = write(fd, ver_cmd, 1);
-    if (written != 1) {
+    if (!util::write_all(fd, ver_cmd, 1)) {
         close(fd);
         return "";
     }
@@ -347,7 +348,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (connected_) {
-            disconnect();
+            disconnect_locked();  // already holding mutex_ — must not re-lock
         }
 
         connection_type_ = info.type;
@@ -366,6 +367,12 @@ public:
 
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
+        disconnect_locked();
+    }
+
+    // Tear down the connection. Caller MUST already hold mutex_ (so connect()
+    // can reuse it without the non-recursive mutex deadlocking on re-lock).
+    void disconnect_locked() {
         if (!connected_) {
             return;
         }
@@ -1378,6 +1385,14 @@ private:
             serial_fd_ = -1;
             return false;
         }
+        // The fd was opened O_NONBLOCK; clear it so reads honour VMIN/VTIME and
+        // write_all()/read don't spuriously fail with EAGAIN (matches the probe
+        // path and the other serial wrappers).
+        if (!util::clear_nonblocking(serial_fd_)) {
+            close(serial_fd_);
+            serial_fd_ = -1;
+            return false;
+        }
         return true;
     }
 
@@ -1428,14 +1443,12 @@ private:
         return write_network(data);
     }
 
-    bool write_serial(const std::string& data) {
-        ssize_t bytes_written = write(serial_fd_, data.c_str(), data.length());
-        return bytes_written == static_cast<ssize_t>(data.length());
-    }
+    bool write_serial(const std::string& data) { return util::write_all(serial_fd_, data.c_str(), data.length()); }
 
     bool write_network(const std::string& data) {
-        ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.length(), 0);
-        return bytes_sent == static_cast<ssize_t>(data.length());
+        // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
+        // the server.
+        return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
     }
 
     std::string read_response(bool require_hash_terminator, int timeout_ms,

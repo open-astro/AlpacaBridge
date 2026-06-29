@@ -11,34 +11,35 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/units.h>
-#include <mutex>
-#include <chrono>
-#include <thread>
-#include <sstream>
-#include <iomanip>
-#include <cmath>
-#include <limits>
-#include <cctype>
-#include <cstring>
-#include <ctime>
-#include <unordered_set>
-
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
+#include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <arpa/inet.h>
-#include <netdb.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
-#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
+
+#include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <ctime>
+#include <iomanip>
+#include <limits>
+#include <mutex>
+#include <sstream>
+#include <thread>
+#include <unordered_set>
 
 #ifndef _WIN32
 #include <filesystem>
@@ -86,13 +87,14 @@ std::string probe_ioptron_port(const std::string& port_path) {
         return "";
     }
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    if (!util::clear_nonblocking(fd)) {
+        close(fd);
+        return "";
+    }
     tcflush(fd, TCIOFLUSH);
 
     const char cmd[] = ":MountInfo#";
-    ssize_t written = write(fd, cmd, sizeof(cmd) - 1);
-    if (written != static_cast<ssize_t>(sizeof(cmd) - 1)) {
+    if (!util::write_all(fd, cmd, sizeof(cmd) - 1)) {
         close(fd);
         return "";
     }
@@ -150,8 +152,10 @@ std::string probe_ioptron_network(const std::string& host, int port, int timeout
         return "";
     }
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (!util::set_nonblocking(fd)) {
+        close(fd);
+        return "";
+    }
 
     sockaddr_in addr{};
     std::memset(&addr, 0, sizeof(addr));
@@ -187,7 +191,13 @@ std::string probe_ioptron_network(const std::string& host, int port, int timeout
         }
     }
 
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    // Restore blocking mode for the synchronous request/response below. If this
+    // fails the socket stays non-blocking and write_all()/read would spuriously
+    // report the mount absent, so treat it as a probe failure.
+    if (!util::clear_nonblocking(fd)) {
+        close(fd);
+        return "";
+    }
 
     struct timeval tv{};
     tv.tv_sec = timeout_ms / 1000;
@@ -196,8 +206,9 @@ std::string probe_ioptron_network(const std::string& host, int port, int timeout
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     const char cmd[] = ":MountInfo#";
-    ssize_t written = write(fd, cmd, sizeof(cmd) - 1);
-    if (written != static_cast<ssize_t>(sizeof(cmd) - 1)) {
+    // This is a TCP socket, not a serial fd: use send_all with MSG_NOSIGNAL so a
+    // probed host closing the connection mid-send can't SIGPIPE-kill the server.
+    if (!util::send_all(fd, cmd, sizeof(cmd) - 1, MSG_NOSIGNAL)) {
         close(fd);
         return "";
     }
@@ -511,8 +522,13 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
                 continue;
             }
 
-            int flags = fcntl(fd, F_GETFL, 0);
-            fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+            // Non-blocking connect for the poll-with-timeout scan; if we can't
+            // set it, connect() would block for the full OS TCP timeout (~127s)
+            // and stall the whole subnet scan, so skip this candidate instead.
+            if (!util::set_nonblocking(fd)) {
+                close(fd);
+                continue;
+            }
 
             sockaddr_in sin{};
             std::memset(&sin, 0, sizeof(sin));
@@ -662,8 +678,13 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
                     continue;
                 }
 
-                int flags = fcntl(fd, F_GETFL, 0);
-                fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+                // Non-blocking connect for the poll-with-timeout scan; if we
+                // can't set it, connect() would block for the full OS TCP
+                // timeout and stall the scan, so skip this candidate.
+                if (!util::set_nonblocking(fd)) {
+                    close(fd);
+                    continue;
+                }
 
                 sockaddr_in addr{};
                 std::memset(&addr, 0, sizeof(addr));
@@ -800,7 +821,7 @@ public:
         
         if (connected_) {
             ALPACA_LOG_INFO("iOptron", "Already connected, disconnecting first");
-            disconnect();
+            disconnect_locked();  // already holding mutex_ — must not re-lock
         }
         
         ALPACA_LOG_INFO("iOptron", "Connection type: " + std::string(info.type == ConnectionType::Serial ? "Serial" : "Network"));
@@ -841,21 +862,26 @@ public:
     
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+        disconnect_locked();
+    }
+
+    // Tear down the connection. Caller MUST already hold mutex_ (so connect()
+    // can reuse it without the non-recursive mutex deadlocking on re-lock).
+    void disconnect_locked() {
         if (!connected_) {
             return;
         }
-        
+
         if (connection_type_ == ConnectionType::Serial) {
             disconnect_serial();
         } else {
             disconnect_network();
         }
-        
+
         connected_ = false;
         ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
     }
-    
+
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
@@ -1122,20 +1148,13 @@ private:
             return false;
         }
         ALPACA_LOG_INFO("iOptron", "Set terminal attributes");
-        
-        // Set to blocking mode
+
+        // Set to blocking mode (matches the probe path and the other wrappers).
         ALPACA_LOG_INFO("iOptron", "Setting to blocking mode...");
-        int flags = fcntl(serial_fd_, F_GETFL);
-        if (flags < 0) {
+        if (!util::clear_nonblocking(serial_fd_)) {
             int fc_err = errno;
-            ALPACA_LOG_ERROR("iOptron", "fcntl F_GETFL failed: " + std::string(std::strerror(fc_err)) + " (errno " + std::to_string(fc_err) + ")");
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
-        if (fcntl(serial_fd_, F_SETFL, flags & ~O_NONBLOCK) != 0) {
-            int fc_err = errno;
-            ALPACA_LOG_ERROR("iOptron", "fcntl F_SETFL failed: " + std::string(std::strerror(fc_err)) + " (errno " + std::to_string(fc_err) + ")");
+            ALPACA_LOG_ERROR("iOptron", "Clearing O_NONBLOCK failed: " + std::string(std::strerror(fc_err)) +
+                                            " (errno " + std::to_string(fc_err) + ")");
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
@@ -1268,31 +1287,50 @@ private:
         if (data_size > std::numeric_limits<DWORD>::max()) {
             return false;
         }
-        const DWORD requested = static_cast<DWORD>(data_size);
-        DWORD bytes_written = 0;
-        return WriteFile(serial_handle_, data.c_str(), requested, &bytes_written, nullptr) &&
-               bytes_written == requested;
+        // Loop until the whole payload is written so a short WriteFile (which can
+        // return TRUE with bytes_written < requested under backpressure) can't
+        // drop trailing bytes and corrupt framing (mirrors POSIX write_all).
+        std::size_t total = 0;
+        while (total < data_size) {
+            DWORD bytes_written = 0;
+            if (!WriteFile(serial_handle_, data.c_str() + total, static_cast<DWORD>(data_size - total), &bytes_written,
+                           nullptr) ||
+                bytes_written == 0) {
+                return false;
+            }
+            total += bytes_written;
+        }
+        return true;
 #else
-        ssize_t bytes_written = write(serial_fd_, data.c_str(), data.length());
-        return bytes_written == static_cast<ssize_t>(data.length());
+        return util::write_all(serial_fd_, data.c_str(), data.length());
 #endif
     }
-    
+
     bool write_network(const std::string& data) {
 #ifdef _WIN32
         const auto data_size = data.size();
         if (data_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
             return false;
         }
-        const int requested = static_cast<int>(data_size);
-        int bytes_sent = send(socket_handle_, data.c_str(), requested, 0);
-        return bytes_sent == requested;
+        // Loop over short sends so partial bytes can't corrupt the next command's
+        // framing (mirrors the POSIX send_all path below).
+        std::size_t total = 0;
+        while (total < data_size) {
+            int bytes_sent = send(socket_handle_, data.c_str() + total, static_cast<int>(data_size - total), 0);
+            if (bytes_sent <= 0) {
+                return false;
+            }
+            total += static_cast<std::size_t>(bytes_sent);
+        }
+        return true;
 #else
-        ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.length(), 0);
-        return bytes_sent == static_cast<ssize_t>(data.length());
+        // MSG_NOSIGNAL: a peer disconnect mid-send must not deliver SIGPIPE and
+        // kill the server. send_all loops over short sends so partial bytes
+        // can't corrupt the next command's framing on this connection.
+        return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
 #endif
     }
-    
+
     std::string read_response(bool require_hash_terminator, int timeout_ms) {
         std::string response;
         auto start = std::chrono::steady_clock::now();

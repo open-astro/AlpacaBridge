@@ -11,21 +11,21 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-
-#include <mutex>
-#include <string>
-#include <cstring>
-#include <chrono>
-#include <cstdio>
-
-#include <sys/socket.h>
-#include <netinet/in.h>
+#include <alpacacore/util/serial_io.h>
+#include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
+
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+#include <string>
 
 namespace alpacacore::vendor::bisque {
 
@@ -363,8 +363,10 @@ private:
     }
 
     void write_locked(const std::string& data) {
-        ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
-        if (bytes_sent != static_cast<ssize_t>(data.length())) {
+        // send_all loops over partial/interrupted sends so a trailing '#'
+        // terminator is never dropped; MSG_NOSIGNAL keeps a dropped peer from
+        // delivering SIGPIPE and killing the server.
+        if (!util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL)) {
             throw AlpacaException("Failed to send command to TheSkyX");
         }
     }

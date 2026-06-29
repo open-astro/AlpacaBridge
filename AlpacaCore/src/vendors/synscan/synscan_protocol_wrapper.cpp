@@ -11,28 +11,29 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-#include <mutex>
+#include <alpacacore/util/serial_io.h>
+#include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cctype>
 #include <chrono>
-#include <thread>
-#include <sstream>
+#include <cmath>
 #include <iomanip>
 #include <limits>
-#include <cctype>
-#include <cmath>
-#include <algorithm>
+#include <mutex>
 #include <optional>
-
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <errno.h>
+#include <sstream>
+#include <thread>
 
 #ifndef _WIN32
 #include <filesystem>
@@ -79,13 +80,14 @@ std::string probe_synscan_port(const std::string& port_path) {
         return "";
     }
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    if (!util::clear_nonblocking(fd)) {
+        close(fd);
+        return "";
+    }
     tcflush(fd, TCIOFLUSH);
 
     const char echo_cmd[] = {'K', 0x42};
-    ssize_t written = write(fd, echo_cmd, 2);
-    if (written != 2) {
+    if (!util::write_all(fd, echo_cmd, 2)) {
         close(fd);
         return "";
     }
@@ -120,8 +122,7 @@ std::string probe_synscan_port(const std::string& port_path) {
     // SynScan returns 6 hex-ASCII digits + '#' (e.g. "042A00#" for 4.42.00).
     tcflush(fd, TCIOFLUSH);
     const char ver_cmd[] = {'V'};
-    written = write(fd, ver_cmd, 1);
-    if (written != 1) {
+    if (!util::write_all(fd, ver_cmd, 1)) {
         close(fd);
         return "";
     }
@@ -355,7 +356,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (connected_) {
-            disconnect();
+            disconnect_locked();  // already holding mutex_ — must not re-lock
         }
 
         connection_type_ = info.type;
@@ -374,6 +375,12 @@ public:
 
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
+        disconnect_locked();
+    }
+
+    // Tear down the connection. Caller MUST already hold mutex_ (so connect()
+    // can reuse it without the non-recursive mutex deadlocking on re-lock).
+    void disconnect_locked() {
         if (!connected_) {
             return;
         }
@@ -818,6 +825,14 @@ private:
             serial_fd_ = -1;
             return false;
         }
+        // The fd was opened O_NONBLOCK; clear it so reads honour VMIN/VTIME and
+        // write_all()/read don't spuriously fail with EAGAIN (matches the probe
+        // path and the other serial wrappers).
+        if (!util::clear_nonblocking(serial_fd_)) {
+            close(serial_fd_);
+            serial_fd_ = -1;
+            return false;
+        }
         return true;
 #endif
     }
@@ -916,13 +931,22 @@ private:
         if (data_size > std::numeric_limits<DWORD>::max()) {
             return false;
         }
-        DWORD bytes_written = 0;
-        const DWORD requested = static_cast<DWORD>(data_size);
-        return WriteFile(serial_handle_, data.c_str(), requested, &bytes_written, nullptr) &&
-               bytes_written == requested;
+        // Loop until the whole payload is written so a short WriteFile (which can
+        // return TRUE with bytes_written < requested under backpressure) can't
+        // drop trailing bytes and corrupt framing (mirrors POSIX write_all).
+        std::size_t total = 0;
+        while (total < data_size) {
+            DWORD bytes_written = 0;
+            if (!WriteFile(serial_handle_, data.c_str() + total, static_cast<DWORD>(data_size - total), &bytes_written,
+                           nullptr) ||
+                bytes_written == 0) {
+                return false;
+            }
+            total += bytes_written;
+        }
+        return true;
 #else
-        ssize_t bytes_written = write(serial_fd_, data.c_str(), data.length());
-        return bytes_written == static_cast<ssize_t>(data.length());
+        return util::write_all(serial_fd_, data.c_str(), data.length());
 #endif
     }
 
@@ -932,11 +956,21 @@ private:
         if (data_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
             return false;
         }
-        int bytes_sent = send(socket_handle_, data.c_str(), static_cast<int>(data_size), 0);
-        return bytes_sent == static_cast<int>(data_size);
+        // Loop over short sends so partial bytes can't corrupt the next
+        // command's framing (mirrors the POSIX send_all path below).
+        std::size_t total = 0;
+        while (total < data_size) {
+            int bytes_sent = send(socket_handle_, data.c_str() + total, static_cast<int>(data_size - total), 0);
+            if (bytes_sent <= 0) {
+                return false;
+            }
+            total += static_cast<std::size_t>(bytes_sent);
+        }
+        return true;
 #else
-        ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.length(), 0);
-        return bytes_sent == static_cast<ssize_t>(data.length());
+        // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
+        // the server.
+        return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
 #endif
     }
 

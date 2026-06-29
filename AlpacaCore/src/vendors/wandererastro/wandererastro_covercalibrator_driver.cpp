@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
@@ -21,6 +22,8 @@
 #include <cmath>
 #include <cstdint>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
 
 namespace alpacacore::vendor::wandererastro {
@@ -77,6 +80,12 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
+    // Firmware date (YYYY-MM-DD), cached in the protocol wrapper from the first
+    // streamed status frame and cleared there on disconnect. Surfaced in the web
+    // UI only, never in DriverInfo. Cheap and non-blocking — no driver-side cache
+    // to keep coherent and no status re-read/re-format per poll.
+    std::optional<std::string> get_device_firmware() const override { return protocol_.get_firmware_date(); }
+
     // ICoverCalibratorV2 (ASCOM Platform 7): adds CoverMoving, CalibratorChanging,
     // Connecting and DeviceState, all of which this driver implements.
     int get_interface_version() const override { return 2; }
@@ -118,7 +127,8 @@ public:
             if (effective.serial_port.empty() && effective.auto_detect_index >= 0) {
                 auto ports = enumerate_wanderer_ports();
                 if (ports.empty()) {
-                    throw AlpacaException("No WandererCover detected on any serial port", AlpacaError::NotConnected);
+                    throw AlpacaException(util::serial_auto_detect_failed_message("WandererCover"),
+                                          AlpacaError::NotConnected);
                 }
                 if (effective.auto_detect_index >= static_cast<int>(ports.size())) {
                     throw AlpacaException("Cover index " + std::to_string(effective.auto_detect_index) +
@@ -162,7 +172,7 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("WandererAstro", "Cover connected");
         } else {
-            protocol_.disconnect();
+            protocol_.disconnect();  // clears the wrapper's cached firmware date
             connected_.store(false);
             ALPACA_LOG_INFO("WandererAstro", "Cover disconnected");
         }

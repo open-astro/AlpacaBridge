@@ -13,13 +13,16 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_protocol_wrapper.h>
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -100,11 +103,10 @@ bool configure_serial_fd(int fd) {
         return false;
     }
     // Clear O_NONBLOCK so the reader's ::read() blocks for the VTIME window
-    // instead of returning EAGAIN immediately. If either fcntl fails, report a
+    // instead of returning EAGAIN immediately. If it fails, report a
     // configuration failure rather than risk leaving the fd non-blocking (which
     // would spin the reader loop at 100% CPU).
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+    if (!util::clear_nonblocking(fd)) {
         return false;
     }
     tcflush(fd, TCIOFLUSH);
@@ -342,7 +344,16 @@ public:
     }
 
     void disconnect() {
-        stop_reader();
+        stop_reader();  // no concurrent writer of status_ after this returns
+        // Invalidate the cached status frame BEFORE clearing connected_, so there
+        // is no window where connected_ is already false but get_status() still
+        // returns a stale valid=true frame (which would leak stale firmware into
+        // the web UI after the device is gone).
+        {
+            std::lock_guard<std::mutex> status_lock(status_mutex_);
+            status_ = WandererStatus{};
+            firmware_date_.clear();
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
         close_serial();
@@ -356,6 +367,14 @@ public:
     WandererStatus get_status() const {
         std::lock_guard<std::mutex> lock(status_mutex_);
         return status_;
+    }
+
+    std::optional<std::string> get_firmware_date() const {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        if (firmware_date_.empty()) {
+            return std::nullopt;
+        }
+        return firmware_date_;
     }
 
     void open_cover() { send_command("1001"); }
@@ -395,24 +414,20 @@ private:
         std::size_t total = 0;
         while (total < payload.size()) {
             DWORD written = 0;
+            // Guard written == 0: a WriteFile that returns TRUE with 0 bytes
+            // (seen on some CH340/CH341 Windows drivers under backpressure) would
+            // otherwise spin this loop forever while holding mutex_.
             if (!WriteFile(serial_handle_, payload.data() + total, static_cast<DWORD>(payload.size() - total), &written,
-                           nullptr)) {
+                           nullptr) ||
+                written == 0) {
                 throw AlpacaException("Serial write failed", AlpacaError::DriverException);
             }
             total += written;
         }
 #else
-        std::size_t total = 0;
-        while (total < payload.size()) {
-            ssize_t written = ::write(serial_fd_, payload.data() + total, payload.size() - total);
-            if (written < 0) {
-                if (errno == EINTR) {
-                    continue;  // interrupted before any byte was written — retry
-                }
-                throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)),
-                                      AlpacaError::DriverException);
-            }
-            total += static_cast<std::size_t>(written);
+        if (!util::write_all(serial_fd_, payload.data(), payload.size())) {
+            throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)),
+                                  AlpacaError::DriverException);
         }
 #endif
     }
@@ -469,6 +484,22 @@ private:
                 if (parse_status_line(buffer, parsed)) {
                     std::lock_guard<std::mutex> lock(status_mutex_);
                     status_ = parsed;
+                    // Cache the firmware date once (YYYYMMDD int -> YYYY-MM-DD).
+                    if (firmware_date_.empty() && parsed.valid && parsed.firmware_version > 0) {
+                        const int fw = parsed.firmware_version;
+                        const int year = fw / 10000;
+                        const int month = (fw / 100) % 100;
+                        const int day = fw % 100;
+                        char buf[16];
+                        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+                            std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
+                        } else {
+                            // Not a plausible YYYYMMDD — surface the raw firmware
+                            // integer rather than an invalid date like 2024-13-99.
+                            std::snprintf(buf, sizeof(buf), "%d", fw);
+                        }
+                        firmware_date_ = buf;
+                    }
                 }
                 buffer.clear();
             } else {
@@ -573,6 +604,9 @@ private:
     std::atomic<bool> running_{false};
     std::thread reader_thread_;
     WandererStatus status_;
+    // Firmware date (YYYY-MM-DD), captured once from the first valid frame and
+    // cleared on disconnect; guarded by status_mutex_ alongside status_.
+    std::string firmware_date_;
 
 #ifdef _WIN32
     HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
@@ -594,6 +628,8 @@ void WandererProtocolWrapper::disconnect() { impl_->disconnect(); }
 bool WandererProtocolWrapper::is_connected() const { return impl_->is_connected(); }
 
 WandererStatus WandererProtocolWrapper::get_status() const { return impl_->get_status(); }
+
+std::optional<std::string> WandererProtocolWrapper::get_firmware_date() const { return impl_->get_firmware_date(); }
 
 void WandererProtocolWrapper::open_cover() { impl_->open_cover(); }
 

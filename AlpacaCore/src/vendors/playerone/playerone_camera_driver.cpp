@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -151,6 +152,16 @@ public:
     std::string get_description() const override { return "Player One Camera Driver"; }
     std::string get_driver_info() const override { return "AlpacaCore Player One Camera Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
+
+    // Vendor SDK (library) version, surfaced in the web UI only (never in DriverInfo).
+    std::optional<std::string> get_device_sdk_version() const override {
+        auto version = PlayerOneSDKWrapper::instance().get_sdk_version();
+        if (version.empty()) {
+            return std::nullopt;
+        }
+        return version;
+    }
+
     int get_interface_version() const override { return 4; }  // ICameraV4 (Platform 7)
 
     bool get_connected() const override { return connected_.load(); }

@@ -11,13 +11,22 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
-
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
+#include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -26,22 +35,12 @@
 #include <iomanip>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <string_view>
 #include <thread>
-#include <optional>
 #include <vector>
-
-#include <arpa/inet.h>
-#include <cerrno>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <termios.h>
-#include <unistd.h>
 
 namespace alpacacore::vendor::zwo {
 
@@ -577,9 +576,13 @@ private:
             return false;
         }
 
-        const int flags = fcntl(serial_fd_, F_GETFL);
-        if (flags >= 0) {
-            (void)fcntl(serial_fd_, F_SETFL, flags & ~O_NONBLOCK);
+        // Fail the open if we can't clear O_NONBLOCK: a non-blocking fd makes
+        // every read return EAGAIN immediately and breaks all I/O silently.
+        // Matches the abort-on-failure behaviour of the other serial wrappers.
+        if (!util::clear_nonblocking(serial_fd_)) {
+            close(serial_fd_);
+            serial_fd_ = -1;
+            return false;
         }
 
         return true;
@@ -698,13 +701,22 @@ private:
         if (data_size > std::numeric_limits<DWORD>::max()) {
             return false;
         }
-        const DWORD requested = static_cast<DWORD>(data_size);
-        DWORD bytes_written = 0;
-        return WriteFile(serial_handle_, data.c_str(), requested, &bytes_written, nullptr) &&
-               bytes_written == requested;
+        // Loop until the whole payload is written so a short WriteFile (which can
+        // return TRUE with bytes_written < requested under backpressure) can't
+        // drop trailing bytes and corrupt framing (mirrors POSIX write_all).
+        std::size_t total = 0;
+        while (total < data_size) {
+            DWORD bytes_written = 0;
+            if (!WriteFile(serial_handle_, data.c_str() + total, static_cast<DWORD>(data_size - total), &bytes_written,
+                           nullptr) ||
+                bytes_written == 0) {
+                return false;
+            }
+            total += bytes_written;
+        }
+        return true;
 #else
-        const ssize_t bytes_written = write(serial_fd_, data.c_str(), data.size());
-        return bytes_written == static_cast<ssize_t>(data.size());
+        return util::write_all(serial_fd_, data.c_str(), data.size());
 #endif
     }
 
@@ -714,12 +726,21 @@ private:
         if (data_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
             return false;
         }
-        const int requested = static_cast<int>(data_size);
-        const int bytes_sent = send(socket_handle_, data.c_str(), requested, 0);
-        return bytes_sent == requested;
+        // Loop over short sends so partial bytes can't corrupt the next
+        // command's framing (mirrors the POSIX send_all path below).
+        std::size_t total = 0;
+        while (total < data_size) {
+            const int bytes_sent = send(socket_handle_, data.c_str() + total, static_cast<int>(data_size - total), 0);
+            if (bytes_sent <= 0) {
+                return false;
+            }
+            total += static_cast<std::size_t>(bytes_sent);
+        }
+        return true;
 #else
-        const ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.size(), 0);
-        return bytes_sent == static_cast<ssize_t>(data.size());
+        // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
+        // the server.
+        return util::send_all(socket_fd_, data.c_str(), data.size(), MSG_NOSIGNAL);
 #endif
     }
 

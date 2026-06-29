@@ -12,6 +12,7 @@
 // with all SSPL v1 requirements.
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
@@ -197,6 +198,18 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
+    // Handset firmware captured at connect; surfaced in the web UI only. Guarded
+    // by its OWN narrow firmware_mutex_, NOT the coarse mutex_ that set_connected()
+    // holds across the multi-second connect, so a configureddevices poll never
+    // blocks on the mount connection.
+    std::optional<std::string> get_device_firmware() const override {
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        if (firmware_cache_.empty()) {
+            return std::nullopt;
+        }
+        return firmware_cache_;
+    }
+
     int get_interface_version() const override { return 4; }
 
     bool get_connected() const override {
@@ -259,6 +272,18 @@ public:
             // In that case, HC-level commands ('E','e','R','r','S','s','L') don't work —
             // use pass-through MC commands instead (MC_GET_POSITION, MC_GOTO_FAST, etc.).
             hc_available_ = !mount_firmware_version_.empty() && mount_firmware_version_ != "0.0";
+            // Publish the firmware to the web-UI getter under its OWN narrow mutex
+            // so a configureddevices poll never blocks on the coarse mutex_ that
+            // this connect sequence holds for several seconds.
+            {
+                // Gate on the version string directly (not hc_available_) so the
+                // UI display isn't coupled to HC-command support: suppress the
+                // empty / "0.0" sentinel the same way SynScan suppresses "0.0.0".
+                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                firmware_cache_ = (!mount_firmware_version_.empty() && mount_firmware_version_ != "0.0")
+                                      ? mount_firmware_version_
+                                      : std::string();
+            }
             ALPACA_LOG_WARN("Celestron", "HC firmware: " + mount_firmware_version_ +
                            " — HC " + (hc_available_ ? "available" : "unavailable, using pass-through commands"));
             try {
@@ -361,6 +386,10 @@ public:
         } else {
             protocol.disconnect();
             connected_ = false;
+            {
+                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                firmware_cache_.clear();
+            }
             target_set_ = false;
             parked_ = false;
             at_home_ = false;
@@ -1833,6 +1862,10 @@ private:
     mutable std::chrono::steady_clock::time_point position_override_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
     std::string mount_firmware_version_;
+    // Web-UI firmware copy, guarded by its own narrow mutex (not mutex_) so the
+    // get_device_firmware() poll never blocks on the coarse connect lock.
+    mutable std::mutex firmware_mutex_;
+    std::string firmware_cache_;
     bool hc_available_ = true;
     int mount_model_id_;
     std::string mount_model_name_;
@@ -1911,7 +1944,7 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_auto(
 
     auto ports = enumerate_celestron_ports();
     if (ports.empty()) {
-        throw AlpacaException("No Celestron NexStar mount found on any serial port");
+        throw AlpacaException(util::serial_auto_detect_failed_message("Celestron NexStar mount"));
     }
     if (mount_index < 0 || mount_index >= static_cast<int>(ports.size())) {
         throw AlpacaException("Mount index " + std::to_string(mount_index) +

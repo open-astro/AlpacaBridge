@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/zwo/zwo_efw_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 #include <alpacacore/version.h>
@@ -87,6 +88,18 @@ public:
     }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
+
+    // Vendor SDK (library) version, surfaced in the web UI only (never in
+    // DriverInfo). EFWGetSDKVersion() returns "1, 7, 0, 0"; render as "1.7.0.0".
+    std::optional<std::string> get_device_sdk_version() const override {
+        auto version = ZWOEFWSDKWrapper::instance().get_sdk_version();
+        // get_sdk_version() returns the literal "unknown" when EFWGetSDKVersion()
+        // yields nullptr — suppress the row rather than show "unknown".
+        if (version.empty() || version == "unknown") {
+            return std::nullopt;
+        }
+        return util::normalize_dotted_version(version);
+    }
 
     int get_interface_version() const override {
         return 3;
