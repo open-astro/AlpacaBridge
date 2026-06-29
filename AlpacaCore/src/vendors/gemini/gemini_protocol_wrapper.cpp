@@ -666,10 +666,18 @@ private:
 
     void write_data(const std::string& data) {
 #ifdef _WIN32
-        DWORD bytes_written = 0;
-        if (!WriteFile(serial_handle_, data.c_str(), static_cast<DWORD>(data.length()),
-                       &bytes_written, nullptr)) {
-            throw AlpacaException("Serial write failed", AlpacaError::DriverException);
+        // Loop until the whole payload is written and check bytes_written: a
+        // short write that still returns TRUE would otherwise drop trailing bytes
+        // (mirrors the POSIX write_all path below).
+        std::size_t total = 0;
+        while (total < data.length()) {
+            DWORD bytes_written = 0;
+            if (!WriteFile(serial_handle_, data.c_str() + total, static_cast<DWORD>(data.length() - total),
+                           &bytes_written, nullptr) ||
+                bytes_written == 0) {
+                throw AlpacaException("Serial write failed", AlpacaError::DriverException);
+            }
+            total += bytes_written;
         }
 #else
         if (!util::write_all(serial_fd_, data.c_str(), data.length())) {

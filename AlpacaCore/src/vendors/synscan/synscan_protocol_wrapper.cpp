@@ -940,8 +940,17 @@ private:
         if (data_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
             return false;
         }
-        int bytes_sent = send(socket_handle_, data.c_str(), static_cast<int>(data_size), 0);
-        return bytes_sent == static_cast<int>(data_size);
+        // Loop over short sends so partial bytes can't corrupt the next
+        // command's framing (mirrors the POSIX send_all path below).
+        std::size_t total = 0;
+        while (total < data_size) {
+            int bytes_sent = send(socket_handle_, data.c_str() + total, static_cast<int>(data_size - total), 0);
+            if (bytes_sent <= 0) {
+                return false;
+            }
+            total += static_cast<std::size_t>(bytes_sent);
+        }
+        return true;
 #else
         // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
         // the server.

@@ -151,6 +151,17 @@ public:
         return firmware_;
     }
 
+    // Vendor SDK (library) version, surfaced in the web UI only (never in
+    // DriverInfo). SVBONY reports both this and the real device firmware above;
+    // the SDK version is a constant pointer, so reading it per poll is cheap.
+    std::optional<std::string> get_device_sdk_version() const override {
+        auto version = SVBSDKWrapper::instance().get_sdk_version();
+        if (version.empty()) {
+            return std::nullopt;
+        }
+        return version;
+    }
+
     int get_interface_version() const override {
         return 4;  // ICameraV4 (Platform 7)
     }
