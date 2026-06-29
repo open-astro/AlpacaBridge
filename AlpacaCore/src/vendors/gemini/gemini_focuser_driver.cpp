@@ -136,11 +136,14 @@ public:
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
             protocol_.disconnect();
-            connected_.store(false);
+            // Clear the cached firmware BEFORE marking disconnected, mirroring
+            // the connect ordering, so a racing reconnect can't end up with
+            // connected==true and an empty firmware cache.
             {
                 std::lock_guard<std::mutex> lock(connection_mutex_);
                 firmware_.clear();
             }
+            connected_.store(false);
             ALPACA_LOG_INFO("Gemini", "Focuser disconnected");
         }
     }

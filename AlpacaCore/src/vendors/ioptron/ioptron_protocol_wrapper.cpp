@@ -152,12 +152,10 @@ std::string probe_ioptron_network(const std::string& host, int port, int timeout
         return "";
     }
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) {
+    if (!util::set_nonblocking(fd)) {
         close(fd);
         return "";
     }
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
     sockaddr_in addr{};
     std::memset(&addr, 0, sizeof(addr));
@@ -193,7 +191,13 @@ std::string probe_ioptron_network(const std::string& host, int port, int timeout
         }
     }
 
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    // Restore blocking mode for the synchronous request/response below. If this
+    // fails the socket stays non-blocking and write_all()/read would spuriously
+    // report the mount absent, so treat it as a probe failure.
+    if (!util::clear_nonblocking(fd)) {
+        close(fd);
+        return "";
+    }
 
     struct timeval tv{};
     tv.tv_sec = timeout_ms / 1000;
@@ -516,12 +520,13 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
                 continue;
             }
 
-            int flags = fcntl(fd, F_GETFL, 0);
-            if (flags < 0) {
+            // Non-blocking connect for the poll-with-timeout scan; if we can't
+            // set it, connect() would block for the full OS TCP timeout (~127s)
+            // and stall the whole subnet scan, so skip this candidate instead.
+            if (!util::set_nonblocking(fd)) {
                 close(fd);
                 continue;
             }
-            fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
             sockaddr_in sin{};
             std::memset(&sin, 0, sizeof(sin));
@@ -671,12 +676,13 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
                     continue;
                 }
 
-                int flags = fcntl(fd, F_GETFL, 0);
-                if (flags < 0) {
+                // Non-blocking connect for the poll-with-timeout scan; if we
+                // can't set it, connect() would block for the full OS TCP
+                // timeout and stall the scan, so skip this candidate.
+                if (!util::set_nonblocking(fd)) {
                     close(fd);
                     continue;
                 }
-                fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
                 sockaddr_in addr{};
                 std::memset(&addr, 0, sizeof(addr));
@@ -1300,11 +1306,26 @@ private:
         int bytes_sent = send(socket_handle_, data.c_str(), requested, 0);
         return bytes_sent == requested;
 #else
-        ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.length(), 0);
-        return bytes_sent == static_cast<ssize_t>(data.length());
+        // TCP send() may write a short count; loop so partial bytes don't stay
+        // in the kernel buffer and corrupt the framing of the next command.
+        std::size_t total = 0;
+        while (total < data.length()) {
+            ssize_t bytes_sent = send(socket_fd_, data.c_str() + total, data.length() - total, 0);
+            if (bytes_sent < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return false;
+            }
+            if (bytes_sent == 0) {
+                return false;
+            }
+            total += static_cast<std::size_t>(bytes_sent);
+        }
+        return true;
 #endif
     }
-    
+
     std::string read_response(bool require_hash_terminator, int timeout_ms) {
         std::string response;
         auto start = std::chrono::steady_clock::now();

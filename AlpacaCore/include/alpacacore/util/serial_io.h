@@ -81,6 +81,22 @@ inline bool clear_nonblocking(int fd) {
     return ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) >= 0;
 }
 
+/**
+ * @brief Set O_NONBLOCK on @p fd, checking both fcntl calls.
+ *
+ * Mirror of clear_nonblocking() for the connect-with-timeout pattern (set
+ * non-blocking, connect, poll, restore blocking). Returns false if either
+ * F_GETFL or F_SETFL fails, so the caller never connect()s on a socket that
+ * was meant to be non-blocking but silently stayed blocking.
+ */
+inline bool set_nonblocking(int fd) {
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return false;
+    }
+    return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0;
+}
+
 }  // namespace alpacacore::util
 
 #endif  // _WIN32
