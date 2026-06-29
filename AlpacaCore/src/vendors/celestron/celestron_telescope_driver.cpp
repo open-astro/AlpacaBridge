@@ -12,6 +12,7 @@
 // with all SSPL v1 requirements.
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
@@ -196,6 +197,15 @@ public:
     }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
+
+    // Handset firmware captured at connect; surfaced in the web UI only.
+    std::optional<std::string> get_device_firmware() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_ || mount_firmware_version_.empty() || mount_firmware_version_ == "0.0") {
+            return std::nullopt;
+        }
+        return mount_firmware_version_;
+    }
 
     int get_interface_version() const override { return 4; }
 
@@ -1911,7 +1921,7 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_auto(
 
     auto ports = enumerate_celestron_ports();
     if (ports.empty()) {
-        throw AlpacaException("No Celestron NexStar mount found on any serial port");
+        throw AlpacaException(util::serial_auto_detect_failed_message("Celestron NexStar mount"));
     }
     if (mount_index < 0 || mount_index >= static_cast<int>(ports.size())) {
         throw AlpacaException("Mount index " + std::to_string(mount_index) +

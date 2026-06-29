@@ -12,6 +12,7 @@
 // with all SSPL v1 requirements.
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/units.h>
@@ -2535,7 +2536,7 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(
 
     auto ports = enumerate_ioptron_ports();
     if (ports.empty()) {
-        throw AlpacaException("No iOptron mount found on any serial port");
+        throw AlpacaException(util::serial_auto_detect_failed_message("iOptron mount"));
     }
     if (mount_index < 0 || mount_index >= static_cast<int>(ports.size())) {
         throw AlpacaException("Mount index " + std::to_string(mount_index) +

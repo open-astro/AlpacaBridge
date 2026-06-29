@@ -11,34 +11,35 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/units.h>
-#include <mutex>
-#include <chrono>
-#include <thread>
-#include <sstream>
-#include <iomanip>
-#include <cmath>
-#include <limits>
-#include <cctype>
-#include <cstring>
-#include <ctime>
-#include <unordered_set>
-
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
+#include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <arpa/inet.h>
-#include <netdb.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
-#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
+
+#include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <ctime>
+#include <iomanip>
+#include <limits>
+#include <mutex>
+#include <sstream>
+#include <thread>
+#include <unordered_set>
 
 #ifndef _WIN32
 #include <filesystem>
@@ -86,13 +87,14 @@ std::string probe_ioptron_port(const std::string& port_path) {
         return "";
     }
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    if (!util::clear_nonblocking(fd)) {
+        close(fd);
+        return "";
+    }
     tcflush(fd, TCIOFLUSH);
 
     const char cmd[] = ":MountInfo#";
-    ssize_t written = write(fd, cmd, sizeof(cmd) - 1);
-    if (written != static_cast<ssize_t>(sizeof(cmd) - 1)) {
+    if (!util::write_all(fd, cmd, sizeof(cmd) - 1)) {
         close(fd);
         return "";
     }
@@ -151,6 +153,10 @@ std::string probe_ioptron_network(const std::string& host, int port, int timeout
     }
 
     int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        close(fd);
+        return "";
+    }
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
     sockaddr_in addr{};
@@ -196,8 +202,7 @@ std::string probe_ioptron_network(const std::string& host, int port, int timeout
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     const char cmd[] = ":MountInfo#";
-    ssize_t written = write(fd, cmd, sizeof(cmd) - 1);
-    if (written != static_cast<ssize_t>(sizeof(cmd) - 1)) {
+    if (!util::write_all(fd, cmd, sizeof(cmd) - 1)) {
         close(fd);
         return "";
     }
@@ -512,6 +517,10 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
             }
 
             int flags = fcntl(fd, F_GETFL, 0);
+            if (flags < 0) {
+                close(fd);
+                continue;
+            }
             fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
             sockaddr_in sin{};
@@ -663,6 +672,10 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
                 }
 
                 int flags = fcntl(fd, F_GETFL, 0);
+                if (flags < 0) {
+                    close(fd);
+                    continue;
+                }
                 fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
                 sockaddr_in addr{};
@@ -1273,11 +1286,10 @@ private:
         return WriteFile(serial_handle_, data.c_str(), requested, &bytes_written, nullptr) &&
                bytes_written == requested;
 #else
-        ssize_t bytes_written = write(serial_fd_, data.c_str(), data.length());
-        return bytes_written == static_cast<ssize_t>(data.length());
+        return util::write_all(serial_fd_, data.c_str(), data.length());
 #endif
     }
-    
+
     bool write_network(const std::string& data) {
 #ifdef _WIN32
         const auto data_size = data.size();

@@ -11,13 +11,22 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
-
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
+#include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -26,22 +35,12 @@
 #include <iomanip>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <string_view>
 #include <thread>
-#include <optional>
 #include <vector>
-
-#include <arpa/inet.h>
-#include <cerrno>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <termios.h>
-#include <unistd.h>
 
 namespace alpacacore::vendor::zwo {
 
@@ -577,10 +576,7 @@ private:
             return false;
         }
 
-        const int flags = fcntl(serial_fd_, F_GETFL);
-        if (flags >= 0) {
-            (void)fcntl(serial_fd_, F_SETFL, flags & ~O_NONBLOCK);
-        }
+        (void)util::clear_nonblocking(serial_fd_);  // best-effort blocking mode
 
         return true;
 #endif
@@ -703,8 +699,7 @@ private:
         return WriteFile(serial_handle_, data.c_str(), requested, &bytes_written, nullptr) &&
                bytes_written == requested;
 #else
-        const ssize_t bytes_written = write(serial_fd_, data.c_str(), data.size());
-        return bytes_written == static_cast<ssize_t>(data.size());
+        return util::write_all(serial_fd_, data.c_str(), data.size());
 #endif
     }
 

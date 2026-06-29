@@ -86,6 +86,24 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
+    // Vendor SDK (library) version, surfaced in the web UI only (never in
+    // DriverInfo). EAFGetSDKVersion() returns "1, 7, 0, 0"; render as "1.7.0.0".
+    std::optional<std::string> get_device_sdk_version() const override {
+        auto version = ZWOEAFSDKWrapper::instance().get_sdk_version();
+        if (version.empty()) {
+            return std::nullopt;
+        }
+        std::string normalized;
+        normalized.reserve(version.size());
+        for (char c : version) {
+            if (c == ' ') {
+                continue;
+            }
+            normalized.push_back(c == ',' ? '.' : c);
+        }
+        return normalized;
+    }
+
     int get_interface_version() const override { return 4; }
 
     bool get_connected() const override {

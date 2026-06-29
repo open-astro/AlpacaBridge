@@ -16,6 +16,7 @@
 #include <alpacacore/version.h>
 
 #include <functional>
+#include <optional>
 #include <variant>
 
 #include "catch2_compat.h"
@@ -53,6 +54,16 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Device metadata", "[wandereras
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 2);
     CHECK(driver->get_unique_id() == "WANDERERASTRO_COVERCALIBRATOR_3");
+}
+
+TEST_CASE("WandererAstro CoverCalibrator Driver - Firmware unavailable when disconnected",
+          "[wandererastro][covercalibrator][unit]") {
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, "/dev/ttyUSB0");
+
+    // Firmware is read from the streamed status frame, so it is only known while
+    // connected. Disconnected, the web UI shows no firmware row.
+    REQUIRE(driver->get_connected() == false);
+    REQUIRE(driver->get_device_firmware() == std::nullopt);
 }
 
 TEST_CASE("WandererAstro CoverCalibrator Driver - Not connected throws", "[wandererastro][covercalibrator][unit]") {

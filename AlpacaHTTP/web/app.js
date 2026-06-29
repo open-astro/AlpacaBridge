@@ -514,6 +514,18 @@ async function loadDevices() {
                         <span class="info-label">Vendor</span>
                         <span class="info-value">${escapeHtml(vendor)}</span>
                     </div>
+                    ${device.Firmware ? `
+                    <div class="info-item">
+                        <span class="info-label">Firmware</span>
+                        <span class="info-value">${escapeHtml(device.Firmware)}</span>
+                    </div>
+                    ` : ''}
+                    ${device.SdkVersion ? `
+                    <div class="info-item">
+                        <span class="info-label">SDK Version</span>
+                        <span class="info-value">${escapeHtml(device.SdkVersion)}</span>
+                    </div>
+                    ` : ''}
                 </div>
                 ${settingsHtml}
                 <div class="device-actions">

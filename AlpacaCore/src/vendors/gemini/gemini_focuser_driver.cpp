@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
@@ -19,6 +20,8 @@
 
 #include <atomic>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
 
 namespace alpacacore::vendor::gemini {
@@ -71,6 +74,18 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
+    // Focuser firmware captured at connect; surfaced in the web UI only.
+    std::optional<std::string> get_device_firmware() const override {
+        if (!connected_.load()) {
+            return std::nullopt;
+        }
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        if (firmware_.empty()) {
+            return std::nullopt;
+        }
+        return firmware_;
+    }
+
     int get_interface_version() const override { return 4; }
 
     bool get_connected() const override {
@@ -104,10 +119,25 @@ public:
         if (connected) {
             protocol_.connect(config_);
             connected_.store(true);
+            // Cache the focuser firmware once (web UI only — never DriverInfo).
+            // A failed query must not fail the connect.
+            try {
+                int fw = protocol_.get_firmware_version();
+                std::lock_guard<std::mutex> lock(connection_mutex_);
+                firmware_ = fw > 0 ? std::to_string(fw) : std::string();
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("Gemini", "Focuser firmware query failed: " + std::string(e.what()));
+                std::lock_guard<std::mutex> lock(connection_mutex_);
+                firmware_.clear();
+            }
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
             protocol_.disconnect();
             connected_.store(false);
+            {
+                std::lock_guard<std::mutex> lock(connection_mutex_);
+                firmware_.clear();
+            }
             ALPACA_LOG_INFO("Gemini", "Focuser disconnected");
         }
     }
@@ -252,8 +282,9 @@ private:
     std::atomic<bool> connected_;
     std::atomic<bool> connecting_;
     GeminiProtocolWrapper protocol_;
-    std::mutex connection_mutex_;
+    mutable std::mutex connection_mutex_;
     std::thread connection_thread_;
+    std::string firmware_;  // captured at connect; web-UI only (guarded by connection_mutex_)
 };
 
 std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
@@ -270,7 +301,7 @@ std::unique_ptr<FocuserDriver> create_gemini_focuser_by_index(int device_number,
                                                                int focuser_index) {
     auto ports = enumerate_gemini_ports();
     if (ports.empty()) {
-        throw AlpacaException("No Gemini/MyFocuserPro2 focusers detected on any serial port",
+        throw AlpacaException(util::serial_auto_detect_failed_message("Gemini/MyFocuserPro2 focuser"),
                               AlpacaError::NotConnected);
     }
     if (focuser_index < 0 || focuser_index >= static_cast<int>(ports.size())) {

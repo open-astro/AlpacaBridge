@@ -11,28 +11,29 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-#include <mutex>
+#include <alpacacore/util/serial_io.h>
+#include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cctype>
 #include <chrono>
-#include <thread>
-#include <sstream>
+#include <cmath>
 #include <iomanip>
 #include <limits>
-#include <cctype>
-#include <cmath>
-#include <algorithm>
+#include <mutex>
 #include <optional>
-
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <errno.h>
+#include <sstream>
+#include <thread>
 
 #ifndef _WIN32
 #include <filesystem>
@@ -79,13 +80,14 @@ std::string probe_synscan_port(const std::string& port_path) {
         return "";
     }
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    if (!util::clear_nonblocking(fd)) {
+        close(fd);
+        return "";
+    }
     tcflush(fd, TCIOFLUSH);
 
     const char echo_cmd[] = {'K', 0x42};
-    ssize_t written = write(fd, echo_cmd, 2);
-    if (written != 2) {
+    if (!util::write_all(fd, echo_cmd, 2)) {
         close(fd);
         return "";
     }
@@ -120,8 +122,7 @@ std::string probe_synscan_port(const std::string& port_path) {
     // SynScan returns 6 hex-ASCII digits + '#' (e.g. "042A00#" for 4.42.00).
     tcflush(fd, TCIOFLUSH);
     const char ver_cmd[] = {'V'};
-    written = write(fd, ver_cmd, 1);
-    if (written != 1) {
+    if (!util::write_all(fd, ver_cmd, 1)) {
         close(fd);
         return "";
     }
@@ -921,8 +922,7 @@ private:
         return WriteFile(serial_handle_, data.c_str(), requested, &bytes_written, nullptr) &&
                bytes_written == requested;
 #else
-        ssize_t bytes_written = write(serial_fd_, data.c_str(), data.length());
-        return bytes_written == static_cast<ssize_t>(data.length());
+        return util::write_all(serial_fd_, data.c_str(), data.length());
 #endif
     }
 

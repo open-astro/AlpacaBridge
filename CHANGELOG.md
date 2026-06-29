@@ -9,7 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [2.1.0] - 2026-06-23
+## [2.2.0] - UNRELEASED
+
+### Added
+- **Device firmware & SDK version in the web UI** (#93): two new optional driver hooks — `AlpacaDriver::get_device_firmware()` (the device's own hardware firmware) and `AlpacaDriver::get_device_sdk_version()` (the vendor library version) — kept distinct so a vendor SDK version is never mislabeled as device firmware. Both are surfaced **only** in the AlpacaBridge web UI: the management `configureddevices` response gains per-device `Firmware` and/or `SdkVersion` fields when the connected driver reports them, and the device-details panel renders a "Firmware" and/or "SDK Version" row only when present. Neither is **ever** added to the ASCOM `DriverInfo` string, so NINA and other Alpaca clients keep a clean driver string; `DriverVersion` remains the AlpacaBridge software version everywhere. Real firmware: WandererCover (date from the streamed status frame), the Gemini focuser and SynScan / Celestron handsets (captured once at connect — no per-request serial I/O), and SVBONY cameras (`SVBGetCameraFirmwareVersion`). SDK version: ZWO camera / EFW filter wheel / EAF focuser (ASI/EFW/EAF SDK, normalized from `1, 7, 7, 0` to `1.7.7.0`), QHY and Player One cameras — the ASI/QHY/Player One SDKs expose no device-firmware API.
+
+### Fixed
+- **Serial protocol wrappers: partial writes and unchecked `fcntl`** (#94): POSIX `write()` can satisfy only part of a payload (or be interrupted by `EINTR`), and `fcntl(F_GETFL)` can fail and return `-1` — feeding that into `flags & ~O_NONBLOCK` could leave the fd non-blocking and spin a reader thread at 100% CPU. Both patterns (first fixed in the WandererCover wrapper) are now corrected across the Gemini, iOptron, SynScan, Celestron, ZWO-mount and Bisque wrappers via a shared `alpacacore/util/serial_io.h` (`write_all()` full-write loop + `clear_nonblocking()` checked fd flag clear). Per the "fix shared patterns everywhere" rule.
+- **Router device registration is exception-safe** (#95): every vendor block in `AlpacaHTTP/src/http/router.cpp` now registers drivers via `std::shared_ptr<AlpacaDriver>(std::move(ptr))` instead of `std::shared_ptr<AlpacaDriver>(ptr.release())`. The old form orphaned the released raw pointer (leak) if the `shared_ptr` control-block allocation threw `std::bad_alloc`. 23 call sites converted (the WandererCover block already used the safe form).
+
+### Changed
+- **Auto-detect failure message is platform-aware** (#96): serial port enumeration is POSIX-only, so on Windows the `enumerate_*_ports()` helpers always return empty — which previously surfaced a misleading "No <device> detected on any serial port" at connect rather than indicating auto-detect is unavailable. A shared `alpacacore/util/auto_detect.h` helper now reports "Auto-detect is not supported on this platform — configure an explicit serial port" on platforms without enumeration, used by the WandererCover, Gemini, SynScan, Celestron and iOptron auto-detect drivers. AlpacaBridge still targets Linux arm64 only; this only clarifies the Windows scaffolding path.
+
+<details>
+<summary><strong>[2.1.0] - 2026-06-23</strong></summary>
 
 ### Added
 - **WandererAstro WandererCover V4 CoverCalibrator driver** (AlpacaCore): the project's first CoverCalibrator driver — a motorized dust cover plus EL flat panel over a CH340 USB-serial link (19200 8N1). Protocol wrapper with a background reader thread that parses the device's continuously-streamed `A`-delimited status frame, fire-and-forget commands (open `1001`, close `1000`, brightness `1`–`255`, off `9999`), and CH340/CH341 auto-detection (`/dev/serial/by-id` → `WandererCoverV4` status match). Cover state is inferred from the streamed angle vs. the configured open/close set points (±10° tolerance, INDI-aligned); calibrator state/brightness are tracked synchronously so reads are correct the instant after `CalibratorOn`/`CalibratorOff`. `HaltCover` has no hardware command, so it stops the driver's move-tracking (cover finishes its travel mechanically) rather than throwing `NotImplemented`, per the ASCOM cover-capable-device contract. Validated with ConformU 4.3.0 on real hardware (WandererCover V4 Pro, firmware 20250504, Linux arm64): 0 errors, 0 issues, 0 timing issues.
@@ -23,6 +36,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ### Changed
 - **`AGENTS.md` + `/driver-build` skill**: documented the two rules a new index-addressed vendor must follow — a unique vendor-prefixed form-field `name` (to avoid the FormData collision above) and an `INDEX_FIELDS` registry entry (for auto-numbering) — with the device-number-vs-index distinction spelled out, so this doesn't resurface when the next camera/focuser is added.
+
+</details>
 
 <details>
 <summary><strong>[2.0.2] - 2026-06-16</strong></summary>

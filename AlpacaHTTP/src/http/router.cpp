@@ -1584,6 +1584,30 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 device["Vendor"] = config->value("vendor", "");
                 device["Config"] = *config;
             }
+
+            // Surface the device's hardware firmware and/or vendor SDK version in
+            // the web UI only. These are deliberately NOT added to the ASCOM
+            // DriverInfo string so NINA and other Alpaca clients keep a clean
+            // driver string. Each field is present only when the live driver
+            // reports a value (the hooks return std::nullopt when unknown /
+            // disconnected). Firmware and SdkVersion are distinct: Firmware is
+            // the device's own firmware, SdkVersion is the vendor library version.
+            if (auto driver = registry.get_device(cap.type, cap.device_number)) {
+                try {
+                    if (auto firmware = driver->get_device_firmware(); firmware.has_value()) {
+                        device["Firmware"] = *firmware;
+                    }
+                } catch (const std::exception& e) {
+                    util::log_warning("Firmware query failed for " + cap.name + ": " + e.what());
+                }
+                try {
+                    if (auto sdk = driver->get_device_sdk_version(); sdk.has_value()) {
+                        device["SdkVersion"] = *sdk;
+                    }
+                } catch (const std::exception& e) {
+                    util::log_warning("SDK version query failed for " + cap.name + ": " + e.what());
+                }
+            }
             devices.push_back(device);
         }
 
@@ -6240,7 +6264,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             telescope->set_site_elevation(site_elevation.value());
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(telescope.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
             util::log_info("Registered iOptron telescope");
             return true;
         }
@@ -6286,7 +6310,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         auto sw = alpacacore::vendor::ioptron::create_ioptron_switch(device_number, std::move(powerbox_config));
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
             util::log_info("Registered iOptron iMate PowerBox switch");
             return true;
         }
@@ -6384,7 +6408,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             telescope->set_site_elevation(site_elevation.value());
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(telescope.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
             util::log_info("Registered SynScan telescope");
             return true;
         }
@@ -6469,7 +6493,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             telescope->set_site_elevation(site_elevation.value());
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(telescope.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
             util::log_info("Registered Celestron telescope");
             return true;
         }
@@ -6521,7 +6545,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             telescope->set_site_elevation(site_elevation.value());
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(telescope.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
             util::log_info("Registered Bisque/Paramount telescope");
             return true;
         }
@@ -6549,7 +6573,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
             util::log_info("Registered ZWO camera");
             return true;
         }
@@ -6626,7 +6650,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             telescope->set_site_elevation(site_elevation.value());
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(telescope.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
             util::log_info("Registered ZWO telescope");
             return true;
         }
@@ -6663,7 +6687,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             wheel->set_names(names_value.get<std::vector<std::string>>());
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(wheel.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
             util::log_info("Registered ZWO EFW filter wheel");
             return true;
         }
@@ -6691,7 +6715,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(focuser.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
             util::log_info("Registered ZWO EAF focuser");
             return true;
         }
@@ -6719,7 +6743,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(rotator.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(rotator)))) {
             util::log_info("Registered ZWO CAA rotator");
             return true;
         }
@@ -6774,7 +6798,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             sw = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(device_number,
                                                                        plus_config);
 
-            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
                 util::log_info("Registered ZWO ASIAIR Plus (RK3568) switch");
                 return true;
             }
@@ -6825,7 +6849,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             }
             sw = alpacacore::vendor::zwo::create_zwo_asiair_switch(device_number, asiair_config);
 
-            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
                 util::log_info(switch_type == "asiair-plus-picm4"
                                    ? "Registered ZWO ASIAIR Plus (Pi CM4) switch"
                                    : "Registered ZWO ASIAIR Pro switch");
@@ -6848,7 +6872,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
             util::log_info("Registered ZWO dew heater switch");
             return true;
         }
@@ -6884,7 +6908,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         auto observing = alpacacore::vendor::weewx::create_weewx_observingconditions(
             device_number, weewx_config);
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(observing.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(observing)))) {
             util::log_info("Registered WeeWX observing conditions");
             return true;
         }
@@ -6912,7 +6936,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
             util::log_info("Registered QHY camera");
             return true;
         }
@@ -6931,7 +6955,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         auto camera = alpacacore::vendor::svbony::create_svbony_camera(device_number, camera_index);
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
             util::log_info("Registered SVBONY camera");
             return true;
         }
@@ -6950,7 +6974,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         auto camera = alpacacore::vendor::touptek::create_touptek_camera(device_number, camera_index);
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
             util::log_info("Registered ToupTek camera");
             return true;
         }
@@ -6976,7 +7000,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 device_number, focuser_index);
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(focuser.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
             util::log_info("Registered ToupTek AAF focuser");
             return true;
         }
@@ -7019,7 +7043,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         auto sw = alpacacore::vendor::touptek::create_touptek_switch(device_number, std::move(powerbox_config));
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
             util::log_info("Registered ToupTek StellaVita switch");
             return true;
         }
@@ -7043,7 +7067,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         auto camera = alpacacore::vendor::playerone::create_playerone_camera(device_number, camera_index);
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(camera.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
             util::log_info("Registered Player One camera");
             return true;
         }
@@ -7071,7 +7095,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             wheel->set_names(names_value.get<std::vector<std::string>>());
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(wheel.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
             util::log_info("Registered Player One Phoenix filter wheel");
             return true;
         }
@@ -7090,7 +7114,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         auto sw = alpacacore::vendor::playerone::create_playerone_switch(device_number, camera_index);
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(sw.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
             util::log_info("Registered Player One thermal switch (dew heater/fan)");
             return true;
         }
@@ -7124,7 +7148,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             focuser = alpacacore::vendor::gemini::create_gemini_focuser_by_index(device_number, focuser_index);
         }
 
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(focuser.release()))) {
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
             util::log_info("Registered Gemini focuser");
             return true;
         }

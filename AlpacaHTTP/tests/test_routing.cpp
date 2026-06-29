@@ -10,13 +10,21 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
+#include <alpacacore/alpaca_defs.h>
+#include <alpacacore/alpacadriver.h>
+#include <alpacacore/device_registry.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
 
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "test_assert.h"
 
@@ -40,6 +48,41 @@ alpacahttp::Response route_request(alpacahttp::Router& router,
     EXPECT(request.parse(raw.str()));
     return router.route(request, 1);
 }
+
+// Minimal driver used to verify the management configureddevices response
+// surfaces get_device_firmware() and get_device_sdk_version() (web-UI only)
+// when, and only when, the driver reports each value.
+class FirmwareStubDriver final : public alpacacore::AlpacaDriver {
+public:
+    FirmwareStubDriver(int number, std::optional<std::string> firmware,
+                       std::optional<std::string> sdk_version = std::nullopt)
+        : number_(number), firmware_(std::move(firmware)), sdk_version_(std::move(sdk_version)) {}
+
+    int get_device_number() const override { return number_; }
+    std::string get_name() const override { return "Firmware Stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::CoverCalibrator; }
+    std::string get_unique_id() const override { return "firmware-stub-" + std::to_string(number_); }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 1; }
+    bool get_connected() const override { return true; }
+    void set_connected(bool) override {}
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return ""; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return ""; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return ""; }
+
+    std::optional<std::string> get_device_firmware() const override { return firmware_; }
+    std::optional<std::string> get_device_sdk_version() const override { return sdk_version_; }
+
+private:
+    int number_;
+    std::optional<std::string> firmware_;
+    std::optional<std::string> sdk_version_;
+};
 
 } // namespace
 
@@ -671,6 +714,56 @@ int main() {
 #else
         EXPECT(configure_json.value("ErrorNumber", 0) != 0);
 #endif
+    }
+
+    // configureddevices surfaces Firmware and SdkVersion independently, each only
+    // when the live driver reports that specific value.
+    {
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        // Real device firmware only (e.g. WandererCover / a mount).
+        auto firmware_dev = std::make_shared<FirmwareStubDriver>(9501, std::string("2025-05-04"));
+        // Vendor SDK version only (e.g. ZWO camera — no device firmware API).
+        auto sdk_dev = std::make_shared<FirmwareStubDriver>(9502, std::nullopt, std::string("1.7.7.0"));
+        // Neither.
+        auto silent = std::make_shared<FirmwareStubDriver>(9503, std::nullopt);
+        EXPECT(registry.register_device(firmware_dev));
+        EXPECT(registry.register_device(sdk_dev));
+        EXPECT(registry.register_device(silent));
+
+        const auto response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto json = nlohmann::json::parse(response.body());
+        EXPECT(json.value("ErrorNumber", -1) == 0);
+
+        bool checked_firmware = false;
+        bool checked_sdk = false;
+        bool checked_silent = false;
+        for (const auto& entry : json["Value"]) {
+            if (entry.value("DeviceType", "") != "CoverCalibrator") {
+                continue;
+            }
+            if (entry.value("DeviceNumber", -1) == 9501) {
+                EXPECT(entry.contains("Firmware"));
+                EXPECT(entry.value("Firmware", "") == "2025-05-04");
+                EXPECT(!entry.contains("SdkVersion"));
+                checked_firmware = true;
+            } else if (entry.value("DeviceNumber", -1) == 9502) {
+                EXPECT(!entry.contains("Firmware"));
+                EXPECT(entry.contains("SdkVersion"));
+                EXPECT(entry.value("SdkVersion", "") == "1.7.7.0");
+                checked_sdk = true;
+            } else if (entry.value("DeviceNumber", -1) == 9503) {
+                EXPECT(!entry.contains("Firmware"));
+                EXPECT(!entry.contains("SdkVersion"));
+                checked_silent = true;
+            }
+        }
+        EXPECT(checked_firmware);
+        EXPECT(checked_sdk);
+        EXPECT(checked_silent);
+
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9501);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9502);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9503);
     }
 
     std::cout << "All routing tests passed!\n";

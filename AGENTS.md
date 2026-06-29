@@ -54,6 +54,56 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
   - Clean thread/task shutdown in destructors.
 - Add TODO comments where vendor protocol/SDK behavior is uncertain.
 
+### Serial I/O: always use the shared helpers (`util/serial_io.h`)
+
+POSIX serial code has two easy-to-get-wrong patterns that must not be hand-rolled
+in a wrapper. Use `alpacacore/util/serial_io.h` (POSIX-only, included inside the
+existing `#ifndef _WIN32` branches):
+
+- **`util::write_all(fd, data, len)`** instead of a bare `write()`. `write()` may
+  satisfy only part of the payload (`0 < n < len`) or be interrupted (`EINTR`);
+  treating any non-negative return as success silently drops trailing bytes (e.g.
+  a command terminator). `write_all` loops until the whole payload is written.
+- **`util::clear_nonblocking(fd)`** instead of `fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)&~O_NONBLOCK)`.
+  A failed `F_GETFL` returns `-1`; `-1 & ~O_NONBLOCK` can leave the fd non-blocking
+  and spin a reader thread at 100% CPU. The helper checks both `fcntl` calls.
+
+Network/socket sites that set `O_NONBLOCK` for a connect-with-timeout must still
+guard `F_GETFL < 0` before using the result.
+
+### Device firmware / SDK version: web UI only, never `DriverInfo`
+
+Two **separate** optional hooks, both default `std::nullopt`:
+
+- `AlpacaDriver::get_device_firmware()` — the **device's own hardware firmware**
+  (a mount/handset firmware version, a camera's on-board firmware, etc.).
+- `AlpacaDriver::get_device_sdk_version()` — the **vendor SDK/library version**
+  the driver links against (a host software version, not a hardware property).
+
+Keep them distinct — do NOT report an SDK version from `get_device_firmware()`;
+that mislabels a library version as firmware (e.g. ZWO's ASI SDK has no device-
+firmware API, so a ZWO camera reports only `get_device_sdk_version()`). The
+management `configureddevices` response adds per-device `Firmware` / `SdkVersion`
+fields only when the connected driver returns each value, and the web UI renders a
+"Firmware" / "SDK Version" row only when present. **Neither goes in the ASCOM
+`DriverInfo` string** — it stays clean for NINA / other Alpaca clients (the QHY
+camera's pre-existing SDK-in-`DriverInfo` is grandfathered; do not copy it).
+`DriverVersion` always stays the AlpacaBridge software version. Both hooks must be
+cheap and non-blocking: protocol drivers whose firmware getter does live serial
+I/O must cache the value at connect and return the cached copy (SynScan/Celestron
+cache it in `mount_firmware_version_`; Gemini caches in `set_connected`); SDK
+drivers return the static SDK version directly. Where a vendor SDK exposes both
+(e.g. SVBONY: `SVBGetCameraFirmwareVersion` for firmware), report each via its own
+hook. Return `std::nullopt` when disconnected and the value is unknown.
+
+### Auto-detect failure message (`util/auto_detect.h`)
+
+Serial port enumeration is POSIX-only, so the `enumerate_*_ports()` helpers return
+empty on Windows. When an auto-detect driver finds no ports, throw
+`util::serial_auto_detect_failed_message("<device label>")` rather than a
+hard-coded "no device found" string, so the Windows path reports "auto-detect not
+supported on this platform" instead of implying missing hardware.
+
 ### Platform 7 InterfaceVersion + DeviceState
 
 - Drivers advertise ASCOM Platform 7 interface versions: Camera 4 (ICameraV4),

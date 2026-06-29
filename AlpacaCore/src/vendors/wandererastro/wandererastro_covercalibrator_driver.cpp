@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
@@ -20,7 +21,10 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
 
 namespace alpacacore::vendor::wandererastro {
@@ -77,6 +81,23 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
+    // Firmware date from the streamed status frame (cached — no extra I/O).
+    // Surfaced in the web UI only, never in DriverInfo. firmware_version is a
+    // YYYYMMDD integer; render it as YYYY-MM-DD.
+    std::optional<std::string> get_device_firmware() const override {
+        if (!connected_.load()) {
+            return std::nullopt;
+        }
+        const WandererStatus s = protocol_.get_status();
+        if (!s.valid || s.firmware_version <= 0) {
+            return std::nullopt;
+        }
+        const int fw = s.firmware_version;
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", fw / 10000, (fw / 100) % 100, fw % 100);
+        return std::string(buf);
+    }
+
     // ICoverCalibratorV2 (ASCOM Platform 7): adds CoverMoving, CalibratorChanging,
     // Connecting and DeviceState, all of which this driver implements.
     int get_interface_version() const override { return 2; }
@@ -118,7 +139,8 @@ public:
             if (effective.serial_port.empty() && effective.auto_detect_index >= 0) {
                 auto ports = enumerate_wanderer_ports();
                 if (ports.empty()) {
-                    throw AlpacaException("No WandererCover detected on any serial port", AlpacaError::NotConnected);
+                    throw AlpacaException(util::serial_auto_detect_failed_message("WandererCover"),
+                                          AlpacaError::NotConnected);
                 }
                 if (effective.auto_detect_index >= static_cast<int>(ports.size())) {
                     throw AlpacaException("Cover index " + std::to_string(effective.auto_detect_index) +

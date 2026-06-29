@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -89,12 +90,68 @@ private:
     bool connected_{false};
 };
 
+// FakeDriver that reports firmware and/or SDK version, to pin the two web-UI-only
+// hooks surfaced in the management configureddevices response.
+class FirmwareDriver final : public alpacacore::AlpacaDriver {
+public:
+    explicit FirmwareDriver(std::optional<std::string> firmware, std::optional<std::string> sdk_version = std::nullopt)
+        : firmware_(std::move(firmware)), sdk_version_(std::move(sdk_version)) {}
+
+    int get_device_number() const override { return 0; }
+    std::string get_name() const override { return "FirmwareDriver"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Camera; }
+    std::string get_unique_id() const override { return "firmware-0"; }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 1; }
+    bool get_connected() const override { return true; }
+    void set_connected(bool) override {}
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return ""; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return ""; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return ""; }
+
+    std::optional<std::string> get_device_firmware() const override { return firmware_; }
+    std::optional<std::string> get_device_sdk_version() const override { return sdk_version_; }
+
+private:
+    std::optional<std::string> firmware_;
+    std::optional<std::string> sdk_version_;
+};
+
 struct RegistryGuard {
     RegistryGuard() { alpacacore::management::DeviceRegistry::instance().clear(); }
     ~RegistryGuard() { alpacacore::management::DeviceRegistry::instance().clear(); }
 };
 
 } // namespace
+
+TEST_CASE("AlpacaDriver firmware/SDK hooks default to empty", "[driver][firmware]") {
+    FakeDriver driver(alpacacore::DeviceType::Camera, 0, "Cam0", "cam-0");
+    // Drivers that do not override the hooks report nothing, so the web UI shows
+    // no firmware/SDK rows and DriverInfo stays clean.
+    REQUIRE(driver.get_device_firmware() == std::nullopt);
+    REQUIRE(driver.get_device_sdk_version() == std::nullopt);
+}
+
+TEST_CASE("AlpacaDriver firmware and SDK version are independent hooks", "[driver][firmware]") {
+    // Real device firmware (e.g. WandererCover, a mount handset, SVBONY camera).
+    FirmwareDriver firmware_only(std::string("2025-05-04"));
+    REQUIRE(firmware_only.get_device_firmware() == std::optional<std::string>("2025-05-04"));
+    REQUIRE(firmware_only.get_device_sdk_version() == std::nullopt);
+
+    // Vendor SDK version only (e.g. ZWO/QHY/Player One — no device firmware API).
+    FirmwareDriver sdk_only(std::nullopt, std::string("1.7.7.0"));
+    REQUIRE(sdk_only.get_device_firmware() == std::nullopt);
+    REQUIRE(sdk_only.get_device_sdk_version() == std::optional<std::string>("1.7.7.0"));
+
+    FirmwareDriver unknown(std::nullopt);
+    REQUIRE(unknown.get_device_firmware() == std::nullopt);
+    REQUIRE(unknown.get_device_sdk_version() == std::nullopt);
+}
 
 TEST_CASE("DeviceRegistry register, lookup, and unregister", "[registry]") {
     RegistryGuard guard;

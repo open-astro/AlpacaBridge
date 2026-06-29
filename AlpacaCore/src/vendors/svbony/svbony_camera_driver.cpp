@@ -136,6 +136,24 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
+    // Real on-board camera firmware (SVBGetCameraFirmwareVersion), web UI only
+    // (never in DriverInfo). Requires a connected camera; the SVBONY SDK exposes
+    // actual device firmware, unlike the ZWO/QHY/Player One SDKs.
+    std::optional<std::string> get_device_firmware() const override {
+        if (!connected_.load()) {
+            return std::nullopt;
+        }
+        try {
+            auto firmware = SVBSDKWrapper::instance().get_firmware_version(camera_id_value());
+            if (firmware.empty()) {
+                return std::nullopt;
+            }
+            return firmware;
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
     int get_interface_version() const override {
         return 4;  // ICameraV4 (Platform 7)
     }

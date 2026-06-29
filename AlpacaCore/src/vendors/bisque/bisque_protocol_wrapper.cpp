@@ -11,21 +11,21 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-
-#include <mutex>
-#include <string>
-#include <cstring>
-#include <chrono>
-#include <cstdio>
-
-#include <sys/socket.h>
-#include <netinet/in.h>
+#include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
+
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+#include <string>
 
 namespace alpacacore::vendor::bisque {
 
@@ -363,9 +363,19 @@ private:
     }
 
     void write_locked(const std::string& data) {
-        ssize_t bytes_sent = send(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
-        if (bytes_sent != static_cast<ssize_t>(data.length())) {
-            throw AlpacaException("Failed to send command to TheSkyX");
+        // send() may transmit only part of the payload (or be interrupted);
+        // loop until the whole command is on the wire so a trailing '#'
+        // terminator is never silently dropped.
+        std::size_t total = 0;
+        while (total < data.length()) {
+            ssize_t sent = send(socket_fd_, data.c_str() + total, data.length() - total, MSG_NOSIGNAL);
+            if (sent < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                throw AlpacaException("Failed to send command to TheSkyX");
+            }
+            total += static_cast<std::size_t>(sent);
         }
     }
 

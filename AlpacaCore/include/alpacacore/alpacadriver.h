@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <ctime>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -74,6 +75,34 @@ public:
      * @brief Get the driver version.
      */
     virtual std::string get_driver_version() const = 0;
+
+    /**
+     * @brief Get the device's reported hardware firmware revision, if available.
+     *
+     * Optional hook surfaced **only** in the AlpacaBridge web UI (the management
+     * configureddevices response), never in the ASCOM @c DriverInfo string, so
+     * @c DriverInfo stays clean for NINA and other Alpaca clients. This is the
+     * **device's own firmware** (e.g. a mount handset version or a camera's
+     * on-board firmware) — NOT the vendor SDK/library version, which has its own
+     * hook below. Drivers that can read real firmware override this; the default
+     * returns @c std::nullopt so nothing is shown. Implementations must be cheap
+     * and non-blocking (return a value cached at connect, not a fresh device
+     * round-trip) and should return @c std::nullopt when the device is not
+     * connected and the value is unknown.
+     */
+    virtual std::optional<std::string> get_device_firmware() const { return std::nullopt; }
+
+    /**
+     * @brief Get the vendor SDK / library version backing this driver, if any.
+     *
+     * Same web-UI-only contract as get_device_firmware() (never in @c DriverInfo).
+     * This is the version of the vendor SDK the driver links against (e.g. the
+     * ZWO ASI SDK), reported separately from device firmware because it is a host
+     * software version, not a property of the connected hardware. SDK-based
+     * drivers (ZWO, QHY, Player One, ...) override this; the default returns
+     * @c std::nullopt. Must be cheap and non-blocking.
+     */
+    virtual std::optional<std::string> get_device_sdk_version() const { return std::nullopt; }
 
     /**
      * @brief Get the ASCOM interface version.

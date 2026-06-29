@@ -11,15 +11,16 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
-#include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
+#include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 
-#include <cstring>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
-#include <thread>
 #include <string>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -82,8 +83,10 @@ static int probe_port(const std::string& port_path) {
         return 0;
     }
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    if (!util::clear_nonblocking(fd)) {
+        close(fd);
+        return 0;
+    }
     tcflush(fd, TCIOFLUSH);
 
     // Wait for MCU to boot after the DTR reset, then try handshake.
@@ -94,8 +97,7 @@ static int probe_port(const std::string& port_path) {
         tcflush(fd, TCIOFLUSH);
 
         const char* cmd = ":03#";
-        ssize_t written = write(fd, cmd, 4);
-        if (written != 4) {
+        if (!util::write_all(fd, cmd, 4)) {
             continue;
         }
 
@@ -632,8 +634,11 @@ private:
         }
 
         // Switch to blocking mode
-        int flags = fcntl(serial_fd_, F_GETFL, 0);
-        fcntl(serial_fd_, F_SETFL, flags & ~O_NONBLOCK);
+        if (!util::clear_nonblocking(serial_fd_)) {
+            close(serial_fd_);
+            serial_fd_ = -1;
+            throw AlpacaException("Failed to set serial port to blocking mode", AlpacaError::DriverException);
+        }
 
         tcflush(serial_fd_, TCIOFLUSH);
 #endif
@@ -667,8 +672,7 @@ private:
             throw AlpacaException("Serial write failed", AlpacaError::DriverException);
         }
 #else
-        ssize_t written = write(serial_fd_, data.c_str(), data.length());
-        if (written < 0) {
+        if (!util::write_all(serial_fd_, data.c_str(), data.length())) {
             throw AlpacaException("Write failed: " + std::string(std::strerror(errno)),
                                   AlpacaError::DriverException);
         }
