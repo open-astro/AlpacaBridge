@@ -39,6 +39,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <thread>
 
 namespace alpacacore::util {
 
@@ -78,6 +79,10 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
                     deadline_set = true;
                 }
                 if (std::chrono::steady_clock::now() < deadline) {
+                    // Back off so this can't busy-spin if the fd is non-blocking
+                    // (no send timeout to pace us); negligible when write/send
+                    // already blocked on SO_SNDTIMEO.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     continue;
                 }
             }
@@ -129,6 +134,10 @@ inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
                     deadline_set = true;
                 }
                 if (std::chrono::steady_clock::now() < deadline) {
+                    // Back off so this can't busy-spin if the socket is
+                    // non-blocking (no SO_SNDTIMEO to pace us); negligible when
+                    // send() already blocked on SO_SNDTIMEO.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     continue;
                 }
             }

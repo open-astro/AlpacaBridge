@@ -414,8 +414,12 @@ private:
         std::size_t total = 0;
         while (total < payload.size()) {
             DWORD written = 0;
+            // Guard written == 0: a WriteFile that returns TRUE with 0 bytes
+            // (seen on some CH340/CH341 Windows drivers under backpressure) would
+            // otherwise spin this loop forever while holding mutex_.
             if (!WriteFile(serial_handle_, payload.data() + total, static_cast<DWORD>(payload.size() - total), &written,
-                           nullptr)) {
+                           nullptr) ||
+                written == 0) {
                 throw AlpacaException("Serial write failed", AlpacaError::DriverException);
             }
             total += written;
