@@ -92,7 +92,9 @@ public:
     // DriverInfo). EFWGetSDKVersion() returns "1, 7, 0, 0"; render as "1.7.0.0".
     std::optional<std::string> get_device_sdk_version() const override {
         auto version = ZWOEFWSDKWrapper::instance().get_sdk_version();
-        if (version.empty()) {
+        // get_sdk_version() returns the literal "unknown" when EFWGetSDKVersion()
+        // yields nullptr — suppress the row rather than show "unknown".
+        if (version.empty() || version == "unknown") {
             return std::nullopt;
         }
         std::string normalized;

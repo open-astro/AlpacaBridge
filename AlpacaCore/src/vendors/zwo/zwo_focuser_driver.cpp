@@ -90,7 +90,9 @@ public:
     // DriverInfo). EAFGetSDKVersion() returns "1, 7, 0, 0"; render as "1.7.0.0".
     std::optional<std::string> get_device_sdk_version() const override {
         auto version = ZWOEAFSDKWrapper::instance().get_sdk_version();
-        if (version.empty()) {
+        // get_sdk_version() returns the literal "unknown" when EAFGetSDKVersion()
+        // yields nullptr — suppress the row rather than show "unknown".
+        if (version.empty() || version == "unknown") {
             return std::nullopt;
         }
         std::string normalized;

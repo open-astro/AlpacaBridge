@@ -343,9 +343,16 @@ public:
 
     void disconnect() {
         stop_reader();
-        std::lock_guard<std::mutex> lock(mutex_);
-        connected_ = false;
-        close_serial();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            connected_ = false;
+            close_serial();
+        }
+        // Invalidate the cached status frame so a get_status() racing with this
+        // disconnect returns valid=false instead of a stale frame (e.g. stale
+        // firmware leaking into the web UI after the device is gone).
+        std::lock_guard<std::mutex> status_lock(status_mutex_);
+        status_ = WandererStatus{};
     }
 
     bool is_connected() const {

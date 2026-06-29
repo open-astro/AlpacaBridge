@@ -138,7 +138,9 @@ public:
     // DriverInfo). ASIGetSDKVersion() returns "1, 7, 7, 0"; render as "1.7.7.0".
     std::optional<std::string> get_device_sdk_version() const override {
         auto version = ZWOSDKWrapper::instance().get_sdk_version();
-        if (version.empty()) {
+        // get_sdk_version() returns the literal "unknown" when ASIGetSDKVersion()
+        // yields nullptr — suppress the row rather than show "unknown".
+        if (version.empty() || version == "unknown") {
             return std::nullopt;
         }
         std::string normalized;

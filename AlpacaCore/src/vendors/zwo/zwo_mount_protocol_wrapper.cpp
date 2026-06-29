@@ -576,7 +576,14 @@ private:
             return false;
         }
 
-        (void)util::clear_nonblocking(serial_fd_);  // best-effort blocking mode
+        // Fail the open if we can't clear O_NONBLOCK: a non-blocking fd makes
+        // every read return EAGAIN immediately and breaks all I/O silently.
+        // Matches the abort-on-failure behaviour of the other serial wrappers.
+        if (!util::clear_nonblocking(serial_fd_)) {
+            close(serial_fd_);
+            serial_fd_ = -1;
+            return false;
+        }
 
         return true;
 #endif
