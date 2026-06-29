@@ -487,8 +487,17 @@ private:
                     // Cache the firmware date once (YYYYMMDD int -> YYYY-MM-DD).
                     if (firmware_date_.empty() && parsed.valid && parsed.firmware_version > 0) {
                         const int fw = parsed.firmware_version;
+                        const int year = fw / 10000;
+                        const int month = (fw / 100) % 100;
+                        const int day = fw % 100;
                         char buf[16];
-                        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", fw / 10000, (fw / 100) % 100, fw % 100);
+                        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+                            std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
+                        } else {
+                            // Not a plausible YYYYMMDD — surface the raw firmware
+                            // integer rather than an invalid date like 2024-13-99.
+                            std::snprintf(buf, sizeof(buf), "%d", fw);
+                        }
                         firmware_date_ = buf;
                     }
                 }

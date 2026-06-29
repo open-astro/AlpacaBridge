@@ -348,7 +348,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (connected_) {
-            disconnect();
+            disconnect_locked();  // already holding mutex_ — must not re-lock
         }
 
         connection_type_ = info.type;
@@ -367,6 +367,12 @@ public:
 
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
+        disconnect_locked();
+    }
+
+    // Tear down the connection. Caller MUST already hold mutex_ (so connect()
+    // can reuse it without the non-recursive mutex deadlocking on re-lock).
+    void disconnect_locked() {
         if (!connected_) {
             return;
         }

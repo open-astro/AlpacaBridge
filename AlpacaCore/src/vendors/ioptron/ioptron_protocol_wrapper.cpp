@@ -821,7 +821,7 @@ public:
         
         if (connected_) {
             ALPACA_LOG_INFO("iOptron", "Already connected, disconnecting first");
-            disconnect();
+            disconnect_locked();  // already holding mutex_ — must not re-lock
         }
         
         ALPACA_LOG_INFO("iOptron", "Connection type: " + std::string(info.type == ConnectionType::Serial ? "Serial" : "Network"));
@@ -862,21 +862,26 @@ public:
     
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+        disconnect_locked();
+    }
+
+    // Tear down the connection. Caller MUST already hold mutex_ (so connect()
+    // can reuse it without the non-recursive mutex deadlocking on re-lock).
+    void disconnect_locked() {
         if (!connected_) {
             return;
         }
-        
+
         if (connection_type_ == ConnectionType::Serial) {
             disconnect_serial();
         } else {
             disconnect_network();
         }
-        
+
         connected_ = false;
         ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
     }
-    
+
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;

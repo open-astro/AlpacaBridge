@@ -218,12 +218,16 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     // Handset firmware captured at connect; surfaced in the web UI only.
+    // Handset firmware captured at connect; surfaced in the web UI only. Guarded
+    // by its OWN narrow firmware_mutex_, NOT the coarse mutex_ that set_connected()
+    // holds across the multi-second connect, so a configureddevices poll never
+    // blocks on the mount connection.
     std::optional<std::string> get_device_firmware() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_ || mount_firmware_version_.empty() || mount_firmware_version_ == "0.0.0") {
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        if (firmware_cache_.empty()) {
             return std::nullopt;
         }
-        return mount_firmware_version_;
+        return firmware_cache_;
     }
 
     int get_interface_version() const override { return 4; }
@@ -279,6 +283,13 @@ public:
             } catch (...) {
                 // TODO: Confirm SynScan firmware query reliability on all V3/V4 handsets.
             }
+            // Publish to the web-UI getter under its OWN narrow mutex so a
+            // configureddevices poll never blocks on the coarse mutex_ this
+            // connect sequence holds for several seconds.
+            {
+                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                firmware_cache_ = (mount_firmware_version_ != "0.0.0") ? mount_firmware_version_ : std::string();
+            }
             try {
                 mount_model_id_ = protocol.get_model_id();
             } catch (...) {
@@ -333,6 +344,10 @@ public:
         } else {
             protocol.disconnect();
             connected_ = false;
+            {
+                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                firmware_cache_.clear();
+            }
             target_set_ = false;
             parked_ = false;
             at_home_ = false;
@@ -1432,6 +1447,10 @@ private:
     mutable int side_of_pier_cached_ = -1;
     mutable bool side_of_pier_valid_ = false;
     std::string mount_firmware_version_;
+    // Web-UI firmware copy, guarded by its own narrow mutex (not mutex_) so the
+    // get_device_firmware() poll never blocks on the coarse connect lock.
+    mutable std::mutex firmware_mutex_;
+    std::string firmware_cache_;
     int mount_model_id_;
     bool use_precise_commands_;
     bool does_refraction_ = false;

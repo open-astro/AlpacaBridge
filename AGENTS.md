@@ -100,11 +100,33 @@ fields only when the connected driver returns each value, and the web UI renders
 camera's pre-existing SDK-in-`DriverInfo` is grandfathered; do not copy it).
 `DriverVersion` always stays the AlpacaBridge software version. Both hooks must be
 cheap and non-blocking: protocol drivers whose firmware getter does live serial
-I/O must cache the value at connect and return the cached copy (SynScan/Celestron
-cache it in `mount_firmware_version_`; Gemini caches in `set_connected`); SDK
-drivers return the static SDK version directly. Where a vendor SDK exposes both
-(e.g. SVBONY: `SVBGetCameraFirmwareVersion` for firmware), report each via its own
-hook. Return `std::nullopt` when disconnected and the value is unknown.
+I/O must cache the value at connect and return the cached copy; SDK drivers return
+the static SDK version directly. Where a vendor SDK exposes both (e.g. SVBONY:
+`SVBGetCameraFirmwareVersion` for firmware), report each via its own hook. Return
+`std::nullopt` when disconnected and the value is unknown.
+
+**Guard the cache with a DEDICATED narrow mutex, never the coarse driver
+`mutex_`.** `set_connected()` typically holds the driver `mutex_` across the
+entire multi-second connect (SDK open, serial handshake, site/time sync). If
+`get_device_firmware()` takes that same `mutex_`, a `/management/v1/configureddevices`
+poll arriving mid-connect blocks the HTTP thread for the whole connect. Add a
+separate `firmware_mutex_` + `firmware_cache_`, populate it at connect and clear
+it at disconnect (both under `firmware_mutex_`), and read only it from the getter
+(WandererCover caches in the protocol wrapper; Gemini/SVBONY/SynScan/Celestron use
+a `firmware_mutex_`). Do NOT consult `connected_` in the getter — rely on the
+cache being empty while disconnected, so there is no atomic-vs-mutex ordering bug.
+
+### Reconnect must not self-deadlock: `disconnect_locked()`
+
+A protocol wrapper's `connect()` that re-uses an existing connection typically
+does `lock(mutex_); if (connected_) disconnect();` — but if `disconnect()` also
+locks `mutex_`, the non-recursive `std::mutex` **deadlocks** on reconnect (user
+changes a port and clicks Connect while connected → hangs the connection thread →
+hangs the server). Split it: a `disconnect_locked()` with the teardown body and NO
+lock (caller must already hold `mutex_`), and a public `disconnect()` that locks
+and delegates. `connect()` calls `disconnect_locked()`; external callers call
+`disconnect()`. All protocol wrappers follow this (gemini/ioptron/synscan/
+celestron/bisque/zwo-mount).
 
 ### Auto-detect failure message (`util/auto_detect.h`)
 
