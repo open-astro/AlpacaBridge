@@ -60,7 +60,10 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
         }
         if (written == 0) {
             // write() made no progress on a non-empty request; treat as a hard
-            // error rather than spinning forever waiting for it to advance.
+            // error rather than spinning forever waiting for it to advance. Set
+            // errno so a caller that reports strerror(errno) gets a real message
+            // instead of a stale/zero value.
+            errno = EIO;
             return false;
         }
         total += static_cast<std::size_t>(written);
@@ -89,6 +92,7 @@ inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
             return false;
         }
         if (sent == 0) {
+            errno = EIO;  // keep strerror(errno) meaningful for callers that report it
             return false;
         }
         total += static_cast<std::size_t>(sent);

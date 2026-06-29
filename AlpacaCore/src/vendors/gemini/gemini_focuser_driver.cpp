@@ -79,7 +79,7 @@ public:
         if (!connected_.load()) {
             return std::nullopt;
         }
-        std::lock_guard<std::mutex> lock(connection_mutex_);
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
         if (firmware_.empty()) {
             return std::nullopt;
         }
@@ -125,11 +125,11 @@ public:
             // fail the connect.
             try {
                 int fw = protocol_.get_firmware_version();
-                std::lock_guard<std::mutex> lock(connection_mutex_);
+                std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_ = fw > 0 ? std::to_string(fw) : std::string();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini", "Focuser firmware query failed: " + std::string(e.what()));
-                std::lock_guard<std::mutex> lock(connection_mutex_);
+                std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
             connected_.store(true);
@@ -140,7 +140,7 @@ public:
             // the connect ordering, so a racing reconnect can't end up with
             // connected==true and an empty firmware cache.
             {
-                std::lock_guard<std::mutex> lock(connection_mutex_);
+                std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
             connected_.store(false);
@@ -288,9 +288,13 @@ private:
     std::atomic<bool> connected_;
     std::atomic<bool> connecting_;
     GeminiProtocolWrapper protocol_;
-    mutable std::mutex connection_mutex_;
+    mutable std::mutex connection_mutex_;  // serialises the connection thread lifecycle only
     std::thread connection_thread_;
-    std::string firmware_;  // captured at connect; web-UI only (guarded by connection_mutex_)
+    // firmware_ has its OWN mutex, NOT connection_mutex_: set_connected() runs on
+    // connection_thread_ and caches firmware, while stop_connection_thread() joins
+    // that thread under connection_mutex_ — sharing one mutex would deadlock.
+    mutable std::mutex firmware_mutex_;
+    std::string firmware_;  // captured at connect; web-UI only (guarded by firmware_mutex_)
 };
 
 std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
