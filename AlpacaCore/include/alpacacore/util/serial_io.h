@@ -37,9 +37,18 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 
 namespace alpacacore::util {
+
+// Upper bound on how long write_all()/send_all() keep retrying a partial
+// transfer that makes NO further progress (repeated EAGAIN/EWOULDBLOCK under a
+// send timeout). It bounds the only retry path that can loop — a partial write
+// followed by persistent backpressure — so a dead peer can't wedge the calling
+// thread for the multi-minute TCP retransmit window. The clock resets on every
+// byte of progress, so a slow-but-advancing link is never cut off.
+inline constexpr std::chrono::milliseconds kPartialIoRetryBudget{2000};
 
 /**
  * @brief Write the entire buffer to @p fd, looping over partial writes.
@@ -50,6 +59,8 @@ namespace alpacacore::util {
  */
 inline bool write_all(int fd, const char* data, std::size_t len) {
     std::size_t total = 0;
+    bool deadline_set = false;
+    std::chrono::steady_clock::time_point deadline{};
     while (total < len) {
         const ssize_t written = ::write(fd, data + total, len - total);
         if (written < 0) {
@@ -59,10 +70,16 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
             if ((errno == EAGAIN || errno == EWOULDBLOCK) && total > 0) {
                 // Transient backpressure (SO_SNDTIMEO) AFTER a partial write:
                 // retry so the half-written payload completes rather than corrupt
-                // framing. When total == 0 nothing was written, so fail fast —
-                // retrying there would wedge the thread for the kernel retransmit
-                // window (~minutes) on a dead peer with a full send buffer.
-                continue;
+                // framing — but only within a bounded no-progress budget so a
+                // dead peer can't stall here for the TCP retransmit window. When
+                // total == 0 nothing was written, so fail fast.
+                if (!deadline_set) {
+                    deadline = std::chrono::steady_clock::now() + kPartialIoRetryBudget;
+                    deadline_set = true;
+                }
+                if (std::chrono::steady_clock::now() < deadline) {
+                    continue;
+                }
             }
             return false;
         }
@@ -75,6 +92,7 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
             return false;
         }
         total += static_cast<std::size_t>(written);
+        deadline_set = false;  // made progress — restart the no-progress budget
     }
     return true;
 }
@@ -92,6 +110,8 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
  */
 inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
     std::size_t total = 0;
+    bool deadline_set = false;
+    std::chrono::steady_clock::time_point deadline{};
     while (total < len) {
         const ssize_t sent = ::send(fd, data + total, len - total, flags);
         if (sent < 0) {
@@ -101,10 +121,16 @@ inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
             if ((errno == EAGAIN || errno == EWOULDBLOCK) && total > 0) {
                 // Transient backpressure under SO_SNDTIMEO AFTER a partial send:
                 // retry so the half-sent command completes (dropping it would
-                // corrupt framing). When total == 0 fail fast — retrying there
-                // would wedge the thread for the kernel retransmit window
-                // (~minutes) on a dead peer with a full send buffer.
-                continue;
+                // corrupt framing) — but only within a bounded no-progress budget
+                // so a dead peer can't stall here for the TCP retransmit window.
+                // When total == 0 fail fast.
+                if (!deadline_set) {
+                    deadline = std::chrono::steady_clock::now() + kPartialIoRetryBudget;
+                    deadline_set = true;
+                }
+                if (std::chrono::steady_clock::now() < deadline) {
+                    continue;
+                }
             }
             return false;
         }
@@ -113,6 +139,7 @@ inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
             return false;
         }
         total += static_cast<std::size_t>(sent);
+        deadline_set = false;  // made progress — restart the no-progress budget
     }
     return true;
 }
