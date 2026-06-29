@@ -53,8 +53,13 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
     while (total < len) {
         const ssize_t written = ::write(fd, data + total, len - total);
         if (written < 0) {
-            if (errno == EINTR) {
-                continue;  // interrupted before any byte was written — retry
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                // EINTR: interrupted. EAGAIN/EWOULDBLOCK: transient backpressure
+                // on an fd with a send timeout (SO_SNDTIMEO) — retry rather than
+                // abandon a possibly half-written payload (which would corrupt
+                // framing). A genuinely broken fd returns EPIPE/ECONNRESET/etc.,
+                // which still exits here.
+                continue;
             }
             return false;
         }
@@ -74,8 +79,9 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
 /**
  * @brief Send the entire buffer over socket @p fd, looping over short sends.
  *
- * The socket analogue of write_all(): retries EINTR, treats a 0 return as a
- * hard error, and forwards @p flags. Callers pass MSG_NOSIGNAL so that a peer
+ * The socket analogue of write_all(): retries EINTR and transient
+ * EAGAIN/EWOULDBLOCK (SO_SNDTIMEO backpressure), treats a 0 return as a hard
+ * error, and forwards @p flags. Callers pass MSG_NOSIGNAL so that a peer
  * disconnect mid-send surfaces as an error return instead of delivering SIGPIPE
  * (whose default disposition would terminate the process). Returns true only
  * when the whole payload was sent; a short send that isn't completed would
@@ -86,7 +92,10 @@ inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
     while (total < len) {
         const ssize_t sent = ::send(fd, data + total, len - total, flags);
         if (sent < 0) {
-            if (errno == EINTR) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                // EINTR or transient backpressure under SO_SNDTIMEO — retry so a
+                // half-sent command completes (dropping it would corrupt framing).
+                // A broken connection returns EPIPE/ECONNRESET/etc. and exits here.
                 continue;
             }
             return false;
