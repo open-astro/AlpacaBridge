@@ -137,21 +137,15 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     // Real on-board camera firmware (SVBGetCameraFirmwareVersion), web UI only
-    // (never in DriverInfo). Requires a connected camera; the SVBONY SDK exposes
-    // actual device firmware, unlike the ZWO/QHY/Player One SDKs.
+    // (never in DriverInfo). The SVBONY SDK exposes actual device firmware,
+    // unlike the ZWO/QHY/Player One SDKs; it is cached at connect (see
+    // set_connected) and returned here so configureddevices polls stay cheap.
     std::optional<std::string> get_device_firmware() const override {
-        if (!connected_.load()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_.load() || firmware_.empty()) {
             return std::nullopt;
         }
-        try {
-            auto firmware = SVBSDKWrapper::instance().get_firmware_version(camera_id_value());
-            if (firmware.empty()) {
-                return std::nullopt;
-            }
-            return firmware;
-        } catch (const std::exception&) {
-            return std::nullopt;
-        }
+        return firmware_;
     }
 
     int get_interface_version() const override {
@@ -256,6 +250,15 @@ public:
             }
 
             serial_number_ = sdk.get_serial_number(resolved_id);
+            // Cache the real camera firmware once (web UI only). Querying it on
+            // every configureddevices poll would hit the SDK each time; a failed
+            // query must not fail the connect.
+            try {
+                firmware_ = sdk.get_firmware_version(resolved_id);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("SVBONY", "Camera firmware query failed: " + std::string(e.what()));
+                firmware_.clear();
+            }
             reset_exposure_state_locked();
             connected_.store(true);
             return;
@@ -273,6 +276,7 @@ public:
         camera_info_ = {};
         camera_info_valid_ = false;
         serial_number_.clear();
+        firmware_.clear();
         reset_exposure_state_locked();
         connected_.store(false);
     }
@@ -1021,6 +1025,7 @@ private:
     int camera_index_;
     int camera_id_;
     std::string serial_number_;
+    std::string firmware_;  // cached at connect; web-UI only (guarded by mutex_)
     SVBCameraInfo camera_info_;
     bool camera_info_valid_;
 

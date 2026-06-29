@@ -57,6 +57,11 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
             }
             return false;
         }
+        if (written == 0) {
+            // write() made no progress on a non-empty request; treat as a hard
+            // error rather than spinning forever waiting for it to advance.
+            return false;
+        }
         total += static_cast<std::size_t>(written);
     }
     return true;

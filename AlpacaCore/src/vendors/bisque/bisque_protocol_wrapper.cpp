@@ -375,6 +375,11 @@ private:
                 }
                 throw AlpacaException("Failed to send command to TheSkyX");
             }
+            if (sent == 0) {
+                // No progress on a non-empty send — connection closed/stalled.
+                // Fail rather than spin forever.
+                throw AlpacaException("Failed to send command to TheSkyX (connection closed)");
+            }
             total += static_cast<std::size_t>(sent);
         }
     }

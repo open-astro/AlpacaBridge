@@ -118,9 +118,11 @@ public:
 
         if (connected) {
             protocol_.connect(config_);
-            connected_.store(true);
-            // Cache the focuser firmware once (web UI only — never DriverInfo).
-            // A failed query must not fail the connect.
+            // Cache the focuser firmware once (web UI only — never DriverInfo)
+            // BEFORE marking connected, so a concurrent get_device_firmware()
+            // can never observe connected==true with an empty cache (which would
+            // be indistinguishable from "no firmware"). A failed query must not
+            // fail the connect.
             try {
                 int fw = protocol_.get_firmware_version();
                 std::lock_guard<std::mutex> lock(connection_mutex_);
@@ -130,6 +132,7 @@ public:
                 std::lock_guard<std::mutex> lock(connection_mutex_);
                 firmware_.clear();
             }
+            connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
             protocol_.disconnect();
