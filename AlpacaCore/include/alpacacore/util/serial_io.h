@@ -53,12 +53,15 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
     while (total < len) {
         const ssize_t written = ::write(fd, data + total, len - total);
         if (written < 0) {
-            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
-                // EINTR: interrupted. EAGAIN/EWOULDBLOCK: transient backpressure
-                // on an fd with a send timeout (SO_SNDTIMEO) — retry rather than
-                // abandon a possibly half-written payload (which would corrupt
-                // framing). A genuinely broken fd returns EPIPE/ECONNRESET/etc.,
-                // which still exits here.
+            if (errno == EINTR) {
+                continue;  // interrupted before any byte was written — retry
+            }
+            if ((errno == EAGAIN || errno == EWOULDBLOCK) && total > 0) {
+                // Transient backpressure (SO_SNDTIMEO) AFTER a partial write:
+                // retry so the half-written payload completes rather than corrupt
+                // framing. When total == 0 nothing was written, so fail fast —
+                // retrying there would wedge the thread for the kernel retransmit
+                // window (~minutes) on a dead peer with a full send buffer.
                 continue;
             }
             return false;
@@ -79,8 +82,8 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
 /**
  * @brief Send the entire buffer over socket @p fd, looping over short sends.
  *
- * The socket analogue of write_all(): retries EINTR and transient
- * EAGAIN/EWOULDBLOCK (SO_SNDTIMEO backpressure), treats a 0 return as a hard
+ * The socket analogue of write_all(): retries EINTR (and transient
+ * EAGAIN/EWOULDBLOCK only after a partial send), treats a 0 return as a hard
  * error, and forwards @p flags. Callers pass MSG_NOSIGNAL so that a peer
  * disconnect mid-send surfaces as an error return instead of delivering SIGPIPE
  * (whose default disposition would terminate the process). Returns true only
@@ -92,10 +95,15 @@ inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
     while (total < len) {
         const ssize_t sent = ::send(fd, data + total, len - total, flags);
         if (sent < 0) {
-            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
-                // EINTR or transient backpressure under SO_SNDTIMEO — retry so a
-                // half-sent command completes (dropping it would corrupt framing).
-                // A broken connection returns EPIPE/ECONNRESET/etc. and exits here.
+            if (errno == EINTR) {
+                continue;
+            }
+            if ((errno == EAGAIN || errno == EWOULDBLOCK) && total > 0) {
+                // Transient backpressure under SO_SNDTIMEO AFTER a partial send:
+                // retry so the half-sent command completes (dropping it would
+                // corrupt framing). When total == 0 fail fast — retrying there
+                // would wedge the thread for the kernel retransmit window
+                // (~minutes) on a dead peer with a full send buffer.
                 continue;
             }
             return false;

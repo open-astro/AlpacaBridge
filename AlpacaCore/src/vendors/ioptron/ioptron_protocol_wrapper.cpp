@@ -1143,20 +1143,13 @@ private:
             return false;
         }
         ALPACA_LOG_INFO("iOptron", "Set terminal attributes");
-        
-        // Set to blocking mode
+
+        // Set to blocking mode (matches the probe path and the other wrappers).
         ALPACA_LOG_INFO("iOptron", "Setting to blocking mode...");
-        int flags = fcntl(serial_fd_, F_GETFL);
-        if (flags < 0) {
+        if (!util::clear_nonblocking(serial_fd_)) {
             int fc_err = errno;
-            ALPACA_LOG_ERROR("iOptron", "fcntl F_GETFL failed: " + std::string(std::strerror(fc_err)) + " (errno " + std::to_string(fc_err) + ")");
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
-        if (fcntl(serial_fd_, F_SETFL, flags & ~O_NONBLOCK) != 0) {
-            int fc_err = errno;
-            ALPACA_LOG_ERROR("iOptron", "fcntl F_SETFL failed: " + std::string(std::strerror(fc_err)) + " (errno " + std::to_string(fc_err) + ")");
+            ALPACA_LOG_ERROR("iOptron", "Clearing O_NONBLOCK failed: " + std::string(std::strerror(fc_err)) +
+                                            " (errno " + std::to_string(fc_err) + ")");
             close(serial_fd_);
             serial_fd_ = -1;
             return false;

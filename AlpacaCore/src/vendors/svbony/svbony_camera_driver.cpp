@@ -139,10 +139,13 @@ public:
     // Real on-board camera firmware (SVBGetCameraFirmwareVersion), web UI only
     // (never in DriverInfo). The SVBONY SDK exposes actual device firmware,
     // unlike the ZWO/QHY/Player One SDKs; it is cached at connect (see
-    // set_connected) and returned here so configureddevices polls stay cheap.
+    // set_connected). Guarded by its OWN narrow firmware_mutex_, NOT the class
+    // mutex_ (which set_connected holds for the entire multi-second SDK open/
+    // close), so a configureddevices poll during connect/disconnect returns
+    // immediately instead of blocking on the SDK.
     std::optional<std::string> get_device_firmware() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_.load() || firmware_.empty()) {
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        if (firmware_.empty()) {
             return std::nullopt;
         }
         return firmware_;
@@ -252,12 +255,17 @@ public:
             serial_number_ = sdk.get_serial_number(resolved_id);
             // Cache the real camera firmware once (web UI only). Querying it on
             // every configureddevices poll would hit the SDK each time; a failed
-            // query must not fail the connect.
+            // query must not fail the connect. Stored under firmware_mutex_ (not
+            // the class mutex_) so the poll-time getter never blocks on the SDK.
+            std::string fw;
             try {
-                firmware_ = sdk.get_firmware_version(resolved_id);
+                fw = sdk.get_firmware_version(resolved_id);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SVBONY", "Camera firmware query failed: " + std::string(e.what()));
-                firmware_.clear();
+            }
+            {
+                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                firmware_ = std::move(fw);
             }
             reset_exposure_state_locked();
             connected_.store(true);
@@ -276,7 +284,10 @@ public:
         camera_info_ = {};
         camera_info_valid_ = false;
         serial_number_.clear();
-        firmware_.clear();
+        {
+            std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+            firmware_.clear();
+        }
         reset_exposure_state_locked();
         connected_.store(false);
     }
@@ -1025,7 +1036,11 @@ private:
     int camera_index_;
     int camera_id_;
     std::string serial_number_;
-    std::string firmware_;  // cached at connect; web-UI only (guarded by mutex_)
+    // firmware_ has its OWN narrow mutex, not the coarse class mutex_ that
+    // set_connected() holds across the whole SDK open/close, so a poll-time
+    // get_device_firmware() never blocks on the SDK.
+    mutable std::mutex firmware_mutex_;
+    std::string firmware_;  // cached at connect; web-UI only (guarded by firmware_mutex_)
     SVBCameraInfo camera_info_;
     bool camera_info_valid_;
 
