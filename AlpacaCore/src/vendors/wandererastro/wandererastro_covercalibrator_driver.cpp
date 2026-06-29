@@ -81,12 +81,16 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    // Firmware date from the streamed status frame (cached — no extra I/O).
+    // Firmware date from the streamed status frame, formatted once and cached.
     // Surfaced in the web UI only, never in DriverInfo. firmware_version is a
-    // YYYYMMDD integer; render it as YYYY-MM-DD.
+    // YYYYMMDD integer; render it as YYYY-MM-DD. Guarded solely by
+    // firmware_mutex_: once disconnected the cache is cleared and get_status()
+    // reports valid=false, so this naturally yields nullopt without consulting
+    // connected_ (no atomic-vs-mutex ordering to reason about).
     std::optional<std::string> get_device_firmware() const override {
-        if (!connected_.load()) {
-            return std::nullopt;
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        if (!firmware_cache_.empty()) {
+            return firmware_cache_;
         }
         const WandererStatus s = protocol_.get_status();
         if (!s.valid || s.firmware_version <= 0) {
@@ -95,7 +99,8 @@ public:
         const int fw = s.firmware_version;
         char buf[16];
         std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", fw / 10000, (fw / 100) % 100, fw % 100);
-        return std::string(buf);
+        firmware_cache_ = buf;
+        return firmware_cache_;
     }
 
     // ICoverCalibratorV2 (ASCOM Platform 7): adds CoverMoving, CalibratorChanging,
@@ -186,6 +191,10 @@ public:
         } else {
             protocol_.disconnect();
             connected_.store(false);
+            {
+                std::lock_guard<std::mutex> lock(firmware_mutex_);
+                firmware_cache_.clear();
+            }
             ALPACA_LOG_INFO("WandererAstro", "Cover disconnected");
         }
     }
@@ -452,6 +461,12 @@ private:
     std::atomic<bool> connected_;
     std::atomic<bool> connecting_;
     WandererProtocolWrapper protocol_;
+
+    // Firmware date is a constant YYYYMMDD that never changes while connected, so
+    // format it once and cache it rather than re-locking the status stream and
+    // re-formatting on every configureddevices poll. Cleared at disconnect.
+    mutable std::mutex firmware_mutex_;
+    mutable std::string firmware_cache_;
 
     mutable std::mutex state_mutex_;
     CoverTarget commanded_ = CoverTarget::None;

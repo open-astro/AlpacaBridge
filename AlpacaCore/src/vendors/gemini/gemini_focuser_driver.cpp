@@ -75,10 +75,11 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     // Focuser firmware captured at connect; surfaced in the web UI only.
+    // Guarded SOLELY by firmware_mutex_ and never consults connected_: firmware_
+    // is non-empty only while connected (set at connect, cleared at disconnect,
+    // both under firmware_mutex_), so there is no atomic-vs-mutex ordering to get
+    // wrong and no connected+empty / disconnected+stale window to reason about.
     std::optional<std::string> get_device_firmware() const override {
-        if (!connected_.load()) {
-            return std::nullopt;
-        }
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         if (firmware_.empty()) {
             return std::nullopt;
@@ -118,11 +119,9 @@ public:
 
         if (connected) {
             protocol_.connect(config_);
-            // Cache the focuser firmware once (web UI only — never DriverInfo)
-            // BEFORE marking connected, so a concurrent get_device_firmware()
-            // can never observe connected==true with an empty cache (which would
-            // be indistinguishable from "no firmware"). A failed query must not
-            // fail the connect.
+            // Cache the focuser firmware once (web UI only — never DriverInfo).
+            // firmware_ is exactly what get_device_firmware() reports; a failed
+            // query must not fail the connect.
             try {
                 int fw = protocol_.get_firmware_version();
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
@@ -136,9 +135,8 @@ public:
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
             protocol_.disconnect();
-            // Clear the cached firmware BEFORE marking disconnected, mirroring
-            // the connect ordering, so a racing reconnect can't end up with
-            // connected==true and an empty firmware cache.
+            // Clear the cached firmware so get_device_firmware() reports nothing
+            // once disconnected.
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
