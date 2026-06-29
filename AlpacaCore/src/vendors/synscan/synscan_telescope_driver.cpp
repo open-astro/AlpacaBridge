@@ -217,7 +217,6 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    // Handset firmware captured at connect; surfaced in the web UI only.
     // Handset firmware captured at connect; surfaced in the web UI only. Guarded
     // by its OWN narrow firmware_mutex_, NOT the coarse mutex_ that set_connected()
     // holds across the multi-second connect, so a configureddevices poll never

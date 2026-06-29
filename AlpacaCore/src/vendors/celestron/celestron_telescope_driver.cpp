@@ -198,7 +198,6 @@ public:
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
-    // Handset firmware captured at connect; surfaced in the web UI only.
     // Handset firmware captured at connect; surfaced in the web UI only. Guarded
     // by its OWN narrow firmware_mutex_, NOT the coarse mutex_ that set_connected()
     // holds across the multi-second connect, so a configureddevices poll never
@@ -277,8 +276,13 @@ public:
             // so a configureddevices poll never blocks on the coarse mutex_ that
             // this connect sequence holds for several seconds.
             {
+                // Gate on the version string directly (not hc_available_) so the
+                // UI display isn't coupled to HC-command support: suppress the
+                // empty / "0.0" sentinel the same way SynScan suppresses "0.0.0".
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                firmware_cache_ = hc_available_ ? mount_firmware_version_ : std::string();
+                firmware_cache_ = (!mount_firmware_version_.empty() && mount_firmware_version_ != "0.0")
+                                      ? mount_firmware_version_
+                                      : std::string();
             }
             ALPACA_LOG_WARN("Celestron", "HC firmware: " + mount_firmware_version_ +
                            " — HC " + (hc_available_ ? "available" : "unavailable, using pass-through commands"));
