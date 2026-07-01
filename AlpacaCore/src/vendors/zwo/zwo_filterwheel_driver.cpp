@@ -190,16 +190,31 @@ public:
 
     int get_position() const override {
         ensure_connected();
-        return ZWOEFWSDKWrapper::instance().get_position(wheel_id_value());
+        // Hold mutex_ across the SDK call: set_connected(false) closes the wheel
+        // under mutex_, so serialising here prevents a concurrent disconnect from
+        // invalidating wheel_id_ mid-call (matches the ToupTek/thermal pattern).
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!wheel_id_.has_value()) {
+            throw AlpacaException("Filter wheel ID not set", AlpacaError::NotConnected);
+        }
+        return ZWOEFWSDKWrapper::instance().get_position(wheel_id_.value());
     }
 
     void set_position(int position) override {
         ensure_connected();
-        int slot_count = slot_count_value();
-        if (position < 0 || position >= slot_count) {
+        // Hold mutex_ across validation and the SDK move for the same
+        // use-after-close reason as get_position.
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!wheel_info_valid_ || wheel_info_.slot_count <= 0) {
+            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
+        }
+        if (position < 0 || position >= wheel_info_.slot_count) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
-        ZWOEFWSDKWrapper::instance().set_position(wheel_id_value(), position);
+        if (!wheel_id_.has_value()) {
+            throw AlpacaException("Filter wheel ID not set", AlpacaError::NotConnected);
+        }
+        ZWOEFWSDKWrapper::instance().set_position(wheel_id_.value(), position);
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -299,22 +314,6 @@ private:
             return;
         }
         throw AlpacaException("Failed to read filter wheel info", AlpacaError::DriverException);
-    }
-
-    int wheel_id_value() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!wheel_id_.has_value()) {
-            throw AlpacaException("Filter wheel ID not set", AlpacaError::NotConnected);
-        }
-        return wheel_id_.value();
-    }
-
-    int slot_count_value() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!wheel_info_valid_ || wheel_info_.slot_count <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
-        }
-        return wheel_info_.slot_count;
     }
 
     void normalize_slot_data_locked() {

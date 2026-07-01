@@ -599,9 +599,14 @@ public:
     }
     void set_readout_mode(int mode) override {
         const auto specs = readout_mode_specs();
+        // Range check first so an out-of-range index is InvalidValue even while
+        // disconnected (same precedence as the switch driver's validate_switch_id).
         if (mode < 0 || mode >= static_cast<int>(specs.size())) {
             throw AlpacaException("Readout mode index out of range", AlpacaError::InvalidValue);
         }
+        // Then require a connection, so a Normal-only camera still throws
+        // NotConnected here rather than silently succeeding on the early-return.
+        ensure_connected();
         const auto& s = specs[static_cast<std::size_t>(mode)];
         if (!s.set_cg && !s.set_hfw) {
             return;  // Single "Normal" mode: nothing to apply.

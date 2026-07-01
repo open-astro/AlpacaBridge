@@ -167,37 +167,33 @@ public:
 
     int get_position() const override {
         ensure_connected();
-        HToupcam handle;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            handle = handle_;
-        }
-        if (!handle) {
+        // Hold mutex_ across the SDK call: set_connected(false) takes mutex_
+        // before it closes handle_, so serialising here prevents a
+        // use-after-close if a disconnect races in (matches the thermal switch
+        // driver's get_switch_value pattern).
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!handle_) {
             throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
         }
         // The SDK returns -1 while the wheel is in motion, which is exactly the
         // ASCOM "moving" sentinel — pass it through unchanged.
-        return ToupTekSDKWrapper::instance().get_filter_wheel_position(handle);
+        return ToupTekSDKWrapper::instance().get_filter_wheel_position(handle_);
     }
 
     void set_position(int position) override {
         ensure_connected();
-        int slots;
-        HToupcam handle;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            slots = slot_count_;
-            handle = handle_;
-        }
-        if (slots <= 0 || !handle) {
+        // Hold mutex_ across validation and the SDK move for the same
+        // use-after-close reason as get_position.
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (slot_count_ <= 0 || !handle_) {
             throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
         }
-        if (position < 0 || position >= slots) {
+        if (position < 0 || position >= slot_count_) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
         // Single absolute move; the wheel was homed at connect so the firmware
         // can traverse to any slot. get_position() reports -1 until it arrives.
-        ToupTekSDKWrapper::instance().set_filter_wheel_position(handle, position);
+        ToupTekSDKWrapper::instance().set_filter_wheel_position(handle_, position);
     }
 
     std::vector<int> get_focus_offsets() const override {

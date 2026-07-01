@@ -300,6 +300,7 @@ public:
         validate_switch_id(id);
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         validate_switch_id_locked(id);
         elements_[static_cast<std::size_t>(id)].name = name;
     }
@@ -308,6 +309,7 @@ public:
         validate_switch_id(id);
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         validate_switch_id_locked(id);
         return elements_[static_cast<std::size_t>(id)].description + " (" + camera_name_ + ")";
     }
@@ -337,6 +339,16 @@ private:
         }
     }
 
+    // Caller holds mutex_. Re-checks the connection under the lock so a
+    // disconnect that completed between the pre-lock ensure_connected() and
+    // acquiring mutex_ cannot lead to indexing an already-cleared elements_
+    // (disconnect clears elements_ and stores connected_=false under mutex_).
+    void ensure_connected_locked() const {
+        if (!connected_.load() || elements_.empty()) {
+            throw AlpacaException("Switch not connected", AlpacaError::NotConnected);
+        }
+    }
+
     // ID validation runs before the connection check (ASCOM: out-of-range ID
     // is InvalidValue even while disconnected). Disconnected, the bound is the
     // potential element count; connected, the probed per-model count.
@@ -354,6 +366,7 @@ private:
 
     ThermalElement element_copy(int id) const {
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         validate_switch_id_locked(id);
         return elements_[static_cast<std::size_t>(id)];
     }
