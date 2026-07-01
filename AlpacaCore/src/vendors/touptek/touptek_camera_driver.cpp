@@ -906,11 +906,15 @@ public:
             span_h += (span_h & 1);
             // NB: at bin 1 an odd NumX/NumY makes the SDK ROI one pixel wider/taller
             // than requested, so got_w/got_h from WaitImageV4 can exceed
-            // active_num_x/active_num_y — this is NOT an off-by-one. Pull-mode rows
-            // arrive at nRowPitch = active_num_x * bytes stride, so the extra column
-            // lands in the stride gap and build_image_array_16bit copies exactly
-            // active_num_x columns per row; the +2-row buffer margin absorbs the
-            // single-stride overshoot. Reported NumX/NumY stay = active_num_x/y.
+            // active_num_x/active_num_y — this is NOT an off-by-one. We pass
+            // rowPitch = active_num_x * bytes, which is SMALLER than the ROI's
+            // (active_num_x+1)-pixel row, so each row's extra trailing pixel is
+            // written at the start of the next row's stride slot and is then
+            // overwritten by that row's first pixel; columns 0..active_num_x-1 of
+            // every row stay intact. build_image_array_16bit reads exactly
+            // active_num_x columns per row at the same stride, and the +2-row
+            // buffer margin absorbs the final row's unreclaimed extra pixel.
+            // Reported NumX/NumY stay = active_num_x/y.
             // Defensive only: with max_w/max_h derived from the even sensor size
             // above, ceil_even(num*bin) <= even_max, so these clamps never fire.
             if (span_w > even_max_w) span_w = even_max_w;

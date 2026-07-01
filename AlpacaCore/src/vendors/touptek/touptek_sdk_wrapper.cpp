@@ -205,28 +205,35 @@ std::vector<ToupCameraInfo> ToupTekSDKWrapper::enumerate_cameras() {
     result.reserve(count);
     int camera_index = 0;
     for (unsigned i = 0; i < count; ++i) {
+        // Skip entries with no model block, matching enumerate_focusers/
+        // enumerate_filter_wheels. Without this, a null-model device would fall
+        // through the flag check below (the && short-circuits to false) and be
+        // pushed as a phantom camera with zero flags/dimensions at index 0,
+        // displacing the real camera.
+        if (!arr[i].model) {
+            continue;
+        }
         // Toupcam_EnumV2 also lists standalone AFW filter wheels and AAF
         // focusers, which are not cameras. Skip them (mirroring the flag guards
         // in enumerate_filter_wheels/enumerate_focusers) so cameras[cameraIndex]
         // — and the cameraIndex=0 default — never resolves to an accessory when
         // a camera and an AFW/AAF are attached together.
-        if (arr[i].model && (arr[i].model->flag & (TOUPCAM_FLAG_FILTERWHEEL | TOUPCAM_FLAG_AUTOFOCUSER)) != 0) {
+        if ((arr[i].model->flag & (TOUPCAM_FLAG_FILTERWHEEL | TOUPCAM_FLAG_AUTOFOCUSER)) != 0) {
             continue;
         }
         ToupCameraInfo info;
         info.index = camera_index++;
         info.id = arr[i].id;
         info.name = arr[i].displayname;
-        if (arr[i].model) {
-            info.model_name = arr[i].model->name ? arr[i].model->name : "";
-            info.flags = arr[i].model->flag;
-            info.pixel_size_um_x = arr[i].model->xpixsz;
-            info.pixel_size_um_y = arr[i].model->ypixsz;
-            info.max_fan_speed = arr[i].model->maxfanspeed;
-            if (arr[i].model->preview > 0) {
-                info.max_width = static_cast<int>(arr[i].model->res[0].width);
-                info.max_height = static_cast<int>(arr[i].model->res[0].height);
-            }
+        // model is guaranteed non-null by the guard at the top of the loop.
+        info.model_name = arr[i].model->name ? arr[i].model->name : "";
+        info.flags = arr[i].model->flag;
+        info.pixel_size_um_x = arr[i].model->xpixsz;
+        info.pixel_size_um_y = arr[i].model->ypixsz;
+        info.max_fan_speed = arr[i].model->maxfanspeed;
+        if (arr[i].model->preview > 0) {
+            info.max_width = static_cast<int>(arr[i].model->res[0].width);
+            info.max_height = static_cast<int>(arr[i].model->res[0].height);
         }
         info.is_color = (info.flags & TOUPCAM_FLAG_MONO) == 0;
         info.supports_pulse_guide = (info.flags & TOUPCAM_FLAG_ST4) != 0;
@@ -259,6 +266,12 @@ std::vector<ToupCameraInfo> ToupTekSDKWrapper::enumerate_cameras() {
 }
 
 HToupcam ToupTekSDKWrapper::open_camera_by_index(int camera_index) {
+    // WARNING: this index is the SDK's raw Toupcam_EnumV2 order, which still
+    // includes AFW filter wheels and AAF focusers — it is NOT the camera-only
+    // index space that enumerate_cameras() (and the web UI's cameraIndex) uses.
+    // No driver path calls this today (all open by id via open_camera_by_id); it
+    // is kept only as a legacy convenience. Prefer open_camera_by_id so the
+    // index spaces can never diverge.
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     HToupcam h = Toupcam_OpenByIndex(static_cast<unsigned>(camera_index));
     if (!h) {

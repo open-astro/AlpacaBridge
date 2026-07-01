@@ -376,8 +376,10 @@ private:
     // kStableReads poll intervals over an on-first-slot return.
     static bool wait_for_home(ToupTekSDKWrapper& sdk, HToupcam handle) {
         constexpr int kPollMs = 100;
-        constexpr int kMaxWaitMs = 6000;
-        constexpr int kStableReads = 3;  // consecutive real-slot reads = settled
+        constexpr int kMaxWaitMs = 6000;  // budget; effective wait is up to one
+                                          // kPollMs longer (sleep runs before the
+                                          // guard rejects waited == kMaxWaitMs)
+        constexpr int kStableReads = 3;   // consecutive real-slot reads = settled
         int stable = 0;
         for (int waited = 0; waited < kMaxWaitMs; waited += kPollMs) {
             std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
