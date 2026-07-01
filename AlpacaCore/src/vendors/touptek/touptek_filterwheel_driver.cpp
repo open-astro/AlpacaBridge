@@ -230,14 +230,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         // Expand a single-token shorthand ("LRGB" -> L,R,G,B) BEFORE validating
         // the count, so the shorthand works when connected too — not only on the
-        // pre-connect config path (where slot_count_ is still 0). Pre-connect the
-        // expansion is a no-op and normalize_slot_data_locked expands it at
-        // connect once the slot count is known.
-        filter_names_ = names;
-        expand_shorthand_locked();
+        // pre-connect config path (where slot_count_ is still 0). Stage on a local
+        // copy and only commit on success, so a validation throw leaves the
+        // existing filter_names_ untouched (not a half-applied array).
+        std::vector<std::string> staged = names;
+        expand_shorthand_locked(staged);
         if (slot_count_ > 0) {
-            validate_slot_count_locked(static_cast<int>(filter_names_.size()), "names");
+            validate_slot_count_locked(static_cast<int>(staged.size()), "names");
         }
+        filter_names_ = std::move(staged);
         apply_default_names_locked();
     }
 
@@ -306,7 +307,7 @@ private:
             return;
         }
         const std::size_t slots = static_cast<std::size_t>(slot_count_);
-        expand_shorthand_locked();
+        expand_shorthand_locked(filter_names_);
         if (filter_names_.empty()) {
             filter_names_.assign(slots, std::string());
         } else if (filter_names_.size() != slots) {
@@ -330,12 +331,12 @@ private:
     // ("LRGB" -> L,R,G,B) only when it looks like a shorthand code (no lowercase
     // letters), so ordinary names like "Clear" or "Ha_NB" that happen to match
     // the slot count are left intact. No-op until the slot count is known.
-    void expand_shorthand_locked() {
-        if (slot_count_ <= 0 || filter_names_.size() != 1) {
+    void expand_shorthand_locked(std::vector<std::string>& names) const {
+        if (slot_count_ <= 0 || names.size() != 1) {
             return;
         }
         const std::size_t slots = static_cast<std::size_t>(slot_count_);
-        const std::string& candidate = filter_names_[0];
+        const std::string& candidate = names[0];
         const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
         if (candidate.size() == slots && !has_lowercase && candidate.find_first_of(",; \t") == std::string::npos) {
             std::vector<std::string> expanded;
@@ -343,7 +344,7 @@ private:
             for (char ch : candidate) {
                 expanded.emplace_back(1, ch);
             }
-            filter_names_ = std::move(expanded);
+            names = std::move(expanded);
         }
     }
 

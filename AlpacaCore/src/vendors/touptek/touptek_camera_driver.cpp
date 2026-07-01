@@ -623,7 +623,6 @@ public:
         // Then require a connection, so a Normal-only camera still throws
         // NotConnected here rather than silently succeeding on the early-return.
         ensure_connected();
-        ensure_not_exposing();  // CG/HFW writes must not race a live integration
         const auto& s = specs[static_cast<std::size_t>(mode)];
         if (!s.set_cg && !s.set_hfw) {
             return;  // Single "Normal" mode: nothing to apply.
@@ -632,6 +631,11 @@ public:
         const HToupcam handle = handle_copy();  // NotConnected while disconnected
         // Apply both axes atomically w.r.t. get_readout_mode's paired reads.
         std::lock_guard<std::mutex> lock(readout_mutex_);
+        // Check exposure state UNDER readout_mutex_ (not before it): start_exposure
+        // sets exposure_active_ under the same lock, so this closes the TOCTOU where
+        // an exposure could begin between the check and the CG/HFW writes and get a
+        // mode change mid-integration.
+        ensure_not_exposing();
         if (s.set_cg) {
             sdk.put_cg(handle, s.cg);
         }
@@ -844,7 +848,13 @@ public:
             exposure_deadline_valid_ = true;
         }
 
-        exposure_active_.store(true);
+        {
+            // Publish exposure_active_ under readout_mutex_ so set_readout_mode's
+            // exposure check (also under readout_mutex_) can't race the start of an
+            // integration and write CG/HFW mid-frame (TOCTOU close).
+            std::lock_guard<std::mutex> rlock(readout_mutex_);
+            exposure_active_.store(true);
+        }
 
         exposure_thread_ = std::thread([this, handle, exposure_us, active_bin, active_num_x, active_num_y, roi_x, roi_y,
                                         roi_w, roi_h, dirty_format, dirty_roi]() {
