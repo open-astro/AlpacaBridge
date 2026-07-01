@@ -871,8 +871,15 @@ public:
         }
 
         auto& sdk = ToupTekSDKWrapper::instance();
+        // Snapshot the handle for the exposure thread below (line ~1011). The
+        // thread's use is safe because stop_exposure_thread() joins it before any
+        // set_connected(false) can Toupcam_Close the handle. The range read here,
+        // however, runs synchronously on THIS thread with no such join, so a
+        // concurrent disconnect could close the handle between handle_copy()
+        // releasing mutex_ and the SDK call — read it under with_handle() instead,
+        // which holds mutex_ across Toupcam_get_ExpTimeRange (see with_handle()).
         HToupcam handle = handle_copy();
-        auto range = sdk.get_exposure_range(handle);
+        auto range = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
 
         long exposure_us_long = static_cast<long>(std::lround(duration * 1'000'000.0));
         if (exposure_us_long < static_cast<long>(range.min_us)) exposure_us_long = range.min_us;
