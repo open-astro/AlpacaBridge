@@ -140,9 +140,16 @@ public:
             }
             connecting_homing_ = true;
             pending_disconnect_ = false;  // fresh attempt; ignore any stale request
-            ToupFilterWheelInfo info = resolve_wheel_locked(sdk);
-            HToupcam handle = sdk.open_filter_wheel_by_id(info.id);
+            // Everything after the flag is set — INCLUDING enumeration and the SDK
+            // open, which throw on a missing/unplugged wheel — must run inside the
+            // try, so the catch always clears connecting_homing_. If it stayed set
+            // after a failed connect, the guard above would silently no-op every
+            // retry: a permanent reconnect lockout until the driver is destroyed.
+            ToupFilterWheelInfo info;
+            HToupcam handle = nullptr;
             try {
+                info = resolve_wheel_locked(sdk);
+                handle = sdk.open_filter_wheel_by_id(info.id);
                 int slots = sdk.get_filter_wheel_slot_count(handle);
                 if (slots <= 0) {
                     throw AlpacaException("Filter wheel reported invalid slot count", AlpacaError::DriverException);
@@ -192,7 +199,9 @@ public:
                 slot_count_ = slots;
                 normalize_slot_data_locked();
             } catch (...) {
-                sdk.close_filter_wheel(handle);
+                if (handle) {  // null if resolve/open itself threw — nothing to close
+                    sdk.close_filter_wheel(handle);
+                }
                 // Restore a clean disconnected state — handle_/info_/slot_count_
                 // may have been published before the throw. Re-take the lock if a
                 // throw from the mutex-released wait_for_home window landed here.

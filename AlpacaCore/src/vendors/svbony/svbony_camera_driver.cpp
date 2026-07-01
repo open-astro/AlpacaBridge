@@ -183,11 +183,21 @@ public:
     }
 
     void set_connected(bool connected) override {
+        if (!connected) {
+            // Join the exposure thread BEFORE taking mutex_ and closing the camera,
+            // so the disconnect never tears down the SDK session under a live
+            // exposure loop (deterministic shutdown on both the sync path and the
+            // async connection task, which calls set_connected directly). Must be
+            // outside mutex_: the thread takes mutex_ to publish its results, so
+            // joining under the lock would deadlock. No-op when nothing is running.
+            stop_exposure_thread();
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         if (connected == connected_.load()) {
-            if (connected) {
-                reset_exposure_state_locked();
-            }
+            // Idempotent (ASCOM): a redundant Connect/Disconnect is a no-op and must
+            // NOT reset exposure state. The Platform-7 `connect` endpoint calls
+            // connect() unconditionally, so wiping here would abort an in-flight
+            // exposure or discard a just-completed image. Matches the QHY driver.
             return;
         }
 

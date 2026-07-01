@@ -144,17 +144,28 @@ public:
     bool get_connecting() const override { return connecting_.load(); }
 
     void set_connected(bool connected) override {
+        if (!connected) {
+            // Join the exposure thread BEFORE taking mutex_ and closing the handle:
+            // the thread runs Toupcam_WaitImageV4 on a raw handle snapshot, so
+            // closing under it is a use-after-close (same reason the async path in
+            // start_connection_task stops it first). It must happen out here —
+            // stop_exposure_thread() takes mutex_ itself and joins, so calling it
+            // with mutex_ held would self-deadlock. No-op when nothing is running
+            // (joinable() check), so the async path's earlier stop stays harmless.
+            stop_exposure_thread();
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         if (connected == connected_.load()) {
-            if (connected) {
-                // reset_exposure_state_locked() clears exposure_active_, so take
-                // readout_mutex_ (after mutex_, preserving lock order) to uphold the
-                // invariant that the flag only changes under readout_mutex_ — a
-                // concurrent set_gain/set_readout_mode must not pass ensure_not_exposing
-                // and write registers mid-frame during a redundant reconnect.
-                std::lock_guard<std::mutex> rlock(readout_mutex_);
-                reset_exposure_state_locked();
-            }
+            // Connect/disconnect are idempotent (ASCOM): a redundant call while
+            // already in the requested state is a no-op. A redundant Connect must
+            // NOT reset exposure state — the Platform-7 `connect` endpoint calls
+            // connect() unconditionally (no !get_connected() guard, unlike the
+            // legacy Connected=true PUT), so wiping here would abort an in-flight
+            // exposure (CameraState flips to Idle mid-frame, and a concurrent
+            // set_gain/set_readout_mode could then pass ensure_not_exposing and
+            // write registers into the live frame) or discard a just-completed image
+            // (ImageReady/last_exposure_valid_ cleared, frame unretrievable). Matches
+            // the QHY driver, which already returns here without resetting.
             return;
         }
 

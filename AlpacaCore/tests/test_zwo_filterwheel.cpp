@@ -63,6 +63,9 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Disconnected Behavior", "[zwo][filterwh
 
     require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_position(0); }, alpacacore::AlpacaError::NotConnected);
+    // Range validation precedes the connection check (ASCOM precedence): a negative
+    // position is InvalidValue even while disconnected (matches the ToupTek AFW).
+    require_alpaca_error([&]() { driver->set_position(-1); }, alpacacore::AlpacaError::InvalidValue);
     REQUIRE(driver->get_focus_offsets().empty());
     REQUIRE(driver->get_names().empty());
     REQUIRE_NOTHROW(driver->set_focus_offsets({0}));

@@ -170,9 +170,10 @@ public:
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (connected == connected_.load()) {
-            if (connected) {
-                reset_exposure_state_locked();
-            }
+            // Idempotent (ASCOM): a redundant Connect/Disconnect is a no-op and must
+            // NOT reset exposure state. The Platform-7 `connect` endpoint calls
+            // connect() unconditionally, so wiping here would abort an in-flight
+            // exposure or discard a just-completed image. Matches the QHY driver.
             return;
         }
 

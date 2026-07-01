@@ -153,6 +153,13 @@ public:
     }
 
     void set_position(int position) override {
+        // Range validation precedes the connection check (ASCOM precedence, per
+        // AGENTS.md): a negative position is unconditionally invalid, so it is
+        // InvalidValue even while disconnected. The upper bound depends on the
+        // slot count (unknown until connect), so it is checked below under the lock.
+        if (position < 0) {
+            throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
+        }
         ensure_connected();
         // Hold mutex_ across validation and the SDK move for the same
         // use-after-close reason as get_position.
@@ -165,7 +172,7 @@ public:
         if (!wheel_info_valid_ || wheel_info_.position_count <= 0) {
             throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
         }
-        if (position < 0 || position >= wheel_info_.position_count) {
+        if (position >= wheel_info_.position_count) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
         PlayerOnePWSDKWrapper::instance().goto_position(handle_, position);
