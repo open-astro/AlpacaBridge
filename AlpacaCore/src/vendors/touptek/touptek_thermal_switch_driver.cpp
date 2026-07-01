@@ -104,6 +104,23 @@ public:
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected && !connected_.load() && connecting_.load() && inflight_is_connect_.load()) {
+            // Disconnect requested while an async connect is in flight but before
+            // its thread has run (connected_ still false) — the idempotency
+            // early-return below would silently drop it and the device would come
+            // up Connected despite the explicit request. Record the intent; the
+            // in-flight connect consumes it at entry or the connection task's
+            // post-connect re-check disconnects. Same pattern as the AFW driver.
+            pending_disconnect_ = true;
+            return;
+        }
+        if (connected && pending_disconnect_) {
+            // A disconnect arrived after this connect was requested (in the window
+            // before this thread acquired mutex_). It is newer — honor it: consume
+            // the flag and stay disconnected instead of opening the camera.
+            pending_disconnect_ = false;
+            return;
+        }
         if (connected == connected_.load()) {
             return;
         }
@@ -485,15 +502,43 @@ private:
             return;  // Destruction in progress; never spawn a new thread.
         }
         if (connecting_.load()) {
+            // An async disconnect racing an in-flight CONNECT must not be dropped
+            // (the device would come up Connected despite the explicit request).
+            // Record the intent; the connect consumes it at entry or the re-check
+            // below runs the disconnect. A disconnect racing an in-flight
+            // DISCONNECT needs nothing (idempotent). Same pattern as the AFW.
+            if (!connect && inflight_is_connect_.load()) {
+                std::lock_guard<std::mutex> state_lock(mutex_);
+                pending_disconnect_ = true;
+            }
             return;
         }
         if (connection_thread_.joinable()) {
             connection_thread_.join();
         }
+        inflight_is_connect_.store(connect);
         connecting_.store(true);
         connection_thread_ = std::thread([this, connect]() {
             try {
                 set_connected(connect);
+                if (connect) {
+                    // Consume a disconnect that landed while this connect held
+                    // mutex_ (the recorder blocks on the lock, so the flag can be
+                    // set right after the connect publishes). The few instructions
+                    // before connecting_ = false remain exposed; a leaked flag
+                    // there self-heals at the next connect's entry check.
+                    bool need_disconnect = false;
+                    {
+                        std::lock_guard<std::mutex> state_lock(mutex_);
+                        if (pending_disconnect_) {
+                            pending_disconnect_ = false;
+                            need_disconnect = connected_.load();
+                        }
+                    }
+                    if (need_disconnect) {
+                        set_connected(false);
+                    }
+                }
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR(kLogTag, "Thermal switch connection failed: " + std::string(e.what()));
             }
@@ -518,6 +563,16 @@ private:
     int probed_element_count_ = 0;  // guarded by mutex_; cached MaxSwitch after first probe
     std::atomic<bool> connected_;
     std::atomic<bool> connecting_;
+    // Direction of the task connecting_ refers to (true = connect). Written under
+    // connection_mutex_ before connecting_ goes true; atomic so the sync
+    // set_connected gate (which holds mutex_, never connection_mutex_) can read
+    // it. Only meaningful while connecting_ is true.
+    std::atomic<bool> inflight_is_connect_{false};
+    // Set when a disconnect arrives while a connect is in flight (before its
+    // thread runs, connected_ still false — the idempotency early-return would
+    // otherwise drop it). Consumed at the connect's entry (stays disconnected)
+    // or by the connection task's post-connect re-check. Guarded by mutex_.
+    bool pending_disconnect_ = false;
     bool shutting_down_ = false;  // guarded by connection_mutex_
     mutable std::mutex mutex_;
     std::mutex connection_mutex_;
