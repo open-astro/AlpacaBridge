@@ -143,14 +143,30 @@ public:
                 // set_connected races this window, and handle_/info_ are still
                 // unpublished so other readers see "not connected" and fast-fail.
                 lock.unlock();
-                wait_for_home(sdk, handle);
+                const bool settled = wait_for_home(sdk, handle);
                 lock.lock();
+                if (!settled) {
+                    // Neither a moving->settled nor a stable-slot signal in 6 s:
+                    // the wheel is obstructed or the firmware is stuck. Fail the
+                    // connect rather than report Connected on a wheel whose slot
+                    // reference is unknown (every move would then land wrong).
+                    throw AlpacaException("Filter wheel did not settle after homing", AlpacaError::DriverException);
+                }
                 handle_ = handle;
                 info_ = info;
                 slot_count_ = slots;
                 normalize_slot_data_locked();
             } catch (...) {
                 sdk.close_filter_wheel(handle);
+                // Restore a clean disconnected state — handle_/info_/slot_count_
+                // may have been published before the throw. Re-take the lock if a
+                // throw from the mutex-released wait_for_home window landed here.
+                if (!lock.owns_lock()) {
+                    lock.lock();
+                }
+                handle_ = nullptr;
+                info_ = {};
+                slot_count_ = 0;
                 throw;
             }
             connected_.store(true);
@@ -161,6 +177,11 @@ public:
             sdk.close_filter_wheel(handle_);
             handle_ = nullptr;
         }
+        // Reset the slot count so a post-disconnect set_names/set_focus_offsets
+        // isn't validated against a stale count (e.g. after swapping a 5-slot wheel
+        // for a 7-slot before reconnecting). A fresh instance starts at 0 too.
+        slot_count_ = 0;
+        info_ = {};
         connected_.store(false);
     }
 
@@ -348,15 +369,16 @@ private:
     // Block until the wheel firmware finishes its home cycle (SDK reports -1
     // while moving, a non-negative slot once settled), or a timeout elapses.
     // Sleeps first so the move has actually begun before the first read.
-    static void wait_for_home(ToupTekSDKWrapper& sdk, HToupcam handle) {
+    // Returns true once the wheel has provably homed, false on timeout (the caller
+    // fails the connect). Settles on either signal: (a) we observed the -1 "moving"
+    // state and it then returned to a real slot (the normal ~1.5 s home), or (b) the
+    // position held a non-negative slot across several polls (covers hardware that
+    // homes in under one poll interval, where -1 is never observed — avoids waiting
+    // out the full timeout for fast homers).
+    static bool wait_for_home(ToupTekSDKWrapper& sdk, HToupcam handle) {
         constexpr int kPollMs = 100;
         constexpr int kMaxWaitMs = 6000;
         constexpr int kStableReads = 3;  // consecutive real-slot reads = settled
-        // Settle on either signal: (a) we observed the -1 "moving" state and it
-        // then returned to a real slot (the normal ~1.5 s home), or (b) the
-        // position held a non-negative slot across several polls (covers hardware
-        // that homes in under one poll interval, where -1 is never observed — the
-        // stable-read path avoids waiting out the full timeout for fast homers).
         bool saw_moving = false;
         int stable = 0;
         for (int waited = 0; waited < kMaxWaitMs; waited += kPollMs) {
@@ -366,12 +388,10 @@ private:
                 saw_moving = true;  // firmware reports -1 while the home move runs
                 stable = 0;
             } else if (saw_moving || ++stable >= kStableReads) {
-                return;  // settled
+                return true;  // settled
             }
         }
-        // Ambiguous (never saw a clear moving->settled or stable signal). The wheel
-        // has most likely already homed; proceed without a misleading warning.
-        ALPACA_LOG_DEBUG(kLogTag, "Filter wheel home poll ended without a clear settle signal; proceeding");
+        return false;  // never settled within the timeout
     }
 
     void expand_shorthand_locked(std::vector<std::string>& names) const {

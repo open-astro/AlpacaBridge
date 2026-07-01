@@ -652,7 +652,14 @@ public:
         ensure_connected();
         const auto& s = specs[static_cast<std::size_t>(mode)];
         if (!s.set_cg && !s.set_hfw) {
-            return;  // Single "Normal" mode: nothing to apply.
+            // Single "Normal" mode: no SDK write, but still reject a mid-exposure
+            // ReadoutMode change per the ASCOM contract. Take readout_mutex_ alone
+            // (no handle_copy, so no mutex_ -> readout_mutex_ ordering concern) so
+            // the check is consistent with the write path below.
+            std::lock_guard<std::mutex> lock(readout_mutex_);
+            ensure_connected();
+            ensure_not_exposing();
+            return;
         }
         auto& sdk = ToupTekSDKWrapper::instance();
         const HToupcam handle = handle_copy();  // NotConnected while disconnected
