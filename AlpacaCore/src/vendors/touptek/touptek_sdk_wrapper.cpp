@@ -127,6 +127,10 @@ public:
             shared_by_id_.erase(hit->second);
             id_by_handle_.erase(hit);
         }
+        // Intentional fallthrough: handles opened by index (open_camera_by_index)
+        // are not tracked in id_by_handle_, so the lookup above misses and they
+        // close immediately here — the legacy non-ref-counted path. A tracked
+        // handle only reaches this Close when its ref count hit zero above.
         if (handle) {
             Toupcam_Close(handle);
         }

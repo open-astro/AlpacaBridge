@@ -967,7 +967,13 @@ public:
         image_ready_ = false;
         image_cached_ = false;
         exposure_deadline_valid_ = false;
+        // Stream was stopped; force the next exposure to re-init it. Mark the ROI
+        // dirty too as a defensive safety net: the SDK preserves ROI across a
+        // StartPullMode restart today, but re-applying it costs one put_roi and
+        // avoids silently capturing full-frame data into a sub-frame buffer if a
+        // future SDK version resets ROI on restart.
         format_dirty_ = true;
+        roi_dirty_ = true;
     }
 
 private:
@@ -1156,7 +1162,10 @@ private:
         }
         exposure_thread_.join();
         std::lock_guard<std::mutex> lock(mutex_);
+        // Stream was stopped; re-init format + ROI on the next exposure (ROI is a
+        // defensive safety net — see stop_exposure).
         format_dirty_ = true;
+        roi_dirty_ = true;
     }
 
     void preload_camera_info() {
