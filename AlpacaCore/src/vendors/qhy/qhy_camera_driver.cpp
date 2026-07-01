@@ -1000,6 +1000,13 @@ public:
                                   AlpacaError::InvalidValue);
         }
 
+        // Held through the thread spawn at the end: serialises the spawn against
+        // the join in stop_exposure (join racing the thread-assignment is UB on
+        // std::thread — a concurrent StartExposure/AbortExposure pair could hit
+        // join_exposure_thread() and `exposure_thread_ = ...` on the same object).
+        // Lock order: exposure_lifecycle_mutex_ -> mutex_ (all locks below nest).
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
+
         const std::string& id = camera_id_value();
         auto& sdk = QHYSDKWrapper::instance();
 
@@ -1115,6 +1122,9 @@ public:
                 return;
             }
         }
+        // Serialise this join against start_exposure's spawn (join vs
+        // thread-assignment on the same std::thread is UB).
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         // Cancel exposure (causes GetSingleFrame to return with an error)
         try {
             QHYSDKWrapper::instance().cancel_exposure(camera_id_value());
@@ -1171,6 +1181,12 @@ private:
     std::chrono::system_clock::time_point last_exposure_start_;
     bool last_exposure_valid_;
     std::thread exposure_thread_;
+    // Serialises the exposure thread's lifecycle: spawn (start_exposure) vs join
+    // (stop_exposure). Join racing the spawn's thread-assignment is UB on
+    // std::thread. The destructor's join is exempt (runs after the connection
+    // thread is joined; no client calls in flight). Lock order:
+    // exposure_lifecycle_mutex_ -> mutex_; the exposure thread never takes it.
+    std::mutex exposure_lifecycle_mutex_;
 
     // Temperature control
     std::thread temp_thread_;

@@ -171,13 +171,19 @@ public:
     bool get_connecting() const override { return connecting_.load(); }
 
     void set_connected(bool connected) override {
+        std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
         if (!connected) {
             // Join the exposure thread BEFORE taking mutex_ and closing the camera,
             // so the disconnect never tears down the SDK session under a live
             // exposure loop (deterministic shutdown on both the sync path and the
             // async connection task, which calls set_connected directly). Must be
             // outside mutex_: the thread takes mutex_ to publish its results, so
-            // joining under the lock would deadlock. No-op when nothing is running.
+            // joining under the lock would deadlock. Hold exposure_lifecycle_mutex_
+            // from before the join through the close, so a concurrent start_exposure
+            // can neither spawn a fresh thread in the join→close gap nor race this
+            // join with its thread-assignment (join vs operator= on the same
+            // std::thread is UB). Lock order: exposure_lifecycle_mutex_ -> mutex_.
+            lifecycle_lock.lock();
             stop_exposure_thread();
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -794,6 +800,13 @@ public:
                                   AlpacaError::InvalidValue);
         }
 
+        // Held through the thread spawn at the end: serialises the spawn against
+        // the joins in stop_exposure and the disconnect's join→close (a spawn
+        // slipping into that gap would run the exposure loop against a closed
+        // camera; and join racing the thread-assignment is UB on std::thread).
+        // Lock order: exposure_lifecycle_mutex_ -> mutex_ (all locks below nest).
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
+
         long exposure_us_long = static_cast<long>(std::lround(duration * 1'000'000.0));
         int id = 0;
         int active_bin = 0;
@@ -990,6 +1003,9 @@ public:
 
     void stop_exposure() override {
         ensure_connected();
+        // Serialise this join against start_exposure's spawn and the disconnect's
+        // join+close (join vs thread-assignment on the same std::thread is UB).
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         exposure_active_.store(false);
         if (exposure_thread_.joinable()) exposure_thread_.join();
         try {
@@ -1032,6 +1048,13 @@ private:
 
     mutable std::atomic<bool> exposure_active_{false};
     std::thread exposure_thread_;
+    // Serialises the exposure thread's lifecycle: spawn (start_exposure) vs join
+    // (stop_exposure, set_connected(false)'s pre-close stop). Join racing the
+    // spawn's thread-assignment is UB on std::thread, and a spawn between the
+    // disconnect's join and the SDK close would run the exposure loop against a
+    // closed camera. Lock order: exposure_lifecycle_mutex_ -> mutex_. The
+    // exposure thread itself never takes it, so joins under it can't deadlock.
+    std::mutex exposure_lifecycle_mutex_;
     mutable std::chrono::steady_clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 

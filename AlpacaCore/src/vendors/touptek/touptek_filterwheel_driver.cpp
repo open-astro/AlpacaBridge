@@ -111,14 +111,15 @@ public:
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (!connected && connecting_homing_) {
-            // Disconnect requested mid-connect: the in-flight set_connected(true)
-            // has released mutex_ for the homing poll, and connected_ is still
-            // false, so the "connected == connected_" early-return below would
-            // silently drop this and the wheel would come up Connected. Record the
-            // intent; the connect honors it after homing (see below) rather than
-            // publishing. Serialised by connection_mutex_, so at most one connect
-            // is in flight to observe this flag.
+        if (!connected && (connecting_homing_ || (connecting_.load() && inflight_is_connect_.load()))) {
+            // Disconnect requested while a connect is in flight — either mid-homing
+            // (connecting_homing_, mutex_ released for the poll) or in the async
+            // startup window (connection thread spawned but not yet holding mutex_,
+            // so connecting_homing_ is still false). In both, connected_ is still
+            // false and the "connected == connected_" early-return below would
+            // silently drop this: the wheel would come up Connected despite an
+            // explicit disconnect. Record the intent; the in-flight connect consumes
+            // it at entry (startup window) or after homing and stays disconnected.
             pending_disconnect_ = true;
             return;
         }
@@ -138,8 +139,16 @@ public:
                 // guards the async path — set_connected is a public sync entry too.)
                 return;
             }
+            if (pending_disconnect_) {
+                // A disconnect arrived AFTER this connect was requested but before
+                // this thread acquired mutex_ (the spawner sets connecting_ first;
+                // acquiring mutex_ can additionally wait behind property getters).
+                // The disconnect is newer, so it supersedes this connect: consume
+                // the flag and stay disconnected instead of opening the wheel.
+                pending_disconnect_ = false;
+                return;
+            }
             connecting_homing_ = true;
-            pending_disconnect_ = false;  // fresh attempt; ignore any stale request
             // Everything after the flag is set — INCLUDING enumeration and the SDK
             // open, which throw on a missing/unplugged wheel — must run inside the
             // try, so the catch always clears connecting_homing_. If it stayed set
@@ -346,29 +355,50 @@ private:
         if (connecting_.load()) {
             // A connect/disconnect is already in flight. An async disconnect (the
             // router dispatches both the legacy Connected=false PUT and the Alpaca v2
-            // disconnect endpoint through here) that lands while the connect thread is
-            // homing with mutex_ released must NOT be dropped, or the wheel comes up
-            // Connected despite the explicit request. Record the intent the same way
-            // the sync set_connected(false) path does; the in-flight connect re-checks
-            // pending_disconnect_ after homing and aborts. Gate on connecting_homing_
-            // (the flag the connect actually re-checks), not connecting_. Lock order
-            // connection_mutex_ -> mutex_ — set_connected takes mutex_ alone and never
-            // connection_mutex_, so this never inverts.
-            if (!connect) {
+            // disconnect endpoint through here) racing an in-flight CONNECT must NOT
+            // be dropped, or the wheel comes up Connected despite the explicit
+            // request. Record the intent whenever the in-flight task is a connect —
+            // covering the startup window (thread spawned, mutex_ not yet held, so
+            // connecting_homing_ still false; widened in practice by property getters
+            // contending on mutex_) as well as the homing poll. The connect consumes
+            // the flag at entry, after homing, or in the post-connect re-check below.
+            // A disconnect racing an in-flight DISCONNECT needs nothing (idempotent).
+            // Lock order connection_mutex_ -> mutex_ — set_connected takes mutex_
+            // alone and never connection_mutex_, so this never inverts.
+            if (!connect && inflight_is_connect_.load()) {
                 std::lock_guard<std::mutex> state_lock(mutex_);
-                if (connecting_homing_) {
-                    pending_disconnect_ = true;
-                }
+                pending_disconnect_ = true;
             }
             return;
         }
         if (connection_thread_.joinable()) {
             connection_thread_.join();
         }
+        inflight_is_connect_.store(connect);
         connecting_.store(true);
         connection_thread_ = std::thread([this, connect]() {
             try {
                 set_connected(connect);
+                if (connect) {
+                    // Consume a disconnect that landed after the post-homing check
+                    // (or after an entry-consumed abort) but before this task
+                    // finished — without this, a disconnect arriving in that tail
+                    // would be recorded and never honored. The remaining exposure
+                    // is the few instructions between this check and
+                    // connecting_.store(false); a leaked flag there self-heals (the
+                    // next connect consumes it at entry and the client retries).
+                    bool need_disconnect = false;
+                    {
+                        std::lock_guard<std::mutex> state_lock(mutex_);
+                        if (pending_disconnect_) {
+                            pending_disconnect_ = false;
+                            need_disconnect = connected_.load();
+                        }
+                    }
+                    if (need_disconnect) {
+                        set_connected(false);
+                    }
+                }
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR(kLogTag, std::string("AFW connection failed: ") + e.what());
             }
@@ -515,19 +545,27 @@ private:
 
     std::atomic<bool> connected_{false};
     std::atomic<bool> connecting_{false};
+    // Direction of the task connecting_ refers to (true = connect). Written in
+    // start_connection_task under connection_mutex_ before connecting_ goes true;
+    // atomic so the sync set_connected(false) gate (which holds mutex_, never
+    // connection_mutex_ — lock order forbids it) can read it. Only meaningful
+    // while connecting_ is true; always checked conjunctively with it.
+    std::atomic<bool> inflight_is_connect_{false};
     // True while a set_connected(true) has opened the wheel and is homing with
     // mutex_ released. Guarded by mutex_. Blocks a racing SYNC set_connected(true)
     // (the public ASCOM Connected setter, which bypasses start_connection_task's
     // connecting_ guard) from opening the same wheel a second time — a double
     // ref-counted open would leak the handle when only one close fires.
     bool connecting_homing_ = false;
-    // Set when a set_connected(false) arrives while connecting_homing_ is true —
-    // i.e. during the mutex-released homing poll, when connected_ is still false
-    // so the plain "connected == connected_" early-return would silently drop the
-    // disconnect and the wheel would come up Connected despite an explicit request
-    // to disconnect. The in-flight connect re-checks this after homing and aborts
-    // (closes the freshly-opened handle, stays disconnected) instead of publishing.
-    // Guarded by mutex_.
+    // Set when a disconnect arrives while a connect is in flight — during the
+    // mutex-released homing poll (connecting_homing_) OR in the async startup
+    // window before the connect thread holds mutex_ (connecting_ +
+    // inflight_is_connect_). In both, connected_ is still false so the plain
+    // "connected == connected_" early-return would silently drop the disconnect
+    // and the wheel would come up Connected despite an explicit request. The
+    // in-flight connect consumes it at entry (superseded — stays disconnected),
+    // after homing (closes the freshly-opened handle), or in the connection
+    // task's post-connect re-check. Guarded by mutex_.
     bool pending_disconnect_ = false;
     bool shutting_down_ = false;  // guarded by connection_mutex_
     mutable std::mutex mutex_;

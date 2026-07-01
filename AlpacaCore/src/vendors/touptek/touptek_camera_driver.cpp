@@ -144,14 +144,18 @@ public:
     bool get_connecting() const override { return connecting_.load(); }
 
     void set_connected(bool connected) override {
+        std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
         if (!connected) {
             // Join the exposure thread BEFORE taking mutex_ and closing the handle:
             // the thread runs Toupcam_WaitImageV4 on a raw handle snapshot, so
-            // closing under it is a use-after-close (same reason the async path in
-            // start_connection_task stops it first). It must happen out here —
+            // closing under it is a use-after-close. It must happen out here —
             // stop_exposure_thread() takes mutex_ itself and joins, so calling it
-            // with mutex_ held would self-deadlock. No-op when nothing is running
-            // (joinable() check), so the async path's earlier stop stays harmless.
+            // with mutex_ held would self-deadlock. Hold exposure_lifecycle_mutex_
+            // from before the join through the close below, so a concurrent
+            // start_exposure cannot spawn a fresh thread in the join→close gap
+            // (it would block on this mutex, then fail NotConnected after we
+            // null the handle). Lock order: exposure_lifecycle_mutex_ -> mutex_.
+            lifecycle_lock.lock();
             stop_exposure_thread();
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -888,14 +892,23 @@ public:
             throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
         }
 
+        // Held for the whole function, through the thread spawn at the end: a
+        // disconnect holds this same mutex from its exposure-thread join through
+        // Toupcam_Close, so a spawn can never slip into that join→close gap and
+        // hand the new thread a handle that is about to be freed. If the
+        // disconnect wins the lock, handle_copy() below throws NotConnected.
+        // Also serialises spawn against the joins in stop_exposure — concurrent
+        // join vs thread-assignment on the same std::thread is UB.
+        // Lock order: exposure_lifecycle_mutex_ -> mutex_ (all locks below nest).
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
+
         auto& sdk = ToupTekSDKWrapper::instance();
         // Snapshot the handle for the exposure thread below (line ~1011). The
         // thread's use is safe because stop_exposure_thread() joins it before any
-        // set_connected(false) can Toupcam_Close the handle. The range read here,
-        // however, runs synchronously on THIS thread with no such join, so a
-        // concurrent disconnect could close the handle between handle_copy()
-        // releasing mutex_ and the SDK call — read it under with_handle() instead,
-        // which holds mutex_ across Toupcam_get_ExpTimeRange (see with_handle()).
+        // set_connected(false) can Toupcam_Close the handle (both under
+        // exposure_lifecycle_mutex_). The range read here, however, runs
+        // synchronously on THIS thread, so it still goes through with_handle(),
+        // which holds mutex_ across Toupcam_get_ExpTimeRange.
         HToupcam handle = handle_copy();
         auto range = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
 
@@ -1148,6 +1161,10 @@ public:
 
     void stop_exposure() override {
         ensure_connected();
+        // Serialise this stop+join against start_exposure's spawn (join racing the
+        // thread-assignment is UB on std::thread) and against the disconnect's
+        // join+close. Taken before mutex_, preserving lock order.
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         // Unblock a thread parked in Toupcam_WaitImageV4 so abort returns promptly
         // (a 10-min frame would otherwise take ~10 min to abort). Hold mutex_ across
         // stop() so a concurrent disconnect can't Toupcam_Close the handle in the gap
@@ -1195,6 +1212,15 @@ private:
     mutable std::mutex mutex_;
     std::mutex connection_mutex_;
     bool shutting_down_ = false;  // guarded by connection_mutex_
+    // Serialises the exposure thread's LIFECYCLE: spawn (start_exposure) vs
+    // join + handle close (set_connected(false)) vs join (stop_exposure). Without
+    // it, a start_exposure landing between the disconnect's join and its
+    // Toupcam_Close could spawn a fresh thread whose handle snapshot is then
+    // closed under it (use-after-close inside WaitImageV4) — and two joiners /
+    // a joiner racing the spawn's thread-assignment is UB on std::thread.
+    // Lock order: exposure_lifecycle_mutex_ -> mutex_ -> readout_mutex_ -> SDK.
+    // The exposure thread itself never takes it, so joins under it can't deadlock.
+    std::mutex exposure_lifecycle_mutex_;
     // Serialises the two-step CG+HFW apply in set_readout_mode against the
     // paired reads in get_readout_mode, so a reader never observes a
     // half-applied combination that isn't in the enumerated specs.
@@ -1370,17 +1396,11 @@ private:
         connecting_.store(true);
         connection_thread_ = std::thread([this, connect]() {
             try {
-                if (!connect) {
-                    // Match the destructor's ordering: stop AND JOIN the exposure
-                    // thread BEFORE set_connected(false) closes the SDK handle. The
-                    // exposure thread runs Toupcam_WaitImageV4 holding none of our
-                    // locks, and set_connected(false) closes the handle under
-                    // mutex_ — so closing without joining first is a use-after-close
-                    // if Stop unwinds the wait asynchronously. The join cannot live
-                    // inside set_connected (it already holds mutex_, which
-                    // stop_exposure_thread also takes → deadlock), so it goes here.
-                    stop_exposure_thread();
-                }
+                // set_connected(false) stops AND joins the exposure thread itself,
+                // under exposure_lifecycle_mutex_ held through the handle close —
+                // no pre-stop here. (An unguarded stop here would race a concurrent
+                // start_exposure's thread-assignment: join vs operator= on the same
+                // std::thread is UB.)
                 set_connected(connect);
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR("ToupTek", "Connection task failed: " + std::string(e.what()));
@@ -1394,6 +1414,10 @@ private:
         if (connection_thread_.joinable()) connection_thread_.join();
     }
 
+    // Callers must hold exposure_lifecycle_mutex_ (start_exposure, stop_exposure,
+    // set_connected(false)) — the join must not race a concurrent spawn's
+    // thread-assignment. Sole exception: the destructor, which runs after the
+    // connection thread is joined and no client calls can be in flight.
     void stop_exposure_thread() {
         if (!exposure_thread_.joinable()) return;
         // Unblock a thread parked in Toupcam_WaitImageV4 (the wrapper releases the
