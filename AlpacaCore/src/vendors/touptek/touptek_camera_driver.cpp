@@ -407,14 +407,15 @@ public:
     double get_ccd_temperature() const override {
         ensure_connected();
         auto& sdk = ToupTekSDKWrapper::instance();
-        int deci_c = sdk.get_temperature_deciC(handle_copy());
+        int deci_c = with_handle([&](HToupcam h) { return sdk.get_temperature_deciC(h); });
         return static_cast<double>(deci_c) / 10.0;
     }
 
     bool get_cooler_on() const override {
         ensure_connected();
         if (!get_can_get_cooler_power()) return false;
-        return ToupTekSDKWrapper::instance().get_tec_enable(handle_copy());
+        auto& sdk = ToupTekSDKWrapper::instance();
+        return with_handle([&](HToupcam h) { return sdk.get_tec_enable(h); });
     }
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
@@ -424,15 +425,21 @@ public:
             }
             return;
         }
-        ToupTekSDKWrapper::instance().put_tec_enable(handle_copy(), cooler_on);
+        auto& sdk = ToupTekSDKWrapper::instance();
+        with_handle([&](HToupcam h) { sdk.put_tec_enable(h, cooler_on); });
     }
     double get_cooler_power() const override {
         ensure_connected();
         if (!get_can_get_cooler_power()) return 0.0;
         auto& sdk = ToupTekSDKWrapper::instance();
         try {
-            int v = sdk.get_tec_voltage_deciV(handle_copy());
-            int vmax = sdk.get_tec_voltage_max_deciV(handle_copy());
+            // Both reads under one with_handle so they come from the same open.
+            int v = 0;
+            int vmax = 0;
+            with_handle([&](HToupcam h) {
+                v = sdk.get_tec_voltage_deciV(h);
+                vmax = sdk.get_tec_voltage_max_deciV(h);
+            });
             if (vmax <= 0) return 0.0;
             double pct = (static_cast<double>(v) / static_cast<double>(vmax)) * 100.0;
             if (pct < 0.0) pct = 0.0;
@@ -447,12 +454,14 @@ public:
 
     double get_exposure_max() const override {
         ensure_connected();
-        auto r = ToupTekSDKWrapper::instance().get_exposure_range(handle_copy());
+        auto& sdk = ToupTekSDKWrapper::instance();
+        auto r = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
         return static_cast<double>(r.max_us) / 1'000'000.0;
     }
     double get_exposure_min() const override {
         ensure_connected();
-        auto r = ToupTekSDKWrapper::instance().get_exposure_range(handle_copy());
+        auto& sdk = ToupTekSDKWrapper::instance();
+        auto r = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
         return static_cast<double>(r.min_us) / 1'000'000.0;
     }
     double get_exposure_resolution() const override { return 0.000001; }
@@ -472,7 +481,8 @@ public:
 
     int get_gain() const override {
         ensure_connected();
-        return static_cast<int>(ToupTekSDKWrapper::instance().get_gain(handle_copy()));
+        auto& sdk = ToupTekSDKWrapper::instance();
+        return static_cast<int>(with_handle([&](HToupcam h) { return sdk.get_gain(h); }));
     }
     void set_gain(int gain) override {
         ensure_connected();
@@ -498,11 +508,13 @@ public:
     }
     int get_gain_max() const override {
         ensure_connected();
-        return static_cast<int>(ToupTekSDKWrapper::instance().get_gain_range(handle_copy()).max);
+        auto& sdk = ToupTekSDKWrapper::instance();
+        return static_cast<int>(with_handle([&](HToupcam h) { return sdk.get_gain_range(h).max; }));
     }
     int get_gain_min() const override {
         ensure_connected();
-        return static_cast<int>(ToupTekSDKWrapper::instance().get_gain_range(handle_copy()).min);
+        auto& sdk = ToupTekSDKWrapper::instance();
+        return static_cast<int>(with_handle([&](HToupcam h) { return sdk.get_gain_range(h).min; }));
     }
     std::vector<std::string> get_gains() const override {
         throw AlpacaException("Gain descriptions not supported", AlpacaError::PropertyNotImplemented);
@@ -532,7 +544,8 @@ public:
         if (!connected_.load()) return false;
         if (!pulse_guiding_.load()) return false;
         try {
-            bool guiding = ToupTekSDKWrapper::instance().is_guiding(handle_copy());
+            auto& sdk = ToupTekSDKWrapper::instance();
+            bool guiding = with_handle([&](HToupcam h) { return sdk.is_guiding(h); });
             if (!guiding) pulse_guiding_.store(false);
             return guiding;
         } catch (const std::exception&) {
@@ -586,7 +599,8 @@ public:
     int get_offset() const override {
         ensure_connected();
         ensure_blacklevel_supported();
-        return ToupTekSDKWrapper::instance().get_blacklevel(handle_copy());
+        auto& sdk = ToupTekSDKWrapper::instance();
+        return with_handle([&](HToupcam h) { return sdk.get_blacklevel(h); });
     }
     void set_offset(int offset) override {
         ensure_connected();
@@ -720,20 +734,24 @@ public:
             return;
         }
         auto& sdk = ToupTekSDKWrapper::instance();
-        const HToupcam handle = handle_copy();  // NotConnected while disconnected
-        // Apply both axes atomically w.r.t. get_readout_mode's paired reads.
-        std::lock_guard<std::mutex> lock(readout_mutex_);
-        ensure_connected();  // stale-handle guard — see set_gain
-        // Check exposure state UNDER readout_mutex_ (not before it): start_exposure
-        // sets exposure_active_ under the same lock, so this closes the TOCTOU where
-        // an exposure could begin between the check and the CG/HFW writes and get a
-        // mode change mid-integration.
+        // Hold mutex_ + readout_mutex_ together and read handle_ directly (same fix
+        // as set_gain/set_offset) — the old handle_copy() snapshot released mutex_
+        // before the write, so a disconnect+reconnect in the gap left the captured
+        // handle closed while ensure_connected() still passed. readout_mutex_ keeps
+        // the two-axis apply atomic w.r.t. get_readout_mode's paired reads, and the
+        // exposure check under it closes the TOCTOU where an exposure could begin
+        // between the check and the CG/HFW writes. Lock order mutex_ -> readout_mutex_.
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> rlock(readout_mutex_);
+        if (!handle_) {
+            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        }
         ensure_not_exposing();
         if (s.set_cg) {
-            sdk.put_cg(handle, s.cg);
+            sdk.put_cg(handle_, s.cg);
         }
         if (s.set_hfw) {
-            sdk.put_high_fullwell(handle, s.hfw);
+            sdk.put_high_fullwell(handle_, s.hfw);
         }
     }
     std::vector<std::string> get_readout_modes() const override {
@@ -763,13 +781,15 @@ public:
 
     double get_set_ccd_temperature() const override {
         ensure_connected();
-        int t = ToupTekSDKWrapper::instance().get_tec_target_deciC(handle_copy());
+        auto& sdk = ToupTekSDKWrapper::instance();
+        int t = with_handle([&](HToupcam h) { return sdk.get_tec_target_deciC(h); });
         return static_cast<double>(t) / 10.0;
     }
     void set_set_ccd_temperature(double temperature) override {
         ensure_connected();
         int deci = static_cast<int>(std::lround(temperature * 10.0));
-        ToupTekSDKWrapper::instance().put_tec_target_deciC(handle_copy(), deci);
+        auto& sdk = ToupTekSDKWrapper::instance();
+        with_handle([&](HToupcam h) { sdk.put_tec_target_deciC(h, deci); });
     }
 
     int get_start_x() const override {
@@ -810,8 +830,8 @@ public:
         case 2: dir = ToupGuideDirection::East;  break;
         case 3: dir = ToupGuideDirection::West;  break;
         }
-        ToupTekSDKWrapper::instance().pulse_guide(handle_copy(), dir,
-                                                   static_cast<unsigned>(duration));
+        auto& sdk = ToupTekSDKWrapper::instance();
+        with_handle([&](HToupcam h) { sdk.pulse_guide(h, dir, static_cast<unsigned>(duration)); });
         // Cancel + join any prior timer (fast — the cancel wakes it), then start a
         // fresh joinable one. On cancel the old timer leaves pulse_guiding_ alone so
         // there's no flicker when one pulse immediately supersedes another.
@@ -1206,6 +1226,27 @@ private:
         return handle_;
     }
 
+    // Runs fn(handle_) with mutex_ HELD across the SDK call. set_connected(false)
+    // closes the handle under mutex_, so holding it here means a concurrent
+    // disconnect cannot Toupcam_Close the handle mid-call — closing the
+    // use-after-close window that the bare handle_copy() snapshot idiom left open
+    // (it released mutex_ before the SDK call). Use this for every fast SDK option
+    // read/write. Do NOT use it for blocking SDK calls (Toupcam_WaitImageV4) or
+    // the exposure thread, which must not hold mutex_. Callers that also need
+    // readout_mutex_ (set_gain/set_offset/get/set_readout_mode) take both locks
+    // directly instead, to stay atomic against the two-step readout-mode apply.
+    // Trailing return type (not bare `auto`) so the type is known at the call
+    // sites above this definition — a deduced `auto` return can't be used before
+    // the function's definition is seen.
+    template <typename Fn>
+    auto with_handle(Fn&& fn) const -> decltype(fn(handle_)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!handle_) {
+            throw AlpacaException("Camera handle is null", AlpacaError::NotConnected);
+        }
+        return fn(handle_);
+    }
+
     // Reject runtime sensor-register writes (readout mode / gain / offset) while
     // a frame is integrating: the exposure thread is blocked in wait_image
     // holding no lock, so a mid-exposure register write would race the live
@@ -1277,12 +1318,11 @@ private:
     }
 
     int offset_max_value() const {
-        int deep_bits = 0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            deep_bits = camera_info_.bit_depth_max;
-        }
-        return ToupTekSDKWrapper::instance().get_blacklevel_max(handle_copy(), deep_bits);
+        auto& sdk = ToupTekSDKWrapper::instance();
+        // handle_ and camera_info_.bit_depth_max read together under one mutex_ hold
+        // (via with_handle), so the SDK read uses a live handle and a consistent
+        // bit depth.
+        return with_handle([&](HToupcam h) { return sdk.get_blacklevel_max(h, camera_info_.bit_depth_max); });
     }
 
     void reset_exposure_state_locked() {

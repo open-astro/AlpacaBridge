@@ -129,6 +129,11 @@ public:
                 handle_ = handle;
             } catch (...) {
                 sdk.close_camera(handle);
+                // build_elements_locked clears elements_ at its top then push_backs;
+                // if it threw mid-build (e.g. OOM) elements_ holds a partial list.
+                // Clear it so the disconnected state is fully clean, consistent with
+                // the other reset fields (handle_ stays null — never published).
+                elements_.clear();
                 camera_id_.clear();
                 serial_number_.clear();
                 throw;
