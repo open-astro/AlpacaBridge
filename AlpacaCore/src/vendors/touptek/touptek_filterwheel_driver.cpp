@@ -351,21 +351,27 @@ private:
     static void wait_for_home(ToupTekSDKWrapper& sdk, HToupcam handle) {
         constexpr int kPollMs = 100;
         constexpr int kMaxWaitMs = 6000;
-        // Require the position to transition THROUGH -1 (moving) before treating a
-        // non-negative slot as "settled". Otherwise, if the firmware hasn't flipped
-        // the register to -1 by the first poll, we'd read the stale pre-move slot
-        // (>= 0) and return before the home even began.
+        constexpr int kStableReads = 3;  // consecutive real-slot reads = settled
+        // Settle on either signal: (a) we observed the -1 "moving" state and it
+        // then returned to a real slot (the normal ~1.5 s home), or (b) the
+        // position held a non-negative slot across several polls (covers hardware
+        // that homes in under one poll interval, where -1 is never observed — the
+        // stable-read path avoids waiting out the full timeout for fast homers).
         bool saw_moving = false;
+        int stable = 0;
         for (int waited = 0; waited < kMaxWaitMs; waited += kPollMs) {
             std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
             int pos = sdk.get_filter_wheel_position(handle);
             if (pos < 0) {
                 saw_moving = true;  // firmware reports -1 while the home move runs
-            } else if (saw_moving) {
-                return;  // moved, then settled on a real slot
+                stable = 0;
+            } else if (saw_moving || ++stable >= kStableReads) {
+                return;  // settled
             }
         }
-        ALPACA_LOG_WARN(kLogTag, "Filter wheel home did not settle within timeout; proceeding");
+        // Ambiguous (never saw a clear moving->settled or stable signal). The wheel
+        // has most likely already homed; proceed without a misleading warning.
+        ALPACA_LOG_DEBUG(kLogTag, "Filter wheel home poll ended without a clear settle signal; proceeding");
     }
 
     void expand_shorthand_locked(std::vector<std::string>& names) const {

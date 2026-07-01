@@ -376,7 +376,10 @@ private:
     // is InvalidValue even while disconnected). Disconnected, the bound is the
     // potential element count; connected, the probed per-model count.
     void validate_switch_id_locked(int id) const {
-        const int limit = connected_.load() ? static_cast<int>(elements_.size()) : kMaxThermalElements;
+        // Disconnected, use the cached probed count when known so the ID bound
+        // matches what get_max_switch() reports (else the worst-case bound).
+        const int limit = connected_.load() ? static_cast<int>(elements_.size())
+                                            : (probed_element_count_ > 0 ? probed_element_count_ : kMaxThermalElements);
         if (id < 0 || id >= limit) {
             throw AlpacaException("Switch ID out of range", AlpacaError::InvalidValue);
         }
