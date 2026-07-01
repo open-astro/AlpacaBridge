@@ -763,13 +763,6 @@ public:
             active_num_y = num_y_;
             dirty_format = format_dirty_;
             dirty_roi = roi_dirty_;
-            // Clear the dirty flags now, under the same lock as the snapshot, so
-            // a concurrent set_num_x/set_roi that re-dirties them after this point
-            // is preserved for the NEXT exposure instead of being overwritten to
-            // false by the exposure thread after its SDK call. The catch below
-            // re-marks them if the apply fails.
-            format_dirty_ = false;
-            roi_dirty_ = false;
 
             // Bound the binned dimensions by the EVEN sensor size, not the raw
             // size. Toupcam_put_Roi requires an even sensor-coordinate span, so
@@ -824,6 +817,16 @@ public:
             roi_y = static_cast<unsigned>(roi_y_i);
             roi_w = static_cast<unsigned>(span_w);
             roi_h = static_cast<unsigned>(span_h);
+
+            // Clear the dirty flags here — AFTER all validation that can throw, but
+            // still under the same lock as the snapshot above. Clearing before the
+            // validation would lose the flags if an invalid ROI threw (the thread
+            // that restores them on failure is never spawned). Because snapshot and
+            // clear share this lock, a concurrent set_num_x/set_roi cannot interleave
+            // between them; one that lands after the lock releases re-dirties the
+            // flag for the NEXT exposure. The catch below re-marks on SDK failure.
+            format_dirty_ = false;
+            roi_dirty_ = false;
         }
 
         stop_exposure_thread();
@@ -846,6 +849,12 @@ public:
         exposure_thread_ = std::thread([this, handle, exposure_us, active_bin, active_num_x, active_num_y, roi_x, roi_y,
                                         roi_w, roi_h, dirty_format, dirty_roi]() {
             auto& sdk_local = ToupTekSDKWrapper::instance();
+            // Track which reconfigure stages actually completed, so the catch
+            // re-marks ONLY the stage that failed — re-marking an
+            // already-applied stage would trigger a spurious stream restart on
+            // the next exposure.
+            bool format_applied = false;
+            bool roi_applied = false;
             try {
                 // Reconfiguring bitdepth / pixel format / binning requires the
                 // stream to be stopped (SDK returns E_WRONG_THREAD otherwise).
@@ -858,12 +867,12 @@ public:
                     sdk_local.put_binning(handle, active_bin);
                     sdk_local.put_trigger_mode(handle, 1);
                     sdk_local.start_pull_mode(handle, &ToupTekCameraDriver::on_event_static, this);
-                    // Flag already cleared at snapshot time (see start_exposure).
+                    format_applied = true;  // flag cleared at snapshot time
                 }
 
                 if (dirty_roi) {
                     sdk_local.put_roi(handle, roi_x, roi_y, roi_w, roi_h);
-                    // Flag already cleared at snapshot time (see start_exposure).
+                    roi_applied = true;  // flag cleared at snapshot time
                 }
 
                 sdk_local.put_exposure_us(handle, exposure_us);
@@ -902,12 +911,12 @@ public:
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ToupTek", "Exposure failed: " + std::string(e.what()));
-                // The SDK reconfigure may have failed mid-apply; re-mark the
-                // flags so the next exposure re-applies format/ROI rather than
-                // trusting the hardware to hold a partial state.
+                // Re-mark only the stage that did NOT complete, so the next
+                // exposure re-applies the failed reconfigure without needlessly
+                // restarting the stream for one that already succeeded.
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (dirty_format) format_dirty_ = true;
-                if (dirty_roi) roi_dirty_ = true;
+                if (dirty_format && !format_applied) format_dirty_ = true;
+                if (dirty_roi && !roi_applied) roi_dirty_ = true;
             }
             exposure_active_.store(false);
         });
@@ -1131,6 +1140,7 @@ private:
 
     void set_bin_locked(int bin_x, int bin_y) {
         ensure_connected();
+        ensure_not_exposing();  // geometry change mid-exposure corrupts the run
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
@@ -1160,6 +1170,7 @@ private:
 
     void set_roi_size_locked(int width, int height) {
         ensure_connected();
+        ensure_not_exposing();  // geometry change mid-exposure corrupts the run
         if (width <= 0 || height <= 0) {
             throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
         }
@@ -1173,6 +1184,7 @@ private:
 
     void set_start_pos_locked(int sx, int sy) {
         ensure_connected();
+        ensure_not_exposing();  // geometry change mid-exposure corrupts the run
         if (sx < 0 || sy < 0) {
             throw AlpacaException("Start position must be non-negative",
                                   AlpacaError::InvalidValue);
