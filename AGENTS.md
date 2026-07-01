@@ -88,6 +88,15 @@ The rules are vendor-agnostic; do them in the driver from the start.
   (after `mutex_`) across the close, **and** the operation must re-check
   `ensure_connected()`/`!handle_` under the op-lock before the SDK call. A
   snapshot-then-call gap with no re-check is a use-after-close.
+- **A "copy the handle out, then call the SDK" helper is a trap** — returning the
+  handle from a locked getter and calling the SDK *after* the lock releases is
+  exactly the snapshot-then-call gap. Prefer a `with_handle([&](h){ return
+  sdk.foo(h); })`-style helper that holds `mutex_` **across** the SDK call (shape
+  (a)) for every fast option read/write, so there's no window at all. Reviewers
+  will flag these one method at a time; convert the whole class at once. The
+  ToupTek camera driver is the reference (`with_handle`). Only the exposure worker
+  keeps a bare snapshot — it must not hold `mutex_` across `WaitImageV4`, and its
+  close is stop-and-joined first.
 - `set_connected(false)` clears driver state (`connected_`, handle, cached info,
   element/name containers) **before** the SDK close, so a throwing close can't trap
   the driver half-connected. A getter that checks `connected_` and then re-locks to
