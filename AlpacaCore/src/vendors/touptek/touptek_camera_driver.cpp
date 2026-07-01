@@ -904,6 +904,13 @@ public:
             int span_h = active_num_y * active_bin;
             span_w += (span_w & 1);
             span_h += (span_h & 1);
+            // NB: at bin 1 an odd NumX/NumY makes the SDK ROI one pixel wider/taller
+            // than requested, so got_w/got_h from WaitImageV4 can exceed
+            // active_num_x/active_num_y — this is NOT an off-by-one. Pull-mode rows
+            // arrive at nRowPitch = active_num_x * bytes stride, so the extra column
+            // lands in the stride gap and build_image_array_16bit copies exactly
+            // active_num_x columns per row; the +2-row buffer margin absorbs the
+            // single-stride overshoot. Reported NumX/NumY stay = active_num_x/y.
             // Defensive only: with max_w/max_h derived from the even sensor size
             // above, ceil_even(num*bin) <= even_max, so these clamps never fire.
             if (span_w > even_max_w) span_w = even_max_w;
