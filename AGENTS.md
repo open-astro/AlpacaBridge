@@ -51,7 +51,13 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
   - Async `connect()/disconnect()` with `get_connecting()`.
   - Synchronous `set_connected()` for compatibility.
   - Useful `get_device_state()` telemetry.
-  - Clean thread/task shutdown in destructors. **The async connection-thread
+  - Clean thread/task shutdown in destructors. **Never `.detach()` a thread that
+    touches `this`** (member atomics, `pulse_guiding_`, etc.) — if the driver is
+    destroyed while it sleeps, the wakeup writes freed memory (UB). Make it a
+    joinable member thread with a cancel flag + condition_variable and join it in
+    the destructor (see the ToupTek camera pulse-guide timer). A short `sleep_for`
+    timer is exactly this trap.
+  - **The async connection-thread
     pattern needs a `shutting_down_` guard** (bool guarded by `connection_mutex_`):
     the destructor must set it under the lock *before* `stop_connection_thread()`,
     and `start_connection_task` must `return` early when it is set. Without it, a

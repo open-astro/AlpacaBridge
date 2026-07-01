@@ -101,6 +101,7 @@ public:
         }
         stop_connection_thread();
         stop_exposure_thread();
+        stop_pulse_guide_thread();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -259,7 +260,13 @@ public:
             return;
         }
 
-        // Disconnecting.
+        // Disconnecting. Hold readout_mutex_ (after mutex_, preserving lock order)
+        // across the close so any in-flight get/set_readout_mode / set_gain /
+        // set_offset — which run under readout_mutex_ with a handle snapshot — has
+        // completed before Toupcam_Close, preventing a stale-handle SDK call. The
+        // exposure_active_ store also belongs under readout_mutex_ (the documented
+        // invariant that the flag only changes under that lock).
+        std::lock_guard<std::mutex> rlock(readout_mutex_);
         exposure_active_.store(false);
         if (handle_) {
             try { sdk.stop(handle_); } catch (const std::exception&) {}
@@ -447,6 +454,10 @@ public:
         // concurrent start_exposure (which flips exposure_active_ under the same
         // lock) can't begin integrating between the check and the write.
         std::lock_guard<std::mutex> lock(readout_mutex_);
+        // Re-check connection under readout_mutex_: set_connected(false) closes the
+        // handle under this same lock, so if it won the race after our handle
+        // snapshot, connected_ is already false and we must not use the stale handle.
+        ensure_connected();
         ensure_not_exposing();
         sdk.put_gain(handle, static_cast<unsigned short>(gain));
     }
@@ -553,6 +564,7 @@ public:
         // Hold readout_mutex_ across the exposure check and the register write —
         // same TOCTOU close as set_gain / set_readout_mode.
         std::lock_guard<std::mutex> lock(readout_mutex_);
+        ensure_connected();  // stale-handle guard — see set_gain
         ensure_not_exposing();
         ToupTekSDKWrapper::instance().put_blacklevel(handle, offset);
     }
@@ -617,6 +629,7 @@ public:
         const bool has_hfw = specs.front().set_hfw;
         // Read both axes atomically w.r.t. set_readout_mode's two-step apply.
         std::lock_guard<std::mutex> lock(readout_mutex_);
+        ensure_connected();  // stale-handle guard — see set_gain
         const int cur_cg = has_cg ? sdk.get_cg(handle) : 0;
         const bool cur_hfw = has_hfw && sdk.get_high_fullwell(handle) != 0;
         for (std::size_t i = 0; i < specs.size(); ++i) {
@@ -645,6 +658,7 @@ public:
         const HToupcam handle = handle_copy();  // NotConnected while disconnected
         // Apply both axes atomically w.r.t. get_readout_mode's paired reads.
         std::lock_guard<std::mutex> lock(readout_mutex_);
+        ensure_connected();  // stale-handle guard — see set_gain
         // Check exposure state UNDER readout_mutex_ (not before it): start_exposure
         // sets exposure_active_ under the same lock, so this closes the TOCTOU where
         // an exposure could begin between the check and the CG/HFW writes and get a
@@ -731,11 +745,34 @@ public:
         }
         ToupTekSDKWrapper::instance().pulse_guide(handle_copy(), dir,
                                                    static_cast<unsigned>(duration));
+        // Cancel + join any prior timer (fast — the cancel wakes it), then start a
+        // fresh joinable one. On cancel the old timer leaves pulse_guiding_ alone so
+        // there's no flicker when one pulse immediately supersedes another.
+        stop_pulse_guide_thread();
+        {
+            std::lock_guard<std::mutex> plock(pulse_guide_mutex_);
+            pulse_guide_cancel_ = false;
+        }
         pulse_guiding_.store(true);
-        std::thread([this, duration]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
-            pulse_guiding_.store(false);
-        }).detach();
+        pulse_guide_thread_ = std::thread([this, duration]() {
+            std::unique_lock<std::mutex> plock(pulse_guide_mutex_);
+            const bool cancelled = pulse_guide_cv_.wait_for(plock, std::chrono::milliseconds(duration),
+                                                            [this] { return pulse_guide_cancel_; });
+            if (!cancelled) {
+                pulse_guiding_.store(false);  // natural completion
+            }
+        });
+    }
+
+    void stop_pulse_guide_thread() {
+        {
+            std::lock_guard<std::mutex> plock(pulse_guide_mutex_);
+            pulse_guide_cancel_ = true;
+        }
+        pulse_guide_cv_.notify_all();
+        if (pulse_guide_thread_.joinable()) {
+            pulse_guide_thread_.join();
+        }
     }
 
     void start_exposure(double duration, bool light) override {
@@ -1025,6 +1062,13 @@ private:
     mutable bool exposure_deadline_valid_{false};
 
     mutable std::atomic<bool> pulse_guiding_;
+    // Joinable timer that clears pulse_guiding_ after the pulse duration. Kept as a
+    // member (not detached) with a cancel flag + cv so the destructor can wake and
+    // join it — a detached thread writing pulse_guiding_ after destruction is UB.
+    std::thread pulse_guide_thread_;
+    std::mutex pulse_guide_mutex_;
+    std::condition_variable pulse_guide_cv_;
+    bool pulse_guide_cancel_{false};
 
     static void on_event_static(unsigned /*event*/, void* /*ctx*/) {
         // Pull-mode callbacks fire on an SDK-owned thread. Do not touch the
