@@ -51,22 +51,115 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
   - Async `connect()/disconnect()` with `get_connecting()`.
   - Synchronous `set_connected()` for compatibility.
   - Useful `get_device_state()` telemetry.
-  - Clean thread/task shutdown in destructors. **Never `.detach()` a thread that
-    touches `this`** (member atomics, `pulse_guiding_`, etc.) — if the driver is
-    destroyed while it sleeps, the wakeup writes freed memory (UB). Make it a
-    joinable member thread with a cancel flag + condition_variable and join it in
-    the destructor (see the ToupTek camera pulse-guide timer). A short `sleep_for`
-    timer is exactly this trap.
-  - **The async connection-thread
-    pattern needs a `shutting_down_` guard** (bool guarded by `connection_mutex_`):
-    the destructor must set it under the lock *before* `stop_connection_thread()`,
-    and `start_connection_task` must `return` early when it is set. Without it, a
-    `connect()` racing the destructor can spawn a `connection_thread_` that
-    outlives the object and is never joined → `std::terminate`. The four ToupTek
-    drivers (camera/filter-wheel/focuser/thermal-switch) have this guard; the same
-    copied pattern in the other ~22 vendor drivers still needs it (a mechanical
-    sweep — ideally a shared async-connect base class — tracked as a follow-up).
+  - Clean thread/task shutdown in destructors — **[Driver concurrency &
+    lifecycle](#driver-concurrency--lifecycle-read-before-writing-a-driver) is the
+    single most important section in this file; every rule there was learned from a
+    review round.**
 - Add TODO comments where vendor protocol/SDK behavior is uncertain.
+
+### Driver concurrency & lifecycle (read before writing a driver)
+
+**Apply this checklist up front.** ConformU is single-threaded and catches *none*
+of the races below — only code review does, so every miss becomes a review round.
+The rules are vendor-agnostic; do them in the driver from the start.
+
+**Threads & shutdown**
+- Async connect: `start_connection_task(bool)` spawns `connection_thread_`. Guard
+  it with a `bool shutting_down_` under `connection_mutex_` — the destructor sets it
+  `true` under the lock *before* `stop_connection_thread()`, and
+  `start_connection_task` returns early when it is set. Without it a `connect()`
+  racing `~Driver` spawns a thread that outlives the object and is never joined →
+  `std::terminate`.
+- **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
+  writes a member (e.g. a pulse-guide flag) is the classic trap: if the object dies
+  mid-sleep the wakeup writes freed memory (UB). Make it a joinable member thread
+  with a cancel flag + `std::condition_variable`, and cancel + join it in the
+  destructor.
+- The destructor joins **every** background thread (connection, exposure, timers)
+  before members are destroyed.
+
+**Handles, locks & disconnect — the #1 source of use-after-close bugs**
+- One fixed lock order everywhere: `driver mutex_` → operation lock
+  (`readout_mutex_`, …) → SDK-wrapper mutex. Never acquire in reverse.
+- An SDK call on a closable handle is safe only if the handle can't be closed
+  underneath it. Two valid shapes: **(a)** hold the driver `mutex_` across the whole
+  SDK call (fine for fast, non-blocking calls); **(b)** if you snapshot the handle
+  and then use a separate op-lock, `set_connected(false)` must take that op-lock
+  (after `mutex_`) across the close, **and** the operation must re-check
+  `ensure_connected()`/`!handle_` under the op-lock before the SDK call. A
+  snapshot-then-call gap with no re-check is a use-after-close.
+- `set_connected(false)` clears driver state (`connected_`, handle, cached info,
+  element/name containers) **before** the SDK close, so a throwing close can't trap
+  the driver half-connected. A getter that checks `connected_` and then re-locks to
+  index a container disconnect clears has a TOCTOU — re-assert the connection under
+  the lock before indexing.
+
+**Long-op / exposure state machines (cameras)**
+- A runtime register write during a live exposure corrupts the frame. Guard it with
+  an `exposure_active_` flag, checked **under the same lock that publishes it**
+  (`start_exposure` sets it under `readout_mutex_`; the setters check it under
+  `readout_mutex_`). Checking the flag *before* taking that lock is a TOCTOU.
+- Abort/stop must **wake a blocking SDK wait** (call the SDK's stop/cancel) before
+  joining the worker — setting a flag alone makes `join()` block for the whole
+  remaining operation (a 10-min frame → a 10-min abort).
+- Don't clear pending/dirty flags before validation that can throw; clear them at
+  the *end* of the locked snapshot block, after the throwing validation.
+
+**ASCOM contract precedence (ConformU enforces this)**
+- Parameter/range validation (`InvalidValue`) precedes the connection check — an
+  out-of-range id/index is `InvalidValue` even while disconnected. Every property
+  otherwise throws `NotConnected` when disconnected (no early-return that skips it).
+
+**Config round-trip (silent data loss on save)**
+- Every persisted field must be `copy_if_present`-ed **per device type** in
+  `sanitize_device_config` (`router.cpp`) — anything unlisted is dropped on save.
+  Every non-ZWO web-UI form field `name` must be vendor-prefixed or it collides with
+  ZWO's bare name in `FormData` (see [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors)).
+
+> The connection-thread + `shutting_down_` pattern is copy-pasted across ~26
+> drivers; the four ToupTek drivers have the guard, the rest still need it —
+> ideally extract a shared `AsyncConnectable` base so it (and the lock discipline
+> above) exists in one place. Tracked follow-up.
+
+Two of our worst deadlocks are documented later, not in the checklist above — read
+[`disconnect_locked()`](#reconnect-must-not-self-deadlock-disconnect_locked) and the
+narrow-`firmware_mutex_` rule (under "Device firmware / SDK version") before touching
+any connect/disconnect path or a getter that takes the coarse driver `mutex_`.
+
+### When fixing a review finding (avoid the regression treadmill)
+
+Across our driver PRs, most review rounds were spent on **regressions introduced by
+the previous round's fix**, not new bugs. Before pushing any fix:
+
+- **Sweep the symmetry.** A fix almost always has mirror sites that need the same
+  change in the same commit: getter ↔ setter, `open` ↔ `close`, `connect` ↔
+  `disconnect`, POSIX ↔ Windows, and every sibling accessor that shares the
+  invariant. Nearly every regression we shipped was "fixed one of N."
+- **A new invariant must be applied everywhere it is read/written, at once.** If a fix
+  establishes "X only changes under lock L" (e.g. `exposure_active_` under
+  `readout_mutex_`), grep every read and write of X and bring them all under L in the
+  same change — a partially-applied invariant is worse than none.
+- **Re-run the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver)
+  over the changed lines *and their siblings*** each round, not just at authoring.
+- **Verify a suggested fix before applying it verbatim** — even the reviewer's; one
+  bot-recommended race fix was itself a use-after-close.
+- **"Approved" is not a final stop signal.** The review bot is non-deterministic and
+  has re-opened PRs it approved. Treat *"no confirmed bugs + ConformU 0/0/0 + all
+  gates green"* as the merge bar, not a literal zero-finding run.
+
+### ASCOM exception vocabulary (pick the right one — ConformU checks it)
+
+| Throw | When |
+|---|---|
+| `InvalidValue` | Bad argument / out-of-range id or index — **even while disconnected** (precedes the connection check). |
+| `NotConnected` | Any operational property/method called while disconnected. |
+| `PropertyNotImplemented` | A property the hardware genuinely lacks (e.g. `Offsets` list, `SubExposureDuration`). |
+| `MethodNotImplemented` | A method the hardware lacks (e.g. `PulseGuide` when `CanPulseGuide` is false). |
+| `NotImplemented` | A generic unsupported action (e.g. `set_temp_comp(true)` with no temp-comp support) — never `DriverException` for "not supported". |
+| `InvalidOperation` | Valid call, wrong state (e.g. changing readout mode/geometry mid-exposure). |
+| `DriverException` | A genuine internal/driver failure only — not a stand-in for any of the above. |
+
+All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not the status.
 
 ### Serial / socket I/O: always use the shared helpers (`util/serial_io.h`)
 
@@ -345,7 +438,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   - `/usr/sbin/fxload` — QHY firmware loader.
   - `/etc/alpacabridge/` — default config (`registered_devices.json`).
 - When adding a new vendor with shared libraries, update `debian/rules` `override_dh_auto_install` to copy them into `$(STAGING)/usr/lib/alpacabridge/`.
-- Update `debian/changelog` when cutting a release.
+- To cut a release, bump the `VERSION` file and date the `## [X.Y.Z]` CHANGELOG.md heading — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
 
 ## Testing Requirements
 
@@ -391,6 +484,8 @@ Every new driver **must** ship with at least the following test cases. Use the e
    - Switches: `get_max_switch`, invalid switch ID handling.
    - Rotators: `get_can_reverse`, device state telemetry.
 
+6. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). This is the automated catch for the two recurring silent-data-loss classes: `sanitize_device_config` dropping an un-allowlisted field, and a web-UI `FormData` name collision. Model it on the existing ToupTek AFW filter-wheel round-trip test.
+
 ### Test CMake Integration
 
 When adding a test file for a new vendor device:
@@ -405,13 +500,14 @@ When adding a test file for a new vendor device:
 - **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`.**
 - **Web UI JavaScript is gated only by `node --check`** (the `javascript` job + pre-flight gate). The web UI is hand-written static JS with no bundler/eslint/`package.json`, so this parse-only check is its sole automated validation — there is nothing else stopping a stray brace from shipping.
 - `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together.
+- **Coverage gap you must compensate for by hand: nothing automated exercises concurrency.** The `sanitizers` job is ASan+UBSan (memory/UB on a single thread), and ConformU is single-threaded — so the #1 driver-review bug class (concurrent connect/disconnect vs an in-flight SDK call, exposure-vs-register-write, ref-count races) is caught *only* by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver). Reason about those paths deliberately; do not assume green CI means thread-safe. (Recommended follow-up: a ThreadSanitizer job + a small per-driver connect/disconnect/operate stress harness would close this gap.)
 
 ## Logging, Threading, and Errors
 
 - Use AlpacaCore logging sink flow; do not use ad-hoc stdout/stderr logging in runtime paths.
 - Avoid global mutable state; protect shared state with mutexes.
 - Use `AlpacaException` for error paths; AlpacaHTTP maps exceptions to Alpaca error responses.
-- **Disconnect paths must be exception-safe**: in ref-counted SDK wrappers, erase the usage bookkeeping **before** the SDK close call so a throwing close (device unplugged) cannot leave a zero-count entry that turns later closes into no-ops; in driver `set_connected(false)`, clear driver state (`connected_`, handle/id, cached info) **before** the SDK close so a throw cannot trap the driver half-connected. Fixed across the PlayerOne PW + ZWO EFW/EAF/CAA wrappers and their drivers 2026-06-12 — use those as the template.
+- **Disconnect paths must be exception-safe** (also in the concurrency checklist): in ref-counted SDK wrappers, erase the usage bookkeeping **before** the SDK close call so a throwing close (device unplugged) cannot leave a zero-count entry that turns later closes into no-ops; in driver `set_connected(false)`, clear driver state (`connected_`, handle/id, cached info) **before** the SDK close so a throw cannot trap the driver half-connected. The PlayerOne PW + ZWO EFW/EAF/CAA wrappers and drivers are the template.
 - AlpacaHTTP must return Alpaca-style JSON envelopes and stable error mapping behavior.
 - On-disk logging writes daily files `alpacabridge-YYYY-MM-DD.log` to `logging.directory` (default `/var/log/AlpacaBridge`, per-config override, env `ALPACAHTTP_LOG_DIRECTORY`). The sink falls back to `$XDG_STATE_HOME/AlpacaBridge/logs` (or `~/.local/state/AlpacaBridge/logs`) when the configured path is not writable. systemd unit uses `LogsDirectory=AlpacaBridge`; the deb postinst pre-creates the directory for non-systemd starts. There is no in-memory log buffer — `/management/v1/logs` reads today's daily file directly from disk.
 - Retention: `logging.retention_days` (default 90, 0 = forever, env `ALPACAHTTP_LOG_RETENTION_DAYS`) auto-deletes daily files whose embedded date is older than `today − retention_days`. Pruning runs once on startup and again on day-rollover inside the file sink. Today's active file is never pruned.
@@ -531,9 +627,9 @@ Devices: Camera, Focuser (AAF — Astro Auto Focuser), FilterWheel (AFW — Astr
 SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between the camera, focuser, filter-wheel, and thermal-switch drivers). The StellaVita Switch driver uses **no SDK** — it is a libgpiod-only driver that happens to live under the ToupTek vendor.
 
 - **Single SDK, multiple device types**: camera, focuser, filter-wheel, and thermal-switch drivers all go through `ToupTekSDKWrapper`. Cameras enumerate via `enumerate_cameras()`, focusers via `enumerate_focusers()` (filters `Toupcam_EnumV2` by `TOUPCAM_FLAG_AUTOFOCUSER`), filter wheels via `enumerate_filter_wheels()` (filters by `TOUPCAM_FLAG_FILTERWHEEL`). Same `Toupcam_Open` selects a camera/focuser/wheel by its capability flag. **`enumerate_cameras()` must EXCLUDE the accessory flags** (`TOUPCAM_FLAG_FILTERWHEEL | TOUPCAM_FLAG_AUTOFOCUSER`) — `Toupcam_EnumV2` returns AFW wheels and AAF focusers in the same list, and the camera driver resolves `cameraIndex` as a *position into the enumerate_cameras() vector* (then opens by that entry's id), so an unfiltered list makes `cameraIndex=0` silently open the filter wheel when both are attached. The three enumerations partition the devices: cameras = neither accessory flag.
-- **No sensor-register writes during an exposure**: the ToupTek camera is the only driver whose `SetReadoutMode`/`Gain`/`Offset` actually program sensor registers at runtime (CG/HFW via `put_cg`/`put_high_fullwell`, gain via `put_gain`, black level via `put_blacklevel`) — the ZWO/SVBONY/Player One `set_readout_mode` are no-op stubs. The exposure thread blocks in `wait_image` holding no lock, so a mid-integration register write races the live frame (mixed-state or stalled frame, no error). All three setters call `ensure_not_exposing()` **under `readout_mutex_`, held across the SDK write** — checking it before the lock is a TOCTOU: `start_exposure` flips `exposure_active_` under the same `readout_mutex_`, so an unlocked check can pass and then the register write lands on a frame that started integrating in the gap. Do the mutex_-taking validation first (`handle_copy()`, range/`offset_max_value()`), THEN `lock(readout_mutex_)` → `ensure_not_exposing()` → SDK write (lock order `mutex_` → `readout_mutex_` → SDK). `set_readout_mode`, `set_gain`, and `set_offset` all follow this shape. **The geometry setters (`set_bin`, `set_num_x/y`, `set_start_x/y`) also call `ensure_not_exposing()`** — not because they touch the SDK (they only set `*_dirty_` flags), but because mutating `bin_`/`num_x_`/`num_y_`/`start_*_` during a live integration leaves the in-flight exposure's captured geometry inconsistent with the next frame's buffer sizing. ConformU sets geometry only between exposures (never mid-integration), so the guard never fires during conformance.
-- **Abort/stop MUST wake the SDK wait, not just set a flag**: `stop_exposure`/`abort_exposure` (and the internal `stop_exposure_thread`) set `exposure_active_=false` and join the exposure thread — but the thread is parked in `Toupcam_WaitImageV4` (the wrapper deliberately does NOT hold the SDK lock across the wait so this is possible), so join blocks for the *entire* remaining exposure unless you also call `sdk.stop(handle)` to unblock the wait. A 10-minute frame otherwise takes ~10 minutes to abort. Calling `Toupcam_Stop` halts the pull-mode stream (started once at connect via `start_pull_mode`), so you must then force `format_dirty_=true` so the next `start_exposure` re-runs `start_pull_mode`; and `stop_exposure_thread` runs *before* the ROI snapshot in `start_exposure` so that forced re-init lands in the same exposure's snapshot. The disconnect path already called `stop()`; the abort paths did not — that was the bug. Any SDK-camera driver with a blocking frame-wait needs the same "unblock the wait before joining" discipline.
-- **Clear the exposure dirty flags at the END of the snapshot's locked block, after all validation** — not right after the snapshot. `start_exposure` snapshots `format_dirty_`/`roi_dirty_`, validates the ROI (which can throw `InvalidValue`), then clears the flags. If you clear before the validation, an invalid ROI throw clears the flags without spawning the thread that restores them, so the next valid exposure silently skips `put_binning`/`put_roi` and uses stale hardware state. Clearing anywhere in the *same* locked block is still atomic w.r.t. a concurrent geometry setter (it needs the same `mutex_`); the point is only to clear after the throwing validation. On SDK-apply failure the catch re-marks *only* the stage (`format`/`roi`) that didn't complete, tracked by local `*_applied` bools — re-marking an already-applied stage forces a needless stream restart next exposure.
+- **Runtime sensor-register writes** (ToupTek mechanics of the exposure-guard rule in the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver)): the ToupTek camera is the *only* driver that programs sensor registers at runtime — CG/HFW (`put_cg`/`put_high_fullwell`), gain (`put_gain`), black level (`put_blacklevel`); the ZWO/SVBONY/Player One `set_readout_mode` are no-op stubs. `SetReadoutMode`/`Gain`/`Offset` do the `mutex_`-taking validation first (`handle_copy()`, ranges), then `lock(readout_mutex_)` → `ensure_connected()` → `ensure_not_exposing()` → SDK write. The geometry setters (`set_bin`/`set_num_x/y`/`set_start_x/y`) also take `readout_mutex_` + `ensure_not_exposing()` — not for the SDK (they only set `*_dirty_` flags) but because mutating `bin_`/`num_x_`/`start_*_` mid-integration desyncs the in-flight frame's geometry from the next buffer size.
+- **Abort mechanics** (ToupTek mechanics of "wake the SDK wait before joining"): the exposure thread parks in `Toupcam_WaitImageV4` (the wrapper deliberately does NOT hold the SDK lock across it). `stop_exposure`/`stop_exposure_thread` call `sdk.stop(handle_)` **under `mutex_`** to unblock the wait before joining; that halts the pull-mode stream (started once at connect via `start_pull_mode`), so they set `format_dirty_`+`roi_dirty_` to force the next `start_exposure` to re-init it, and `stop_exposure_thread` runs *before* the ROI snapshot so that re-init lands in the same exposure. Don't pre-clear `exposure_active_` before the join — let the worker clear it via the stopped stream, else a concurrent register write sees a false "idle" mid-frame.
+- **ROI dirty-flag timing** (ToupTek mechanics of "clear flags after validation"): `start_exposure` snapshots `format_dirty_`/`roi_dirty_`, validates the ROI, then clears them at the *end* of the locked block; the worker's catch re-marks *only* the stage (`format`/`roi`) that didn't complete (via local `*_applied` bools) so a failed apply doesn't force a needless stream restart.
 - **Two device drivers can share ONE camera (reference-counted open)**: `Toupcam_Open` allows only one handle per physical camera, but the thermal switch (dew heater/fan) must operate the *same* camera the Camera device is streaming from. `ToupTekSDKWrapper` reference-counts opens by the device's opaque id (`shared_by_id_` / `id_by_handle_` maps) via the shared `Impl::open_shared_by_id` / `close_shared` helpers: `Toupcam_Open` fires only for the first opener and returns the shared `HToupcam`; `Toupcam_Close` fires only when the last holder releases. **ALL open-by-id paths route through these helpers — camera, focuser, AND filter wheel** (`open_camera_by_id`, `open_focuser_by_id`, `open_filter_wheel_by_id` all delegate); don't reintroduce a raw `Toupcam_Open`/`Close` in any of them. Distinct physical devices enumerate to distinct ids so they never collide, but two driver instances on the *same* id (the camera + its thermal switch, or a camera + its integrated autofocuser) now correctly share one open instead of the second raw-open returning null. Mirrors the Player One wrapper's `usage_`/`open_count`. Consequence: connecting the camera *and* the thermal switch is one physical open; disconnecting the camera while the switch is still connected keeps the camera powered/cooling (desirable). Opens by *index* (`open_camera_by_index`) are not tracked and close immediately (legacy path).
 - **Offset = black level**: ASCOM `Offset` maps to `TOUPCAM_OPTION_BLACKLEVEL`, gated on `TOUPCAM_FLAG_BLACKLEVEL`. Integer `OffsetMin`(0)/`OffsetMax` mode (no named `Offsets` list). `OffsetMax` scales with the current output bit depth — `31 << (bits - 8)` (`TOUPCAM_BLACKLEVEL8_MAX` = 31), where bits is 8 in 8-bit output mode else the camera's deep bit count — so it's computed in the wrapper (`get_blacklevel_max`) which reads `OPTION_BITDEPTH`. ToupTek was previously the only camera driver stubbing offset to `PropertyNotImplemented`; it now matches ZWO/SVBONY/Player One/QHY. **`FullWellCapacity` is NOT queryable from the SDK** — the driver returns the ADU saturation (`2^bitdepth − 1`), not electrons; the true full well is a sensor datasheet spec (IMX571: ~51 ke⁻ Normal, ~100 ke⁻ High Full Well), and the High Full Well ReadoutMode is what switches between them.
 - **Conversion gain + High Full Well → ReadoutModes**: the two ToupTek sensor-mode axes — conversion gain (`TOUPCAM_OPTION_CG`: 0=LCG, 1=HCG, 2=HDR-if-`FLAG_CGHDR`) and High Full Well (`TOUPCAM_OPTION_HIGH_FULLWELL`) — are folded into ONE flat ASCOM `ReadoutModes` list (ASCOM has only one readout-mode axis). `readout_mode_specs()` builds the list from capabilities: `HCG/LCG(/HDR)/High Full Well` when both, `HCG/LCG(/HDR)` for CG-only, `Normal/High Full Well` for HFW-only, else `Normal`. **Each spec fully specifies BOTH axes** (e.g. "High Full Well" = CG-LCG + HFW-on) so `get_readout_mode` round-trips to a stable index by reading both options. This is the idiomatic ASCOM home for hardware sensor modes (NINA shows a dropdown), NOT a custom Action. Note `preload_camera_info()` populates caps at *construction* (from real hardware if present), so `get_readout_modes()` reflects capability even before connect — a unit test asserting a specific mode list or "1 mode while disconnected" is wrong on a host with such a camera attached; assert only invariants (non-empty, out-of-range index → `InvalidValue`).
@@ -541,8 +637,6 @@ SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between
 - **Thermal switch (dew heater + fan + tail LED)** — `touptek_thermal_switch_driver.{h,cpp}`, mirroring `playerone_switch_driver`. Dew heater = `TOUPCAM_OPTION_HEAT` (level 0..`OPTION_HEAT_MAX`), fan = `TOUPCAM_OPTION_FAN` (speed 0..`model->maxfanspeed` — the fan max comes from the enumerated model, not an option), tail indicator LED = `TOUPCAM_OPTION_TAILLIGHT` (boolean on/off; astro users turn it off to avoid reflections/light leaks). Heater/fan are capability-probed via `TOUPCAM_FLAG_HEAT`/`_FAN`; the **tail LED has no capability flag**, so it is probed by *reading* `get_taillight` in a try/catch and only exposed if the camera accepts it. A camera exposing none of the three throws `NotImplemented`. `kMaxThermalElements` = 3 (the disconnected switch-ID bound). **The cooler is NOT a switch element** — it lives on the Camera interface (`CoolerOn`/`SetCCDTemperature`/`CoolerPower`), matching ASCOM and Player One. The `(touptek, switch)` router branch and the config sanitizer pick the backend from `switchType`: `"thermal"` (bound by `cameraIndex`) vs `"stellavita"` (default, GPIO). The thermal switch builds on any ToupTek host (camera SDK only); StellaVita still needs libgpiod. **Gotcha (bit us):** the web-UI switch-type `<select>` must use a *unique* form-field `name` (`touptekSwitchType`), NOT the bare `switchType` — ZWO's switch-type select already uses `name="switchType"` and submits even while its vendor section is hidden, so `formData.get('switchType')` returns ZWO's value and the ToupTek switch silently registers as StellaVita (fails to connect: no GPIO). The submit handler reads `touptekSwitchType` and maps it to `deviceData.switchType`. This is the same FormData-collision class as the index fields — it applies to *any* shared field name, discriminator selects included.
 - **AFW (Astro Filter Wheel) — option-based, no dedicated API**: unlike the AAF focuser (which has the `Toupcam_AAF` action interface), the filter wheel is driven through the generic `Toupcam_get/put_Option`. Slot count = `TOUPCAM_OPTION_FILTERWHEEL_SLOT` (read once at connect, like ZWO EFW's `slotNum` — never hardcode 5/7; the web UI's 5/7/Custom picker is config-only). Position = `TOUPCAM_OPTION_FILTERWHEEL_POSITION`: **get returns `-1` while in motion** — that maps *directly* onto the ASCOM FilterWheel `Position` "moving" sentinel, so pass it through unchanged (no extra is-moving flag needed). On set, the low byte is the target slot (mask with `& 0xff`) and `(val>>8)&0x1` is a direction bit (`0` = clockwise, `1` = "auto direction"). **The wheel MUST be homed at connect or it hunts and never lands** — the single most important thing about this driver, and it bit us hard: without homing, moves make the wheel tick/rock in place ("tick-tick pause, never completes a revolution"), especially right after a firmware update (the firmware loses its slot reference). The fix mirrors the **INDI `indi_toupwheel` reference driver's** connect sequence exactly: (1) `get_Option(FILTERWHEEL_SLOT)` read the slot count; (2) `put_Option(FILTERWHEEL_SLOT, slot)` write it straight back (re-applies the wheel's slot config; the option is `[RW]`); (3) `put_Option(FILTERWHEEL_POSITION, -1)` home/reset so the firmware references its slots (in INDI this is `SelectFilter(0)` → `put_Option(POSITION, SpinningDirection | (0-1))` = `-1`). `reset_filter_wheel` returns immediately but the firmware takes ~1.5 s to home — **wait for the home to settle (poll `get_filter_wheel_position` until it returns a non-negative slot; it reports `-1` while moving) BEFORE reporting `Connected`**, otherwise a `SetPosition` arriving during the home window aborts the cycle and leaves the slot reference unknown (moves then land on wrong slots — the exact failure homing was added to prevent). Once homed, a **single absolute move** (`put_Option(POSITION, position)`, 0-based, direction bit `0`) traverses to any slot fine — do NOT step one slot at a time, and do NOT set the direction bit to `1`/auto (that made single-slot moves oscillate in place on our hardware). ASCOM `Position` is already 0-based so no `±1` offset is needed (INDI carries a `-1`/`+1` only because it is internally 1-based). The wrapper hides these option constants inside `touptek_sdk_wrapper.cpp` (same as the camera `TOUPCAM_OPTION_*` calls) so driver code never includes `toupcam.h`.
 - **AFW driver mirrors ZWO EFW for filter semantics, ToupTek focuser for handle/connection**: `Names`/`FocusOffsets` normalization (length tied to slot count, single-string-to-chars expansion, default `Filter N` names) is copied verbatim from `zwo_filterwheel_driver.cpp`; the `HToupcam handle_` + async connection-thread lifecycle is copied from `touptek_focuser_driver.cpp`. Constructed by index or SDK id (string), same as the ToupTek focuser — not the ZWO `int wheel_id`.
-- **Hold the driver mutex ACROSS the SDK call on any operational read/write that touches a shared/closable handle** (cross-driver pattern — bot review flagged it on ToupTek, fixed on ZWO EFW + Player One filter wheels + the ToupTek thermal switch too). The tempting shape — snapshot the handle/id under the mutex, release, then call the SDK — has a use-after-close window: `set_connected(false)` takes the *same* mutex before it closes the handle, so a disconnect racing between the snapshot and the SDK call operates on a freed handle (UB for a raw `HToupcam`; an opaque SDK error for an int id/handle). The fix is to `std::lock_guard` from the null/id check through the SDK return (`get_position`/`set_position`, `get_switch_value`/`set_switch_value`). This is safe from deadlock because `set_connected` holds the mutex across its own `close_*` and neither path re-enters the mutex; the SDK's internal mutex is a separate, lower lock. Only do this for non-blocking initiators/readers (these SDK calls return immediately — the wheel/heater reports progress via a later poll), never around a call that blocks for the whole operation.
-- **Re-check the connection UNDER the lock before indexing a container that disconnect clears** (thermal switch `ensure_connected_locked`): a getter that checks `connected_` (or `!handle_`) and *then* re-takes the mutex to index `elements_`/`filter_names_` has a TOCTOU — disconnect clears that container under the mutex in the gap, and a sentinel-bounded id (e.g. `kMaxThermalElements`) then indexes an empty vector. Every lock-then-index path must re-assert the connection (`!connected_ || elements_.empty()` → `NotConnected`) after acquiring the lock, not rely on the pre-lock check. `get/set_switch_value` are naturally safe *only* because disconnect nulls `handle_` before it clears `elements_` and they check `!handle_` first under the lock — don't assume that ordering elsewhere.
 - **AAF API convention** (`Toupcam_AAF(handle, action, value, *out)`):
   - **SET**: `Toupcam_AAF(h, AAF_SETxxx, value, nullptr)` — passes value in third arg.
   - **GET**: `Toupcam_AAF(h, AAF_GETxxx, 0, &out)` — third arg is unused, output via pointer.
