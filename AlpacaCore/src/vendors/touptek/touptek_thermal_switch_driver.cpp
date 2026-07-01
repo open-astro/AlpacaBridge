@@ -540,6 +540,14 @@ private:
                     need_disconnect = connect && connected_.load();
                 }
             }
+            // Publish Idle BEFORE the deferred disconnect below (still under
+            // connection_mutex_, so recorders cannot misjudge the state): if the
+            // deferred set_connected(false) ran while conn_task_ was still
+            // ConnectInFlight, the sync gate would treat our own call as another
+            // racing disconnect, re-record the flag, and return without closing —
+            // leaving the device Connected and the stale flag silently no-opping
+            // the next connect.
+            conn_task_.store(kConnIdle);
             if (need_disconnect) {
                 try {
                     set_connected(false);
@@ -547,7 +555,6 @@ private:
                     ALPACA_LOG_ERROR(kLogTag, "Thermal switch deferred disconnect failed: " + std::string(e.what()));
                 }
             }
-            conn_task_.store(kConnIdle);
         });
     }
 

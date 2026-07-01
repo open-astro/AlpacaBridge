@@ -112,7 +112,7 @@ public:
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (!connected && (connecting_homing_ || conn_task_.load() == kConnConnect)) {
+        if (!connected && !connected_.load() && (connecting_homing_ || conn_task_.load() == kConnConnect)) {
             // Disconnect requested while a connect is in flight — either mid-homing
             // (connecting_homing_, mutex_ released for the poll) or in the async
             // startup window (connection thread spawned but not yet holding mutex_,
@@ -404,6 +404,14 @@ private:
                     need_disconnect = connect && connected_.load();
                 }
             }
+            // Publish Idle BEFORE the deferred disconnect below (still under
+            // connection_mutex_, so recorders cannot misjudge the state): if the
+            // deferred set_connected(false) ran while conn_task_ was still
+            // ConnectInFlight, the sync gate would treat our own call as another
+            // racing disconnect, re-record the flag, and return without closing —
+            // leaving the device Connected and the stale flag silently no-opping
+            // the next connect.
+            conn_task_.store(kConnIdle);
             if (need_disconnect) {
                 try {
                     set_connected(false);
@@ -411,7 +419,6 @@ private:
                     ALPACA_LOG_ERROR(kLogTag, std::string("AFW deferred disconnect failed: ") + e.what());
                 }
             }
-            conn_task_.store(kConnIdle);
         });
     }
 
