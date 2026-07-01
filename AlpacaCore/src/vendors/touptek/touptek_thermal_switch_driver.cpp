@@ -205,8 +205,19 @@ public:
     }
 
     bool get_switch(int id) const override {
-        double value = get_switch_value(id);
-        return value > get_min_switch_value(id);
+        validate_switch_id(id);
+        ensure_connected();
+        // Read the value AND compare against the element min under a single lock,
+        // so a concurrent disconnect can't clear elements_ between two separate
+        // lock acquisitions and surface a spurious NotConnected after the value
+        // already read successfully.
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_switch_id_locked(id);
+        if (!handle_) {
+            throw AlpacaException("Camera handle not available", AlpacaError::NotConnected);
+        }
+        const auto& element = elements_[static_cast<std::size_t>(id)];
+        return static_cast<double>(read_element_value_locked(element)) > static_cast<double>(element.min_value);
     }
 
     void set_switch(int id, bool state) override {
@@ -231,21 +242,23 @@ public:
         if (!handle_) {
             throw AlpacaException("Camera handle not available", AlpacaError::NotConnected);
         }
-        const auto& element = elements_[static_cast<std::size_t>(id)];
+        return static_cast<double>(read_element_value_locked(elements_[static_cast<std::size_t>(id)]));
+    }
+
+    // Reads the live SDK value for an element. Caller holds mutex_ and has
+    // verified handle_ is non-null (so the read is serialised against a
+    // concurrent disconnect/close).
+    int read_element_value_locked(const ThermalElement& element) const {
         auto& sdk = ToupTekSDKWrapper::instance();
-        int value = 0;
         switch (element.kind) {
             case ThermalElementKind::DewHeater:
-                value = sdk.get_heat(handle_);
-                break;
+                return sdk.get_heat(handle_);
             case ThermalElementKind::Fan:
-                value = sdk.get_fan(handle_);
-                break;
+                return sdk.get_fan(handle_);
             case ThermalElementKind::TailLight:
-                value = sdk.get_taillight(handle_);
-                break;
+                return sdk.get_taillight(handle_);
         }
-        return static_cast<double>(value);
+        return 0;
     }
 
     void set_switch_value(int id, double value) override {

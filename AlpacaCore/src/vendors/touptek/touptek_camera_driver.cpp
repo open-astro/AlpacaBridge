@@ -951,14 +951,22 @@ public:
 
     void stop_exposure() override {
         ensure_connected();
-        exposure_active_.store(false);
-        // Unblock a thread parked in Toupcam_WaitImageV4 so abort/stop returns
-        // promptly instead of blocking for the remaining exposure time (a 10-min
-        // frame would otherwise take ~10 min to abort). Same as the disconnect
-        // path. Stopping the stream forces the next exposure to re-init it.
-        try {
-            ToupTekSDKWrapper::instance().stop(handle_copy());
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        // Unblock a thread parked in Toupcam_WaitImageV4 so abort returns promptly
+        // (a 10-min frame would otherwise take ~10 min to abort). Hold mutex_ across
+        // stop() so a concurrent disconnect can't Toupcam_Close the handle in the gap
+        // (use-after-close). Do NOT pre-clear exposure_active_: the thread exits on
+        // the stopped stream (wait_image returns got=false) and clears it itself, so
+        // clearing it here before the join would let a concurrent set_readout_mode /
+        // set_gain (which check the flag under readout_mutex_) write registers while
+        // the frame is still live.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (handle_) {
+                try {
+                    ToupTekSDKWrapper::instance().stop(handle_);
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                }
+            }
         }
         if (exposure_thread_.joinable()) {
             exposure_thread_.join();
@@ -1151,14 +1159,21 @@ private:
 
     void stop_exposure_thread() {
         if (!exposure_thread_.joinable()) return;
-        exposure_active_.store(false);
         // Unblock a thread parked in Toupcam_WaitImageV4 (the wrapper releases the
         // SDK lock across the wait for exactly this) so the join returns promptly
-        // instead of waiting out the full wait_image timeout. Stopping the stream
-        // means the next exposure must restart it, so mark the format dirty.
-        try {
-            ToupTekSDKWrapper::instance().stop(handle_copy());
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        // instead of waiting out the full wait_image timeout. Hold mutex_ across
+        // stop() so a concurrent disconnect can't close the handle in the gap; the
+        // thread exits on the stopped stream (got=false) and clears exposure_active_
+        // itself, so we don't pre-clear it. Stopping the stream means the next
+        // exposure must restart it, so mark format/ROI dirty.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (handle_) {
+                try {
+                    ToupTekSDKWrapper::instance().stop(handle_);
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                }
+            }
         }
         exposure_thread_.join();
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1196,11 +1211,16 @@ private:
 
     void set_bin_locked(int bin_x, int bin_y) {
         ensure_connected();
-        ensure_not_exposing();  // geometry change mid-exposure corrupts the run
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        // Check the exposure state under readout_mutex_ (lock order mutex_ ->
+        // readout_mutex_) so it is atomic with the geometry mutation below and with
+        // start_exposure publishing exposure_active_ — a bare pre-lock check is a
+        // TOCTOU (matches set_gain / set_readout_mode).
+        std::lock_guard<std::mutex> rlock(readout_mutex_);
+        ensure_not_exposing();
         if (!camera_info_valid_) {
             throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
         }
@@ -1226,11 +1246,12 @@ private:
 
     void set_roi_size_locked(int width, int height) {
         ensure_connected();
-        ensure_not_exposing();  // geometry change mid-exposure corrupts the run
         if (width <= 0 || height <= 0) {
             throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
+        ensure_not_exposing();
         if (num_x_ == width && num_y_ == height) return;
         num_x_ = width;
         num_y_ = height;
@@ -1240,12 +1261,13 @@ private:
 
     void set_start_pos_locked(int sx, int sy) {
         ensure_connected();
-        ensure_not_exposing();  // geometry change mid-exposure corrupts the run
         if (sx < 0 || sy < 0) {
             throw AlpacaException("Start position must be non-negative",
                                   AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
+        ensure_not_exposing();
         if (start_x_ == sx && start_y_ == sy) return;
         start_x_ = sx;
         start_y_ = sy;

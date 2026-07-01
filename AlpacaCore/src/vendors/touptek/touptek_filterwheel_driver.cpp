@@ -18,6 +18,7 @@
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -131,6 +132,12 @@ public:
                 // (notably after a firmware update).
                 sdk.set_filter_wheel_slot_count(handle, slots);
                 sdk.reset_filter_wheel(handle);
+                // reset_filter_wheel returns immediately but the firmware takes
+                // ~1.5 s to home. Wait for it to settle before reporting connected:
+                // a SetPosition arriving mid-home aborts the cycle and leaves the
+                // slot reference unknown (moves then land on wrong slots). The SDK
+                // reports -1 while moving; poll until it settles (or time out).
+                wait_for_home(sdk, handle);
                 handle_ = handle;
                 info_ = info;
                 slot_count_ = slots;
@@ -331,6 +338,21 @@ private:
     // ("LRGB" -> L,R,G,B) only when it looks like a shorthand code (no lowercase
     // letters), so ordinary names like "Clear" or "Ha_NB" that happen to match
     // the slot count are left intact. No-op until the slot count is known.
+    // Block until the wheel firmware finishes its home cycle (SDK reports -1
+    // while moving, a non-negative slot once settled), or a timeout elapses.
+    // Sleeps first so the move has actually begun before the first read.
+    static void wait_for_home(ToupTekSDKWrapper& sdk, HToupcam handle) {
+        constexpr int kPollMs = 100;
+        constexpr int kMaxWaitMs = 6000;
+        for (int waited = 0; waited < kMaxWaitMs; waited += kPollMs) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+            if (sdk.get_filter_wheel_position(handle) >= 0) {
+                return;  // firmware finished homing
+            }
+        }
+        ALPACA_LOG_WARN(kLogTag, "Filter wheel home did not settle within timeout; proceeding");
+    }
+
     void expand_shorthand_locked(std::vector<std::string>& names) const {
         if (slot_count_ <= 0 || names.size() != 1) {
             return;

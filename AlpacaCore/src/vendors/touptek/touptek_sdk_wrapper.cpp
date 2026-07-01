@@ -112,8 +112,12 @@ public:
         if (!h) {
             throw AlpacaException(unavailable_msg, AlpacaError::NotConnected);
         }
-        shared_by_id_[id] = SharedCam{h, 1};
+        // Two map insertions: if the second threw (only on OOM for these small
+        // key/value types), the first would leak a tracked-but-unclosed entry.
+        // Insert id_by_handle_ first (its throw leaves nothing partially tracked),
+        // then shared_by_id_, so a partial state can't reference a live handle.
         id_by_handle_[h] = id;
+        shared_by_id_[id] = SharedCam{h, 1};
         return h;
     }
 
