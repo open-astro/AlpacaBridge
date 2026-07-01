@@ -278,7 +278,14 @@ vendor that ignores either ships a silently broken form:
   bare `cameraIndex`/`focuserIndex`/`filterwheelIndex`/`rotatorIndex` names (it's the
   canonical first block); **every other vendor must prefix**. Element `id`s can stay
   descriptive (`playerone-camera-index`) — `setFormValue`/auto-fill key off `id`, the
-  collision is purely about the `name` used in `FormData`.
+  collision is purely about the `name` used in `FormData`. **This applies to EVERY shared
+  field name, not just the `*Index` ones** — the `*Id` binding fields
+  (`cameraId`/`focuserId`/`filterwheelId`/`rotatorId`) and discriminator selects
+  (`switchType`) collide the same way. ToupTek's focuser-id (`touptekFocuserId`), filter-wheel-id
+  (`touptekFilterwheelId`), and switch-type (`touptekSwitchType`) are all prefixed for this
+  reason; a bare `name="focuserId"` on a non-ZWO input silently returns ZWO's value. When you add
+  ANY input whose name matches a field ZWO already uses, prefix it and read the prefixed name in
+  the submit handler.
 - **Register the field in the `INDEX_FIELDS` array** in `AlpacaHTTP/web/app.js`
   (`fieldId`, `vendor`, `deviceType`, `configKey`, optional `idFieldId`). That one entry
   drives auto-increment (so a second device of the same vendor/type doesn't reuse index 0)

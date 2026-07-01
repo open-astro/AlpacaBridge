@@ -2633,7 +2633,10 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
     } else if (deviceData.vendor === 'touptek') {
         if (normalizeDeviceType(deviceData.deviceType) === 'focuser') {
-            const touptekFocuserId = formData.get('focuserId');
+            // Unique field name (not the bare 'focuserId') to avoid the
+            // FormData collision with ZWO's focuser-id input, which appears
+            // first in the DOM and would otherwise win formData.get().
+            const touptekFocuserId = formData.get('touptekFocuserId');
             if (touptekFocuserId && touptekFocuserId.trim() !== '') {
                 deviceData.focuserId = touptekFocuserId.trim();
             } else {
