@@ -383,10 +383,7 @@ private:
                     // Consume a disconnect that landed after the post-homing check
                     // (or after an entry-consumed abort) but before this task
                     // finished — without this, a disconnect arriving in that tail
-                    // would be recorded and never honored. The remaining exposure
-                    // is the few instructions between this check and
-                    // connecting_.store(false); a leaked flag there self-heals (the
-                    // next connect consumes it at entry and the client retries).
+                    // would be recorded and never honored.
                     bool need_disconnect = false;
                     {
                         std::lock_guard<std::mutex> state_lock(mutex_);
@@ -401,6 +398,16 @@ private:
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR(kLogTag, std::string("AFW connection failed: ") + e.what());
+            }
+            {
+                // Discard any pending_disconnect_ that landed after the re-check
+                // above. That disconnect is dropped (instructions-wide window; the
+                // client retries) — but the flag must NOT leak into the next
+                // connect, which would consume it at entry and silently no-op:
+                // the caller would see connecting=false + connected=false with no
+                // error and need a second connect to recover.
+                std::lock_guard<std::mutex> state_lock(mutex_);
+                pending_disconnect_ = false;
             }
             connecting_.store(false);
         });
@@ -476,9 +483,10 @@ private:
     // kStableReads poll intervals over an on-first-slot return.
     static bool wait_for_home(ToupTekSDKWrapper& sdk, HToupcam handle) {
         constexpr int kPollMs = 100;
-        constexpr int kMaxWaitMs = 6000;  // budget; effective wait is up to one
-                                          // kPollMs longer (sleep runs before the
-                                          // guard rejects waited == kMaxWaitMs)
+        constexpr int kMaxWaitMs = 6000;  // total wait is exactly this: the loop
+                                          // condition rejects waited == kMaxWaitMs
+                                          // before sleeping, so 60 sleeps of
+                                          // kPollMs each
         constexpr int kStableReads = 3;   // consecutive real-slot reads = settled
         int stable = 0;
         for (int waited = 0; waited < kMaxWaitMs; waited += kPollMs) {

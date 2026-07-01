@@ -524,9 +524,7 @@ private:
                 if (connect) {
                     // Consume a disconnect that landed while this connect held
                     // mutex_ (the recorder blocks on the lock, so the flag can be
-                    // set right after the connect publishes). The few instructions
-                    // before connecting_ = false remain exposed; a leaked flag
-                    // there self-heals at the next connect's entry check.
+                    // set right after the connect publishes).
                     bool need_disconnect = false;
                     {
                         std::lock_guard<std::mutex> state_lock(mutex_);
@@ -541,6 +539,14 @@ private:
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR(kLogTag, "Thermal switch connection failed: " + std::string(e.what()));
+            }
+            {
+                // Discard any pending_disconnect_ that landed after the re-check
+                // above. That disconnect is dropped (instructions-wide window; the
+                // client retries) — but the flag must NOT leak into the next
+                // connect, which would consume it at entry and silently no-op.
+                std::lock_guard<std::mutex> state_lock(mutex_);
+                pending_disconnect_ = false;
             }
             connecting_.store(false);
         });
