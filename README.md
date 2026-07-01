@@ -4,7 +4,7 @@
 
 AlpacaBridge is a complete ASCOM Alpaca server for Linux. Install it on a machine at the mount, connect your gear once, and access cameras, focusers, filter wheels, rotators, mounts, and weather stations over the network from any Alpaca-compatible software (N.I.N.A., SGP, and others). All drivers are validated against ConformU.
 
-#### [2.1.0] - 2026-06-23 &middot; [Changelog](CHANGELOG.md)
+#### [2.2.0] - 2026-07-01 &middot; [Changelog](CHANGELOG.md)
 
 ## Features
 

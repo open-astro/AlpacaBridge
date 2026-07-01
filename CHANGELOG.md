@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [2.2.0] - UNRELEASED
+## [2.2.0] - 2026-07-01
 
 ### Added
 - **ToupTek AFW Filter Wheel driver** (AlpacaCore): standalone ToupTek AFW (Astro Filter Wheel) support for the AFW-M 5- and 7-slot models, enumerated through the existing toupcam Camera SDK (`Toupcam_EnumV2` filtered by `TOUPCAM_FLAG_FILTERWHEEL`). At connect the driver reads the slot count (`TOUPCAM_OPTION_FILTERWHEEL_SLOT`), writes it back, and homes the wheel (`TOUPCAM_OPTION_FILTERWHEEL_POSITION = -1`) — the same sequence as the INDI toupbase reference driver — so the firmware establishes its slot reference; without homing the wheel hunts and never lands (notably right after a firmware update). `Position` reads/writes then go through `TOUPCAM_OPTION_FILTERWHEEL_POSITION` as single absolute moves (clockwise direction bit), where the SDK's in-motion `-1` maps directly onto the ASCOM "moving" sentinel. `Names`/`FocusOffsets` follow the shared ZWO EFW / Player One Phoenix semantics (length tied to slot count, single-string expansion, default `Filter N` names). Interface version 3 (IFilterWheelV3). The toupcam SDK version is surfaced in the web UI only, never in `DriverInfo`.
