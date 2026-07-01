@@ -287,6 +287,17 @@ vendor that ignores either ships a silently broken form:
   index 0. This is distinct from the Alpaca **device number** (auto-assigned per device
   type, vendor-agnostic, and what clients address). Serial/network devices (port path or
   host) have no index and belong in neither place.
+- **Allowlist EVERY persisted field in `sanitize_device_config` (`router.cpp`), per device type**
+  (bit us three times: ZWO ASIAIR PWM ports, ToupTek `switchType`, ToupTek AFW filter fields).
+  `sanitize_device_config` is a strict allowlist — anything not explicitly `copy_if_present`-ed
+  is silently dropped on save, so the config round-trips lossily and the setting reverts (a
+  filter-wheel binding resets to index 0, custom filter names vanish, PWM toggles revert). When
+  you add a config field that a driver reads in its registration branch, you MUST also add a
+  matching `copy_if_present` in that vendor's `sanitize_device_config` branch. If a vendor
+  serves multiple device types through one branch (ToupTek: camera/focuser/filterwheel/switch),
+  split on `device_type` so each type keeps its own fields — don't let a shared `else` copy only
+  the camera/focuser fields. Cross-check the driver's `config.value(...)` / `config.contains(...)`
+  reads in the registration function against the sanitizer branch; they must list the same keys.
 
 ## Alpaca Protocol Conformance (AlpacaHTTP)
 

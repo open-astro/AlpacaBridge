@@ -7365,6 +7365,13 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
                 copy_if_present("pwmFrequencyHz");
                 copy_if_present("ports");
             }
+        } else if (device_type == "filterwheel") {
+            // Standalone ToupTek AFW: bind by index or SDK id string, plus the
+            // user's custom filter names. Without these the wheel binding resets
+            // to index 0 and filter names are erased on every save.
+            copy_if_present("filterwheelIndex");
+            copy_if_present("filterwheelId");
+            copy_if_present("filterNames");
         } else {
             copy_if_present("cameraIndex");
             copy_if_present("focuserIndex");

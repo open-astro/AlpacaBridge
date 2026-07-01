@@ -587,6 +587,8 @@ public:
         const HToupcam handle = handle_copy();  // NotConnected while disconnected
         const bool has_cg = specs.front().set_cg;
         const bool has_hfw = specs.front().set_hfw;
+        // Read both axes atomically w.r.t. set_readout_mode's two-step apply.
+        std::lock_guard<std::mutex> lock(readout_mutex_);
         const int cur_cg = has_cg ? sdk.get_cg(handle) : 0;
         const bool cur_hfw = has_hfw && sdk.get_high_fullwell(handle) != 0;
         for (std::size_t i = 0; i < specs.size(); ++i) {
@@ -613,6 +615,8 @@ public:
         }
         auto& sdk = ToupTekSDKWrapper::instance();
         const HToupcam handle = handle_copy();  // NotConnected while disconnected
+        // Apply both axes atomically w.r.t. get_readout_mode's paired reads.
+        std::lock_guard<std::mutex> lock(readout_mutex_);
         if (s.set_cg) {
             sdk.put_cg(handle, s.cg);
         }
@@ -899,6 +903,10 @@ private:
     std::atomic<bool> connecting_;
     mutable std::mutex mutex_;
     std::mutex connection_mutex_;
+    // Serialises the two-step CG+HFW apply in set_readout_mode against the
+    // paired reads in get_readout_mode, so a reader never observes a
+    // half-applied combination that isn't in the enumerated specs.
+    mutable std::mutex readout_mutex_;
     std::thread connection_thread_;
 
     int bin_;

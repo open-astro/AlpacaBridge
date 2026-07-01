@@ -583,6 +583,67 @@ int main() {
 #endif
     }
 
+    // --- ToupTek AFW filter wheel routing/config persistence test ---
+    // Guards against sanitize_device_config dropping the filter-wheel binding
+    // and custom filter names on save (a strict allowlist silently strips any
+    // field it does not copy).
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    {
+        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "filterwheel"}, {"deviceNumber", 9203}};
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        const std::vector<std::string> filter_names = {"Lum", "Red", "Green", "Blue", "Ha"};
+        nlohmann::json configure_body = {{"vendor", "touptek"},
+                                         {"deviceType", "filterwheel"},
+                                         {"deviceNumber", 9203},
+                                         {"filterwheelIndex", 0},
+                                         {"filterwheelId", "tp-afw-routing-test"},
+                                         {"filterNames", filter_names}};
+
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        EXPECT(configured_json.value("ErrorNumber", -1) == 0);
+        EXPECT(configured_json.contains("Value"));
+        EXPECT(configured_json["Value"].is_array());
+
+        bool found_touptek_wheel = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "FilterWheel" && entry.value("DeviceNumber", -1) == 9203) {
+                EXPECT(entry.value("Vendor", "") == "touptek");
+                EXPECT(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                EXPECT(cfg.value("vendor", "") == "touptek");
+                EXPECT(cfg.value("deviceType", "") == "filterwheel");
+                // The three fields that sanitize_device_config used to strip.
+                EXPECT(cfg.value("filterwheelId", "") == "tp-afw-routing-test");
+                EXPECT(cfg.contains("filterwheelIndex"));
+                EXPECT(cfg.contains("filterNames"));
+                EXPECT(cfg["filterNames"] == filter_names);
+                found_touptek_wheel = true;
+                break;
+            }
+        }
+        EXPECT(found_touptek_wheel);
+
+        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "filterwheel"}, {"deviceNumber", 9203}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        EXPECT(remove_json.value("ErrorNumber", -1) == 0);
+#else
+        EXPECT(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
     // --- iOptron iMate PowerBox switch routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_IOPTRON
     {

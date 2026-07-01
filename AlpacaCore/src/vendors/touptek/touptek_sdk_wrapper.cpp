@@ -482,9 +482,11 @@ int ToupTekSDKWrapper::get_blacklevel_max(HToupcam handle, int deep_bits) {
     // output mode the max is the 8-bit value; in deep mode it follows the
     // camera's native (deep) bit count.
     int mode = 0;
-    if (FAILED(Toupcam_get_Option(handle, TOUPCAM_OPTION_BITDEPTH, &mode))) {
-        mode = 0;
-    }
+    // Propagate a BITDEPTH read failure instead of silently defaulting to 8-bit:
+    // a camera actually streaming in deep mode would otherwise report OffsetMax
+    // as 31 rather than its true deep-mode maximum. Every other getter here
+    // throws on SDK failure; match that so the caller sees NotConnected/error.
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_BITDEPTH, &mode), "Toupcam_get_Option(BITDEPTH)");
     int bits = (mode == 0) ? 8 : deep_bits;
     if (bits < 8) {
         bits = 8;
