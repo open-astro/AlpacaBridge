@@ -7069,6 +7069,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             error_message = "Failed to register device. Device may already exist.";
             return false;
         }
+        // Only "thermal" (handled above) and "stellavita" (below) are valid.
+        // Reject anything else here so a typo'd/unknown switchType (e.g. "Thermal")
+        // can't silently fall through and create a StellaVita PowerBox instead.
+        if (switch_type != "stellavita") {
+            error_message = "Unknown ToupTek switchType '" + switch_type + "' (expected 'thermal' or 'stellavita')";
+            return false;
+        }
 #endif
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
         // StellaVita PowerBox: on-board 12V DC power ports driven over local

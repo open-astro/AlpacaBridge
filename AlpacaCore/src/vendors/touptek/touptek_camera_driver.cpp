@@ -679,6 +679,8 @@ public:
         }
     }
     std::vector<std::string> get_readout_modes() const override {
+        ensure_connected();  // ASCOM: properties throw NotConnected when disconnected
+                             // (consistent with the get_readout_mode index getter)
         const auto specs = readout_mode_specs();
         std::vector<std::string> names;
         names.reserve(specs.size());
