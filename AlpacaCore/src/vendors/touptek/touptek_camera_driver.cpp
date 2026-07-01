@@ -477,21 +477,24 @@ public:
     void set_gain(int gain) override {
         ensure_connected();
         auto& sdk = ToupTekSDKWrapper::instance();
-        const HToupcam handle = handle_copy();  // takes mutex_ (before readout_mutex_)
-        auto range = sdk.get_gain_range(handle);
+        // Read the valid range, range-check, and write the register under mutex_ +
+        // readout_mutex_ held together (same fix as set_offset). The range was
+        // previously read OUTSIDE readout_mutex_, so a concurrent reconnect to a
+        // different model (different gain range) could stale the bound between the
+        // check and the write. Holding both locks also makes the exposure check
+        // atomic with the write, and reads handle_ directly under the lock rather
+        // than a pre-lock snapshot. Lock order mutex_ -> readout_mutex_ -> SDK.
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> rlock(readout_mutex_);
+        if (!handle_) {
+            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        }
+        auto range = sdk.get_gain_range(handle_);
         if (gain < range.min || gain > range.max) {
             throw AlpacaException("Gain out of range", AlpacaError::InvalidValue);
         }
-        // Hold readout_mutex_ across the exposure check and the register write so a
-        // concurrent start_exposure (which flips exposure_active_ under the same
-        // lock) can't begin integrating between the check and the write.
-        std::lock_guard<std::mutex> lock(readout_mutex_);
-        // Re-check connection under readout_mutex_: set_connected(false) closes the
-        // handle under this same lock, so if it won the race after our handle
-        // snapshot, connected_ is already false and we must not use the stale handle.
-        ensure_connected();
         ensure_not_exposing();
-        sdk.put_gain(handle, static_cast<unsigned short>(gain));
+        sdk.put_gain(handle_, static_cast<unsigned short>(gain));
     }
     int get_gain_max() const override {
         ensure_connected();
@@ -588,17 +591,27 @@ public:
     void set_offset(int offset) override {
         ensure_connected();
         ensure_blacklevel_supported();
-        int max = offset_max_value();
+        auto& sdk = ToupTekSDKWrapper::instance();
+        // Compute the max bound (which scales with the live bit depth), range-check,
+        // and write the register under mutex_ + readout_mutex_ held together. The
+        // bound was previously computed OUTSIDE readout_mutex_, so a concurrent
+        // reconnect that changed the bit depth between the check and the write left
+        // the accepted bound stale (spurious SDK DriverException). Holding both locks
+        // also makes the exposure check atomic with the write (start_exposure
+        // publishes exposure_active_ under readout_mutex_). Lock order mutex_ ->
+        // readout_mutex_ -> SDK, so the bound is read from handle_ directly, not via
+        // offset_max_value()/handle_copy() (which would re-take mutex_).
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> rlock(readout_mutex_);
+        if (!handle_) {
+            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        }
+        const int max = sdk.get_blacklevel_max(handle_, camera_info_.bit_depth_max);
         if (offset < 0 || offset > max) {
             throw AlpacaException("Offset out of range", AlpacaError::InvalidValue);
         }
-        const HToupcam handle = handle_copy();  // takes mutex_ (before readout_mutex_)
-        // Hold readout_mutex_ across the exposure check and the register write —
-        // same TOCTOU close as set_gain / set_readout_mode.
-        std::lock_guard<std::mutex> lock(readout_mutex_);
-        ensure_connected();  // stale-handle guard — see set_gain
         ensure_not_exposing();
-        ToupTekSDKWrapper::instance().put_blacklevel(handle, offset);
+        sdk.put_blacklevel(handle_, offset);
     }
     int get_offset_max() const override {
         ensure_connected();

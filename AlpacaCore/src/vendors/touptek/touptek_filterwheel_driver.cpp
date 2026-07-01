@@ -118,6 +118,16 @@ public:
         auto& sdk = ToupTekSDKWrapper::instance();
 
         if (connected) {
+            if (connecting_homing_) {
+                // Another set_connected(true) is already mid-connect and has
+                // released mutex_ during the homing poll. Opening again would double
+                // the ref-counted SDK open and leak the handle when only one close
+                // fires. The in-flight connect will publish handle_/connected_; this
+                // call becomes a no-op. (connecting_ in start_connection_task only
+                // guards the async path — set_connected is a public sync entry too.)
+                return;
+            }
+            connecting_homing_ = true;
             ToupFilterWheelInfo info = resolve_wheel_locked(sdk);
             HToupcam handle = sdk.open_filter_wheel_by_id(info.id);
             try {
@@ -167,8 +177,10 @@ public:
                 handle_ = nullptr;
                 info_ = {};
                 slot_count_ = 0;
+                connecting_homing_ = false;  // cleared under mutex_ on failure
                 throw;
             }
+            connecting_homing_ = false;  // cleared under mutex_ on success
             connected_.store(true);
             return;
         }
@@ -452,6 +464,12 @@ private:
 
     std::atomic<bool> connected_{false};
     std::atomic<bool> connecting_{false};
+    // True while a set_connected(true) has opened the wheel and is homing with
+    // mutex_ released. Guarded by mutex_. Blocks a racing SYNC set_connected(true)
+    // (the public ASCOM Connected setter, which bypasses start_connection_task's
+    // connecting_ guard) from opening the same wheel a second time — a double
+    // ref-counted open would leak the handle when only one close fires.
+    bool connecting_homing_ = false;
     bool shutting_down_ = false;  // guarded by connection_mutex_
     mutable std::mutex mutex_;
     std::mutex connection_mutex_;
