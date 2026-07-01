@@ -147,6 +147,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (connected == connected_.load()) {
             if (connected) {
+                // reset_exposure_state_locked() clears exposure_active_, so take
+                // readout_mutex_ (after mutex_, preserving lock order) to uphold the
+                // invariant that the flag only changes under readout_mutex_ — a
+                // concurrent set_gain/set_readout_mode must not pass ensure_not_exposing
+                // and write registers mid-frame during a redundant reconnect.
+                std::lock_guard<std::mutex> rlock(readout_mutex_);
                 reset_exposure_state_locked();
             }
             return;
@@ -274,7 +280,14 @@ public:
                                       AlpacaError::DriverException);
             }
 
-            reset_exposure_state_locked();
+            {
+                // Same invariant as the redundant-reconnect path above: clear
+                // exposure_active_ (inside reset_exposure_state_locked) under
+                // readout_mutex_. No exposure thread runs yet here, but keeping every
+                // caller consistent means the invariant holds by construction.
+                std::lock_guard<std::mutex> rlock(readout_mutex_);
+                reset_exposure_state_locked();
+            }
             connected_.store(true);
             return;
         }
@@ -947,6 +960,7 @@ public:
             // the next exposure.
             bool format_applied = false;
             bool roi_applied = false;
+            bool frame_ready = false;
             try {
                 // Reconfiguring bitdepth / pixel format / binning requires the
                 // stream to be stopped (SDK returns E_WRONG_THREAD otherwise).
@@ -1007,8 +1021,13 @@ public:
                                                           static_cast<int>(got_w),
                                                           static_cast<int>(got_h));
                     image_cached_ = true;
-                    image_ready_ = true;
+                    // image_ready_ is intentionally NOT set here — it is published
+                    // AFTER exposure_active_ is cleared below, so a poller never
+                    // observes ImageReady=true while camera_state still reports
+                    // Exposing (an ASCOM-forbidden combination). The frame is fully
+                    // captured, so remaining Exposing during this build is fine.
                 }
+                frame_ready = true;
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ToupTek", "Exposure failed: " + std::string(e.what()));
                 // Re-mark only the stage that did NOT complete, so the next
@@ -1018,11 +1037,20 @@ public:
                 if (dirty_format && !format_applied) format_dirty_ = true;
                 if (dirty_roi && !roi_applied) roi_dirty_ = true;
             }
-            // Normal completion also publishes the false-transition under
-            // readout_mutex_ (see the abort path above) so every exposure_active_
-            // change on this thread upholds the invariant.
-            std::lock_guard<std::mutex> rlock(readout_mutex_);
-            exposure_active_.store(false);
+            // Clear exposure_active_ FIRST (under readout_mutex_, matching the
+            // abort path) so the camera leaves the Exposing state, THEN publish
+            // image_ready_ — never the reverse, or a poller could observe
+            // ImageReady=true while camera_state still returns Exposing. This also
+            // keeps every exposure_active_ transition on this thread under
+            // readout_mutex_ (the documented invariant).
+            {
+                std::lock_guard<std::mutex> rlock(readout_mutex_);
+                exposure_active_.store(false);
+            }
+            if (frame_ready) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                image_ready_ = true;
+            }
         });
     }
 

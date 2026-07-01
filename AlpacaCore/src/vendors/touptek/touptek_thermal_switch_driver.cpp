@@ -224,8 +224,26 @@ public:
     }
 
     void set_switch(int id, bool state) override {
-        double value = state ? get_max_switch_value(id) : get_min_switch_value(id);
-        set_switch_value(id, value);
+        validate_switch_id(id);
+        ensure_connected();
+        // Resolve the target level (max for on / min for off) AND write it under a
+        // SINGLE lock hold. Going through get_max/min_switch_value + set_switch_value
+        // took three separate lock acquisitions, so a disconnect+reconnect to a
+        // different camera model in between could change elements_[id]'s range —
+        // making the resolved value stale when set_switch_value range-checks it
+        // (spurious InvalidValue, or writing the wrong level to a different control).
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_switch_id_locked(id);
+        if (!handle_) {
+            throw AlpacaException("Camera handle not available", AlpacaError::NotConnected);
+        }
+        const auto& element = elements_[static_cast<std::size_t>(id)];
+        if (!element.writable) {
+            throw AlpacaException(element.name + " is read-only", AlpacaError::InvalidOperation);
+        }
+        // The element's own min_value/max_value are trivially in range, so no
+        // separate bounds check is needed (unlike the free-value set path).
+        write_element_value_locked(element, state ? element.max_value : element.min_value);
     }
 
     void set_async(int id, bool /*state*/) override {
@@ -264,6 +282,26 @@ public:
         return 0;
     }
 
+    // Writes value_long to the element's SDK control. Caller holds mutex_, has
+    // verified handle_ is non-null and the element is writable, and has ensured
+    // value_long is within [min_value, max_value] (the element's own bounds are
+    // trivially in range). Shared by set_switch and set_switch_value so both
+    // resolve-and-write under a single lock (no cross-call TOCTOU).
+    void write_element_value_locked(const ThermalElement& element, long value_long) {
+        auto& sdk = ToupTekSDKWrapper::instance();
+        switch (element.kind) {
+            case ThermalElementKind::DewHeater:
+                sdk.put_heat(handle_, static_cast<int>(value_long));
+                break;
+            case ThermalElementKind::Fan:
+                sdk.put_fan(handle_, static_cast<int>(value_long));
+                break;
+            case ThermalElementKind::TailLight:
+                sdk.put_taillight(handle_, value_long != 0);
+                break;
+        }
+    }
+
     void set_switch_value(int id, double value) override {
         validate_switch_id(id);
         ensure_connected();
@@ -287,18 +325,7 @@ public:
         if (value_long < element.min_value || value_long > element.max_value) {
             throw AlpacaException(element.name + " value out of range", AlpacaError::InvalidValue);
         }
-        auto& sdk = ToupTekSDKWrapper::instance();
-        switch (element.kind) {
-            case ThermalElementKind::DewHeater:
-                sdk.put_heat(handle_, static_cast<int>(value_long));
-                break;
-            case ThermalElementKind::Fan:
-                sdk.put_fan(handle_, static_cast<int>(value_long));
-                break;
-            case ThermalElementKind::TailLight:
-                sdk.put_taillight(handle_, value_long != 0);
-                break;
-        }
+        write_element_value_locked(element, value_long);
     }
 
     void set_async_value(int id, double /*value*/) override {

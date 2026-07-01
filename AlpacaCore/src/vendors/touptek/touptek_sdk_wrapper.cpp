@@ -18,6 +18,7 @@
 
 #include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 
@@ -96,6 +97,15 @@ public:
     std::map<std::string, SharedCam> shared_by_id_;
     std::map<HToupcam, std::string> id_by_handle_;
 
+    // Every currently-open SDK handle — both ref-counted by-id opens and the
+    // untracked open_camera_by_index() legacy handles. Lets close_shared() be
+    // idempotent: a handle not in this set is a double-close and is ignored
+    // rather than passed to Toupcam_Close (which, on an already-closed handle,
+    // could hit a recycled value and tear down an innocent holder). Note this
+    // does not defend against a caller that closes a stale handle AFTER another
+    // open recycled the same value — that is a use-after-free in the caller.
+    std::set<HToupcam> open_handles_;
+
     // Reference-counted open/close shared by EVERY device type that opens by id
     // (camera, focuser, filter wheel). Keyed by the device's opaque id, so two
     // driver instances on the same physical device (e.g. a camera and its
@@ -120,9 +130,11 @@ public:
         try {
             shared_by_id_[id] = SharedCam{h, 1};
             id_by_handle_[h] = id;
+            open_handles_.insert(h);
         } catch (...) {
             shared_by_id_.erase(id);
             id_by_handle_.erase(h);
+            open_handles_.erase(h);
             Toupcam_Close(h);
             throw;
         }
@@ -130,6 +142,16 @@ public:
     }
 
     void close_shared(HToupcam handle) {
+        // Idempotent guard: if we have no record of this handle being open it is a
+        // double-close. Do NOT fall through to Toupcam_Close — the handle value may
+        // have been recycled by a later open, and closing it would kill that
+        // innocent holder. (The bot-suggested "not in id_by_handle_ -> return" guard
+        // would instead have leaked every untracked open_camera_by_index handle,
+        // which is legitimately absent from id_by_handle_ and must still close here.)
+        auto live = open_handles_.find(handle);
+        if (live == open_handles_.end()) {
+            return;
+        }
         auto hit = id_by_handle_.find(handle);
         if (hit != id_by_handle_.end()) {
             auto sit = shared_by_id_.find(hit->second);
@@ -149,10 +171,11 @@ public:
             }
             id_by_handle_.erase(hit);
         }
-        // Intentional fallthrough: handles opened by index (open_camera_by_index)
-        // are not tracked in id_by_handle_, so the lookup above misses and they
-        // close immediately here — the legacy non-ref-counted path. A tracked
-        // handle only reaches this Close when its ref count hit zero above.
+        // Reached only on an actual close: an untracked index handle (missed the
+        // id_by_handle_ lookup — the legacy non-ref-counted path) or a tracked
+        // handle whose ref count just hit zero above. Drop it from the live set
+        // first so a later double-close is ignored by the guard at the top.
+        open_handles_.erase(live);
         if (handle) {
             Toupcam_Close(handle);
         }
@@ -241,6 +264,14 @@ HToupcam ToupTekSDKWrapper::open_camera_by_index(int camera_index) {
     if (!h) {
         throw AlpacaException("Toupcam_OpenByIndex returned null (camera not available)",
                               AlpacaError::NotConnected);
+    }
+    // Track even untracked index opens so close_shared() is idempotent for them
+    // too. If the insert throws (OOM), close the handle rather than leak it.
+    try {
+        pimpl_->open_handles_.insert(h);
+    } catch (...) {
+        Toupcam_Close(h);
+        throw;
     }
     return h;
 }
