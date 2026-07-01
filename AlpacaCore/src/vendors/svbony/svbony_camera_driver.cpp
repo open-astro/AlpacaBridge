@@ -669,18 +669,14 @@ public:
         return num_x_;
     }
 
-    void set_num_x(int num_x) override {
-        set_roi_size_locked(num_x, get_num_y());
-    }
+    void set_num_x(int num_x) override { set_roi_size_locked(num_x, std::nullopt); }
 
     int get_num_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return num_y_;
     }
 
-    void set_num_y(int num_y) override {
-        set_roi_size_locked(get_num_x(), num_y);
-    }
+    void set_num_y(int num_y) override { set_roi_size_locked(std::nullopt, num_y); }
 
     int get_offset() const override {
         ensure_connected();
@@ -798,18 +794,14 @@ public:
         return start_x_;
     }
 
-    void set_start_x(int start_x) override {
-        set_start_pos_locked(start_x, get_start_y());
-    }
+    void set_start_x(int start_x) override { set_start_pos_locked(start_x, std::nullopt); }
 
     int get_start_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return start_y_;
     }
 
-    void set_start_y(int start_y) override {
-        set_start_pos_locked(get_start_x(), start_y);
-    }
+    void set_start_y(int start_y) override { set_start_pos_locked(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
@@ -1425,12 +1417,18 @@ private:
         image_cached_ = false;
     }
 
-    void set_roi_size_locked(int width, int height) {
+    // width/height (or sx/sy) of std::nullopt means "leave that axis unchanged",
+    // resolved UNDER mutex_: each public setter passes only its own axis, so a
+    // concurrent setter for the other axis can no longer be clobbered by a stale
+    // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
+    void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
         ensure_connected();
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int width = width_opt.value_or(num_x_);
+        const int height = height_opt.value_or(num_y_);
         if (width <= 0 || height <= 0) {
             throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
         if (num_x_ == width && num_y_ == height) {
             return;
         }
@@ -1447,12 +1445,14 @@ private:
         image_cached_ = false;
     }
 
-    void set_start_pos_locked(int sx, int sy) {
+    void set_start_pos_locked(std::optional<int> sx_opt, std::optional<int> sy_opt) {
         ensure_connected();
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int sx = sx_opt.value_or(start_x_);
+        const int sy = sy_opt.value_or(start_y_);
         if (sx < 0 || sy < 0) {
             throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
         if (start_x_ == sx && start_y_ == sy) {
             return;
         }

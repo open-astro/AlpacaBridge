@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -616,12 +617,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return num_x_;
     }
-    void set_num_x(int num_x) override { set_roi_size_locked(num_x, get_num_y()); }
+    void set_num_x(int num_x) override { set_roi_size_locked(num_x, std::nullopt); }
     int get_num_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return num_y_;
     }
-    void set_num_y(int num_y) override { set_roi_size_locked(get_num_x(), num_y); }
+    void set_num_y(int num_y) override { set_roi_size_locked(std::nullopt, num_y); }
 
     // ASCOM Offset maps to the ToupTek black level (TOUPCAM_OPTION_BLACKLEVEL),
     // available on cameras that report TOUPCAM_FLAG_BLACKLEVEL (e.g. the ATR2600M
@@ -839,12 +840,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return start_x_;
     }
-    void set_start_x(int start_x) override { set_start_pos_locked(start_x, get_start_y()); }
+    void set_start_x(int start_x) override { set_start_pos_locked(start_x, std::nullopt); }
     int get_start_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return start_y_;
     }
-    void set_start_y(int start_y) override { set_start_pos_locked(get_start_x(), start_y); }
+    void set_start_y(int start_y) override { set_start_pos_locked(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
@@ -1424,12 +1425,13 @@ private:
     void start_connection_task(bool connect) {
         std::lock_guard<std::mutex> lock(connection_mutex_);
         if (shutting_down_) return;  // Destruction in progress; never spawn a new thread.
-        if (conn_task_.load() != kConnIdle) {
+        const auto inflight = conn_task_.load();
+        if (inflight != kConnIdle) {
             // An async disconnect racing an in-flight CONNECT must not be dropped
             // (the camera would come up Connected despite the explicit request).
             // Record the intent; the connect consumes it at entry or the re-check
             // below runs the disconnect. Same pattern as the AFW driver.
-            if (!connect && conn_task_.load() == kConnConnect) {
+            if (!connect && inflight == kConnConnect) {
                 std::lock_guard<std::mutex> state_lock(mutex_);
                 pending_disconnect_ = true;
             }
@@ -1445,40 +1447,49 @@ private:
                 // start_exposure's thread-assignment: join vs operator= on the same
                 // std::thread is UB.)
                 set_connected(connect);
-                if (connect) {
-                    // Consume a disconnect that landed while this connect held
-                    // mutex_ (the recorder blocks on the lock, so the flag can be
-                    // set right after the connect publishes).
-                    bool need_disconnect = false;
-                    {
-                        std::lock_guard<std::mutex> state_lock(mutex_);
-                        if (pending_disconnect_) {
-                            pending_disconnect_ = false;
-                            need_disconnect = connected_.load();
-                        }
-                    }
-                    if (need_disconnect) {
-                        set_connected(false);
-                    }
-                }
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR("ToupTek", "Connection task failed: " + std::string(e.what()));
             }
+            // Tail under connection_mutex_: conn_task_ only transitions to Idle
+            // here, under the same lock every start_connection_task holds — so a
+            // recorder can never misjudge the in-flight task (the double-read race),
+            // and a disconnect recorded against this connect is either honored
+            // RIGHT HERE or its caller is still waiting on connection_mutex_ and,
+            // once Idle is published, spawns a real disconnect task. No disconnect
+            // is dropped and no stale flag leaks into the next connect (which
+            // would consume it at entry and silently no-op).
+            std::lock_guard<std::mutex> conn_lock(connection_mutex_);
+            bool need_disconnect = false;
             {
-                // Discard any pending_disconnect_ that landed after the re-check
-                // above. That disconnect is dropped (instructions-wide window; the
-                // client retries) — but the flag must NOT leak into the next
-                // connect, which would consume it at entry and silently no-op.
                 std::lock_guard<std::mutex> state_lock(mutex_);
-                pending_disconnect_ = false;
+                if (pending_disconnect_) {
+                    pending_disconnect_ = false;
+                    need_disconnect = connect && connected_.load();
+                }
+            }
+            if (need_disconnect) {
+                try {
+                    set_connected(false);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_ERROR("ToupTek", "Deferred disconnect failed: " + std::string(e.what()));
+                }
             }
             conn_task_.store(kConnIdle);
         });
     }
 
     void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) connection_thread_.join();
+        // Join OUTSIDE connection_mutex_: the connection task's tail takes
+        // connection_mutex_ (to publish Idle atomically w.r.t. recorders), so
+        // joining while holding it would deadlock with a finishing task.
+        std::thread thread_to_join;
+        {
+            std::lock_guard<std::mutex> lock(connection_mutex_);
+            thread_to_join = std::move(connection_thread_);
+        }
+        if (thread_to_join.joinable()) {
+            thread_to_join.join();
+        }
     }
 
     // Callers must hold exposure_lifecycle_mutex_ (start_exposure, stop_exposure,
@@ -1572,13 +1583,19 @@ private:
         image_cached_ = false;
     }
 
-    void set_roi_size_locked(int width, int height) {
+    // width/height (or sx/sy) of std::nullopt means "leave that axis unchanged",
+    // resolved UNDER mutex_: each public setter passes only its own axis, so a
+    // concurrent setter for the other axis can no longer be clobbered by a stale
+    // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
+    void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
         ensure_connected();
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
+        const int width = width_opt.value_or(num_x_);
+        const int height = height_opt.value_or(num_y_);
         if (width <= 0 || height <= 0) {
             throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
         ensure_not_exposing();
         if (num_x_ == width && num_y_ == height) return;
         num_x_ = width;
@@ -1597,14 +1614,16 @@ private:
     // pixel before the requested StartX. This snap is intentional and consistent
     // (a guider's relative centroids are unaffected); callers needing an exact
     // origin should align StartX/StartY to a 2-pixel boundary at bin 1.
-    void set_start_pos_locked(int sx, int sy) {
+    void set_start_pos_locked(std::optional<int> sx_opt, std::optional<int> sy_opt) {
         ensure_connected();
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
+        const int sx = sx_opt.value_or(start_x_);
+        const int sy = sy_opt.value_or(start_y_);
         if (sx < 0 || sy < 0) {
             throw AlpacaException("Start position must be non-negative",
                                   AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
         ensure_not_exposing();
         if (start_x_ == sx && start_y_ == sy) return;
         start_x_ = sx;

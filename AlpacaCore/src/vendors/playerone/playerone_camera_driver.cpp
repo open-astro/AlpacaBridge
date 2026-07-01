@@ -602,12 +602,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return num_x_;
     }
-    void set_num_x(int num_x) override { set_roi_size_common(num_x, get_num_y()); }
+    void set_num_x(int num_x) override { set_roi_size_common(num_x, std::nullopt); }
     int get_num_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return num_y_;
     }
-    void set_num_y(int num_y) override { set_roi_size_common(get_num_x(), num_y); }
+    void set_num_y(int num_y) override { set_roi_size_common(std::nullopt, num_y); }
 
     int get_offset() const override {
         ensure_connected();
@@ -734,12 +734,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return start_x_;
     }
-    void set_start_x(int start_x) override { set_start_pos_common(start_x, get_start_y()); }
+    void set_start_x(int start_x) override { set_start_pos_common(start_x, std::nullopt); }
     int get_start_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return start_y_;
     }
-    void set_start_y(int start_y) override { set_start_pos_common(get_start_x(), start_y); }
+    void set_start_y(int start_y) override { set_start_pos_common(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
         throw AlpacaException("Sub-exposure duration not supported",
@@ -1210,16 +1210,22 @@ private:
         image_cached_ = false;
     }
 
-    void set_roi_size_common(int width, int height) {
+    // width/height (or sx/sy) of std::nullopt means "leave that axis unchanged",
+    // resolved UNDER mutex_: each public setter passes only its own axis, so a
+    // concurrent setter for the other axis can no longer be clobbered by a stale
+    // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
+    void set_roi_size_common(std::optional<int> width_opt, std::optional<int> height_opt) {
         ensure_connected();
-        if (width <= 0 || height <= 0) {
-            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
-        }
         // ASCOM convention: setters are lenient, StartExposure does the
         // sensor-bounds validation. ConformU's "Reject Bad XSize/YSize" tests
         // set values beyond sensor dimensions and expect the error at
         // StartExposure rather than here.
         std::lock_guard<std::mutex> lock(mutex_);
+        const int width = width_opt.value_or(num_x_);
+        const int height = height_opt.value_or(num_y_);
+        if (width <= 0 || height <= 0) {
+            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
+        }
         if (num_x_ == width && num_y_ == height) return;
         num_x_ = width;
         num_y_ = height;
@@ -1227,14 +1233,16 @@ private:
         image_cached_ = false;
     }
 
-    void set_start_pos_common(int sx, int sy) {
+    void set_start_pos_common(std::optional<int> sx_opt, std::optional<int> sy_opt) {
         ensure_connected();
+        // ASCOM convention: setters are lenient, StartExposure validates.
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int sx = sx_opt.value_or(start_x_);
+        const int sy = sy_opt.value_or(start_y_);
         if (sx < 0 || sy < 0) {
             throw AlpacaException("Start position must be non-negative",
                                   AlpacaError::InvalidValue);
         }
-        // ASCOM convention: setters are lenient, StartExposure validates.
-        std::lock_guard<std::mutex> lock(mutex_);
         if (start_x_ == sx && start_y_ == sy) return;
         start_x_ = sx;
         start_y_ = sy;

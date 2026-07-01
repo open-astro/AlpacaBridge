@@ -357,7 +357,8 @@ private:
         if (shutting_down_) {
             return;  // Destruction in progress; never spawn a new thread.
         }
-        if (conn_task_.load() != kConnIdle) {
+        const auto inflight = conn_task_.load();
+        if (inflight != kConnIdle) {
             // A connect/disconnect is already in flight. An async disconnect (the
             // router dispatches both the legacy Connected=false PUT and the Alpaca v2
             // disconnect endpoint through here) racing an in-flight CONNECT must NOT
@@ -370,7 +371,7 @@ private:
             // A disconnect racing an in-flight DISCONNECT needs nothing (idempotent).
             // Lock order connection_mutex_ -> mutex_ — set_connected takes mutex_
             // alone and never connection_mutex_, so this never inverts.
-            if (!connect && conn_task_.load() == kConnConnect) {
+            if (!connect && inflight == kConnConnect) {
                 std::lock_guard<std::mutex> state_lock(mutex_);
                 pending_disconnect_ = true;
             }
@@ -383,44 +384,48 @@ private:
         connection_thread_ = std::thread([this, connect]() {
             try {
                 set_connected(connect);
-                if (connect) {
-                    // Consume a disconnect that landed after the post-homing check
-                    // (or after an entry-consumed abort) but before this task
-                    // finished — without this, a disconnect arriving in that tail
-                    // would be recorded and never honored.
-                    bool need_disconnect = false;
-                    {
-                        std::lock_guard<std::mutex> state_lock(mutex_);
-                        if (pending_disconnect_) {
-                            pending_disconnect_ = false;
-                            need_disconnect = connected_.load();
-                        }
-                    }
-                    if (need_disconnect) {
-                        set_connected(false);
-                    }
-                }
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR(kLogTag, std::string("AFW connection failed: ") + e.what());
             }
+            // Tail under connection_mutex_: conn_task_ only transitions to Idle
+            // here, under the same lock every start_connection_task holds — so a
+            // recorder can never misjudge the in-flight task (the double-read race),
+            // and a disconnect recorded against this connect is either honored
+            // RIGHT HERE or its caller is still waiting on connection_mutex_ and,
+            // once Idle is published, spawns a real disconnect task. No disconnect
+            // is dropped and no stale flag leaks into the next connect (which
+            // would consume it at entry and silently no-op).
+            std::lock_guard<std::mutex> conn_lock(connection_mutex_);
+            bool need_disconnect = false;
             {
-                // Discard any pending_disconnect_ that landed after the re-check
-                // above. That disconnect is dropped (instructions-wide window; the
-                // client retries) — but the flag must NOT leak into the next
-                // connect, which would consume it at entry and silently no-op:
-                // the caller would see connecting=false + connected=false with no
-                // error and need a second connect to recover.
                 std::lock_guard<std::mutex> state_lock(mutex_);
-                pending_disconnect_ = false;
+                if (pending_disconnect_) {
+                    pending_disconnect_ = false;
+                    need_disconnect = connect && connected_.load();
+                }
+            }
+            if (need_disconnect) {
+                try {
+                    set_connected(false);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_ERROR(kLogTag, std::string("AFW deferred disconnect failed: ") + e.what());
+                }
             }
             conn_task_.store(kConnIdle);
         });
     }
 
     void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
+        // Join OUTSIDE connection_mutex_: the connection task's tail takes
+        // connection_mutex_ (to publish Idle atomically w.r.t. recorders), so
+        // joining while holding it would deadlock with a finishing task.
+        std::thread thread_to_join;
+        {
+            std::lock_guard<std::mutex> lock(connection_mutex_);
+            thread_to_join = std::move(connection_thread_);
+        }
+        if (thread_to_join.joinable()) {
+            thread_to_join.join();
         }
     }
 
