@@ -802,7 +802,8 @@ public:
                 if (dirty_format) {
                     try {
                         sdk_local.stop(handle);
-                    } catch (const std::exception&) {
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                        // Stopping an already-stopped stream is harmless; ignore.
                     }
                     sdk_local.put_binning(handle, active_bin);
                     sdk_local.put_trigger_mode(handle, 1);

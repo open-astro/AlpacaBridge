@@ -41,7 +41,9 @@ public:
         stop_connection_thread();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                // Qualified: virtual dispatch is gone in a destructor anyway;
+                // saying so explicitly keeps clang-analyzer's VirtualCall happy.
+                ToupTekFilterWheelDriver::set_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(kLogTag, std::string("Error during AFW destruction: ") + e.what());
             }
