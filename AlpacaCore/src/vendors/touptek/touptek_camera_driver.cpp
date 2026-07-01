@@ -437,13 +437,18 @@ public:
     }
     void set_gain(int gain) override {
         ensure_connected();
-        ensure_not_exposing();
         auto& sdk = ToupTekSDKWrapper::instance();
-        auto range = sdk.get_gain_range(handle_copy());
+        const HToupcam handle = handle_copy();  // takes mutex_ (before readout_mutex_)
+        auto range = sdk.get_gain_range(handle);
         if (gain < range.min || gain > range.max) {
             throw AlpacaException("Gain out of range", AlpacaError::InvalidValue);
         }
-        sdk.put_gain(handle_copy(), static_cast<unsigned short>(gain));
+        // Hold readout_mutex_ across the exposure check and the register write so a
+        // concurrent start_exposure (which flips exposure_active_ under the same
+        // lock) can't begin integrating between the check and the write.
+        std::lock_guard<std::mutex> lock(readout_mutex_);
+        ensure_not_exposing();
+        sdk.put_gain(handle, static_cast<unsigned short>(gain));
     }
     int get_gain_max() const override {
         ensure_connected();
@@ -539,13 +544,17 @@ public:
     }
     void set_offset(int offset) override {
         ensure_connected();
-        ensure_not_exposing();
         ensure_blacklevel_supported();
         int max = offset_max_value();
         if (offset < 0 || offset > max) {
             throw AlpacaException("Offset out of range", AlpacaError::InvalidValue);
         }
-        ToupTekSDKWrapper::instance().put_blacklevel(handle_copy(), offset);
+        const HToupcam handle = handle_copy();  // takes mutex_ (before readout_mutex_)
+        // Hold readout_mutex_ across the exposure check and the register write —
+        // same TOCTOU close as set_gain / set_readout_mode.
+        std::lock_guard<std::mutex> lock(readout_mutex_);
+        ensure_not_exposing();
+        ToupTekSDKWrapper::instance().put_blacklevel(handle, offset);
     }
     int get_offset_max() const override {
         ensure_connected();
