@@ -669,11 +669,15 @@ void ToupTekSDKWrapper::pulse_guide(HToupcam handle, ToupGuideDirection directio
 bool ToupTekSDKWrapper::is_guiding(HToupcam handle) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     HRESULT hr = Toupcam_ST4PlusGuideState(handle);
-    // S_OK => guiding, S_FALSE => not guiding, other => error.
-    if (hr == 0) {
-        return true;
-    }
-    return false;
+    // Judge by SUCCEEDED/FAILED, never by == S_OK: the SDK header warns that
+    // S_FALSE (0x1) is a DISTINCT success code (here meaning "not guiding"), so a
+    // bare `== S_OK` conflates it with error HRESULTs. throw_on_error surfaces a
+    // real (negative) error instead of mapping it to "not guiding" — otherwise a
+    // transient SDK hiccup would clear the caller's in-flight guide flag while the
+    // hardware is still pulsing, and a guider polling IsPulseGuiding could fire the
+    // next move mid-pulse. After it, only success codes remain.
+    throw_on_error(hr, "Toupcam_ST4PlusGuideState");
+    return hr == S_OK;  // S_OK => guiding; S_FALSE (or any other success) => not guiding
 }
 
 std::vector<ToupFocuserInfo> ToupTekSDKWrapper::enumerate_focusers() {

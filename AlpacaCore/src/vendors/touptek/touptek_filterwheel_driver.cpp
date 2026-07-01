@@ -335,6 +335,22 @@ private:
             return;  // Destruction in progress; never spawn a new thread.
         }
         if (connecting_.load()) {
+            // A connect/disconnect is already in flight. An async disconnect (the
+            // router dispatches both the legacy Connected=false PUT and the Alpaca v2
+            // disconnect endpoint through here) that lands while the connect thread is
+            // homing with mutex_ released must NOT be dropped, or the wheel comes up
+            // Connected despite the explicit request. Record the intent the same way
+            // the sync set_connected(false) path does; the in-flight connect re-checks
+            // pending_disconnect_ after homing and aborts. Gate on connecting_homing_
+            // (the flag the connect actually re-checks), not connecting_. Lock order
+            // connection_mutex_ -> mutex_ — set_connected takes mutex_ alone and never
+            // connection_mutex_, so this never inverts.
+            if (!connect) {
+                std::lock_guard<std::mutex> state_lock(mutex_);
+                if (connecting_homing_) {
+                    pending_disconnect_ = true;
+                }
+            }
             return;
         }
         if (connection_thread_.joinable()) {
