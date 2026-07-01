@@ -112,12 +112,20 @@ public:
         if (!h) {
             throw AlpacaException(unavailable_msg, AlpacaError::NotConnected);
         }
-        // Two map insertions: if the second threw (only on OOM for these small
-        // key/value types), the first would leak a tracked-but-unclosed entry.
-        // Insert id_by_handle_ first (its throw leaves nothing partially tracked),
-        // then shared_by_id_, so a partial state can't reference a live handle.
-        id_by_handle_[h] = id;
-        shared_by_id_[id] = SharedCam{h, 1};
+        // Publish into both maps exception-safely: if either insertion throws
+        // (only on OOM for these small key/value types), the caller never receives
+        // h, so close_shared() would never run and the SDK handle would leak for
+        // the singleton's lifetime. Roll back any partial state and close the
+        // handle before rethrowing.
+        try {
+            shared_by_id_[id] = SharedCam{h, 1};
+            id_by_handle_[h] = id;
+        } catch (...) {
+            shared_by_id_.erase(id);
+            id_by_handle_.erase(h);
+            Toupcam_Close(h);
+            throw;
+        }
         return h;
     }
 

@@ -110,7 +110,7 @@ public:
     bool get_connecting() const override { return connecting_.load(); }
 
     void set_connected(bool connected) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         if (connected == connected_.load()) {
             return;
         }
@@ -137,7 +137,14 @@ public:
                 // a SetPosition arriving mid-home aborts the cycle and leaves the
                 // slot reference unknown (moves then land on wrong slots). The SDK
                 // reports -1 while moving; poll until it settles (or time out).
+                // Release mutex_ during the poll so a concurrent GetName/GetUniqueId
+                // (NINA calls these eagerly at enumeration) doesn't block for up to
+                // 6 s. set_connected is serialised by connection_mutex_, so no other
+                // set_connected races this window, and handle_/info_ are still
+                // unpublished so other readers see "not connected" and fast-fail.
+                lock.unlock();
                 wait_for_home(sdk, handle);
+                lock.lock();
                 handle_ = handle;
                 info_ = info;
                 slot_count_ = slots;
