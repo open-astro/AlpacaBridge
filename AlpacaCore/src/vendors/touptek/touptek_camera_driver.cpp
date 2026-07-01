@@ -713,40 +713,43 @@ public:
         return 0;  // Current combination not enumerated; report the first mode.
     }
     void set_readout_mode(int mode) override {
-        const auto specs = readout_mode_specs();
         // Range check first so an out-of-range index is InvalidValue even while
         // disconnected (same precedence as the switch driver's validate_switch_id).
-        if (mode < 0 || mode >= static_cast<int>(specs.size())) {
+        // While disconnected the list is just "Normal", so only 0 is accepted; the
+        // authoritative re-check against the live model happens under the lock below.
+        if (mode < 0 || mode >= static_cast<int>(readout_mode_specs().size())) {
             throw AlpacaException("Readout mode index out of range", AlpacaError::InvalidValue);
         }
         // Then require a connection, so a Normal-only camera still throws
         // NotConnected here rather than silently succeeding on the early-return.
         ensure_connected();
-        const auto& s = specs[static_cast<std::size_t>(mode)];
-        if (!s.set_cg && !s.set_hfw) {
-            // Single "Normal" mode: no SDK write, but still reject a mid-exposure
-            // ReadoutMode change per the ASCOM contract. Take readout_mutex_ alone
-            // (no handle_copy, so no mutex_ -> readout_mutex_ ordering concern) so
-            // the check is consistent with the write path below.
-            std::lock_guard<std::mutex> lock(readout_mutex_);
-            ensure_connected();
-            ensure_not_exposing();
-            return;
-        }
+
         auto& sdk = ToupTekSDKWrapper::instance();
-        // Hold mutex_ + readout_mutex_ together and read handle_ directly (same fix
-        // as set_gain/set_offset) — the old handle_copy() snapshot released mutex_
-        // before the write, so a disconnect+reconnect in the gap left the captured
-        // handle closed while ensure_connected() still passed. readout_mutex_ keeps
-        // the two-axis apply atomic w.r.t. get_readout_mode's paired reads, and the
-        // exposure check under it closes the TOCTOU where an exposure could begin
-        // between the check and the CG/HFW writes. Lock order mutex_ -> readout_mutex_.
+        // Derive the spec, validate the handle, and apply the CG/HFW writes with
+        // mutex_ + readout_mutex_ held together, reading handle_ AND the mode list
+        // from ONE connection snapshot (both off camera_info_/handle_ under mutex_).
+        // This matches get_readout_mode, which likewise re-derives capabilities
+        // under both locks: a disconnect+reconnect to a different model between the
+        // pre-lock range check and here cannot pair an old model's CG/HFW spec with
+        // the new handle. readout_mutex_ keeps the two-axis apply atomic w.r.t.
+        // get_readout_mode's paired reads, and the exposure check under it closes the
+        // TOCTOU where an exposure could begin between the check and the writes.
+        // Lock order mutex_ -> readout_mutex_.
         std::lock_guard<std::mutex> lock(mutex_);
         std::lock_guard<std::mutex> rlock(readout_mutex_);
         if (!handle_) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
+        const auto specs = readout_mode_specs_locked();
+        // Re-validate against the live model: a reconnect could have swapped to a
+        // camera with fewer modes since the pre-lock range check above.
+        if (mode < 0 || mode >= static_cast<int>(specs.size())) {
+            throw AlpacaException("Readout mode index out of range", AlpacaError::InvalidValue);
+        }
+        const auto& s = specs[static_cast<std::size_t>(mode)];
         ensure_not_exposing();
+        // A single "Normal" mode sets neither axis: no SDK write, but the
+        // ensure_not_exposing() check above still rejects a mid-exposure change.
         if (s.set_cg) {
             sdk.put_cg(handle_, s.cg);
         }
@@ -1284,15 +1287,17 @@ private:
     // and High Full Well capabilities. Order is stable so an index means the same
     // mode across get/set. Always returns at least one entry ("Normal").
     std::vector<ReadoutModeSpec> readout_mode_specs() const {
-        bool cg = false;
-        bool cghdr = false;
-        bool hfw = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            cg = camera_info_valid_ && camera_info_.supports_cg;
-            cghdr = camera_info_valid_ && camera_info_.supports_cghdr;
-            hfw = camera_info_valid_ && camera_info_.supports_high_fullwell;
-        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        return readout_mode_specs_locked();
+    }
+    // Assumes mutex_ is held. Callers that also hold readout_mutex_ and read
+    // handle_ (get/set_readout_mode) use this to derive the mode list from the
+    // SAME connection snapshot as the handle, so a disconnect+reconnect to a
+    // different model can't pair an old model's spec with the new handle.
+    std::vector<ReadoutModeSpec> readout_mode_specs_locked() const {
+        const bool cg = camera_info_valid_ && camera_info_.supports_cg;
+        const bool cghdr = camera_info_valid_ && camera_info_.supports_cghdr;
+        const bool hfw = camera_info_valid_ && camera_info_.supports_high_fullwell;
         std::vector<ReadoutModeSpec> specs;
         if (cg && hfw) {
             specs.push_back({"HCG", true, 1, true, false});
