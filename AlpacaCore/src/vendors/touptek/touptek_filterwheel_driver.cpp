@@ -185,7 +185,12 @@ public:
         // Hold mutex_ across validation and the SDK move for the same
         // use-after-close reason as get_position.
         std::lock_guard<std::mutex> lock(mutex_);
-        if (slot_count_ <= 0 || !handle_) {
+        // Check the disconnect sentinel first so a concurrent disconnect yields
+        // NotConnected, not a generic DriverException (matches get_position).
+        if (!handle_) {
+            throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
+        }
+        if (slot_count_ <= 0) {
             throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
         }
         if (position < 0 || position >= slot_count_) {

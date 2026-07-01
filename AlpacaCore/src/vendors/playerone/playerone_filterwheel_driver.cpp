@@ -157,14 +157,16 @@ public:
         // Hold mutex_ across validation and the SDK move for the same
         // use-after-close reason as get_position.
         std::lock_guard<std::mutex> lock(mutex_);
+        // Check the disconnect sentinel first so a concurrent disconnect yields
+        // NotConnected, not a generic DriverException (matches get_position).
+        if (handle_ < 0) {
+            throw AlpacaException("Filter wheel handle not set", AlpacaError::NotConnected);
+        }
         if (!wheel_info_valid_ || wheel_info_.position_count <= 0) {
             throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
         }
         if (position < 0 || position >= wheel_info_.position_count) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
-        }
-        if (handle_ < 0) {
-            throw AlpacaException("Filter wheel handle not set", AlpacaError::NotConnected);
         }
         PlayerOnePWSDKWrapper::instance().goto_position(handle_, position);
     }

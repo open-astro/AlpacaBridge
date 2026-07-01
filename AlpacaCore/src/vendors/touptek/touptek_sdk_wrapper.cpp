@@ -95,6 +95,42 @@ public:
     };
     std::map<std::string, SharedCam> shared_by_id_;
     std::map<HToupcam, std::string> id_by_handle_;
+
+    // Reference-counted open/close shared by EVERY device type that opens by id
+    // (camera, focuser, filter wheel). Keyed by the device's opaque id, so two
+    // driver instances on the same physical device (e.g. a camera and its
+    // integrated autofocuser, or a camera and its thermal switch) share one
+    // Toupcam_Open instead of the second raw-open returning null. Callers must
+    // already hold mutex_.
+    HToupcam open_shared_by_id(const std::string& id, const char* unavailable_msg) {
+        auto it = shared_by_id_.find(id);
+        if (it != shared_by_id_.end() && it->second.open_count > 0) {
+            ++it->second.open_count;
+            return it->second.handle;
+        }
+        HToupcam h = Toupcam_Open(id.empty() ? nullptr : id.c_str());
+        if (!h) {
+            throw AlpacaException(unavailable_msg, AlpacaError::NotConnected);
+        }
+        shared_by_id_[id] = SharedCam{h, 1};
+        id_by_handle_[h] = id;
+        return h;
+    }
+
+    void close_shared(HToupcam handle) {
+        auto hit = id_by_handle_.find(handle);
+        if (hit != id_by_handle_.end()) {
+            auto sit = shared_by_id_.find(hit->second);
+            if (sit != shared_by_id_.end() && --sit->second.open_count > 0) {
+                return;  // Another driver still holds this device open.
+            }
+            shared_by_id_.erase(hit->second);
+            id_by_handle_.erase(hit);
+        }
+        if (handle) {
+            Toupcam_Close(handle);
+        }
+    }
 };
 
 ToupTekSDKWrapper::ToupTekSDKWrapper()
@@ -176,40 +212,15 @@ HToupcam ToupTekSDKWrapper::open_camera_by_index(int camera_index) {
 
 HToupcam ToupTekSDKWrapper::open_camera_by_id(const std::string& id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    // Share an already-open handle for the same camera id (reference-counted),
-    // so the camera and thermal-switch drivers coexist on one Toupcam open.
-    auto it = pimpl_->shared_by_id_.find(id);
-    if (it != pimpl_->shared_by_id_.end() && it->second.open_count > 0) {
-        ++it->second.open_count;
-        return it->second.handle;
-    }
-    HToupcam h = Toupcam_Open(id.empty() ? nullptr : id.c_str());
-    if (!h) {
-        throw AlpacaException("Toupcam_Open returned null (camera not available)",
-                              AlpacaError::NotConnected);
-    }
-    pimpl_->shared_by_id_[id] = Impl::SharedCam{h, 1};
-    pimpl_->id_by_handle_[h] = id;
-    return h;
+    // Reference-counted so the camera and thermal-switch drivers coexist on one
+    // Toupcam open. Handles opened by index are not tracked and close via the
+    // legacy path in close_camera.
+    return pimpl_->open_shared_by_id(id, "Toupcam_Open returned null (camera not available)");
 }
 
 void ToupTekSDKWrapper::close_camera(HToupcam handle) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    // Reference-counted close for shared (open_camera_by_id) handles: only the
-    // last closer actually calls Toupcam_Close. Handles opened by index are not
-    // tracked and close immediately (legacy path).
-    auto hit = pimpl_->id_by_handle_.find(handle);
-    if (hit != pimpl_->id_by_handle_.end()) {
-        auto sit = pimpl_->shared_by_id_.find(hit->second);
-        if (sit != pimpl_->shared_by_id_.end() && --sit->second.open_count > 0) {
-            return;  // Other driver still holds this camera open.
-        }
-        pimpl_->shared_by_id_.erase(hit->second);
-        pimpl_->id_by_handle_.erase(hit);
-    }
-    if (handle) {
-        Toupcam_Close(handle);
-    }
+    pimpl_->close_shared(handle);
 }
 
 void ToupTekSDKWrapper::start_pull_mode(HToupcam handle,
@@ -611,19 +622,12 @@ std::vector<ToupFocuserInfo> ToupTekSDKWrapper::enumerate_focusers() {
 
 HToupcam ToupTekSDKWrapper::open_focuser_by_id(const std::string& id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    HToupcam h = Toupcam_Open(id.empty() ? nullptr : id.c_str());
-    if (!h) {
-        throw AlpacaException("Toupcam_Open returned null (focuser not available)",
-                              AlpacaError::NotConnected);
-    }
-    return h;
+    return pimpl_->open_shared_by_id(id, "Toupcam_Open returned null (focuser not available)");
 }
 
 void ToupTekSDKWrapper::close_focuser(HToupcam handle) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    if (handle) {
-        Toupcam_Close(handle);
-    }
+    pimpl_->close_shared(handle);
 }
 
 void ToupTekSDKWrapper::aaf_set(HToupcam handle, int action, int value, const char* context) {
@@ -671,18 +675,12 @@ std::vector<ToupFilterWheelInfo> ToupTekSDKWrapper::enumerate_filter_wheels() {
 
 HToupcam ToupTekSDKWrapper::open_filter_wheel_by_id(const std::string& id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    HToupcam h = Toupcam_Open(id.empty() ? nullptr : id.c_str());
-    if (!h) {
-        throw AlpacaException("Toupcam_Open returned null (filter wheel not available)", AlpacaError::NotConnected);
-    }
-    return h;
+    return pimpl_->open_shared_by_id(id, "Toupcam_Open returned null (filter wheel not available)");
 }
 
 void ToupTekSDKWrapper::close_filter_wheel(HToupcam handle) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    if (handle) {
-        Toupcam_Close(handle);
-    }
+    pimpl_->close_shared(handle);
 }
 
 int ToupTekSDKWrapper::get_filter_wheel_slot_count(HToupcam handle) {

@@ -305,7 +305,7 @@ const INDEX_FIELDS = [
     { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
-    { fieldId: 'touptek-filterwheel-index', vendor: 'touptek', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
+    { fieldId: 'touptek-filterwheel-index', vendor: 'touptek', deviceType: 'filterwheel', configKey: 'filterwheelIndex', idFieldId: 'touptek-filterwheel-id' },
     { fieldId: 'playerone-camera-index', vendor: 'playerone', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'playerone-filterwheel-index', vendor: 'playerone', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
@@ -803,23 +803,32 @@ function startEditDevice(device) {
         setFormValue('touptek-focuser-index', config.focuserIndex);
         setFormValue('touptek-focuser-id', config.focuserId);
         setFormValue('touptek-filterwheel-index', config.filterwheelIndex);
-        const touptekFilterNamesField = document.getElementById('touptek-filter-names');
-        if (touptekFilterNamesField) {
-            touptekFilterNamesField.value = Array.isArray(config.filterNames)
-                ? config.filterNames.join('\n')
-                : '';
-            touptekFilterwheelSlotUI.syncSlotsFromTextarea();
+        setFormValue('touptek-filterwheel-id', config.filterwheelId);
+        // Only touch the filter-name/slot UI when editing a filter wheel;
+        // otherwise editing a ToupTek camera/focuser would blank the slot list.
+        if (deviceType === 'filterwheel') {
+            const touptekFilterNamesField = document.getElementById('touptek-filter-names');
+            if (touptekFilterNamesField) {
+                touptekFilterNamesField.value = Array.isArray(config.filterNames)
+                    ? config.filterNames.join('\n')
+                    : '';
+                touptekFilterwheelSlotUI.syncSlotsFromTextarea();
+            }
         }
     } else if (vendor === 'playerone') {
         setFormValue('playerone-camera-index', config.cameraIndex);
         setFormValue('playerone-switch-camera-index', config.cameraIndex);
         setFormValue('playerone-filterwheel-index', config.filterwheelIndex);
-        const playerOneFilterNamesField = document.getElementById('playerone-filter-names');
-        if (playerOneFilterNamesField) {
-            playerOneFilterNamesField.value = Array.isArray(config.filterNames)
-                ? config.filterNames.join('\n')
-                : '';
-            playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
+        // Only touch the filter-name/slot UI when editing a filter wheel;
+        // otherwise editing a Player One camera/switch would blank the slot list.
+        if (deviceType === 'filterwheel') {
+            const playerOneFilterNamesField = document.getElementById('playerone-filter-names');
+            if (playerOneFilterNamesField) {
+                playerOneFilterNamesField.value = Array.isArray(config.filterNames)
+                    ? config.filterNames.join('\n')
+                    : '';
+                playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
+            }
         }
     } else if (vendor === 'weewx') {
         setFormValue('weewx-url', config.weewxUrl);
@@ -2632,8 +2641,14 @@ document.getElementById('device-form').addEventListener('submit', async function
                 deviceData.focuserIndex = touptekFocuserIndex !== null ? touptekFocuserIndex : 0;
             }
         } else if (normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
-            const touptekWheelIndex = readOptionalNumber(formData, 'touptekFilterwheelIndex');
-            deviceData.filterwheelIndex = touptekWheelIndex !== null ? touptekWheelIndex : 0;
+            // Bind by SDK id string when supplied (like focuserId), else by index.
+            const touptekWheelId = formData.get('touptekFilterwheelId');
+            if (touptekWheelId && touptekWheelId.trim() !== '') {
+                deviceData.filterwheelId = touptekWheelId.trim();
+            } else {
+                const touptekWheelIndex = readOptionalNumber(formData, 'touptekFilterwheelIndex');
+                deviceData.filterwheelIndex = touptekWheelIndex !== null ? touptekWheelIndex : 0;
+            }
             const touptekFilterNames = parseFilterNamesInput(formData.get('touptekFilterNames'));
             if (touptekFilterNames.length > 0) {
                 deviceData.filterNames = touptekFilterNames;

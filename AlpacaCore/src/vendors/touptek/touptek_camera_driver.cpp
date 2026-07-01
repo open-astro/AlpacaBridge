@@ -749,8 +749,17 @@ public:
             dirty_format = format_dirty_;
             dirty_roi = roi_dirty_;
 
-            int max_w = camera_info_.max_width / active_bin;
-            int max_h = camera_info_.max_height / active_bin;
+            // Bound the binned dimensions by the EVEN sensor size, not the raw
+            // size. Toupcam_put_Roi requires an even sensor-coordinate span, so
+            // the largest deliverable binned width is floor(even_max/bin); a
+            // client that requested floor(raw/bin) on an odd-width sensor would
+            // otherwise ask for a span that, once even-rounded, exceeds the
+            // sensor and clamps back to fewer than num columns (a black edge
+            // column). Deriving max from the even size makes that unreachable.
+            const int even_max_w = camera_info_.max_width & ~1;
+            const int even_max_h = camera_info_.max_height & ~1;
+            int max_w = even_max_w / active_bin;
+            int max_h = even_max_h / active_bin;
             if (active_num_x <= 0 || active_num_y <= 0) {
                 throw AlpacaException("ROI not valid", AlpacaError::InvalidValue);
             }
@@ -775,12 +784,12 @@ public:
             // limit), shift the even offset left/up by the overflow instead of
             // shrinking the span — that keeps the output count at num, so the
             // pixel buffer sized from active_num_x/y stays correct.
-            const int even_max_w = camera_info_.max_width & ~1;
-            const int even_max_h = camera_info_.max_height & ~1;
             int span_w = active_num_x * active_bin;
             int span_h = active_num_y * active_bin;
             span_w += (span_w & 1);
             span_h += (span_h & 1);
+            // Defensive only: with max_w/max_h derived from the even sensor size
+            // above, ceil_even(num*bin) <= even_max, so these clamps never fire.
             if (span_w > even_max_w) span_w = even_max_w;
             if (span_h > even_max_h) span_h = even_max_h;
             int roi_x_i = (active_start_x * active_bin) & ~1;

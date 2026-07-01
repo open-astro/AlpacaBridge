@@ -773,6 +773,11 @@
                             <small>0-based index among ToupTek AFW (Astro Filter Wheel) devices.</small>
                         </div>
                         <div class="form-group">
+                            <label for="touptek-filterwheel-id">Filter Wheel ID (optional):</label>
+                            <input type="text" id="touptek-filterwheel-id" name="touptekFilterwheelId" placeholder="(leave blank to use index)">
+                            <small>Bind to a specific wheel by its SDK id string instead of the index (survives re-enumeration if multiple wheels are attached).</small>
+                        </div>
+                        <div class="form-group">
                             <label for="touptek-filterwheel-slot-count">Filter Wheel Slots:</label>
                             <div class="filterwheel-slot-controls">
                                 <select id="touptek-filterwheel-slot-count">
