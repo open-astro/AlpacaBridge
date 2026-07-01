@@ -41,6 +41,13 @@ public:
     {}
 
     ~ToupTekFocuserDriver() override {
+        {
+            // Block any new connection task from spawning a thread that would
+            // outlive this object (destructor race -> std::terminate on an
+            // unjoined connection_thread_).
+            std::lock_guard<std::mutex> lock(connection_mutex_);
+            shutting_down_ = true;
+        }
         stop_connection_thread();
         if (connected_.load()) {
             try {
@@ -262,6 +269,9 @@ private:
 
     void start_connection_task(bool connect) {
         std::lock_guard<std::mutex> lock(connection_mutex_);
+        if (shutting_down_) {
+            return;  // Destruction in progress; never spawn a new thread.
+        }
         if (connecting_.load()) {
             return;
         }
@@ -327,6 +337,7 @@ private:
 
     std::atomic<bool> connected_{false};
     std::atomic<bool> connecting_{false};
+    bool shutting_down_ = false;  // guarded by connection_mutex_
     mutable std::mutex mutex_;
     std::mutex connection_mutex_;
     std::thread connection_thread_;

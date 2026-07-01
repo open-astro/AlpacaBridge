@@ -51,7 +51,15 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
   - Async `connect()/disconnect()` with `get_connecting()`.
   - Synchronous `set_connected()` for compatibility.
   - Useful `get_device_state()` telemetry.
-  - Clean thread/task shutdown in destructors.
+  - Clean thread/task shutdown in destructors. **The async connection-thread
+    pattern needs a `shutting_down_` guard** (bool guarded by `connection_mutex_`):
+    the destructor must set it under the lock *before* `stop_connection_thread()`,
+    and `start_connection_task` must `return` early when it is set. Without it, a
+    `connect()` racing the destructor can spawn a `connection_thread_` that
+    outlives the object and is never joined → `std::terminate`. The four ToupTek
+    drivers (camera/filter-wheel/focuser/thermal-switch) have this guard; the same
+    copied pattern in the other ~22 vendor drivers still needs it (a mechanical
+    sweep — ideally a shared async-connect base class — tracked as a follow-up).
 - Add TODO comments where vendor protocol/SDK behavior is uncertain.
 
 ### Serial / socket I/O: always use the shared helpers (`util/serial_io.h`)

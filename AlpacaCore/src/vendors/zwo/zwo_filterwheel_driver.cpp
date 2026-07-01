@@ -239,10 +239,15 @@ public:
 
     void set_names(const std::vector<std::string>& names) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (wheel_info_valid_ && wheel_info_.slot_count > 0) {
-            validate_slot_count_locked(static_cast<int>(names.size()), "names");
-        }
+        // Expand a single-token shorthand ("LRGB" -> L,R,G,B) BEFORE validating
+        // the count so it works when connected too, not only on the pre-connect
+        // config path (matches normalize_slot_data_locked). Per the "fix shared
+        // patterns everywhere" rule.
         filter_names_ = names;
+        expand_shorthand_locked();
+        if (wheel_info_valid_ && wheel_info_.slot_count > 0) {
+            validate_slot_count_locked(static_cast<int>(filter_names_.size()), "names");
+        }
         apply_default_names_locked();
     }
 
@@ -323,21 +328,7 @@ private:
             return;
         }
         const std::size_t slots = static_cast<std::size_t>(wheel_info_.slot_count);
-        if (filter_names_.size() == 1) {
-            // Expand a single delimiter-less token into per-slot single-character
-            // names ("LRGB" -> L,R,G,B) only when it looks like a shorthand code
-            // (no lowercase letters), so ordinary names like "Clear" or "Ha_NB"
-            // that happen to match the slot count are left intact.
-            const std::string& candidate = filter_names_[0];
-            const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
-            if (candidate.size() == slots && !has_lowercase && candidate.find_first_of(",; \t") == std::string::npos) {
-                filter_names_.clear();
-                filter_names_.reserve(slots);
-                for (char ch : candidate) {
-                    filter_names_.emplace_back(1, ch);
-                }
-            }
-        }
+        expand_shorthand_locked();
         if (filter_names_.empty()) {
             filter_names_.assign(slots, std::string());
         } else if (filter_names_.size() != slots) {
@@ -354,6 +345,27 @@ private:
                                        ") does not match wheel slot count (" + std::to_string(slots) +
                                        "); resizing to match the wheel");
             focus_offsets_.resize(slots);
+        }
+    }
+
+    // Expand a single delimiter-less token into per-slot single-character names
+    // ("LRGB" -> L,R,G,B) only when it looks like a shorthand code (no lowercase
+    // letters), so ordinary names like "Clear" or "Ha_NB" that happen to match
+    // the slot count are left intact. No-op until the slot count is known.
+    void expand_shorthand_locked() {
+        if (!wheel_info_valid_ || wheel_info_.slot_count <= 0 || filter_names_.size() != 1) {
+            return;
+        }
+        const std::size_t slots = static_cast<std::size_t>(wheel_info_.slot_count);
+        const std::string& candidate = filter_names_[0];
+        const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
+        if (candidate.size() == slots && !has_lowercase && candidate.find_first_of(",; \t") == std::string::npos) {
+            std::vector<std::string> expanded;
+            expanded.reserve(slots);
+            for (char ch : candidate) {
+                expanded.emplace_back(1, ch);
+            }
+            filter_names_ = std::move(expanded);
         }
     }
 

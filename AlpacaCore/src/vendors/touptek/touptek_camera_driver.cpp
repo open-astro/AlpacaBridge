@@ -92,6 +92,13 @@ public:
     }
 
     ~ToupTekCameraDriver() override {
+        {
+            // Block any new connection task from spawning a thread that would
+            // outlive this object (destructor race -> std::terminate on an
+            // unjoined connection_thread_).
+            std::lock_guard<std::mutex> lock(connection_mutex_);
+            shutting_down_ = true;
+        }
         stop_connection_thread();
         stop_exposure_thread();
         if (connected_.load()) {
@@ -583,9 +590,12 @@ public:
     // stable index. Cameras with neither capability keep the single "Normal"
     // mode and behave exactly as before. See readout_mode_specs().
     int get_readout_mode() const override {
+        ensure_connected();  // ASCOM: properties throw NotConnected when
+                             // disconnected — even the single-mode early return
+                             // below must not short-circuit that (matches the setter)
         const auto specs = readout_mode_specs();
         if (specs.size() == 1) {
-            return 0;  // Only "Normal" (also the disconnected default).
+            return 0;  // Only "Normal".
         }
         auto& sdk = ToupTekSDKWrapper::instance();
         const HToupcam handle = handle_copy();  // NotConnected while disconnected
@@ -753,6 +763,13 @@ public:
             active_num_y = num_y_;
             dirty_format = format_dirty_;
             dirty_roi = roi_dirty_;
+            // Clear the dirty flags now, under the same lock as the snapshot, so
+            // a concurrent set_num_x/set_roi that re-dirties them after this point
+            // is preserved for the NEXT exposure instead of being overwritten to
+            // false by the exposure thread after its SDK call. The catch below
+            // re-marks them if the apply fails.
+            format_dirty_ = false;
+            roi_dirty_ = false;
 
             // Bound the binned dimensions by the EVEN sensor size, not the raw
             // size. Toupcam_put_Roi requires an even sensor-coordinate span, so
@@ -841,14 +858,12 @@ public:
                     sdk_local.put_binning(handle, active_bin);
                     sdk_local.put_trigger_mode(handle, 1);
                     sdk_local.start_pull_mode(handle, &ToupTekCameraDriver::on_event_static, this);
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    format_dirty_ = false;
+                    // Flag already cleared at snapshot time (see start_exposure).
                 }
 
                 if (dirty_roi) {
                     sdk_local.put_roi(handle, roi_x, roi_y, roi_w, roi_h);
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    roi_dirty_ = false;
+                    // Flag already cleared at snapshot time (see start_exposure).
                 }
 
                 sdk_local.put_exposure_us(handle, exposure_us);
@@ -887,6 +902,12 @@ public:
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ToupTek", "Exposure failed: " + std::string(e.what()));
+                // The SDK reconfigure may have failed mid-apply; re-mark the
+                // flags so the next exposure re-applies format/ROI rather than
+                // trusting the hardware to hold a partial state.
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (dirty_format) format_dirty_ = true;
+                if (dirty_roi) roi_dirty_ = true;
             }
             exposure_active_.store(false);
         });
@@ -917,6 +938,7 @@ private:
     std::atomic<bool> connecting_;
     mutable std::mutex mutex_;
     std::mutex connection_mutex_;
+    bool shutting_down_ = false;  // guarded by connection_mutex_
     // Serialises the two-step CG+HFW apply in set_readout_mode against the
     // paired reads in get_readout_mode, so a reader never observes a
     // half-applied combination that isn't in the enumerated specs.
@@ -1057,6 +1079,7 @@ private:
 
     void start_connection_task(bool connect) {
         std::lock_guard<std::mutex> lock(connection_mutex_);
+        if (shutting_down_) return;  // Destruction in progress; never spawn a new thread.
         if (connecting_.load()) return;
         if (connection_thread_.joinable()) connection_thread_.join();
         connecting_.store(true);
