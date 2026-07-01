@@ -65,29 +65,27 @@ std::pair<int, int> bayer_offsets(ToupBayerPattern pattern) {
 class ToupTekCameraDriver : public CameraDriver {
 public:
     ToupTekCameraDriver(int device_number, int camera_index)
-        : device_number_(device_number)
-        , camera_index_(camera_index)
-        , handle_(nullptr)
-        , camera_info_()
-        , camera_info_valid_(false)
-        , serial_number_()
-        , firmware_version_()
-        , connected_(false)
-        , connecting_(false)
-        , bin_(1)
-        , start_x_(0)
-        , start_y_(0)
-        , num_x_(0)
-        , num_y_(0)
-        , image_ready_(false)
-        , image_cached_(false)
-        , last_image_()
-        , last_exposure_duration_(0.0)
-        , last_exposure_start_()
-        , last_exposure_valid_(false)
-        , exposure_active_(false)
-        , pulse_guiding_(false)
-    {
+        : device_number_(device_number),
+          camera_index_(camera_index),
+          handle_(nullptr),
+          camera_info_(),
+          camera_info_valid_(false),
+          serial_number_(),
+          firmware_version_(),
+          connected_(false),
+          bin_(1),
+          start_x_(0),
+          start_y_(0),
+          num_x_(0),
+          num_y_(0),
+          image_ready_(false),
+          image_cached_(false),
+          last_image_(),
+          last_exposure_duration_(0.0),
+          last_exposure_start_(),
+          last_exposure_valid_(false),
+          exposure_active_(false),
+          pulse_guiding_(false) {
         preload_camera_info();
     }
 
@@ -141,7 +139,7 @@ public:
 
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connecting_.load(); }
+    bool get_connecting() const override { return conn_task_.load() != kConnIdle; }
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
@@ -159,7 +157,7 @@ public:
             stop_exposure_thread();
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected && !connected_.load() && connecting_.load() && inflight_is_connect_.load()) {
+        if (!connected && !connected_.load() && conn_task_.load() == kConnConnect) {
             // Disconnect requested while an async connect is in flight but before
             // its thread has run (connected_ still false) — the idempotency
             // early-return below would silently drop it and the camera would come
@@ -1231,12 +1229,14 @@ private:
     std::string firmware_version_;
 
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
-    // Direction of the task connecting_ refers to (true = connect). Written under
-    // connection_mutex_ before connecting_ goes true; atomic so the sync
-    // set_connected gate (which holds mutex_, never connection_mutex_) can read
-    // it. Only meaningful while connecting_ is true.
-    std::atomic<bool> inflight_is_connect_{false};
+    // Connection-task state, encoded as ONE atomic so readers can never observe
+    // a half-published (in-flight?, direction) pair — two separate atomics have
+    // an unavoidable window between the stores in which the sync set_connected
+    // gate (which holds mutex_, never connection_mutex_) could misjudge the
+    // in-flight task and drop a disconnect. Written in start_connection_task
+    // under connection_mutex_ and reset by the connection task itself.
+    enum ConnTaskState : std::uint8_t { kConnIdle = 0, kConnConnect = 1, kConnDisconnect = 2 };
+    std::atomic<ConnTaskState> conn_task_{kConnIdle};
     // Set when a disconnect arrives while a connect is in flight (before its
     // thread runs, connected_ still false — the idempotency early-return would
     // otherwise drop it). Consumed at the connect's entry (stays disconnected)
@@ -1424,20 +1424,19 @@ private:
     void start_connection_task(bool connect) {
         std::lock_guard<std::mutex> lock(connection_mutex_);
         if (shutting_down_) return;  // Destruction in progress; never spawn a new thread.
-        if (connecting_.load()) {
+        if (conn_task_.load() != kConnIdle) {
             // An async disconnect racing an in-flight CONNECT must not be dropped
             // (the camera would come up Connected despite the explicit request).
             // Record the intent; the connect consumes it at entry or the re-check
             // below runs the disconnect. Same pattern as the AFW driver.
-            if (!connect && inflight_is_connect_.load()) {
+            if (!connect && conn_task_.load() == kConnConnect) {
                 std::lock_guard<std::mutex> state_lock(mutex_);
                 pending_disconnect_ = true;
             }
             return;
         }
         if (connection_thread_.joinable()) connection_thread_.join();
-        inflight_is_connect_.store(connect);
-        connecting_.store(true);
+        conn_task_.store(connect ? kConnConnect : kConnDisconnect);
         connection_thread_ = std::thread([this, connect]() {
             try {
                 // set_connected(false) stops AND joins the exposure thread itself,
@@ -1473,7 +1472,7 @@ private:
                 std::lock_guard<std::mutex> state_lock(mutex_);
                 pending_disconnect_ = false;
             }
-            connecting_.store(false);
+            conn_task_.store(kConnIdle);
         });
     }
 
