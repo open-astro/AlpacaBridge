@@ -151,6 +151,25 @@ the previous round's fix**, not new bugs. Before pushing any fix:
   change in the same commit: getter ↔ setter, `open` ↔ `close`, `connect` ↔
   `disconnect`, POSIX ↔ Windows, and every sibling accessor that shares the
   invariant. Nearly every regression we shipped was "fixed one of N."
+- **MANDATORY before pushing any fix — write out the sibling set.** The bullet above
+  is not advisory; a review round spent re-flagging the mirror of the fix you just
+  pushed is a *process failure*, not a new bug. Before every push, state explicitly
+  (in the commit body or PR comment) the full set of sites that share this defect's
+  shape and confirm each is fixed **in this same commit** or is genuinely N/A. Do not
+  push a fix for one member of a pair/family and "wait to see" if the reviewer flags
+  the rest — grep for them yourself first. Concrete misses this cost us on the ToupTek
+  AFW PR (#99), each an avoidable extra round:
+  - Fixed `set_readout_mode`'s pre-lock spec/handle TOCTOU, pushed, **then** the bot
+    flagged the identical bug in `get_readout_mode` the next round. Getter/setter pair —
+    should have been one commit.
+  - Fixed the *sync* `set_connected(false)` dropped-disconnect-during-homing, pushed,
+    **then** the bot flagged the *async* `disconnect()` → `start_connection_task(false)`
+    route with the same drop. Both disconnect entry points share the flag — should have
+    been one commit.
+  When you touch one enumerator/getter/setter/entry-point, `grep` the sibling family
+  (`enumerate_*`, `get_*`/`set_*` for the same property, every `disconnect` route the
+  router can dispatch) and fix or dismiss each **before** the push, naming them in the
+  writeup so the sweep is auditable.
 - **A new invariant must be applied everywhere it is read/written, at once.** If a fix
   establishes "X only changes under lock L" (e.g. `exposure_active_` under
   `readout_mutex_`), grep every read and write of X and bring them all under L in the
