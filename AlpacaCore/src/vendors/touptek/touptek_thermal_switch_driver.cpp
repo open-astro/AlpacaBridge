@@ -216,19 +216,26 @@ public:
     double get_switch_value(int id) const override {
         validate_switch_id(id);
         ensure_connected();
-        const auto element = element_copy(id);
+        // Hold mutex_ across the SDK call: set_connected(false) takes mutex_
+        // before it may Toupcam_Close the shared handle (when this switch is the
+        // sole opener), so serialising here prevents a use-after-close.
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_switch_id_locked(id);
+        if (!handle_) {
+            throw AlpacaException("Camera handle not available", AlpacaError::NotConnected);
+        }
+        const auto& element = elements_[static_cast<std::size_t>(id)];
         auto& sdk = ToupTekSDKWrapper::instance();
-        const HToupcam handle = handle_copy();
         int value = 0;
         switch (element.kind) {
             case ThermalElementKind::DewHeater:
-                value = sdk.get_heat(handle);
+                value = sdk.get_heat(handle_);
                 break;
             case ThermalElementKind::Fan:
-                value = sdk.get_fan(handle);
+                value = sdk.get_fan(handle_);
                 break;
             case ThermalElementKind::TailLight:
-                value = sdk.get_taillight(handle);
+                value = sdk.get_taillight(handle_);
                 break;
         }
         return static_cast<double>(value);
@@ -237,7 +244,14 @@ public:
     void set_switch_value(int id, double value) override {
         validate_switch_id(id);
         ensure_connected();
-        const auto element = element_copy(id);
+        // Hold mutex_ across validation and the SDK write for the same reason as
+        // get_switch_value — no use-after-close if a disconnect races in.
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_switch_id_locked(id);
+        if (!handle_) {
+            throw AlpacaException("Camera handle not available", AlpacaError::NotConnected);
+        }
+        const auto& element = elements_[static_cast<std::size_t>(id)];
         if (!element.writable) {
             throw AlpacaException(element.name + " is read-only", AlpacaError::InvalidOperation);
         }
@@ -251,16 +265,15 @@ public:
             throw AlpacaException(element.name + " value out of range", AlpacaError::InvalidValue);
         }
         auto& sdk = ToupTekSDKWrapper::instance();
-        const HToupcam handle = handle_copy();
         switch (element.kind) {
             case ThermalElementKind::DewHeater:
-                sdk.put_heat(handle, static_cast<int>(value_long));
+                sdk.put_heat(handle_, static_cast<int>(value_long));
                 break;
             case ThermalElementKind::Fan:
-                sdk.put_fan(handle, static_cast<int>(value_long));
+                sdk.put_fan(handle_, static_cast<int>(value_long));
                 break;
             case ThermalElementKind::TailLight:
-                sdk.put_taillight(handle, value_long != 0);
+                sdk.put_taillight(handle_, value_long != 0);
                 break;
         }
     }
@@ -343,14 +356,6 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         validate_switch_id_locked(id);
         return elements_[static_cast<std::size_t>(id)];
-    }
-
-    HToupcam handle_copy() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!handle_) {
-            throw AlpacaException("Camera handle not available", AlpacaError::NotConnected);
-        }
-        return handle_;
     }
 
     void build_elements_locked(ToupTekSDKWrapper& sdk, HToupcam handle, const ToupCameraInfo& info) {

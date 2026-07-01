@@ -755,12 +755,16 @@ public:
             }
 
             // Toupcam_put_Roi requires an even sensor-coordinate offset, width,
-            // and height. The binned ROI span is (num * bin); for odd bin
-            // factors that product can be odd (e.g. 3x3 → 4167), which the SDK
-            // rejects — no frame is ever delivered and ImageReady never sets.
-            // Round the span UP to even (clamped to the sensor) and the offset
-            // DOWN to even; the SDK still floor-bins the span to exactly num
-            // output pixels (the +1 padding is < bin for any bin >= 2), so the
+            // and height, and the ROI must fit the sensor. The binned span is
+            // (num * bin); for odd bin factors that product can be odd (e.g.
+            // 3x3 → 4167), which the SDK rejects — no frame is delivered and
+            // ImageReady never sets. Round the span UP to even so the SDK
+            // floor-bins it back to exactly num output pixels (the +1 pad is
+            // < bin for any bin >= 2), and round the offset DOWN to even. If
+            // padding the span pushes the right/bottom edge past the sensor
+            // (an edge-touching sub-frame where num*bin already reached the
+            // limit), shift the even offset left/up by the overflow instead of
+            // shrinking the span — that keeps the output count at num, so the
             // pixel buffer sized from active_num_x/y stays correct.
             const int even_max_w = camera_info_.max_width & ~1;
             const int even_max_h = camera_info_.max_height & ~1;
@@ -770,8 +774,14 @@ public:
             span_h += (span_h & 1);
             if (span_w > even_max_w) span_w = even_max_w;
             if (span_h > even_max_h) span_h = even_max_h;
-            roi_x = static_cast<unsigned>((active_start_x * active_bin) & ~1);
-            roi_y = static_cast<unsigned>((active_start_y * active_bin) & ~1);
+            int roi_x_i = (active_start_x * active_bin) & ~1;
+            int roi_y_i = (active_start_y * active_bin) & ~1;
+            if (roi_x_i + span_w > even_max_w) roi_x_i = (even_max_w - span_w) & ~1;
+            if (roi_y_i + span_h > even_max_h) roi_y_i = (even_max_h - span_h) & ~1;
+            if (roi_x_i < 0) roi_x_i = 0;
+            if (roi_y_i < 0) roi_y_i = 0;
+            roi_x = static_cast<unsigned>(roi_x_i);
+            roi_y = static_cast<unsigned>(roi_y_i);
             roi_w = static_cast<unsigned>(span_w);
             roi_h = static_cast<unsigned>(span_h);
         }

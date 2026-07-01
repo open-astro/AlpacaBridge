@@ -1909,8 +1909,12 @@ function parseFilterNamesInput(rawValue) {
         .map(name => name.trim())
         .filter(name => name.length > 0);
     if (names.length === 1) {
+        // Expand a single delimiter-less token into per-slot single-character
+        // names ("LRGB" -> L,R,G,B) only when it looks like a shorthand code:
+        // no lowercase letters. This keeps ordinary names like "Clear" or
+        // "Ha_NB" intact instead of exploding them into characters.
         const candidate = names[0];
-        if (candidate.length > 1 && !/[,\s;]/.test(candidate)) {
+        if (candidate.length > 1 && !/[,\s;]/.test(candidate) && !/[a-z]/.test(candidate)) {
             names = candidate.split('');
         }
     }

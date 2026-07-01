@@ -290,8 +290,13 @@ private:
         }
         const std::size_t slots = static_cast<std::size_t>(slot_count_);
         if (filter_names_.size() == 1) {
+            // Expand a single delimiter-less token into per-slot single-character
+            // names ("LRGB" -> L,R,G,B) only when it looks like a shorthand code
+            // (no lowercase letters), so ordinary names like "Clear" or "Ha_NB"
+            // that happen to match the slot count are left intact.
             const std::string& candidate = filter_names_[0];
-            if (candidate.size() == slots && candidate.find_first_of(",; \t") == std::string::npos) {
+            const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
+            if (candidate.size() == slots && !has_lowercase && candidate.find_first_of(",; \t") == std::string::npos) {
                 filter_names_.clear();
                 filter_names_.reserve(slots);
                 for (char ch : candidate) {
