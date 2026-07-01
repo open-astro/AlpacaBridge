@@ -351,10 +351,18 @@ private:
     static void wait_for_home(ToupTekSDKWrapper& sdk, HToupcam handle) {
         constexpr int kPollMs = 100;
         constexpr int kMaxWaitMs = 6000;
+        // Require the position to transition THROUGH -1 (moving) before treating a
+        // non-negative slot as "settled". Otherwise, if the firmware hasn't flipped
+        // the register to -1 by the first poll, we'd read the stale pre-move slot
+        // (>= 0) and return before the home even began.
+        bool saw_moving = false;
         for (int waited = 0; waited < kMaxWaitMs; waited += kPollMs) {
             std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
-            if (sdk.get_filter_wheel_position(handle) >= 0) {
-                return;  // firmware finished homing
+            int pos = sdk.get_filter_wheel_position(handle);
+            if (pos < 0) {
+                saw_moving = true;  // firmware reports -1 while the home move runs
+            } else if (saw_moving) {
+                return;  // moved, then settled on a real slot
             }
         }
         ALPACA_LOG_WARN(kLogTag, "Filter wheel home did not settle within timeout; proceeding");

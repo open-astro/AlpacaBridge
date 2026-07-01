@@ -186,10 +186,13 @@ public:
 
     int get_max_switch() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_.load()) {
-            return kMaxThermalElements;
+        if (connected_.load()) {
+            return static_cast<int>(elements_.size());
         }
-        return static_cast<int>(elements_.size());
+        // Once we have probed this camera, keep reporting that count so MaxSwitch
+        // doesn't jump between connect states. Before the first connect the real
+        // count is unknown, so report the worst-case upper bound.
+        return probed_element_count_ > 0 ? probed_element_count_ : kMaxThermalElements;
     }
 
     bool get_can_write(int id) const override {
@@ -436,6 +439,9 @@ private:
             throw AlpacaException("Camera has no dew heater, fan, or tail light (uncooled model?)",
                                   AlpacaError::NotImplemented);
         }
+        // Remember the probed count so MaxSwitch stays stable across a later
+        // disconnect (ASCOM expects MaxSwitch not to change once known).
+        probed_element_count_ = static_cast<int>(elements_.size());
     }
 
     void start_connection_task(bool connect) {
@@ -474,6 +480,7 @@ private:
     std::string camera_name_;
     HToupcam handle_{nullptr};
     std::vector<ThermalElement> elements_;
+    int probed_element_count_ = 0;  // guarded by mutex_; cached MaxSwitch after first probe
     std::atomic<bool> connected_;
     std::atomic<bool> connecting_;
     bool shutting_down_ = false;  // guarded by connection_mutex_

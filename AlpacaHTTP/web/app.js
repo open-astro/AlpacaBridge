@@ -1908,7 +1908,13 @@ function normalizeFilterName(name) {
     return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function parseFilterNamesInput(rawValue) {
+// expandShorthand: when true (the live UI preview), a single all-caps token is
+// split into per-character names for display. On SUBMIT it must be false so the
+// raw token is sent to the server, where the C++ expand_shorthand_locked expands
+// it ONLY when its length matches the wheel's real slot count. Splitting here
+// without knowing the slot count would send e.g. "LRGB" as 4 names to a 5-slot
+// wheel, which gets silently padded (pre-connect) or rejected (post-connect).
+function parseFilterNamesInput(rawValue, expandShorthand = true) {
     if (!rawValue) {
         return [];
     }
@@ -1917,7 +1923,7 @@ function parseFilterNamesInput(rawValue) {
         .split(/\r?\n/)
         .map(name => name.trim())
         .filter(name => name.length > 0);
-    if (names.length === 1) {
+    if (expandShorthand && names.length === 1) {
         // Expand a single delimiter-less token into per-slot single-character
         // names ("LRGB" -> L,R,G,B) only when it looks like a shorthand code:
         // no lowercase letters. This keeps ordinary names like "Clear" or
@@ -2554,7 +2560,9 @@ document.getElementById('device-form').addEventListener('submit', async function
                 }
             }
             const filterNamesRaw = formData.get('filterNames');
-            const names = parseFilterNamesInput(filterNamesRaw);
+            // Submit: don't expand shorthand client-side — send the raw token and
+            // let the slot-count-aware C++ expansion handle it (see parseFilterNamesInput).
+            const names = parseFilterNamesInput(filterNamesRaw, false);
             if (names.length > 0) {
                 deviceData.filterNames = names;
             }
@@ -2652,7 +2660,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                 const touptekWheelIndex = readOptionalNumber(formData, 'touptekFilterwheelIndex');
                 deviceData.filterwheelIndex = touptekWheelIndex !== null ? touptekWheelIndex : 0;
             }
-            const touptekFilterNames = parseFilterNamesInput(formData.get('touptekFilterNames'));
+            const touptekFilterNames = parseFilterNamesInput(formData.get('touptekFilterNames'), false);
             if (touptekFilterNames.length > 0) {
                 deviceData.filterNames = touptekFilterNames;
             }
@@ -2664,7 +2672,7 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
             const playerOneWheelIndex = readOptionalNumber(formData, 'playerOneFilterwheelIndex');
             deviceData.filterwheelIndex = playerOneWheelIndex !== null ? playerOneWheelIndex : 0;
-            const playerOneFilterNames = parseFilterNamesInput(formData.get('playerOneFilterNames'));
+            const playerOneFilterNames = parseFilterNamesInput(formData.get('playerOneFilterNames'), false);
             if (playerOneFilterNames.length > 0) {
                 deviceData.filterNames = playerOneFilterNames;
             }
