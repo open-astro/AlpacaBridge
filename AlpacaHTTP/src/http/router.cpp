@@ -88,6 +88,7 @@
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
+#include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 #ifdef ALPACACORE_TOUPTEK_STELLAVITA
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 #endif
@@ -7051,6 +7052,24 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     }
 
     if (vendor == "touptek" && device_type_str == "switch") {
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        // Two distinct ToupTek switch backends share the (touptek, switch) route:
+        //  - "thermal": a cooled camera's dew heater + fan via the camera SDK
+        //    (shared handle), available on any ToupTek build.
+        //  - "stellavita" (default): the StellaVita PowerBox's 12V GPIO ports,
+        //    only built when libgpiod (>= 2.0) is present.
+        const std::string switch_type = config.value("switchType", "stellavita");
+        if (switch_type == "thermal") {
+            int camera_index = config.value("cameraIndex", 0);
+            auto sw = alpacacore::vendor::touptek::create_touptek_thermal_switch(device_number, camera_index);
+            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
+                util::log_info("Registered ToupTek thermal switch");
+                return true;
+            }
+            error_message = "Failed to register device. Device may already exist.";
+            return false;
+        }
+#endif
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
         // StellaVita PowerBox: on-board 12V DC power ports driven over local
         // GPIO (libgpiod) on the CM4's /dev/gpiochip0 — independent of the
@@ -7332,13 +7351,20 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
         if (device_type == "switch") {
-            // StellaVita PowerBox: local GPIO. Persist the optional chip path
-            // plus the PWM frequency and per-port PWM/name overrides so
-            // dimmable-port config survives a save (sanitize strips anything
-            // not allowlisted).
-            copy_if_present("gpioChip");
-            copy_if_present("pwmFrequencyHz");
-            copy_if_present("ports");
+            // Two switch backends share (touptek, switch): the StellaVita
+            // PowerBox (local GPIO) and the cooled-camera thermal switch (dew
+            // heater + fan). switchType selects; persist the fields each needs.
+            copy_if_present("switchType");
+            const std::string touptek_switch_type = config.value("switchType", "stellavita");
+            if (touptek_switch_type == "thermal") {
+                copy_if_present("cameraIndex");
+            } else {
+                // StellaVita PowerBox: optional chip path plus PWM frequency and
+                // per-port PWM/name overrides so dimmable-port config survives.
+                copy_if_present("gpioChip");
+                copy_if_present("pwmFrequencyHz");
+                copy_if_present("ports");
+            }
         } else {
             copy_if_present("cameraIndex");
             copy_if_present("focuserIndex");

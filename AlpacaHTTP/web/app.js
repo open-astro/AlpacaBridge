@@ -769,6 +769,19 @@ function startEditDevice(device) {
     } else if (vendor === 'svbony') {
         setFormValue('svbony-camera-index', config.cameraIndex);
     } else if (vendor === 'touptek' && deviceType === 'switch') {
+        // switchType selects the backend: 'thermal' (camera dew heater + fan) or
+        // 'stellavita' (GPIO PowerBox, the default for legacy configs).
+        const touptekSwitchType = config.switchType || 'stellavita';
+        setFormValue('touptek-switch-type', touptekSwitchType);
+        if (touptekSwitchType === 'thermal') {
+            setFormValue('touptek-thermal-camera-index', config.cameraIndex);
+        }
+        // Re-run the sub-block toggle now that switchType is set, so the thermal
+        // vs StellaVita fields match the loaded config (mirrors ZWO's pattern).
+        const touptekSwitchTypeEl = document.getElementById('touptek-switch-type');
+        if (touptekSwitchTypeEl) {
+            touptekSwitchTypeEl.dispatchEvent(new Event('change'));
+        }
         // StellaVita PowerBox: optional GPIO chip override plus PWM frequency
         // and per-port PWM flags (positional: index 0 = Port 1 .. 3 = Port 4).
         if (config.gpioChip !== undefined && config.gpioChip !== null) {
@@ -1760,6 +1773,11 @@ if (zwoSwitchTypeSelect) {
     zwoSwitchTypeSelect.addEventListener('change', updateZwoConfigFields);
 }
 
+const touptekSwitchTypeSelect = document.getElementById('touptek-switch-type');
+if (touptekSwitchTypeSelect) {
+    touptekSwitchTypeSelect.addEventListener('change', updateTouptekConfigFields);
+}
+
 const synscanConnectionType = document.getElementById('synscan-connection-type');
 if (synscanConnectionType) {
     synscanConnectionType.addEventListener('change', function() {
@@ -2183,6 +2201,22 @@ function updateTouptekConfigFields() {
         switchFields.style.display = isSwitch ? 'block' : 'none';
         setFieldGroupEnabled(switchFields, isSwitch);
     }
+    // ToupTek has two switch backends selected by switchType: the camera thermal
+    // switch (dew heater + fan) and the StellaVita PowerBox (GPIO). Show only the
+    // relevant sub-block so hidden fields don't submit.
+    const switchTypeSelect = document.getElementById('touptek-switch-type');
+    const thermalFields = document.getElementById('touptek-thermal-switch-fields');
+    const stellavitaFields = document.getElementById('touptek-stellavita-switch-fields');
+    const isThermal = isSwitch && switchTypeSelect && switchTypeSelect.value === 'thermal';
+    const isStellavita = isSwitch && !isThermal;
+    if (thermalFields) {
+        thermalFields.style.display = isThermal ? 'block' : 'none';
+        setFieldGroupEnabled(thermalFields, isThermal);
+    }
+    if (stellavitaFields) {
+        stellavitaFields.style.display = isStellavita ? 'block' : 'none';
+        setFieldGroupEnabled(stellavitaFields, isStellavita);
+    }
 }
 
 function updatePlayerOneConfigFields() {
@@ -2550,29 +2584,40 @@ document.getElementById('device-form').addEventListener('submit', async function
         const svbonyCameraIndex = readOptionalNumber(formData, 'svbonyCameraIndex');
         deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
     } else if (deviceData.vendor === 'touptek' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
-        // StellaVita PowerBox: local GPIO, no camera/focuser index. Optional
-        // GPIO chip override (defaults to /dev/gpiochip0 server-side) plus
-        // optional PWM dimming on any of the four ports.
-        const gpioChip = (formData.get('touptekPowerboxGpioChip') || '').trim();
-        if (gpioChip) {
-            deviceData.gpioChip = gpioChip;
+        // Unique field name (not "switchType") to avoid the FormData collision
+        // with ZWO's switch-type select, which also submits while hidden.
+        const touptekSwitchType = formData.get('touptekSwitchType') || 'stellavita';
+        deviceData.switchType = touptekSwitchType;
+        if (touptekSwitchType === 'thermal') {
+            // Camera thermal switch: dew heater + fan, bound by camera index and
+            // sharing the camera's SDK connection.
+            const thermalCameraIndex = readOptionalNumber(formData, 'touptekThermalCameraIndex');
+            deviceData.cameraIndex = thermalCameraIndex !== null ? thermalCameraIndex : 0;
+        } else {
+            // StellaVita PowerBox: local GPIO, no camera/focuser index. Optional
+            // GPIO chip override (defaults to /dev/gpiochip0 server-side) plus
+            // optional PWM dimming on any of the four ports.
+            const gpioChip = (formData.get('touptekPowerboxGpioChip') || '').trim();
+            if (gpioChip) {
+                deviceData.gpioChip = gpioChip;
+            }
+            const portPwm = [0, 1, 2, 3].map(function(i) {
+                return formData.get('touptekPortPwm' + i) === 'on';
+            });
+            // Always persist the PWM frequency so a custom value survives even if
+            // the user temporarily un-ticks every port; it applies the next time a
+            // port is switched back to PWM.
+            const pwmFreq = Number.parseInt(formData.get('touptekPowerboxPwmFrequency'), 10);
+            if (!Number.isNaN(pwmFreq)) {
+                deviceData.pwmFrequencyHz = pwmFreq;
+            }
+            // Always emit the positional ports overlay (even all-false) so any
+            // per-port config carried in the saved device (e.g. names) is not
+            // dropped on a re-save with every PWM box un-ticked.
+            deviceData.ports = portPwm.map(function(pwm) {
+                return { pwm: pwm };
+            });
         }
-        const portPwm = [0, 1, 2, 3].map(function(i) {
-            return formData.get('touptekPortPwm' + i) === 'on';
-        });
-        // Always persist the PWM frequency so a custom value survives even if
-        // the user temporarily un-ticks every port; it applies the next time a
-        // port is switched back to PWM.
-        const pwmFreq = Number.parseInt(formData.get('touptekPowerboxPwmFrequency'), 10);
-        if (!Number.isNaN(pwmFreq)) {
-            deviceData.pwmFrequencyHz = pwmFreq;
-        }
-        // Always emit the positional ports overlay (even all-false) so any
-        // per-port config carried in the saved device (e.g. names) is not
-        // dropped on a re-save with every PWM box un-ticked.
-        deviceData.ports = portPwm.map(function(pwm) {
-            return { pwm: pwm };
-        });
     } else if (deviceData.vendor === 'touptek') {
         if (normalizeDeviceType(deviceData.deviceType) === 'focuser') {
             const touptekFocuserId = formData.get('focuserId');

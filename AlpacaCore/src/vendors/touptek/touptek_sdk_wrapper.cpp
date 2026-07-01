@@ -16,6 +16,7 @@
 #define TOUPCAM_HRESULT_ERRORCODE_NEEDED
 #include <toupcam.h>
 
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -82,6 +83,18 @@ void throw_on_error(HRESULT hr, const char* context) {
 class ToupTekSDKWrapper::Impl {
 public:
     std::mutex mutex_;
+
+    // Reference-counted shared opens keyed by the camera's opaque id, so the
+    // camera driver and the thermal-switch driver can operate on the same
+    // physical camera at once (Toupcam allows only one open handle per device).
+    // Toupcam_Open fires once (first opener); Toupcam_Close fires once (last
+    // closer). Mirrors the Player One wrapper's usage_ map.
+    struct SharedCam {
+        HToupcam handle{nullptr};
+        int open_count{0};
+    };
+    std::map<std::string, SharedCam> shared_by_id_;
+    std::map<HToupcam, std::string> id_by_handle_;
 };
 
 ToupTekSDKWrapper::ToupTekSDKWrapper()
@@ -115,6 +128,7 @@ std::vector<ToupCameraInfo> ToupTekSDKWrapper::enumerate_cameras() {
             info.flags = arr[i].model->flag;
             info.pixel_size_um_x = arr[i].model->xpixsz;
             info.pixel_size_um_y = arr[i].model->ypixsz;
+            info.max_fan_speed = arr[i].model->maxfanspeed;
             if (arr[i].model->preview > 0) {
                 info.max_width = static_cast<int>(arr[i].model->res[0].width);
                 info.max_height = static_cast<int>(arr[i].model->res[0].height);
@@ -125,6 +139,12 @@ std::vector<ToupCameraInfo> ToupTekSDKWrapper::enumerate_cameras() {
         info.supports_cooler = (info.flags & TOUPCAM_FLAG_TEC) != 0;
         info.supports_tec_onoff = (info.flags & TOUPCAM_FLAG_TEC_ONOFF) != 0;
         info.supports_trigger_software = (info.flags & TOUPCAM_FLAG_TRIGGER_SOFTWARE) != 0;
+        info.supports_high_fullwell = (info.flags & TOUPCAM_FLAG_HIGH_FULLWELL) != 0;
+        info.supports_cghdr = (info.flags & TOUPCAM_FLAG_CGHDR) != 0;
+        info.supports_cg = info.supports_cghdr || (info.flags & TOUPCAM_FLAG_CG) != 0;
+        info.supports_blacklevel = (info.flags & TOUPCAM_FLAG_BLACKLEVEL) != 0;
+        info.supports_heat = (info.flags & TOUPCAM_FLAG_HEAT) != 0;
+        info.supports_fan = (info.flags & TOUPCAM_FLAG_FAN) != 0;
 
         // Toupcam supports digital binning 1..8 via OPTION_BINNING on every
         // camera. Expose 1..4 as the commonly-useful range.
@@ -156,16 +176,37 @@ HToupcam ToupTekSDKWrapper::open_camera_by_index(int camera_index) {
 
 HToupcam ToupTekSDKWrapper::open_camera_by_id(const std::string& id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    // Share an already-open handle for the same camera id (reference-counted),
+    // so the camera and thermal-switch drivers coexist on one Toupcam open.
+    auto it = pimpl_->shared_by_id_.find(id);
+    if (it != pimpl_->shared_by_id_.end() && it->second.open_count > 0) {
+        ++it->second.open_count;
+        return it->second.handle;
+    }
     HToupcam h = Toupcam_Open(id.empty() ? nullptr : id.c_str());
     if (!h) {
         throw AlpacaException("Toupcam_Open returned null (camera not available)",
                               AlpacaError::NotConnected);
     }
+    pimpl_->shared_by_id_[id] = Impl::SharedCam{h, 1};
+    pimpl_->id_by_handle_[h] = id;
     return h;
 }
 
 void ToupTekSDKWrapper::close_camera(HToupcam handle) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    // Reference-counted close for shared (open_camera_by_id) handles: only the
+    // last closer actually calls Toupcam_Close. Handles opened by index are not
+    // tracked and close immediately (legacy path).
+    auto hit = pimpl_->id_by_handle_.find(handle);
+    if (hit != pimpl_->id_by_handle_.end()) {
+        auto sit = pimpl_->shared_by_id_.find(hit->second);
+        if (sit != pimpl_->shared_by_id_.end() && --sit->second.open_count > 0) {
+            return;  // Other driver still holds this camera open.
+        }
+        pimpl_->shared_by_id_.erase(hit->second);
+        pimpl_->id_by_handle_.erase(hit);
+    }
     if (handle) {
         Toupcam_Close(handle);
     }
@@ -394,6 +435,104 @@ int ToupTekSDKWrapper::get_tec_voltage_max_deciV(HToupcam handle) {
     throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_TEC_VOLTAGE_MAX, &value),
                    "Toupcam_get_Option(TEC_VOLTAGE_MAX)");
     return value;
+}
+
+int ToupTekSDKWrapper::get_high_fullwell(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_HIGH_FULLWELL, &value),
+                   "Toupcam_get_Option(HIGH_FULLWELL)");
+    return value;
+}
+
+void ToupTekSDKWrapper::put_high_fullwell(HToupcam handle, bool enable) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_HIGH_FULLWELL, enable ? 1 : 0),
+                   "Toupcam_put_Option(HIGH_FULLWELL)");
+}
+
+int ToupTekSDKWrapper::get_cg(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_CG, &value), "Toupcam_get_Option(CG)");
+    return value;
+}
+
+void ToupTekSDKWrapper::put_cg(HToupcam handle, int cg) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_CG, cg), "Toupcam_put_Option(CG)");
+}
+
+int ToupTekSDKWrapper::get_blacklevel(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_BLACKLEVEL, &value), "Toupcam_get_Option(BLACKLEVEL)");
+    return value;
+}
+
+void ToupTekSDKWrapper::put_blacklevel(HToupcam handle, int value) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_BLACKLEVEL, value), "Toupcam_put_Option(BLACKLEVEL)");
+}
+
+int ToupTekSDKWrapper::get_blacklevel_max(HToupcam handle, int deep_bits) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    // The black-level range scales with the current output bit depth:
+    // TOUPCAM_BLACKLEVEL8_MAX (31) at 8-bit, up to 31*256 at 16-bit. In 8-bit
+    // output mode the max is the 8-bit value; in deep mode it follows the
+    // camera's native (deep) bit count.
+    int mode = 0;
+    if (FAILED(Toupcam_get_Option(handle, TOUPCAM_OPTION_BITDEPTH, &mode))) {
+        mode = 0;
+    }
+    int bits = (mode == 0) ? 8 : deep_bits;
+    if (bits < 8) {
+        bits = 8;
+    }
+    return TOUPCAM_BLACKLEVEL8_MAX << (bits - 8);
+}
+
+int ToupTekSDKWrapper::get_heat_max(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_HEAT_MAX, &value), "Toupcam_get_Option(HEAT_MAX)");
+    return value;
+}
+
+int ToupTekSDKWrapper::get_heat(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_HEAT, &value), "Toupcam_get_Option(HEAT)");
+    return value;
+}
+
+void ToupTekSDKWrapper::put_heat(HToupcam handle, int level) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_HEAT, level), "Toupcam_put_Option(HEAT)");
+}
+
+int ToupTekSDKWrapper::get_fan(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_FAN, &value), "Toupcam_get_Option(FAN)");
+    return value;
+}
+
+void ToupTekSDKWrapper::put_fan(HToupcam handle, int speed) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_FAN, speed), "Toupcam_put_Option(FAN)");
+}
+
+int ToupTekSDKWrapper::get_taillight(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_TAILLIGHT, &value), "Toupcam_get_Option(TAILLIGHT)");
+    return value;
+}
+
+void ToupTekSDKWrapper::put_taillight(HToupcam handle, bool on) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_TAILLIGHT, on ? 1 : 0), "Toupcam_put_Option(TAILLIGHT)");
 }
 
 std::string ToupTekSDKWrapper::get_serial_number(HToupcam handle) {

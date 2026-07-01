@@ -54,6 +54,13 @@ struct ToupCameraInfo {
     bool supports_cooler{};
     bool supports_tec_onoff{};
     bool supports_trigger_software{};
+    bool supports_high_fullwell{};  // TOUPCAM_FLAG_HIGH_FULLWELL
+    bool supports_cg{};             // TOUPCAM_FLAG_CG (HCG/LCG conversion gain)
+    bool supports_cghdr{};          // TOUPCAM_FLAG_CGHDR (adds an HDR conversion gain)
+    bool supports_blacklevel{};     // TOUPCAM_FLAG_BLACKLEVEL (ASCOM Offset)
+    bool supports_heat{};           // TOUPCAM_FLAG_HEAT (anti-fog dew heater)
+    bool supports_fan{};            // TOUPCAM_FLAG_FAN (cooling fan)
+    unsigned max_fan_speed{};       // model->maxfanspeed (fan speed range [0, max])
     int bit_depth_max{};
 };
 
@@ -216,6 +223,40 @@ public:
     int get_tec_target_deciC(HToupcam handle);
     int get_tec_voltage_deciV(HToupcam handle);
     int get_tec_voltage_max_deciV(HToupcam handle);
+
+    // High full well ---------------------------------------------------------
+    // TOUPCAM_OPTION_HIGH_FULLWELL: 0 = disable, 1 = enable. Gated by
+    // supports_high_fullwell; exposed to ASCOM as a ReadoutMode.
+    int get_high_fullwell(HToupcam handle);
+    void put_high_fullwell(HToupcam handle, bool enable);
+
+    // Conversion gain (TOUPCAM_OPTION_CG): 0 = LCG, 1 = HCG, 2 = HDR (only on
+    // FLAG_CGHDR cameras). Gated by supports_cg; folded into ASCOM ReadoutModes.
+    int get_cg(HToupcam handle);
+    void put_cg(HToupcam handle, int cg);
+
+    // Black level (ASCOM Offset) ---------------------------------------------
+    // TOUPCAM_OPTION_BLACKLEVEL. Range is [0, get_blacklevel_max]; the max scales
+    // with the current output bit depth (31 at 8-bit up to 31*256 at 16-bit), so
+    // it takes the camera's deep-mode bit count. Gated by supports_blacklevel.
+    int get_blacklevel(HToupcam handle);
+    void put_blacklevel(HToupcam handle, int value);
+    int get_blacklevel_max(HToupcam handle, int deep_bits);
+
+    // Thermal controls (cooled-camera Switch) --------------------------------
+    // Dew (anti-fog) heater: level in [0, get_heat_max]. 0 = off.
+    int get_heat_max(HToupcam handle);
+    int get_heat(HToupcam handle);
+    void put_heat(HToupcam handle, int level);
+    // Cooling fan: speed in [0, model->maxfanspeed]. 0 = off.
+    int get_fan(HToupcam handle);
+    void put_fan(HToupcam handle, int speed);
+
+    // Tail indicator LED (TOUPCAM_OPTION_TAILLIGHT): 0 = off, 1 = on. There is
+    // no capability flag — probe by calling get_taillight and catching the
+    // error on cameras that don't support it.
+    int get_taillight(HToupcam handle);
+    void put_taillight(HToupcam handle, bool on);
 
     // Camera metadata --------------------------------------------------------
     std::string get_serial_number(HToupcam handle);

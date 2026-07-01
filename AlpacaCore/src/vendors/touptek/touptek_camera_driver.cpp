@@ -514,19 +514,36 @@ public:
     }
     void set_num_y(int num_y) override { set_roi_size_locked(get_num_x(), num_y); }
 
+    // ASCOM Offset maps to the ToupTek black level (TOUPCAM_OPTION_BLACKLEVEL),
+    // available on cameras that report TOUPCAM_FLAG_BLACKLEVEL (e.g. the ATR2600M
+    // / IMX571). Cameras without it throw PropertyNotImplemented, as before.
     int get_offset() const override {
-        throw AlpacaException("Offset not supported", AlpacaError::PropertyNotImplemented);
+        ensure_connected();
+        ensure_blacklevel_supported();
+        return ToupTekSDKWrapper::instance().get_blacklevel(handle_copy());
     }
-    void set_offset(int) override {
-        throw AlpacaException("Offset not supported", AlpacaError::PropertyNotImplemented);
+    void set_offset(int offset) override {
+        ensure_connected();
+        ensure_blacklevel_supported();
+        int max = offset_max_value();
+        if (offset < 0 || offset > max) {
+            throw AlpacaException("Offset out of range", AlpacaError::InvalidValue);
+        }
+        ToupTekSDKWrapper::instance().put_blacklevel(handle_copy(), offset);
     }
     int get_offset_max() const override {
-        throw AlpacaException("Offset not supported", AlpacaError::PropertyNotImplemented);
+        ensure_connected();
+        ensure_blacklevel_supported();
+        return offset_max_value();
     }
     int get_offset_min() const override {
-        throw AlpacaException("Offset not supported", AlpacaError::PropertyNotImplemented);
+        ensure_connected();
+        ensure_blacklevel_supported();
+        return 0;  // TOUPCAM_BLACKLEVEL_MIN
     }
     std::vector<std::string> get_offsets() const override {
+        // Integer offset mode (OffsetMin/OffsetMax), so the named-offsets list is
+        // deliberately not implemented, matching the other camera drivers.
         throw AlpacaException("Offset descriptions not supported",
                               AlpacaError::PropertyNotImplemented);
     }
@@ -556,13 +573,57 @@ public:
         return camera_info_valid_ ? camera_info_.pixel_size_um_y : 0.0;
     }
 
-    int get_readout_mode() const override { return 0; }
+    // ASCOM ReadoutModes fold the ToupTek conversion-gain (HCG/LCG/HDR) and High
+    // Full Well hardware modes into one flat, NINA-friendly dropdown. Each mode
+    // fully specifies the state it applies on both axes, so reads round-trip to a
+    // stable index. Cameras with neither capability keep the single "Normal"
+    // mode and behave exactly as before. See readout_mode_specs().
+    int get_readout_mode() const override {
+        const auto specs = readout_mode_specs();
+        if (specs.size() == 1) {
+            return 0;  // Only "Normal" (also the disconnected default).
+        }
+        auto& sdk = ToupTekSDKWrapper::instance();
+        const HToupcam handle = handle_copy();  // NotConnected while disconnected
+        const bool has_cg = specs.front().set_cg;
+        const bool has_hfw = specs.front().set_hfw;
+        const int cur_cg = has_cg ? sdk.get_cg(handle) : 0;
+        const bool cur_hfw = has_hfw && sdk.get_high_fullwell(handle) != 0;
+        for (std::size_t i = 0; i < specs.size(); ++i) {
+            const auto& s = specs[i];
+            if ((!s.set_cg || s.cg == cur_cg) && (!s.set_hfw || s.hfw == cur_hfw)) {
+                return static_cast<int>(i);
+            }
+        }
+        return 0;  // Current combination not enumerated; report the first mode.
+    }
     void set_readout_mode(int mode) override {
-        if (mode != 0) {
-            throw AlpacaException("Readout mode not supported", AlpacaError::NotImplemented);
+        const auto specs = readout_mode_specs();
+        if (mode < 0 || mode >= static_cast<int>(specs.size())) {
+            throw AlpacaException("Readout mode index out of range", AlpacaError::InvalidValue);
+        }
+        const auto& s = specs[static_cast<std::size_t>(mode)];
+        if (!s.set_cg && !s.set_hfw) {
+            return;  // Single "Normal" mode: nothing to apply.
+        }
+        auto& sdk = ToupTekSDKWrapper::instance();
+        const HToupcam handle = handle_copy();  // NotConnected while disconnected
+        if (s.set_cg) {
+            sdk.put_cg(handle, s.cg);
+        }
+        if (s.set_hfw) {
+            sdk.put_high_fullwell(handle, s.hfw);
         }
     }
-    std::vector<std::string> get_readout_modes() const override { return {"Normal"}; }
+    std::vector<std::string> get_readout_modes() const override {
+        const auto specs = readout_mode_specs();
+        std::vector<std::string> names;
+        names.reserve(specs.size());
+        for (const auto& s : specs) {
+            names.push_back(s.name);
+        }
+        return names;
+    }
 
     std::string get_sensor_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -659,6 +720,11 @@ public:
         int active_start_y = 0;
         int active_num_x = 0;
         int active_num_y = 0;
+        // Sensor-coordinate ROI actually programmed into the SDK (see below).
+        unsigned roi_x = 0;
+        unsigned roi_y = 0;
+        unsigned roi_w = 0;
+        unsigned roi_h = 0;
         bool dirty_format = false;
         bool dirty_roi = false;
         {
@@ -687,6 +753,27 @@ public:
                 active_start_y + active_num_y > max_h) {
                 throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
             }
+
+            // Toupcam_put_Roi requires an even sensor-coordinate offset, width,
+            // and height. The binned ROI span is (num * bin); for odd bin
+            // factors that product can be odd (e.g. 3x3 → 4167), which the SDK
+            // rejects — no frame is ever delivered and ImageReady never sets.
+            // Round the span UP to even (clamped to the sensor) and the offset
+            // DOWN to even; the SDK still floor-bins the span to exactly num
+            // output pixels (the +1 padding is < bin for any bin >= 2), so the
+            // pixel buffer sized from active_num_x/y stays correct.
+            const int even_max_w = camera_info_.max_width & ~1;
+            const int even_max_h = camera_info_.max_height & ~1;
+            int span_w = active_num_x * active_bin;
+            int span_h = active_num_y * active_bin;
+            span_w += (span_w & 1);
+            span_h += (span_h & 1);
+            if (span_w > even_max_w) span_w = even_max_w;
+            if (span_h > even_max_h) span_h = even_max_h;
+            roi_x = static_cast<unsigned>((active_start_x * active_bin) & ~1);
+            roi_y = static_cast<unsigned>((active_start_y * active_bin) & ~1);
+            roi_w = static_cast<unsigned>(span_w);
+            roi_h = static_cast<unsigned>(span_h);
         }
 
         stop_exposure_thread();
@@ -706,16 +793,17 @@ public:
 
         exposure_active_.store(true);
 
-        exposure_thread_ = std::thread([this, handle, exposure_us,
-                                        active_bin, active_start_x, active_start_y,
-                                        active_num_x, active_num_y,
-                                        dirty_format, dirty_roi]() {
+        exposure_thread_ = std::thread([this, handle, exposure_us, active_bin, active_num_x, active_num_y, roi_x, roi_y,
+                                        roi_w, roi_h, dirty_format, dirty_roi]() {
             auto& sdk_local = ToupTekSDKWrapper::instance();
             try {
                 // Reconfiguring bitdepth / pixel format / binning requires the
                 // stream to be stopped (SDK returns E_WRONG_THREAD otherwise).
                 if (dirty_format) {
-                    try { sdk_local.stop(handle); } catch (const std::exception&) {}
+                    try {
+                        sdk_local.stop(handle);
+                    } catch (const std::exception&) {
+                    }
                     sdk_local.put_binning(handle, active_bin);
                     sdk_local.put_trigger_mode(handle, 1);
                     sdk_local.start_pull_mode(handle, &ToupTekCameraDriver::on_event_static, this);
@@ -724,11 +812,7 @@ public:
                 }
 
                 if (dirty_roi) {
-                    sdk_local.put_roi(handle,
-                                      static_cast<unsigned>(active_start_x * active_bin),
-                                      static_cast<unsigned>(active_start_y * active_bin),
-                                      static_cast<unsigned>(active_num_x * active_bin),
-                                      static_cast<unsigned>(active_num_y * active_bin));
+                    sdk_local.put_roi(handle, roi_x, roi_y, roi_w, roi_h);
                     std::lock_guard<std::mutex> lock(mutex_);
                     roi_dirty_ = false;
                 }
@@ -737,9 +821,11 @@ public:
                 sdk_local.trigger(handle, 1);
 
                 unsigned timeout_ms = (exposure_us / 1000) + 10000;
-                std::vector<std::uint16_t> pixel_buffer(
-                    static_cast<std::size_t>(active_num_x) *
-                    static_cast<std::size_t>(active_num_y));
+                // Buffer is num_x * num_y; the even-up ROI floor-bins to exactly
+                // that. Add a two-row margin as crash-insurance in case a model
+                // ever delivers one extra padded row from the rounded ROI span.
+                std::vector<std::uint16_t> pixel_buffer(static_cast<std::size_t>(active_num_x) *
+                                                        static_cast<std::size_t>(active_num_y + 2));
 
                 unsigned got_w = 0;
                 unsigned got_h = 0;
@@ -845,6 +931,70 @@ private:
     bool supports_cooler_locked_copy() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return camera_info_valid_ && camera_info_.supports_cooler;
+    }
+
+    // One ASCOM ReadoutMode entry. set_cg / set_hfw say whether this camera has
+    // that axis (uniform across all specs for a given camera); cg / hfw are the
+    // values that mode applies.
+    struct ReadoutModeSpec {
+        std::string name;
+        bool set_cg{};
+        int cg{};
+        bool set_hfw{};
+        bool hfw{};
+    };
+
+    // Build the readout-mode list from the camera's conversion-gain (HCG/LCG/HDR)
+    // and High Full Well capabilities. Order is stable so an index means the same
+    // mode across get/set. Always returns at least one entry ("Normal").
+    std::vector<ReadoutModeSpec> readout_mode_specs() const {
+        bool cg = false;
+        bool cghdr = false;
+        bool hfw = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cg = camera_info_valid_ && camera_info_.supports_cg;
+            cghdr = camera_info_valid_ && camera_info_.supports_cghdr;
+            hfw = camera_info_valid_ && camera_info_.supports_high_fullwell;
+        }
+        std::vector<ReadoutModeSpec> specs;
+        if (cg && hfw) {
+            specs.push_back({"HCG", true, 1, true, false});
+            specs.push_back({"LCG", true, 0, true, false});
+            specs.push_back({"High Full Well", true, 0, true, true});
+            if (cghdr) {
+                specs.push_back({"HDR", true, 2, true, false});
+            }
+        } else if (cg) {
+            specs.push_back({"HCG", true, 1, false, false});
+            specs.push_back({"LCG", true, 0, false, false});
+            if (cghdr) {
+                specs.push_back({"HDR", true, 2, false, false});
+            }
+        } else if (hfw) {
+            specs.push_back({"Normal", false, 0, true, false});
+            specs.push_back({"High Full Well", false, 0, true, true});
+        } else {
+            specs.push_back({"Normal", false, 0, false, false});
+        }
+        return specs;
+    }
+
+    void ensure_blacklevel_supported() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!camera_info_valid_ || !camera_info_.supports_blacklevel) {
+            throw AlpacaException("Offset (black level) not supported by this camera",
+                                  AlpacaError::PropertyNotImplemented);
+        }
+    }
+
+    int offset_max_value() const {
+        int deep_bits = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            deep_bits = camera_info_.bit_depth_max;
+        }
+        return ToupTekSDKWrapper::instance().get_blacklevel_max(handle_copy(), deep_bits);
     }
 
     void reset_exposure_state_locked() {

@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-06-30
+## Updated 2026-07-01
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -91,15 +91,21 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | GPCMOS01200KPF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS01200KPF/) |
+| ATR2600M (cooled, IMX571) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/ATR2600M/) |
 
 <details>
 <summary><strong>ToupTek Driver Notes</strong></summary>
 
 - **SDK**: ToupTek toupcamsdk 2026-01-28 (build target)
 - **Connection**: USB (self-contained `libtoupcam.so`; no libusb/libudev link dependency)
-- **Tested model**: GPCMOS01200KPF (guide camera) on Linux arm64. Other ToupTek models sharing the same SDK are expected to work but have not been individually ConformU-verified.
-- **Dew Heater**: Not supported. The ToupTek SDK exposes `TOUPCAM_FLAG_HEAT` / `TOUPCAM_OPTION_HEAT` for anti-fog heating on cooled cameras, but we do not currently have a cooled ToupTek camera available to implement and validate the Switch device. Will be added when hardware is available.
-- **Cooling (TEC)**: Capability-gated on the SDK's `TOUPCAM_FLAG_TEC` / `TOUPCAM_FLAG_TEC_ONOFF` flags. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control paths are implemented but untested against physical cooled hardware.
+- **Tested models**: GPCMOS01200KPF (guide camera) and ATR2600M (cooled APS-C mono, IMX571) — both ConformU-validated on Linux arm64. Other ToupTek models sharing the same SDK are expected to work but have not been individually verified.
+- **ConformU**: 4.3.0 — ATR2600M: 0 errors, 0 issues, 0 timing issues (SDK 59.30701.20260128).
+- **Cooling (TEC)**: Capability-gated on `TOUPCAM_FLAG_TEC` / `TOUPCAM_FLAG_TEC_ONOFF`. Uncooled cameras report `CanSetCCDTemperature = false`. On cooled models (ATR2600M) `CoolerOn` / `SetCCDTemperature` / `CoolerPower` drive the TEC; verified reaching −10 °C on hardware.
+- **Readout modes (conversion gain + High Full Well)**: on sensors that support them, ASCOM `ReadoutModes` exposes the conversion-gain (`HCG` / `LCG`, plus `HDR` on HDR-capable models) and `High Full Well` hardware modes as a dropdown (e.g. NINA). On the IMX571 these trade read-noise vs full-well (HCG = low noise; LCG / High Full Well = larger full well, ~51 ke⁻ → ~100 ke⁻). Sensors without these keep a single `Normal` mode.
+- **Offset**: exposed as ASCOM `Offset` (black level, `TOUPCAM_OPTION_BLACKLEVEL`) on cameras reporting `TOUPCAM_FLAG_BLACKLEVEL`; `OffsetMax` scales with the output bit depth. Cameras without it report `PropertyNotImplemented`.
+- **Dew heater / fan / tail LED**: cooled cameras expose an anti-fog dew heater, radiator fan, and the tail indicator LED through the **ToupTek Thermal Switch** device (see Switch Drivers) — `switchType: thermal`, bound by `cameraIndex`, sharing the camera's SDK handle so it runs alongside the camera. Elements are capability-probed per model.
+- **Binning**: 1×/2×/3×/4×. Odd bin factors need an even sensor-ROI span, which the driver handles by padding the ROI to even (the SDK floor-bins it back to the requested pixel count).
+- **FullWellCapacity**: reported as the ADU saturation value; the true electron full well is a sensor-datasheet figure the SDK does not expose (see readout modes above for the ~51 ke⁻ / ~100 ke⁻ IMX571 modes).
 
 </details>
 
@@ -338,12 +344,15 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
 |-------------|--------------|------------|------------------|--------|
+| Thermal Switch (Dew Heater + Fan + Tail LED) | Cooled cameras (ATR2600M) | USB (via Camera) | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/ATR2600M%20Thermal%20Switch/) |
 | StellaVita PowerBox | StellaVita (Raspberry Pi CM4 / BCM2711) | Local GPIO (libgpiod v2) | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/StellaVita/) |
 
 <details>
 <summary><strong>ToupTek Switch Driver Notes</strong></summary>
 
-- **StellaVita PowerBox** (`vendor: touptek`, `deviceType: switch`) — the StellaVita's four on-board 12V DC ports via libgpiod v2 on `/dev/gpiochip0` (override with `gpioChip`). Exposes Port 1–4 mapped to BCM GPIO 18/10/17/4 (on BCM2711 the libgpiod line offset equals the BCM GPIO number); mapping verified on hardware against the board's `gpio=18,10,17,4,9,11=op,dh,pu` config.txt directive. GPIO 9/11 power the on-board Cypress USB hub and are deliberately not exposed. All four ports are boolean on/off by default; each can opt into 0–100% soft-PWM dimming (per-port `pwm` flag, `pwmFrequencyHz` default **100 Hz** — tested best on StellaVita, dims flat panels smoothly without 50 Hz flicker). Local GPIO only — independent of the ToupTek camera/focuser SDK; runs on the StellaVita itself (arm64). Connecting preserves the board's boot-high state (ports powered on); disconnecting does not power them off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#touptek-stellavita-raspberry-pi-cm4).
+- **Thermal Switch** (`vendor: touptek`, `deviceType: switch`, `switchType: thermal`) — exposes a cooled ToupTek camera's anti-fog dew heater (`TOUPCAM_OPTION_HEAT`), radiator fan (`TOUPCAM_OPTION_FAN`), and tail indicator LED (`TOUPCAM_OPTION_TAILLIGHT`, on/off — turn off to avoid light leaks during imaging) as switch elements. Element ranges come from the camera (fan speed `[0, maxfanspeed]` — often a single on/off speed; heater `[0, HEAT_MAX]`); elements are capability-probed per model at connect (heater/fan via `FLAG_HEAT`/`FLAG_FAN`, the tail LED by probing the option). Binds by `cameraIndex` and shares the camera's Toupcam handle via a reference-counted open, so it runs alongside the camera device. The cooler itself stays on the Camera interface (`CoolerOn` / `SetCCDTemperature`), not a switch element.
+  - **ConformU** 4.3.0 — ✓ validated on ATR2600M hardware (Linux arm64): 0 errors, 0 issues, 0 timing issues. Three elements exercised: `DewHeater` (0–4), `Fan` (0–1, single-speed on this model), `TailLight` (0–1). [Report](AlpacaCore/conformu/ToupTek/ATR2600M%20Thermal%20Switch/Linux-arm64.txt).
+- **StellaVita PowerBox** (`vendor: touptek`, `deviceType: switch`, `switchType: stellavita`) — the StellaVita's four on-board 12V DC ports via libgpiod v2 on `/dev/gpiochip0` (override with `gpioChip`). Exposes Port 1–4 mapped to BCM GPIO 18/10/17/4 (on BCM2711 the libgpiod line offset equals the BCM GPIO number); mapping verified on hardware against the board's `gpio=18,10,17,4,9,11=op,dh,pu` config.txt directive. GPIO 9/11 power the on-board Cypress USB hub and are deliberately not exposed. All four ports are boolean on/off by default; each can opt into 0–100% soft-PWM dimming (per-port `pwm` flag, `pwmFrequencyHz` default **100 Hz** — tested best on StellaVita, dims flat panels smoothly without 50 Hz flicker). Local GPIO only — independent of the ToupTek camera/focuser SDK; runs on the StellaVita itself (arm64). Connecting preserves the board's boot-high state (ports powered on); disconnecting does not power them off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#touptek-stellavita-raspberry-pi-cm4).
   - **ConformU** 4.3.0 — ✓ validated on StellaVita hardware (Linux arm64; Raspberry Pi CM4, Debian 13 Trixie, `/dev/gpiochip0`): 0 errors, 0 issues, 0 timing issues. Run against a mixed config (Port 1 PWM, Ports 2–4 boolean) so both the boolean and soft-PWM paths were exercised in one pass; slowest member 16 ms vs the 100 ms FAST target. [Report](AlpacaCore/conformu/ToupTek/StellaVita/Linux-arm64.txt).
 
 </details>

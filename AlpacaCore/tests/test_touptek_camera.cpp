@@ -135,3 +135,35 @@ TEST_CASE("ToupTek Camera Driver - State Machine Contracts", "[touptek][camera][
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);
 }
+
+TEST_CASE("ToupTek Camera Driver - Readout modes (conversion gain + High Full Well)", "[touptek][camera][unit]") {
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
+
+    // ReadoutModes fold the camera's conversion-gain (HCG/LCG/HDR) and High Full
+    // Well capabilities into one flat list — its exact contents depend on the
+    // camera attached to the test host (caps are preloaded from hardware at
+    // construction), so assert only the hardware-independent invariants: the
+    // list is non-empty, and any out-of-range index is InvalidValue (not a
+    // generic DriverException). The connected mode toggles are exercised by
+    // ConformU.
+    const auto modes = driver->get_readout_modes();
+    REQUIRE_FALSE(modes.empty());
+    require_alpaca_error([&]() { driver->set_readout_mode(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_readout_mode(static_cast<int>(modes.size())); },
+                         alpacacore::AlpacaError::InvalidValue);
+}
+
+TEST_CASE("ToupTek Camera Driver - Offset (black level)", "[touptek][camera][unit]") {
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
+
+    // Offset maps to the black level on cameras reporting TOUPCAM_FLAG_BLACKLEVEL.
+    // Operational reads require a connection first, so disconnected they report
+    // NotConnected (not a generic DriverException); the connected value range is
+    // exercised by ConformU. Named offset descriptions are never implemented
+    // (integer OffsetMin/OffsetMax mode), regardless of hardware.
+    require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_offset(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offset_min(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offset_max(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offsets(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}
