@@ -223,6 +223,13 @@ public:
     }
 
     void set_position(int position) override {
+        // Range validation precedes the connection check (ASCOM precedence, per
+        // AGENTS.md): a negative position is unconditionally invalid, so it is
+        // InvalidValue even while disconnected. The upper bound depends on
+        // slot_count_ (0 until connect), so it is checked below under the lock.
+        if (position < 0) {
+            throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
+        }
         ensure_connected();
         // Hold mutex_ across validation and the SDK move for the same
         // use-after-close reason as get_position.
@@ -235,7 +242,7 @@ public:
         if (slot_count_ <= 0) {
             throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
         }
-        if (position < 0 || position >= slot_count_) {
+        if (position >= slot_count_) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
         // Single absolute move; the wheel was homed at connect so the firmware

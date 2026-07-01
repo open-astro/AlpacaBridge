@@ -1267,6 +1267,17 @@ private:
         connecting_.store(true);
         connection_thread_ = std::thread([this, connect]() {
             try {
+                if (!connect) {
+                    // Match the destructor's ordering: stop AND JOIN the exposure
+                    // thread BEFORE set_connected(false) closes the SDK handle. The
+                    // exposure thread runs Toupcam_WaitImageV4 holding none of our
+                    // locks, and set_connected(false) closes the handle under
+                    // mutex_ — so closing without joining first is a use-after-close
+                    // if Stop unwinds the wait asynchronously. The join cannot live
+                    // inside set_connected (it already holds mutex_, which
+                    // stop_exposure_thread also takes → deadlock), so it goes here.
+                    stop_exposure_thread();
+                }
                 set_connected(connect);
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR("ToupTek", "Connection task failed: " + std::string(e.what()));
