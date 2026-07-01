@@ -505,4 +505,86 @@ int ToupTekSDKWrapper::aaf_range(HToupcam handle, int range_action, int target_a
     return value;
 }
 
+std::vector<ToupFilterWheelInfo> ToupTekSDKWrapper::enumerate_filter_wheels() {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    ToupcamDeviceV2 arr[TOUPCAM_MAX]{};
+    unsigned count = Toupcam_EnumV2(arr);
+    std::vector<ToupFilterWheelInfo> result;
+    int wheel_index = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        if (!arr[i].model) continue;
+        unsigned long long flags = arr[i].model->flag;
+        if ((flags & TOUPCAM_FLAG_FILTERWHEEL) == 0) {
+            continue;
+        }
+        ToupFilterWheelInfo info;
+        info.index = wheel_index++;
+        info.id = arr[i].id;
+        info.name = arr[i].displayname;
+        info.model_name = arr[i].model->name ? arr[i].model->name : "";
+        info.flags = flags;
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
+HToupcam ToupTekSDKWrapper::open_filter_wheel_by_id(const std::string& id) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    HToupcam h = Toupcam_Open(id.empty() ? nullptr : id.c_str());
+    if (!h) {
+        throw AlpacaException("Toupcam_Open returned null (filter wheel not available)", AlpacaError::NotConnected);
+    }
+    return h;
+}
+
+void ToupTekSDKWrapper::close_filter_wheel(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    if (handle) {
+        Toupcam_Close(handle);
+    }
+}
+
+int ToupTekSDKWrapper::get_filter_wheel_slot_count(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_SLOT, &value),
+                   "Toupcam_get_Option(FILTERWHEEL_SLOT)");
+    return value;
+}
+
+void ToupTekSDKWrapper::set_filter_wheel_slot_count(HToupcam handle, int slot_count) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_SLOT, slot_count),
+                   "Toupcam_put_Option(FILTERWHEEL_SLOT)");
+}
+
+void ToupTekSDKWrapper::reset_filter_wheel(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    // -1 triggers the wheel's home/reset cycle.
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_POSITION, -1),
+                   "Toupcam_put_Option(FILTERWHEEL_POSITION=-1 reset)");
+}
+
+int ToupTekSDKWrapper::get_filter_wheel_position(HToupcam handle) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int value = 0;
+    throw_on_error(Toupcam_get_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_POSITION, &value),
+                   "Toupcam_get_Option(FILTERWHEEL_POSITION)");
+    // -1 means the wheel is in motion; the position bits are the low byte.
+    if (value < 0) {
+        return -1;
+    }
+    return value & 0xff;
+}
+
+void ToupTekSDKWrapper::set_filter_wheel_position(HToupcam handle, int position) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    // Low byte = target slot; the direction bit (val >> 8) is left at 0
+    // (clockwise), matching the toupbase reference driver's default. This is a
+    // single absolute move — the firmware handles the traverse once the wheel
+    // has been homed at connect (see ToupTekFilterWheelDriver::set_connected).
+    throw_on_error(Toupcam_put_Option(handle, TOUPCAM_OPTION_FILTERWHEEL_POSITION, position & 0xff),
+                   "Toupcam_put_Option(FILTERWHEEL_POSITION)");
+}
+
 } // namespace alpacacore::vendor::touptek

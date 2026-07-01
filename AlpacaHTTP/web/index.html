@@ -737,6 +737,37 @@
                         </table>
                     </div>
 
+                    <!-- AFW (Astro Filter Wheel) configuration -->
+                    <div id="touptek-filterwheel-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="touptek-filterwheel-index">Filter Wheel Index:</label>
+                            <input type="number" id="touptek-filterwheel-index" name="touptekFilterwheelIndex" value="0" min="0">
+                            <small>0-based index among ToupTek AFW (Astro Filter Wheel) devices.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="touptek-filterwheel-slot-count">Filter Wheel Slots:</label>
+                            <div class="filterwheel-slot-controls">
+                                <select id="touptek-filterwheel-slot-count">
+                                    <option value="">Select slot count</option>
+                                    <option value="5">5 slots (AFW-M 5)</option>
+                                    <option value="7">7 slots (AFW-M 7)</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                                <input type="number" id="touptek-filterwheel-slot-custom" min="1" max="16" placeholder="Custom">
+                            </div>
+                            <small>Pick a slot count to build filter dropdowns, or leave blank &mdash; the driver reads the real slot count from the wheel at connect.</small>
+                        </div>
+                        <div id="touptek-filterwheel-slot-list" class="filterwheel-slot-list"></div>
+                        <details class="filterwheel-advanced">
+                            <summary>Advanced: edit filter names as lines</summary>
+                            <div class="form-group">
+                                <label for="touptek-filter-names">Filter Names (optional):</label>
+                                <textarea id="touptek-filter-names" name="touptekFilterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                                <small>One name per line. Leave blank to use default Filter N names.</small>
+                            </div>
+                        </details>
+                    </div>
+
                 </div>
 
                 <!-- WeeWX ObservingConditions Configuration -->

@@ -89,6 +89,19 @@ struct ToupFocuserInfo {
 };
 
 /**
+ * Information about a ToupTek AFW (Astro Filter Wheel) device discovered via
+ * Toupcam_EnumV2. Identified by the TOUPCAM_FLAG_FILTERWHEEL capability bit.
+ * Covers the standalone AFW-M models (5- and 7-slot).
+ */
+struct ToupFilterWheelInfo {
+    int index{};
+    std::string id;          // opaque id from Toupcam_EnumV2, used for Toupcam_Open
+    std::string name;        // displayname
+    std::string model_name;  // model->name
+    unsigned long long flags{};
+};
+
+/**
  * AAF (Astro Auto Focuser) action codes.
  *
  * Mirrors TOUPCAM_AAF_* in toupcam.h so driver code can avoid including the
@@ -231,6 +244,37 @@ public:
 
     // AAF range query: Toupcam_AAF(handle, RANGEMAX|RANGEMIN|RANGEDEF, action, &out).
     int aaf_range(HToupcam handle, int range_action, int target_action, const char* context);
+
+    // AFW (Astro Filter Wheel) ----------------------------------------------
+    // Enumeration filters Toupcam_EnumV2 results by TOUPCAM_FLAG_FILTERWHEEL.
+    std::vector<ToupFilterWheelInfo> enumerate_filter_wheels();
+
+    // Open by Toupcam_EnumV2 id. Throws on failure.
+    HToupcam open_filter_wheel_by_id(const std::string& id);
+
+    void close_filter_wheel(HToupcam handle);
+
+    // Number of filter slots reported by the wheel firmware
+    // (TOUPCAM_OPTION_FILTERWHEEL_SLOT).
+    int get_filter_wheel_slot_count(HToupcam handle);
+
+    // Write the slot count back to the wheel (TOUPCAM_OPTION_FILTERWHEEL_SLOT is
+    // [RW]). The toupbase reference driver does this at connect right after
+    // reading it, re-applying the wheel's slot configuration.
+    void set_filter_wheel_slot_count(HToupcam handle, int slot_count);
+
+    // Home/reset the wheel (TOUPCAM_OPTION_FILTERWHEEL_POSITION = -1). Required
+    // at connect so the firmware establishes its slot reference — without it the
+    // wheel hunts and never lands (notably after a firmware update).
+    void reset_filter_wheel(HToupcam handle);
+
+    // Current slot (0-based). Returns -1 while the wheel is in motion, matching
+    // the ASCOM FilterWheel Position contract (TOUPCAM_OPTION_FILTERWHEEL_POSITION).
+    int get_filter_wheel_position(HToupcam handle);
+
+    // Move to slot 0..N-1 (single absolute move; direction bit left at 0 =
+    // clockwise, matching the toupbase default).
+    void set_filter_wheel_position(HToupcam handle, int position);
 
 private:
     class Impl;

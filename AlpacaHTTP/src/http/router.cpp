@@ -86,6 +86,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
+#include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #ifdef ALPACACORE_TOUPTEK_STELLAVITA
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
@@ -7002,6 +7003,42 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
             util::log_info("Registered ToupTek AAF focuser");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
+        return false;
+#endif
+    }
+
+    if (vendor == "touptek" && device_type_str == "filterwheel") {
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        // Standalone ToupTek AFW (Astro Filter Wheel); AFW-M 5- and 7-slot.
+        // Enumerated by the toupcam SDK; the slot count is read from the wheel
+        // firmware at connect, so no slot count is supplied here.
+        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
+        std::string wheel_id = config.value("filterwheelId", "");
+        if (!wheel_id.empty()) {
+            wheel = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(device_number, wheel_id);
+        } else {
+            int wheel_index = config.value("filterwheelIndex", 0);
+            wheel = alpacacore::vendor::touptek::create_touptek_filterwheel_by_index(device_number, wheel_index);
+        }
+
+        if (config.contains("filterNames")) {
+            const auto& names_value = config.at("filterNames");
+            if (!names_value.is_array()) {
+                error_message = "ToupTek filter wheel filterNames must be an array";
+                return false;
+            }
+            wheel->set_names(names_value.get<std::vector<std::string>>());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
+            util::log_info("Registered ToupTek AFW filter wheel");
             return true;
         }
 

@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-06-23
+## Updated 2026-06-30
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -171,6 +171,24 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested model**: Phoenix Wheel PW8 (8-position) on Linux arm64
 - **ConformU**: 4.3.0 — 0 errors, 0 issues, 0 timing issues
 - **Filter names / focus offsets**: per-slot aliases and focus offsets stored on the wheel (set via Player One's own software) are read as defaults at connect; `filterNames` from the AlpacaBridge config overrides them and nothing is written back to the wheel.
+- **Position** reports −1 while the wheel is rotating, per the ASCOM IFilterWheelV3 contract.
+
+</details>
+
+### ToupTek
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| AFW-M (5/7-slot) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/AFW-M/) |
+
+<details>
+<summary><strong>ToupTek FilterWheel Driver Notes</strong></summary>
+
+- **SDK**: ToupTek toupcamsdk 2026-01-28 (shared with the ToupTek camera and focuser drivers)
+- **Connection**: USB (enumerated by the toupcam SDK via `TOUPCAM_FLAG_FILTERWHEEL`; standalone AFW-M, not a camera-integrated wheel)
+- **Tested model**: AFW-M 7-slot on Linux arm64 (wheel firmware `FILTERWHEEL01A_V202_20250903.iic`)
+- **ConformU**: 4.3.0 — 0 errors, 0 issues, 0 timing issues
+- **Homing at connect**: the driver reads the slot count, writes it back, and homes the wheel (`FILTERWHEEL_POSITION = -1`) at connect — mirroring the INDI toupbase reference driver — so the firmware establishes its slot reference. This is unconditional (matches INDI) and does not depend on a particular firmware; it matters most right after a firmware flash, which clears the slot reference and otherwise leaves the wheel hunting without landing. Expect the wheel to home once on connect.
 - **Position** reports −1 while the wheel is rotating, per the ASCOM IFilterWheelV3 contract.
 
 </details>
