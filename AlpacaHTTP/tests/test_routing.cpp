@@ -268,6 +268,55 @@ int main() {
     }
 #endif
 
+    // --- ToupTek thermal switch routing test ---
+    // The (touptek, switch) route selects between the StellaVita PowerBox and
+    // the cooled-camera thermal switch (dew heater / fan / tail LED) via
+    // switchType. The "thermal" backend is available on any ToupTek build (it
+    // needs no libgpiod), registers without hardware, and must round-trip its
+    // switchType discriminator and cameraIndex binding.
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    {
+        nlohmann::json configure_body = {{"vendor", "touptek"},
+                                         {"deviceType", "switch"},
+                                         {"deviceNumber", 9181},
+                                         {"switchType", "thermal"},
+                                         {"cameraIndex", 2}};
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        bool found_touptek_thermal = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Switch" && entry.value("DeviceNumber", -1) == 9181) {
+                const auto& cfg = entry["Config"];
+                EXPECT(cfg.value("vendor", "") == "touptek");
+                EXPECT(cfg.value("switchType", "") == "thermal");
+                EXPECT(cfg.value("cameraIndex", -1) == 2);
+                found_touptek_thermal = true;
+                break;
+            }
+        }
+        EXPECT(found_touptek_thermal);
+
+        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "switch"}, {"deviceNumber", 9181}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        EXPECT(nlohmann::json::parse(remove_response.body()).value("ErrorNumber", -1) == 0);
+    }
+    {
+        // An unknown/typo'd switchType (e.g. wrong case "Thermal") must be
+        // rejected, never silently fall through to a StellaVita registration.
+        nlohmann::json configure_body = {
+            {"vendor", "touptek"}, {"deviceType", "switch"}, {"deviceNumber", 9182}, {"switchType", "Thermal"}};
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+        EXPECT(configure_json.value("ErrorNumber", 0) != 0);
+    }
+#endif
+
     // --- Player One thermal switch routing test ---
 #ifdef ALPACACORE_ENABLE_PLAYERONE
     {

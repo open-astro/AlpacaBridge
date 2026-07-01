@@ -196,62 +196,81 @@ public:
                 }
             }
 
-            sdk.put_trigger_mode(handle_, 1); // software trigger
-
-            // Refresh frame dimensions and Bayer pattern from the open camera.
-            int width = 0;
-            int height = 0;
+            // Everything from here until connected_ is set true must release the
+            // freshly opened handle on failure: the destructor only closes when
+            // connected_, so an unguarded throw (put_trigger_mode, get_serial_number,
+            // get_firmware_version, start_pull_mode all propagate) would leak the SDK
+            // open — the ref-counted open never balances — and hand a stale handle to
+            // the next reconnect. Guard the whole post-open configuration in one try.
             try {
-                sdk.get_size(handle_, width, height);
-            } catch (const std::exception&) {}
-            if (width > 0 && height > 0) {
-                camera_info_.max_width = width;
-                camera_info_.max_height = height;
-            }
+                sdk.put_trigger_mode(handle_, 1);  // software trigger
 
-            try {
-                unsigned four_cc = 0;
-                unsigned bpp = 0;
-                sdk.get_raw_format(handle_, four_cc, bpp);
-                if (four_cc == kFourCC_YYYY || (camera_info_.flags & 0x10) /* FLAG_MONO */) {
-                    camera_info_.is_color = false;
-                    camera_info_.bayer = ToupBayerPattern::None;
-                } else {
-                    camera_info_.is_color = true;
-                    camera_info_.bayer = four_cc_to_bayer(four_cc);
+                // Refresh frame dimensions and Bayer pattern from the open camera.
+                int width = 0;
+                int height = 0;
+                try {
+                    sdk.get_size(handle_, width, height);
+                } catch (const std::exception& e) {
+                    // Best-effort: keep the preloaded sensor size on failure.
+                    ALPACA_LOG_DEBUG("ToupTek", "get_Size failed: " + std::string(e.what()));
                 }
-                if (bpp > 0) {
-                    camera_info_.bit_depth_max = static_cast<int>(bpp);
+                if (width > 0 && height > 0) {
+                    camera_info_.max_width = width;
+                    camera_info_.max_height = height;
                 }
-            } catch (const std::exception&) {}
 
-            try {
-                float px = 0.0f;
-                float py = 0.0f;
-                sdk.get_pixel_size(handle_, 0xffffffffu, px, py);
-                if (px > 0.0f) camera_info_.pixel_size_um_x = px;
-                if (py > 0.0f) camera_info_.pixel_size_um_y = py;
-            } catch (const std::exception&) {}
+                try {
+                    unsigned four_cc = 0;
+                    unsigned bpp = 0;
+                    sdk.get_raw_format(handle_, four_cc, bpp);
+                    if (four_cc == kFourCC_YYYY || (camera_info_.flags & 0x10) /* FLAG_MONO */) {
+                        camera_info_.is_color = false;
+                        camera_info_.bayer = ToupBayerPattern::None;
+                    } else {
+                        camera_info_.is_color = true;
+                        camera_info_.bayer = four_cc_to_bayer(four_cc);
+                    }
+                    if (bpp > 0) {
+                        camera_info_.bit_depth_max = static_cast<int>(bpp);
+                    }
+                } catch (const std::exception& e) {
+                    // Best-effort: keep the preloaded colour/format info on failure.
+                    ALPACA_LOG_DEBUG("ToupTek", "get_RawFormat failed: " + std::string(e.what()));
+                }
 
-            serial_number_ = sdk.get_serial_number(handle_);
-            firmware_version_ = sdk.get_firmware_version(handle_);
+                try {
+                    float px = 0.0f;
+                    float py = 0.0f;
+                    sdk.get_pixel_size(handle_, 0xffffffffu, px, py);
+                    if (px > 0.0f) camera_info_.pixel_size_um_x = px;
+                    if (py > 0.0f) camera_info_.pixel_size_um_y = py;
+                } catch (const std::exception& e) {
+                    // Best-effort: keep the preloaded pixel size on failure.
+                    ALPACA_LOG_DEBUG("ToupTek", "get_PixelSize failed: " + std::string(e.what()));
+                }
 
-            bin_ = 1;
-            start_x_ = 0;
-            start_y_ = 0;
-            // Even sensor size (see set_bin_locked / start_exposure): at bin 1
-            // this only differs from the raw size on an odd-dimension sensor.
-            num_x_ = camera_info_.max_width & ~1;
-            num_y_ = camera_info_.max_height & ~1;
-            roi_dirty_ = false;
-            format_dirty_ = false;
+                serial_number_ = sdk.get_serial_number(handle_);
+                firmware_version_ = sdk.get_firmware_version(handle_);
 
-            try {
+                bin_ = 1;
+                start_x_ = 0;
+                start_y_ = 0;
+                // Even sensor size (see set_bin_locked / start_exposure): at bin 1
+                // this only differs from the raw size on an odd-dimension sensor.
+                num_x_ = camera_info_.max_width & ~1;
+                num_y_ = camera_info_.max_height & ~1;
+                roi_dirty_ = false;
+                format_dirty_ = false;
+
                 sdk.start_pull_mode(handle_, &ToupTekCameraDriver::on_event_static, this);
+            } catch (const AlpacaException&) {
+                sdk.close_camera(handle_);
+                handle_ = nullptr;
+                throw;
             } catch (const std::exception& e) {
                 sdk.close_camera(handle_);
                 handle_ = nullptr;
-                throw AlpacaException(std::string("Failed to start pull mode: ") + e.what(),
+                throw AlpacaException(std::string("Failed to configure ToupTek camera: ") + e.what(),
                                       AlpacaError::DriverException);
             }
 
@@ -1312,6 +1331,16 @@ private:
         image_cached_ = false;
     }
 
+    // NOTE: the ROI origin snaps DOWN to an even sensor-coordinate boundary at
+    // exposure time (Toupcam_put_Roi requires an even offset, and on a colour
+    // sensor even alignment is mandatory to preserve the Bayer phase — an odd
+    // offset would swap the colour filter pattern and corrupt debayering). The
+    // sensor offset is start * bin, so for even bin factors every StartX is
+    // already on the grid; for odd bin factors (notably bin 1) an odd StartX
+    // resolves to the next lower even sensor column, i.e. the origin can land one
+    // pixel before the requested StartX. This snap is intentional and consistent
+    // (a guider's relative centroids are unaffected); callers needing an exact
+    // origin should align StartX/StartY to a 2-pixel boundary at bin 1.
     void set_start_pos_locked(int sx, int sy) {
         ensure_connected();
         if (sx < 0 || sy < 0) {

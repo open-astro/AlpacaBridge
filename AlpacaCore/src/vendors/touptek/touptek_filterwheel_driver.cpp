@@ -362,38 +362,39 @@ private:
         }
     }
 
-    // Expand a single delimiter-less token into per-slot single-character names
-    // ("LRGB" -> L,R,G,B) only when it looks like a shorthand code (no lowercase
-    // letters), so ordinary names like "Clear" or "Ha_NB" that happen to match
-    // the slot count are left intact. No-op until the slot count is known.
     // Block until the wheel firmware finishes its home cycle (SDK reports -1
     // while moving, a non-negative slot once settled), or a timeout elapses.
     // Sleeps first so the move has actually begun before the first read.
-    // Returns true once the wheel has provably homed, false on timeout (the caller
-    // fails the connect). Settles on either signal: (a) we observed the -1 "moving"
-    // state and it then returned to a real slot (the normal ~1.5 s home), or (b) the
-    // position held a non-negative slot across several polls (covers hardware that
-    // homes in under one poll interval, where -1 is never observed — avoids waiting
-    // out the full timeout for fast homers).
+    // Returns true once the wheel has provably homed, false on timeout (the
+    // caller fails the connect). Requires kStableReads CONSECUTIVE non-negative
+    // reads before declaring the wheel settled — even after the -1 "moving"
+    // state has cleared — so a brief valid-slot bounce during deceleration is
+    // not mistaken for a completed home (any -1 read resets the counter).
+    // Hardware that homes in under one poll interval (never reporting -1)
+    // settles via the same consecutive-read requirement rather than waiting out
+    // the full timeout. The unconditional stability requirement costs at most
+    // kStableReads poll intervals over an on-first-slot return.
     static bool wait_for_home(ToupTekSDKWrapper& sdk, HToupcam handle) {
         constexpr int kPollMs = 100;
         constexpr int kMaxWaitMs = 6000;
         constexpr int kStableReads = 3;  // consecutive real-slot reads = settled
-        bool saw_moving = false;
         int stable = 0;
         for (int waited = 0; waited < kMaxWaitMs; waited += kPollMs) {
             std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
             int pos = sdk.get_filter_wheel_position(handle);
             if (pos < 0) {
-                saw_moving = true;  // firmware reports -1 while the home move runs
-                stable = 0;
-            } else if (saw_moving || ++stable >= kStableReads) {
-                return true;  // settled
+                stable = 0;  // firmware reports -1 while the home move runs
+            } else if (++stable >= kStableReads) {
+                return true;  // settled: kStableReads consecutive real-slot reads
             }
         }
         return false;  // never settled within the timeout
     }
 
+    // Expand a single delimiter-less token into per-slot single-character names
+    // ("LRGB" -> L,R,G,B) only when it looks like a shorthand code (no lowercase
+    // letters), so ordinary names like "Clear" or "Ha_NB" that happen to match
+    // the slot count are left intact. No-op until the slot count is known.
     void expand_shorthand_locked(std::vector<std::string>& names) const {
         if (slot_count_ <= 0 || names.size() != 1) {
             return;

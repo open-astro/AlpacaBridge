@@ -93,6 +93,13 @@ The rules are vendor-agnostic; do them in the driver from the start.
   the driver half-connected. A getter that checks `connected_` and then re-locks to
   index a container disconnect clears has a TOCTOU — re-assert the connection under
   the lock before indexing.
+- **Connect side (mirror of the above):** once you've opened the handle, guard the
+  **entire** remaining init so any throw closes it before returning. If `connected_`
+  is only set true at the very end, the destructor's `if (connected_)` close won't
+  fire — and with a **ref-counted** open (`open_count` stays at 1) the leak is
+  permanent: the next reconnect bumps the count to 2, hands back the same stale
+  handle, and `Close` never balances. Don't leave post-open SDK calls
+  (`put_trigger_mode`, `get_serial_number`, …) outside the cleanup try.
 
 **Long-op / exposure state machines (cameras)**
 - A runtime register write during a live exposure corrupts the frame. Guard it with
