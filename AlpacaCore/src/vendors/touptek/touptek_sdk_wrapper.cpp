@@ -133,10 +133,20 @@ public:
         auto hit = id_by_handle_.find(handle);
         if (hit != id_by_handle_.end()) {
             auto sit = shared_by_id_.find(hit->second);
-            if (sit != shared_by_id_.end() && --sit->second.open_count > 0) {
-                return;  // Another driver still holds this device open.
+            if (sit != shared_by_id_.end()) {
+                // A tracked handle always has open_count >= 1 here (a zero-count
+                // entry is erased below and removed from both maps). Guard the
+                // decrement rather than doing "--open_count > 0" unconditionally:
+                // if a mispaired double-close drove the count to <= 1 while another
+                // holder still existed, the raw decrement would underflow past the
+                // erase and Toupcam_Close a handle still in use (undefined
+                // behaviour). Only a count > 1 means another driver still holds it.
+                if (sit->second.open_count > 1) {
+                    --sit->second.open_count;
+                    return;  // Another driver still holds this device open.
+                }
+                shared_by_id_.erase(sit);  // final release: fall through to Close
             }
-            shared_by_id_.erase(hit->second);
             id_by_handle_.erase(hit);
         }
         // Intentional fallthrough: handles opened by index (open_camera_by_index)

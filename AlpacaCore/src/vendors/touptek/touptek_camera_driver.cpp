@@ -988,6 +988,14 @@ public:
                 if (!got || !exposure_active_.load()) {
                     ALPACA_LOG_WARN("ToupTek",
                         "Exposure failed or aborted before frame arrived");
+                    // Publish the false-transition under readout_mutex_ so the
+                    // invariant "exposure_active_ only changes under readout_mutex_"
+                    // holds on the exposure thread's own exit paths too (matching
+                    // the disconnect and deadline paths). Taken alone here — the
+                    // thread holds neither mutex_ nor the SDK lock — so it respects
+                    // the mutex_ -> readout_mutex_ order, and no join site holds
+                    // readout_mutex_, so this cannot deadlock the joining thread.
+                    std::lock_guard<std::mutex> rlock(readout_mutex_);
                     exposure_active_.store(false);
                     return;
                 }
@@ -1010,6 +1018,10 @@ public:
                 if (dirty_format && !format_applied) format_dirty_ = true;
                 if (dirty_roi && !roi_applied) roi_dirty_ = true;
             }
+            // Normal completion also publishes the false-transition under
+            // readout_mutex_ (see the abort path above) so every exposure_active_
+            // change on this thread upholds the invariant.
+            std::lock_guard<std::mutex> rlock(readout_mutex_);
             exposure_active_.store(false);
         });
     }
