@@ -678,31 +678,35 @@ public:
         ensure_connected();  // ASCOM: properties throw NotConnected when
                              // disconnected — even the single-mode early return
                              // below must not short-circuit that (matches the setter)
-        const auto specs = readout_mode_specs();
-        if (specs.size() == 1) {
-            return 0;  // Only "Normal".
-        }
         auto& sdk = ToupTekSDKWrapper::instance();
+        std::vector<ReadoutModeSpec> specs;
         int cur_cg = 0;
         bool cur_hfw = false;
         {
-            // Capture the handle, the capability flags (which axes exist), AND read
-            // both SDK registers under mutex_ + readout_mutex_ held together, so all
-            // three come from ONE connection: a disconnect (or disconnect+reconnect
-            // to a different model) cannot swap the handle out from under a stale
-            // has_cg/has_hfw pair captured before the lock. readout_mutex_ also makes
-            // the two register reads atomic w.r.t. set_readout_mode's two-step
-            // CG+HFW apply. Deriving the caps here from camera_info_ (rather than the
-            // pre-lock specs snapshot) is what makes them consistent with handle_.
+            // Derive the mode list, the capability flags (which axes exist), AND
+            // read both SDK registers under mutex_ + readout_mutex_ held together,
+            // so all come from ONE connection: a disconnect (or disconnect+reconnect
+            // to a different model) cannot leave a pre-lock specs snapshot paired
+            // with register reads from the new handle. This mirrors set_readout_mode,
+            // which likewise derives its spec via readout_mode_specs_locked() under
+            // the same locks. readout_mutex_ also makes the two register reads atomic
+            // w.r.t. set_readout_mode's two-step CG+HFW apply.
             std::lock_guard<std::mutex> lock(mutex_);
             std::lock_guard<std::mutex> rlock(readout_mutex_);
             if (!handle_) {
                 throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
             }
+            specs = readout_mode_specs_locked();
             const bool has_cg = camera_info_valid_ && camera_info_.supports_cg;
             const bool has_hfw = camera_info_valid_ && camera_info_.supports_high_fullwell;
+            // Normal-only camera: neither axis exists, so no SDK register read is
+            // issued (cur_cg/cur_hfw stay at their defaults) — the size==1 shortcut
+            // below then reports mode 0 without a wasted round-trip.
             cur_cg = has_cg ? sdk.get_cg(handle_) : 0;
             cur_hfw = has_hfw && sdk.get_high_fullwell(handle_) != 0;
+        }
+        if (specs.size() == 1) {
+            return 0;  // Only "Normal".
         }
         for (std::size_t i = 0; i < specs.size(); ++i) {
             const auto& s = specs[i];
