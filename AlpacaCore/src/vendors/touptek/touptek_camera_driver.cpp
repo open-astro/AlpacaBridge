@@ -231,8 +231,10 @@ public:
             bin_ = 1;
             start_x_ = 0;
             start_y_ = 0;
-            num_x_ = camera_info_.max_width;
-            num_y_ = camera_info_.max_height;
+            // Even sensor size (see set_bin_locked / start_exposure): at bin 1
+            // this only differs from the raw size on an odd-dimension sensor.
+            num_x_ = camera_info_.max_width & ~1;
+            num_y_ = camera_info_.max_height & ~1;
             roi_dirty_ = false;
             format_dirty_ = false;
 
@@ -423,6 +425,7 @@ public:
     }
     void set_gain(int gain) override {
         ensure_connected();
+        ensure_not_exposing();
         auto& sdk = ToupTekSDKWrapper::instance();
         auto range = sdk.get_gain_range(handle_copy());
         if (gain < range.min || gain > range.max) {
@@ -524,6 +527,7 @@ public:
     }
     void set_offset(int offset) override {
         ensure_connected();
+        ensure_not_exposing();
         ensure_blacklevel_supported();
         int max = offset_max_value();
         if (offset < 0 || offset > max) {
@@ -609,6 +613,7 @@ public:
         // Then require a connection, so a Normal-only camera still throws
         // NotConnected here rather than silently succeeding on the early-return.
         ensure_connected();
+        ensure_not_exposing();  // CG/HFW writes must not race a live integration
         const auto& s = specs[static_cast<std::size_t>(mode)];
         if (!s.set_cg && !s.set_hfw) {
             return;  // Single "Normal" mode: nothing to apply.
@@ -961,6 +966,16 @@ private:
         return handle_;
     }
 
+    // Reject runtime sensor-register writes (readout mode / gain / offset) while
+    // a frame is integrating: the exposure thread is blocked in wait_image
+    // holding no lock, so a mid-exposure register write would race the live
+    // integration and yield a mixed-state or stalled frame with no error.
+    void ensure_not_exposing() const {
+        if (exposure_active_.load()) {
+            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
+        }
+    }
+
     bool supports_cooler_locked_copy() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return camera_info_valid_ && camera_info_.supports_cooler;
@@ -1107,8 +1122,12 @@ private:
         }
         if (bin_ == bin_x) return;
         bin_ = bin_x;
-        num_x_ = camera_info_.max_width / bin_;
-        num_y_ = camera_info_.max_height / bin_;
+        // Bound by the EVEN sensor size, matching start_exposure's max_w/max_h
+        // (Toupcam_put_Roi needs an even sensor span). Using the raw size here
+        // would let num_x_ exceed what start_exposure allows on an odd-width
+        // sensor and throw "ROI size exceeds sensor dimensions" at full frame.
+        num_x_ = (camera_info_.max_width & ~1) / bin_;
+        num_y_ = (camera_info_.max_height & ~1) / bin_;
         start_x_ = 0;
         start_y_ = 0;
         format_dirty_ = true;

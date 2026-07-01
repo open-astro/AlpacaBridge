@@ -154,9 +154,18 @@ std::vector<ToupCameraInfo> ToupTekSDKWrapper::enumerate_cameras() {
     unsigned count = Toupcam_EnumV2(arr);
     std::vector<ToupCameraInfo> result;
     result.reserve(count);
+    int camera_index = 0;
     for (unsigned i = 0; i < count; ++i) {
+        // Toupcam_EnumV2 also lists standalone AFW filter wheels and AAF
+        // focusers, which are not cameras. Skip them (mirroring the flag guards
+        // in enumerate_filter_wheels/enumerate_focusers) so cameras[cameraIndex]
+        // — and the cameraIndex=0 default — never resolves to an accessory when
+        // a camera and an AFW/AAF are attached together.
+        if (arr[i].model && (arr[i].model->flag & (TOUPCAM_FLAG_FILTERWHEEL | TOUPCAM_FLAG_AUTOFOCUSER)) != 0) {
+            continue;
+        }
         ToupCameraInfo info;
-        info.index = static_cast<int>(i);
+        info.index = camera_index++;
         info.id = arr[i].id;
         info.name = arr[i].displayname;
         if (arr[i].model) {
