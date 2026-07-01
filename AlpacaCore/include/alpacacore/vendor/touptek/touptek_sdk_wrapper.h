@@ -162,6 +162,13 @@ public:
     std::vector<ToupCameraInfo> enumerate_cameras();
 
     // Returns the opened handle (non-null). Throws on failure.
+    //
+    // DEPRECATED: this index is the SDK's raw Toupcam_EnumV2 order (still includes
+    // AFW/AAF accessories), NOT the camera-only index space that enumerate_cameras()
+    // and the web UI's cameraIndex use, and it opens OUTSIDE the reference-counted
+    // by-id sharing — so it can Toupcam_Close a device another driver holds open by
+    // id. No production path uses it. Always open by id via open_camera_by_id().
+    [[deprecated("index space diverges from enumerate_cameras(); use open_camera_by_id()")]]
     HToupcam open_camera_by_index(int camera_index);
     HToupcam open_camera_by_id(const std::string& id);
 

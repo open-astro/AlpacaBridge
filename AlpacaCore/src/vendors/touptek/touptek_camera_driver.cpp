@@ -656,14 +656,27 @@ public:
             return 0;  // Only "Normal".
         }
         auto& sdk = ToupTekSDKWrapper::instance();
-        const HToupcam handle = handle_copy();  // NotConnected while disconnected
-        const bool has_cg = specs.front().set_cg;
-        const bool has_hfw = specs.front().set_hfw;
-        // Read both axes atomically w.r.t. set_readout_mode's two-step apply.
-        std::lock_guard<std::mutex> lock(readout_mutex_);
-        ensure_connected();  // stale-handle guard — see set_gain
-        const int cur_cg = has_cg ? sdk.get_cg(handle) : 0;
-        const bool cur_hfw = has_hfw && sdk.get_high_fullwell(handle) != 0;
+        int cur_cg = 0;
+        bool cur_hfw = false;
+        {
+            // Capture the handle, the capability flags (which axes exist), AND read
+            // both SDK registers under mutex_ + readout_mutex_ held together, so all
+            // three come from ONE connection: a disconnect (or disconnect+reconnect
+            // to a different model) cannot swap the handle out from under a stale
+            // has_cg/has_hfw pair captured before the lock. readout_mutex_ also makes
+            // the two register reads atomic w.r.t. set_readout_mode's two-step
+            // CG+HFW apply. Deriving the caps here from camera_info_ (rather than the
+            // pre-lock specs snapshot) is what makes them consistent with handle_.
+            std::lock_guard<std::mutex> lock(mutex_);
+            std::lock_guard<std::mutex> rlock(readout_mutex_);
+            if (!handle_) {
+                throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+            }
+            const bool has_cg = camera_info_valid_ && camera_info_.supports_cg;
+            const bool has_hfw = camera_info_valid_ && camera_info_.supports_high_fullwell;
+            cur_cg = has_cg ? sdk.get_cg(handle_) : 0;
+            cur_hfw = has_hfw && sdk.get_high_fullwell(handle_) != 0;
+        }
         for (std::size_t i = 0; i < specs.size(); ++i) {
             const auto& s = specs[i];
             if ((!s.set_cg || s.cg == cur_cg) && (!s.set_hfw || s.hfw == cur_hfw)) {
@@ -1004,6 +1017,16 @@ public:
 
                 unsigned got_w = 0;
                 unsigned got_h = 0;
+                // rowPitch = active_num_x * 2 bytes: this is the SDK contract for
+                // Toupcam_WaitImageV4's nRowPitch arg — the destination row stride
+                // in OUR buffer (not the ROI width). We deliberately set it to the
+                // requested (unpadded) width so the image is laid out at active_num_x
+                // stride regardless of the even-padded ROI (see the odd-NumX/bin-1
+                // note at the ROI computation above). got_w/got_h are the SDK's
+                // delivered dimensions and MAY exceed active_num_x/y by one at bin 1;
+                // build_image_array_16bit reads exactly active_num_x columns per row
+                // at this same stride. If a future SDK ignores nRowPitch and packs at
+                // got_w, this assumption breaks — revalidate against the SDK docs.
                 bool got = sdk_local.wait_image(handle, timeout_ms,
                                                  pixel_buffer.data(),
                                                  16,
