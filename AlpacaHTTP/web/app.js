@@ -422,7 +422,7 @@ async function loadDevices() {
         }
         
         if (data.ErrorNumber !== 0) {
-            devicesList.innerHTML = `<p class="error">Error: ${data.ErrorMessage || 'Unknown error'}</p>`;
+            devicesList.innerHTML = `<p class="error">Error: ${escapeHtml(data.ErrorMessage || 'Unknown error')}</p>`;
             return;
         }
 
@@ -1029,7 +1029,7 @@ async function loadServerInfo() {
         }
         
         if (data.ErrorNumber !== 0) {
-            serverInfo.innerHTML = `<p class="error">Error: ${data.ErrorMessage || 'Unknown error'}</p>`;
+            serverInfo.innerHTML = `<p class="error">Error: ${escapeHtml(data.ErrorMessage || 'Unknown error')}</p>`;
             return;
         }
 

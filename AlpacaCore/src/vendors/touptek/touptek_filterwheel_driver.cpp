@@ -111,6 +111,17 @@ public:
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lock(mutex_);
+        if (!connected && connecting_homing_) {
+            // Disconnect requested mid-connect: the in-flight set_connected(true)
+            // has released mutex_ for the homing poll, and connected_ is still
+            // false, so the "connected == connected_" early-return below would
+            // silently drop this and the wheel would come up Connected. Record the
+            // intent; the connect honors it after homing (see below) rather than
+            // publishing. Serialised by connection_mutex_, so at most one connect
+            // is in flight to observe this flag.
+            pending_disconnect_ = true;
+            return;
+        }
         if (connected == connected_.load()) {
             return;
         }
@@ -128,6 +139,7 @@ public:
                 return;
             }
             connecting_homing_ = true;
+            pending_disconnect_ = false;  // fresh attempt; ignore any stale request
             ToupFilterWheelInfo info = resolve_wheel_locked(sdk);
             HToupcam handle = sdk.open_filter_wheel_by_id(info.id);
             try {
@@ -155,6 +167,19 @@ public:
                 lock.unlock();
                 const bool settled = wait_for_home(sdk, handle);
                 lock.lock();
+                if (pending_disconnect_) {
+                    // A set_connected(false) landed during the mutex-released homing
+                    // poll. Honor it: close the just-opened handle and stay
+                    // disconnected rather than publishing handle_/connected_. This is
+                    // a requested disconnect, not a failure — return cleanly (no throw).
+                    sdk.close_filter_wheel(handle);
+                    handle_ = nullptr;
+                    info_ = {};
+                    slot_count_ = 0;
+                    connecting_homing_ = false;
+                    pending_disconnect_ = false;
+                    return;
+                }
                 if (!settled) {
                     // Neither a moving->settled nor a stable-slot signal in 6 s:
                     // the wheel is obstructed or the firmware is stuck. Fail the
@@ -177,7 +202,8 @@ public:
                 handle_ = nullptr;
                 info_ = {};
                 slot_count_ = 0;
-                connecting_homing_ = false;  // cleared under mutex_ on failure
+                connecting_homing_ = false;   // cleared under mutex_ on failure
+                pending_disconnect_ = false;  // consumed with this attempt
                 throw;
             }
             connecting_homing_ = false;  // cleared under mutex_ on success
@@ -470,6 +496,14 @@ private:
     // connecting_ guard) from opening the same wheel a second time — a double
     // ref-counted open would leak the handle when only one close fires.
     bool connecting_homing_ = false;
+    // Set when a set_connected(false) arrives while connecting_homing_ is true —
+    // i.e. during the mutex-released homing poll, when connected_ is still false
+    // so the plain "connected == connected_" early-return would silently drop the
+    // disconnect and the wheel would come up Connected despite an explicit request
+    // to disconnect. The in-flight connect re-checks this after homing and aborts
+    // (closes the freshly-opened handle, stays disconnected) instead of publishing.
+    // Guarded by mutex_.
+    bool pending_disconnect_ = false;
     bool shutting_down_ = false;  // guarded by connection_mutex_
     mutable std::mutex mutex_;
     std::mutex connection_mutex_;
