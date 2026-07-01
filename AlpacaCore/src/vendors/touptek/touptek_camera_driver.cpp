@@ -325,6 +325,11 @@ public:
                 std::chrono::steady_clock::now() >= exposure_deadline_) {
                 ALPACA_LOG_WARN("ToupTek",
                     "Exposure deadline exceeded; forcing CameraState=Idle.");
+                // Publish the false-transition under readout_mutex_ too, so the
+                // invariant "exposure_active_ only changes under readout_mutex_"
+                // (which set_readout_mode relies on) holds on this path as well.
+                // Lock order is mutex_ -> readout_mutex_, held consistently.
+                std::lock_guard<std::mutex> rlock(readout_mutex_);
                 exposure_active_.store(false);
                 exposure_deadline_valid_ = false;
                 return CameraState::Idle;
@@ -743,6 +748,11 @@ public:
         }
         unsigned exposure_us = static_cast<unsigned>(exposure_us_long);
 
+        // Stop any still-running prior exposure BEFORE snapshotting state: it may
+        // force format_dirty_ (see stop_exposure_thread) to restart the stream it
+        // had to stop, and we want that reflected in this exposure's snapshot.
+        stop_exposure_thread();
+
         int active_bin = 0;
         int active_start_x = 0;
         int active_start_y = 0;
@@ -832,8 +842,6 @@ public:
             format_dirty_ = false;
             roi_dirty_ = false;
         }
-
-        stop_exposure_thread();
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -935,6 +943,14 @@ public:
     void stop_exposure() override {
         ensure_connected();
         exposure_active_.store(false);
+        // Unblock a thread parked in Toupcam_WaitImageV4 so abort/stop returns
+        // promptly instead of blocking for the remaining exposure time (a 10-min
+        // frame would otherwise take ~10 min to abort). Same as the disconnect
+        // path. Stopping the stream forces the next exposure to re-init it.
+        try {
+            ToupTekSDKWrapper::instance().stop(handle_copy());
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        }
         if (exposure_thread_.joinable()) {
             exposure_thread_.join();
         }
@@ -942,6 +958,7 @@ public:
         image_ready_ = false;
         image_cached_ = false;
         exposure_deadline_valid_ = false;
+        format_dirty_ = true;
     }
 
 private:
@@ -1118,8 +1135,19 @@ private:
     }
 
     void stop_exposure_thread() {
+        if (!exposure_thread_.joinable()) return;
         exposure_active_.store(false);
-        if (exposure_thread_.joinable()) exposure_thread_.join();
+        // Unblock a thread parked in Toupcam_WaitImageV4 (the wrapper releases the
+        // SDK lock across the wait for exactly this) so the join returns promptly
+        // instead of waiting out the full wait_image timeout. Stopping the stream
+        // means the next exposure must restart it, so mark the format dirty.
+        try {
+            ToupTekSDKWrapper::instance().stop(handle_copy());
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+        }
+        exposure_thread_.join();
+        std::lock_guard<std::mutex> lock(mutex_);
+        format_dirty_ = true;
     }
 
     void preload_camera_info() {
