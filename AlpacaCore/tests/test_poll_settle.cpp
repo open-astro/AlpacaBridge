@@ -113,4 +113,6 @@ TEST_CASE("ConsecutiveSettle - zero/negative parameters are rejected loudly", "[
     CHECK_THROWS_AS(ConsecutiveSettle(0, 60), std::invalid_argument);
     CHECK_THROWS_AS(ConsecutiveSettle(3, 0), std::invalid_argument);
     CHECK_THROWS_AS(ConsecutiveSettle(-1, -1), std::invalid_argument);
+    // Settled would be statically unreachable: run longer than the budget.
+    CHECK_THROWS_AS(ConsecutiveSettle(5, 3), std::invalid_argument);
 }

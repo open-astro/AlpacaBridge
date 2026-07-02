@@ -123,8 +123,8 @@ jobs:
           # 2026-07-01 and every mirror synced the deletion within hours,
           # 404-ing this step twice in one day. No network fetch remains. The
           # pinned checksum (kernel.org's published sha256, workflow env so
-          # both jobs share one pin) still gates the artifact, so a tampered
-          # in-repo tarball fails loudly.
+          # both jobs share one pin) guards against corruption — not
+          # adversarial modification; see the README beside the tarball.
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
@@ -283,8 +283,8 @@ jobs:
           # 2026-07-01 and every mirror synced the deletion within hours,
           # 404-ing this step twice in one day. No network fetch remains. The
           # pinned checksum (kernel.org's published sha256, workflow env so
-          # both jobs share one pin) still gates the artifact, so a tampered
-          # in-repo tarball fails loudly.
+          # both jobs share one pin) guards against corruption — not
+          # adversarial modification; see the README beside the tarball.
           cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -

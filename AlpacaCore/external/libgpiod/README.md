@@ -13,8 +13,16 @@ every mirror synced the deletion within hours, 404-ing CI twice in one day —
 first the primary, then the whole mirror-fallback chain. This copy was
 retrieved from the Fedora lookaside cache
 (`src.fedoraproject.org/repo/pkgs/libgpiod/`) and verified byte-identical to
-the original kernel.org artifact via the pinned sha256 above. CI still
-re-verifies the checksum before building, so a tampered tarball fails loudly.
+the original kernel.org artifact via the pinned sha256 above.
 
-Replace on a version bump: update the tarball, this README, and the `ver=` +
-sha256 pins in both `.github/workflows/ci.yml` jobs together.
+**What the CI checksum does and does not protect:** with the tarball and the
+pin living in the same repo, the `sha256sum -c` step guards against
+*corruption* (a bad checkout, filter mangling, bit-rot) — NOT against
+adversarial modification, since one commit can swap both the binary and the
+pin together. That is the standard vendoring trade-off; review changes to
+this directory with the same care as a dependency bump (the provenance chain
+above is what a reviewer should re-verify).
+
+Replace on a version bump: update the tarball, this README (checksum +
+provenance), and the `LIBGPIOD_VER` / `LIBGPIOD_SHA256` values in the single
+top-level `env:` block of `.github/workflows/ci.yml`.

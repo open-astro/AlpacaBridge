@@ -55,6 +55,11 @@ public:
         if (stable_reads_required < 1 || max_polls < 1) {
             throw std::invalid_argument("ConsecutiveSettle requires stable_reads_required >= 1 and max_polls >= 1");
         }
+        // Settled must be reachable: a stable run longer than the poll budget
+        // can never complete, so the object would silently always time out.
+        if (stable_reads_required > max_polls) {
+            throw std::invalid_argument("ConsecutiveSettle: stable_reads_required cannot exceed max_polls");
+        }
     }
 
     /// Feed the result of one poll. Returns the decision as of this reading.
