@@ -24,6 +24,7 @@ set(TEST_SOURCES
     test_alpaca_defs.cpp
     test_device_registry.cpp
     test_error_handling.cpp
+    test_poll_settle.cpp
     test_units.cpp
     test_version_format.cpp
 )

@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/poll_settle.h>
 #include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
@@ -500,22 +501,25 @@ private:
     // kStableReads poll intervals over an on-first-slot return.
     static bool wait_for_home(ToupTekSDK& sdk, HToupcam handle) {
         constexpr int kPollMs = 100;
-        constexpr int kMaxWaitMs = 6000;  // total wait is exactly this: the loop
-                                          // condition rejects waited == kMaxWaitMs
-                                          // before sleeping, so 60 sleeps of
-                                          // kPollMs each
-        constexpr int kStableReads = 3;   // consecutive real-slot reads = settled
-        int stable = 0;
-        for (int waited = 0; waited < kMaxWaitMs; waited += kPollMs) {
+        constexpr int kMaxPolls = 60;    // 60 polls x 100 ms = 6 s cap
+        constexpr int kStableReads = 3;  // consecutive real-slot reads = settled
+        // The settle DECISION lives in the pure util::ConsecutiveSettle state
+        // machine (deceleration-bounce reset, poll budget, final-poll settle),
+        // unit-tested with scripted sequences in test_poll_settle.cpp — this
+        // loop only supplies the cadence and the reading.
+        util::ConsecutiveSettle settle(kStableReads, kMaxPolls);
+        for (;;) {
             std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
             int pos = sdk.get_filter_wheel_position(handle);
-            if (pos < 0) {
-                stable = 0;  // firmware reports -1 while the home move runs
-            } else if (++stable >= kStableReads) {
-                return true;  // settled: kStableReads consecutive real-slot reads
+            switch (settle.feed(pos >= 0)) {
+                case util::ConsecutiveSettle::State::Settled:
+                    return true;
+                case util::ConsecutiveSettle::State::TimedOut:
+                    return false;
+                case util::ConsecutiveSettle::State::Pending:
+                    break;
             }
         }
-        return false;  // never settled within the timeout
     }
 
     // Expand a single delimiter-less token into per-slot single-character names
