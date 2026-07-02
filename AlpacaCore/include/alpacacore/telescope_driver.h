@@ -67,7 +67,7 @@ public:
     // per-vendor static libraries link without a base-library ordering
     // dependency. UTCDate is intentionally omitted to avoid format drift versus
     // the /utcdate endpoint; it is optional ("if known").
-    std::vector<DeviceState> get_device_state() const override {
+    std::vector<DeviceState> get_device_state() const override final {
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {

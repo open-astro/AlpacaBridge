@@ -45,7 +45,7 @@ public:
      * single-lock or wrapper-direct per-vendor version: reading through anything
      * but the public getters is exactly what desyncs DeviceState from the GETs.
      */
-    std::vector<DeviceState> get_device_state() const override {
+    std::vector<DeviceState> get_device_state() const override final {
         std::vector<DeviceState> state;
         int count = 0;
         try {

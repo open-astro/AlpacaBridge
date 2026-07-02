@@ -33,7 +33,7 @@ public:
     // Platform 7 operational state (IFocuserV4): IsMoving, Position, Temperature
     // (omitted if not implemented) plus a TimeStamp. Inline so the vtable stays
     // weak; values come from the same getters as the GET endpoints.
-    std::vector<DeviceState> get_device_state() const override {
+    std::vector<DeviceState> get_device_state() const override final {
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {

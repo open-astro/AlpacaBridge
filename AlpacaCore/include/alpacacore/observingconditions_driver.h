@@ -35,7 +35,7 @@ public:
     // properties (each omitted if that sensor is not implemented) plus a
     // TimeStamp. Inline so the vtable stays weak; values come from the same
     // getters as the GET endpoints.
-    std::vector<DeviceState> get_device_state() const override {
+    std::vector<DeviceState> get_device_state() const override final {
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {

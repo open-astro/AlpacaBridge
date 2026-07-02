@@ -104,3 +104,16 @@ TEST_CASE("ZWO Dew Heater Switch Driver - ASCOM Error Codes", "[zwo][switch][uni
     require_alpaca_error([&]() { driver->get_switch(0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_switch(0, false); }, alpacacore::AlpacaError::NotConnected);
 }
+
+TEST_CASE("ZWO Dew Heater Switch Driver - Disconnected DeviceState", "[zwo][switch][unit]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0);
+
+    {
+        // Only the TimeStamp survives while disconnected: the SwitchDriver base
+        // builds DeviceState from the public getters, which throw NotConnected
+        // and are omitted per the DeviceState contract.
+        const auto state = driver->get_device_state();
+        REQUIRE(state.size() == 1);
+        CHECK(state[0].name == "TimeStamp");
+    }
+}

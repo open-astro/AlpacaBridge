@@ -35,7 +35,7 @@ public:
     // Platform 7 operational state (IFilterWheelV3): Position (-1 while moving)
     // plus a TimeStamp. Inline so the vtable stays weak; the value comes from
     // the same getter as the GET endpoint.
-    std::vector<DeviceState> get_device_state() const override {
+    std::vector<DeviceState> get_device_state() const override final {
         std::vector<DeviceState> state;
         try {
             state.push_back({"Position", DeviceStateValue{static_cast<std::int32_t>(get_position())}});

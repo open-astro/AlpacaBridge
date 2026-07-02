@@ -73,7 +73,7 @@ public:
     // TimeStamp entry is always added. Defined inline to keep the CameraDriver
     // vtable weak so the per-vendor static libraries link without a base-library
     // ordering dependency.
-    std::vector<DeviceState> get_device_state() const override {
+    std::vector<DeviceState> get_device_state() const override final {
         std::vector<DeviceState> state;
 
         auto add = [&state](const char* name, auto getter) {

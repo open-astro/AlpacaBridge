@@ -67,7 +67,7 @@ public:
      * single-lock per-vendor version: ASCOM doesn't require cross-property
      * atomicity and ConformU only checks per-property GET consistency.
      */
-    std::vector<DeviceState> get_device_state() const override {
+    std::vector<DeviceState> get_device_state() const override final {
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
