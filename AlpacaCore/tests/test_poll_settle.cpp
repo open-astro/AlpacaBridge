@@ -109,6 +109,18 @@ TEST_CASE("ConsecutiveSettle - terminal states are sticky", "[util][settle][unit
     CHECK(timed.feed(true) == State::TimedOut);
 }
 
+TEST_CASE("ConsecutiveSettle - budget firing on a settled read with an incomplete run times out",
+          "[util][settle][unit]") {
+    // Production boundary (3, 60): poll 60 is a real-slot read, but the
+    // stable run is only 2 of 3 -- the budget must win.
+    ConsecutiveSettle settle(3, 60);
+    for (int i = 0; i < 58; ++i) {
+        REQUIRE(settle.feed(false) == State::Pending);
+    }
+    REQUIRE(settle.feed(true) == State::Pending);  // poll 59: stable 1
+    CHECK(settle.feed(true) == State::TimedOut);   // poll 60: stable 2 < 3 -> budget fires
+}
+
 TEST_CASE("ConsecutiveSettle - zero/negative parameters are rejected loudly", "[util][settle][unit]") {
     CHECK_THROWS_AS(ConsecutiveSettle(0, 60), std::invalid_argument);
     CHECK_THROWS_AS(ConsecutiveSettle(3, 0), std::invalid_argument);
