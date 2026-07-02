@@ -143,20 +143,6 @@ public:
         connected_.store(false);
     }
 
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        if (!connected_.load()) {
-            return state;
-        }
-        try {
-            state.push_back({"GetSwitch0", get_switch(kDewHeaterSwitchId)});
-            state.push_back({"GetSwitchValue0", get_switch_value(kDewHeaterSwitchId)});
-            state.push_back({"StateChangeComplete0", get_state_change_complete(kDewHeaterSwitchId)});
-        } catch (const std::exception&) {
-        }
-        return state;
-    }
-
     std::vector<std::string> get_supported_actions() const override {
         return {};
     }

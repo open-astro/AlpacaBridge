@@ -143,22 +143,6 @@ public:
         }
     }
 
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        if (!wrapper_.is_open()) {
-            return state;
-        }
-        for (std::size_t i = 0; i < config_.ports.size(); ++i) {
-            const int v = wrapper_.get_value(i);
-            const auto idx = std::to_string(i);
-            const bool on = config_.ports[i].pwm_enabled ? (v > 0) : (v != 0);
-            state.push_back({"GetSwitch" + idx, on});
-            state.push_back({"GetSwitchValue" + idx, static_cast<double>(v)});
-            state.push_back({"StateChangeComplete" + idx, true});
-        }
-        return state;
-    }
-
     std::vector<std::string> get_supported_actions() const override { return {}; }
 
     std::string action(std::string_view action_name, std::string_view) override {

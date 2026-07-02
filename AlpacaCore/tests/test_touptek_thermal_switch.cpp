@@ -116,7 +116,14 @@ TEST_CASE("ToupTek Thermal Switch Driver - State machine", "[touptek][switch][un
     REQUIRE_FALSE(driver->get_connected());
     REQUIRE_FALSE(driver->get_connecting());
     // DeviceState is empty while disconnected per the DeviceState contract.
-    CHECK(driver->get_device_state().empty());
+    {
+        // Only the TimeStamp survives while disconnected: the SwitchDriver base
+        // builds DeviceState from the public getters, which throw NotConnected
+        // and are omitted per the DeviceState contract.
+        const auto state = driver->get_device_state();
+        REQUIRE(state.size() == 1);
+        CHECK(state[0].name == "TimeStamp");
+    }
     require_alpaca_error([&]() { driver->get_state_change_complete(0); }, alpacacore::AlpacaError::NotConnected);
 }
 
