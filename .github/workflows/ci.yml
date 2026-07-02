@@ -40,6 +40,13 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Single source of truth for the vendored libgpiod build dependency — both the
+# build-vendors and clang-tidy jobs consume these, so a version bump can't
+# skew them (tarball + README in AlpacaCore/external/libgpiod/).
+env:
+  LIBGPIOD_VER: "2.2.4"
+  LIBGPIOD_SHA256: "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592"
+
 permissions:
   contents: read
 
@@ -111,15 +118,15 @@ jobs:
         # copy.
         run: |
           set -euo pipefail
-          ver=2.2.4
           # The tarball is VENDORED (AlpacaCore/external/libgpiod/ — see the
           # README there): kernel.org removed old libgpiod point releases on
           # 2026-07-01 and every mirror synced the deletion within hours,
           # 404-ing this step twice in one day. No network fetch remains. The
-          # pinned checksum (kernel.org's published sha256) still gates the
-          # artifact, so a tampered in-repo tarball fails loudly.
-          cp "AlpacaCore/external/libgpiod/libgpiod-${ver}.tar.xz" /tmp/libgpiod.tar.xz
-          echo "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592  /tmp/libgpiod.tar.xz" \
+          # pinned checksum (kernel.org's published sha256, workflow env so
+          # both jobs share one pin) still gates the artifact, so a tampered
+          # in-repo tarball fails loudly.
+          cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
+          echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
@@ -271,15 +278,15 @@ jobs:
         # ahead of any system copy.
         run: |
           set -euo pipefail
-          ver=2.2.4
           # The tarball is VENDORED (AlpacaCore/external/libgpiod/ — see the
           # README there): kernel.org removed old libgpiod point releases on
           # 2026-07-01 and every mirror synced the deletion within hours,
           # 404-ing this step twice in one day. No network fetch remains. The
-          # pinned checksum (kernel.org's published sha256) still gates the
-          # artifact, so a tampered in-repo tarball fails loudly.
-          cp "AlpacaCore/external/libgpiod/libgpiod-${ver}.tar.xz" /tmp/libgpiod.tar.xz
-          echo "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592  /tmp/libgpiod.tar.xz" \
+          # pinned checksum (kernel.org's published sha256, workflow env so
+          # both jobs share one pin) still gates the artifact, so a tampered
+          # in-repo tarball fails loudly.
+          cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
+          echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
