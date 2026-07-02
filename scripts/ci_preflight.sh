@@ -398,17 +398,27 @@ if [ "${RUN_SCAN_BUILD:-0}" = "1" ]; then
   else
     SCAN_DIR="AlpacaHTTP/build-scan"
     SCAN_OUT="${SCAN_DIR}/scan-report"
+    SCAN_LOG="/tmp/scan_build_out.log"
     rm -rf "${SCAN_DIR}"
+    # The configure MUST run under scan-build: it exports CC/CXX pointing at
+    # the ccc/c++-analyzer interposers and cmake caches that compiler. An
+    # unwrapped configure caches the real compiler and the build step then
+    # "succeeds" having analyzed NOTHING (verified empirically: wrapped
+    # configure caches c++-analyzer in CMakeCache.txt, unwrapped caches
+    # /usr/bin/c++). The grep guard turns that silent false-negative into a
+    # loud failure if a future refactor drops the wrapper.
     if "${SCAN_BIN}" -disable-checker unix.BlockInCriticalSection -o "${SCAN_OUT}" \
          cmake -S AlpacaHTTP -B "${SCAN_DIR}" \
-         -DALPACAHTTP_BUILD_TESTS=ON -DALPACACORE_ENABLE_ALL_VENDORS=ON >/dev/null 2>&1 \
+         -DALPACAHTTP_BUILD_TESTS=ON -DALPACACORE_ENABLE_ALL_VENDORS=ON > "${SCAN_LOG}" 2>&1 \
+       && grep -q "CMAKE_CXX_COMPILER:FILEPATH=.*analyzer" "${SCAN_DIR}/CMakeCache.txt" \
        && "${SCAN_BIN}" -disable-checker unix.BlockInCriticalSection -o "${SCAN_OUT}" \
-         cmake --build "${SCAN_DIR}" --parallel "${PARALLEL}" > /tmp/scan_build_out.log 2>&1; then
+         cmake --build "${SCAN_DIR}" --parallel "${PARALLEL}" >> "${SCAN_LOG}" 2>&1; then
       bugs="$(find "${SCAN_OUT}" -name 'report-*.html' 2>/dev/null | wc -l | tr -d ' ')"
       echo "scan-build: ${bugs} advisory finding(s); HTML reports under ${SCAN_OUT}/"
       record PASS "scan-build (${bugs} advisory findings, non-blocking)"
     else
-      tail -20 /tmp/scan_build_out.log 2>/dev/null || true
+      echo "scan-build failed; last lines of ${SCAN_LOG}:"
+      tail -20 "${SCAN_LOG}" 2>/dev/null || true
       record FAIL "scan-build (analyzer run failed)"
     fi
   fi
