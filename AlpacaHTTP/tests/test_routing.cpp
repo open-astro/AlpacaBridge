@@ -65,6 +65,12 @@ nlohmann::json roundtrip_config(alpacahttp::Router& router, const nlohmann::json
     }
     const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
     const auto configured_json = nlohmann::json::parse(configured_response.body());
+    // An error envelope has no "Value"; return null for a clean EXPECT
+    // diagnostic instead of an uncaught json::out_of_range on the const
+    // subscript below.
+    if (!configured_json.contains("Value") || !configured_json["Value"].is_array()) {
+        return nlohmann::json();
+    }
     for (const auto& entry : configured_json["Value"]) {
         if (entry.value("DeviceType", "") == device_type && entry.value("DeviceNumber", -1) == device_number) {
             return entry.value("Config", nlohmann::json());

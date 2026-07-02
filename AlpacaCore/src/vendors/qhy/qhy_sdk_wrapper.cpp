@@ -45,18 +45,24 @@ class QHYSDKWrapper::Impl {
 public:
     mutable std::mutex mutex;
     std::unordered_map<std::string, qhyccd_handle*> handles;
-    bool resource_initialized{false};
+    mutable bool resource_initialized{false};
+    mutable bool resource_init_attempted{false};
+    mutable std::string sdk_version_cache;  // filled on successful init
 
     Impl() {
-        // Suppress SDK debug output
-        EnableQHYCCDMessage(false);
-        EnableQHYCCDLogFile(false);
-
-        uint32_t ret = InitQHYCCDResource();
-        if (ret == QHYCCD_SUCCESS) {
-            resource_initialized = true;
-        }
-        // Non-fatal if resource init fails — we'll report errors per-operation
+        // Deliberately NO libqhyccd call here — not even the debug-output
+        // suppression: the FIRST call into the library spawns the SDK's
+        // PnpEventListenerThread, which calls
+        // libusb_hotplug_register_callback on the libusb context even when
+        // libusb_init failed — a segfault on any host without a working USB
+        // stack (verified: USB-less sandbox, backtrace through
+        // PnpEventListenerThread -> libusb_hotplug_register_callback ->
+        // pthread_mutex_lock on garbage). Constructing the wrapper happens on
+        // configure/management paths (e.g. a configureddevices poll reading
+        // the SDK version), which must never crash the server; the resource
+        // comes up lazily on the first real camera operation (see
+        // ensure_resource), i.e. at connect, where a user is actively
+        // attaching hardware.
     }
 
     ~Impl() {
@@ -83,7 +89,26 @@ public:
         return it->second;
     }
 
+    // Lazy one-shot init (see the constructor comment for why). Callers hold
+    // `mutex`, which serializes the attempt.
     void ensure_resource() const {
+        if (!resource_init_attempted) {
+            resource_init_attempted = true;
+            // Suppress SDK debug output first (this is the point where the
+            // library may spawn its listener thread — see the ctor comment).
+            EnableQHYCCDMessage(false);
+            EnableQHYCCDLogFile(false);
+            if (InitQHYCCDResource() == QHYCCD_SUCCESS) {
+                resource_initialized = true;
+                uint32_t year = 0, month = 0, day = 0, subday = 0;
+                if (GetQHYCCDSDKVersion(&year, &month, &day, &subday) == QHYCCD_SUCCESS) {
+                    std::ostringstream oss;
+                    oss << year << "." << std::setw(2) << std::setfill('0') << month << "." << std::setw(2)
+                        << std::setfill('0') << day << "." << subday;
+                    sdk_version_cache = oss.str();
+                }
+            }
+        }
         if (!resource_initialized) {
             throw AlpacaException("QHY SDK resource not initialized", AlpacaError::DriverException);
         }
@@ -442,15 +467,14 @@ void QHYSDKWrapper::set_readout_mode(const std::string& camera_id, uint32_t mode
 // ────────────────────────────────────────────────────────────────────────────
 
 std::string QHYSDKWrapper::get_sdk_version() {
-    uint32_t year = 0, month = 0, day = 0, subday = 0;
-    if (GetQHYCCDSDKVersion(&year, &month, &day, &subday) == QHYCCD_SUCCESS) {
-        std::ostringstream oss;
-        oss << year << "." << std::setw(2) << std::setfill('0') << month
-            << "." << std::setw(2) << std::setfill('0') << day
-            << "." << subday;
-        return oss.str();
-    }
-    return "unknown";
+    // Served from the cache filled at ensure_resource time: this getter is
+    // reached from configure/management paths (configureddevices SdkVersion,
+    // DriverInfo) where touching libqhyccd at all is unsafe pre-init — the
+    // library's first entry point spawns its PnP listener thread, which
+    // segfaults on hosts without a working USB stack. Empty until the first
+    // real camera operation initializes the SDK.
+    std::lock_guard<std::mutex> lock(pimpl_->mutex);
+    return pimpl_->sdk_version_cache;
 }
 
 } // namespace alpacacore::vendor::qhy

@@ -112,9 +112,14 @@ public:
         , pulse_guiding_(false)
         , pulse_guiding_end_{}
     {
-        // Populate model name from SDK enumeration so the web UI shows it
-        // immediately without requiring a Connect first.
-        try_preload_camera_info();
+        // Deliberately NO SDK touch here (the old construction-time
+        // try_preload_camera_info is gone): libqhyccd's first entry point
+        // spawns its PnP listener thread, which segfaults the whole process
+        // on hosts without a working USB stack — and driver construction
+        // happens on the configure/management path, which must never crash
+        // the server. Cost: the web UI shows the model name only after the
+        // first Connect instead of immediately. camera_info_ is populated at
+        // open+init.
     }
 
     ~QHYCameraDriver() override {
@@ -138,8 +143,8 @@ public:
 
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        // camera_info_.model is populated by try_preload_camera_info() at construction
-        // (before any connection), and again after open+init. Return it whenever available.
+        // camera_info_.model is populated at open+init (construction must not
+        // touch the SDK — see the constructor comment). Return it whenever available.
         if (!camera_info_.model.empty()) {
             return camera_info_.model;
         }
@@ -1235,31 +1240,6 @@ private:
             throw AlpacaException("Camera ID not specified", AlpacaError::InvalidValue);
         }
         return camera_id_.value();
-    }
-
-    void try_preload_camera_info() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        try {
-            if (camera_id_.has_value()) {
-                std::string model;
-                if (QHYSDKWrapper::instance().get_camera_model(camera_id_.value(), model)) {
-                    camera_info_.camera_id = camera_id_.value();
-                    camera_info_.model = model;
-                    camera_info_valid_ = false; // chip info still not loaded
-                }
-            } else if (camera_index_.has_value()) {
-                auto cameras = QHYSDKWrapper::instance().enumerate_cameras();
-                int index = camera_index_.value();
-                if (index >= 0 && index < static_cast<int>(cameras.size())) {
-                    const auto& info = cameras[static_cast<std::size_t>(index)];
-                    camera_info_ = info;
-                    camera_id_   = info.camera_id;
-                    camera_info_valid_ = false;
-                }
-            }
-        } catch (const std::exception& e) {
-            ALPACA_LOG_DEBUG("QHY", "Pre-load camera info skipped: " + std::string(e.what()));
-        }
     }
 
     void load_readout_modes_locked(const std::string& id) {
