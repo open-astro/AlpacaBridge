@@ -557,8 +557,8 @@ public:
     double get_heat_sink_temperature() const override { return get_ccd_temperature(); }
 
     ImageArray get_image_array() const override {
-        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         if (!last_exposure_valid_ || !image_ready_ || !image_cached_) {
             throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
         }
@@ -666,8 +666,8 @@ public:
         return offset_max_value();  // support checked inside, under the same lock
     }
     int get_offset_min() const override {
-        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         ensure_blacklevel_supported_locked();
         return 0;  // TOUPCAM_BLACKLEVEL_MIN
     }
@@ -1622,8 +1622,8 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
-        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
@@ -1649,8 +1649,8 @@ private:
     // (a guider's relative centroids are unaffected); callers needing an exact
     // origin should align StartX/StartY to a 2-pixel boundary at bin 1.
     void set_start_pos_locked(std::optional<int> sx_opt, std::optional<int> sy_opt) {
-        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         std::lock_guard<std::mutex> rlock(readout_mutex_);  // TOCTOU close — see set_bin_locked
         const int sx = sx_opt.value_or(start_x_);
         const int sy = sy_opt.value_or(start_y_);

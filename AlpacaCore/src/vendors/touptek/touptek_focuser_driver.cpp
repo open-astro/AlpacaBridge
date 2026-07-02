@@ -193,14 +193,14 @@ public:
     }
 
     int get_max_step() const override {
-        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return max_step_current_;
     }
 
     int get_max_increment() const override {
-        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return max_step_current_;
     }
 
