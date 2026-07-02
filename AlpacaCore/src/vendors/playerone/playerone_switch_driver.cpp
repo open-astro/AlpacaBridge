@@ -136,24 +136,6 @@ public:
         connected_.store(false);
     }
 
-    std::vector<DeviceState> get_device_state() const override {
-        std::vector<DeviceState> state;
-        if (!connected_.load()) {
-            return state;
-        }
-        const int count = get_max_switch();
-        for (int id = 0; id < count; ++id) {
-            try {
-                state.push_back({"GetSwitch" + std::to_string(id), get_switch(id)});
-                state.push_back({"GetSwitchValue" + std::to_string(id), get_switch_value(id)});
-                state.push_back({"StateChangeComplete" + std::to_string(id), get_state_change_complete(id)});
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-                // Omit unavailable members per the DeviceState contract.
-            }
-        }
-        return state;
-    }
-
     std::vector<std::string> get_supported_actions() const override { return {}; }
 
     std::string action(std::string_view action_name, std::string_view) override {

@@ -160,7 +160,14 @@ TEST_CASE("ToupTek StellaVita Switch Driver - State machine", "[touptek][switch]
     // device-state bag.
     CHECK_FALSE(driver->get_connected());
     CHECK_FALSE(driver->get_connecting());
-    CHECK(driver->get_device_state().empty());
+    {
+        // Only the TimeStamp survives while disconnected: the SwitchDriver base
+        // builds DeviceState from the public getters, which throw NotConnected
+        // and are omitted per the DeviceState contract.
+        const auto state = driver->get_device_state();
+        REQUIRE(state.size() == 1);
+        CHECK(state[0].name == "TimeStamp");
+    }
 }
 
 // 8. Unsupported method error codes.

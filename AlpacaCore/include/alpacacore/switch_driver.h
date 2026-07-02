@@ -30,6 +30,49 @@ class SwitchDriver : public AlpacaDriver {
 public:
     virtual ~SwitchDriver() = default;
 
+    /**
+     * @brief Platform 7 DeviceState snapshot for Switch devices.
+     *
+     * Reports the per-switch operational properties (GetSwitchN, GetSwitchValueN,
+     * StateChangeCompleteN for every id below MaxSwitch) plus a TimeStamp by
+     * calling this device's own public getters — the same ones the GET endpoints
+     * use, which is what guarantees the DeviceState↔GET consistency ConformU
+     * checks. A getter that throws (NotConnected, or an unwrapped vendor error)
+     * causes that id's members to be omitted rather than failing the whole call.
+     *
+     * Per AGENTS.md, DeviceState is intentionally NOT an atomic snapshot (each
+     * getter locks separately) and vendors must NOT override this with a
+     * single-lock or wrapper-direct per-vendor version: reading through anything
+     * but the public getters is exactly what desyncs DeviceState from the GETs.
+     */
+    std::vector<DeviceState> get_device_state() const override final {
+        std::vector<DeviceState> state;
+        int count = 0;
+        try {
+            count = get_max_switch();
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // MaxSwitch itself unavailable -- report TimeStamp only.
+        }
+        for (int id = 0; id < count; ++id) {
+            try {
+                // Read all three before pushing: the getters acquire the driver
+                // mutex independently, so a disconnect racing between them can
+                // throw mid-id -- computing first keeps the push all-or-nothing
+                // (no orphaned GetSwitchN without its siblings).
+                const bool on = get_switch(id);
+                const double value = get_switch_value(id);
+                const bool complete = get_state_change_complete(id);
+                state.push_back({"GetSwitch" + std::to_string(id), on});
+                state.push_back({"GetSwitchValue" + std::to_string(id), value});
+                state.push_back({"StateChangeComplete" + std::to_string(id), complete});
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Omit this id's members per the DeviceState contract.
+            }
+        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
+    }
+
     // Switch-specific properties
 
     /**

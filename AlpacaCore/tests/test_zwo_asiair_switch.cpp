@@ -163,10 +163,17 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - State machine when disconnected",
         0, alpacacore::vendor::zwo::default_asiair_pro_config());
 
     // ASCOM contract: a disconnected switch reports get_connected() = false,
-    // get_connecting() = false, and get_device_state() returns an empty bag.
+    // get_connecting() = false, and get_device_state() returns only a TimeStamp.
     CHECK_FALSE(driver->get_connected());
     CHECK_FALSE(driver->get_connecting());
-    CHECK(driver->get_device_state().empty());
+    {
+        // Only the TimeStamp survives while disconnected: the SwitchDriver base
+        // builds DeviceState from the public getters, which throw NotConnected
+        // and are omitted per the DeviceState contract.
+        const auto state = driver->get_device_state();
+        REQUIRE(state.size() == 1);
+        CHECK(state[0].name == "TimeStamp");
+    }
 }
 
 TEST_CASE("ZWO ASIAIR Pro Switch Driver - Unsupported method error codes",
