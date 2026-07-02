@@ -17,6 +17,7 @@
 #include <alpacacore/util/poll_settle.h>
 
 #include <initializer_list>
+#include <stdexcept>
 
 #include "catch2_compat.h"
 
@@ -106,4 +107,10 @@ TEST_CASE("ConsecutiveSettle - terminal states are sticky", "[util][settle][unit
     ConsecutiveSettle timed(1, 1);
     REQUIRE(timed.feed(false) == State::TimedOut);
     CHECK(timed.feed(true) == State::TimedOut);
+}
+
+TEST_CASE("ConsecutiveSettle - zero/negative parameters are rejected loudly", "[util][settle][unit]") {
+    CHECK_THROWS_AS(ConsecutiveSettle(0, 60), std::invalid_argument);
+    CHECK_THROWS_AS(ConsecutiveSettle(3, 0), std::invalid_argument);
+    CHECK_THROWS_AS(ConsecutiveSettle(-1, -1), std::invalid_argument);
 }

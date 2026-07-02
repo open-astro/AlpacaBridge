@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace alpacacore::util {
 
@@ -47,7 +48,14 @@ public:
     enum class State : std::uint8_t { Pending, Settled, TimedOut };
 
     ConsecutiveSettle(int stable_reads_required, int max_polls)
-        : stable_required_(stable_reads_required), max_polls_(max_polls) {}
+        : stable_required_(stable_reads_required), max_polls_(max_polls) {
+        // Loud construction guard: 0 stable reads would settle on the first
+        // feed (defeating the debounce) and 0 polls would time out before any
+        // reading — both silently wrong if a bad config value reaches here.
+        if (stable_reads_required < 1 || max_polls < 1) {
+            throw std::invalid_argument("ConsecutiveSettle requires stable_reads_required >= 1 and max_polls >= 1");
+        }
+    }
 
     /// Feed the result of one poll. Returns the decision as of this reading.
     /// Terminal states are sticky: further feeds keep returning them.

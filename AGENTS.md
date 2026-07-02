@@ -626,6 +626,11 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   (`test_poll_settle.cpp` — bounce, fast-homer, timeout, final-poll settle).
   Use it for any new loop of that shape (the AFW `wait_for_home` is the
   reference); single-edge loops ("poll until IsSlewing flips") don't need it.
+  One hand-rolled instance remains BY DESIGN: the iOptron slew-settle loop
+  (`ioptron_telescope_driver.cpp`, `kRequiredStableReads`) shares the
+  consecutive-run core but has a clock-deadline budget and a dual exit
+  (target-reached OR stabilized) — forcing it onto the poll-budget API would
+  fake a parameter. Unify if a third instance of that extended shape appears.
 
 ### Test CMake Integration
 
