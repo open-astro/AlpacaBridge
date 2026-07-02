@@ -9,6 +9,7 @@
 #   ./scripts/ci_preflight.sh                 # base = main
 #   PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh   # fork contributors
 #   RUN_SANITIZERS=1 ./scripts/ci_preflight.sh # also run the ASan+UBSan job
+#   RUN_SCAN_BUILD=1 ./scripts/ci_preflight.sh # also run Clang Static Analyzer (advisory)
 #   PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh         # never apt-install
 #
 # Missing analysis tools (clang-tidy, cppcheck, shellcheck, clang-format, node)
@@ -373,6 +374,53 @@ if [ "${RUN_SANITIZERS:-0}" = "1" ]; then
     record PASS "sanitizers"
   else
     record FAIL "sanitizers"
+  fi
+fi
+
+# --- optional: scan-build (Clang Static Analyzer, advisory) -----------------
+#
+# Deep path-sensitive analysis over the all-vendors build (issue #106).
+# ADVISORY by decision: the 2026-07-01 evaluation found 18 findings — 12 were
+# unix.BlockInCriticalSection on the protocol wrappers' bounded serial/socket
+# reads held under the wrapper mutex (intentional transaction-atomicity
+# architecture, so that checker is disabled below) and 6 were real-but-trivial
+# deadcode.DeadStores (fixed). Zero findings in the leak/use-after-free classes
+# that motivated the evaluation — the analyzer doesn't see through our RAII +
+# try/catch cleanup — so this is NOT a CI gate; run it locally when touching
+# handle-lifecycle or error-path-cleanup code. Findings are reported, never
+# fail the gate; the gate FAILs only if the analyzer itself cannot run.
+
+if [ "${RUN_SCAN_BUILD:-0}" = "1" ]; then
+  section "scan-build (Clang Static Analyzer, advisory)"
+  SCAN_BIN="$(command -v scan-build || command -v scan-build-19 || true)"
+  if [ -z "${SCAN_BIN}" ]; then
+    record SKIP "scan-build (tool missing: apt install clang-tools)"
+  else
+    SCAN_DIR="AlpacaHTTP/build-scan"
+    SCAN_OUT="${SCAN_DIR}/scan-report"
+    SCAN_LOG="/tmp/scan_build_out.log"
+    rm -rf "${SCAN_DIR}"
+    # The configure MUST run under scan-build: it exports CC/CXX pointing at
+    # the ccc/c++-analyzer interposers and cmake caches that compiler. An
+    # unwrapped configure caches the real compiler and the build step then
+    # "succeeds" having analyzed NOTHING (verified empirically: wrapped
+    # configure caches c++-analyzer in CMakeCache.txt, unwrapped caches
+    # /usr/bin/c++). The grep guard turns that silent false-negative into a
+    # loud failure if a future refactor drops the wrapper.
+    if "${SCAN_BIN}" -disable-checker unix.BlockInCriticalSection -o "${SCAN_OUT}" \
+         cmake -S AlpacaHTTP -B "${SCAN_DIR}" \
+         -DALPACAHTTP_BUILD_TESTS=ON -DALPACACORE_ENABLE_ALL_VENDORS=ON > "${SCAN_LOG}" 2>&1 \
+       && grep -q "CMAKE_CXX_COMPILER:FILEPATH=.*analyzer" "${SCAN_DIR}/CMakeCache.txt" \
+       && "${SCAN_BIN}" -disable-checker unix.BlockInCriticalSection -o "${SCAN_OUT}" \
+         cmake --build "${SCAN_DIR}" --parallel "${PARALLEL}" >> "${SCAN_LOG}" 2>&1; then
+      bugs="$(find "${SCAN_OUT}" -name 'report-*.html' 2>/dev/null | wc -l | tr -d ' ')"
+      echo "scan-build: ${bugs} advisory finding(s); HTML reports under ${SCAN_OUT}/"
+      record PASS "scan-build (${bugs} advisory findings, non-blocking)"
+    else
+      echo "scan-build failed; last lines of ${SCAN_LOG}:"
+      tail -20 "${SCAN_LOG}" 2>/dev/null || true
+      record FAIL "scan-build (analyzer run failed)"
+    fi
   fi
 fi
 

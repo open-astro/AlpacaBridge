@@ -278,9 +278,7 @@ bool update_location_in_config(const std::string& config_path,
     }
 
     if (in_server_section && !location_written) {
-        output.push_back(std::string(server_indent + 2, ' ') +
-                         "location: \"" + escape_yaml_string(location) + "\"");
-        location_written = true;
+        output.push_back(std::string(server_indent + 2, ' ') + "location: \"" + escape_yaml_string(location) + "\"");
     }
 
     if (!server_section_found) {
@@ -2322,36 +2320,7 @@ Response Router::dispatch_telescope_method(
 
             throw_invalid_value("Missing parameter: " + param_name);
         };
-        
-        // Helper function to parse string from query param or JSON body
-        auto parse_string = [&](const std::string& param_name) -> std::string {
-            if (request.has_query_param(param_name)) {
-                return request.get_query_param(param_name);
-            }
-            auto json_opt = parse_json(request.body());
-            if (json_opt) {
-                if (const auto* val = find_json_value(*json_opt, param_name)) {
-                    if (!val->is_string()) {
-                        throw_invalid_value("Invalid JSON value for parameter: " + param_name);
-                    }
-                    return val->get<std::string>();
-                }
-                if (const auto* val = find_json_value(*json_opt, "Value")) {
-                    if (!val->is_string()) {
-                        throw_invalid_value("Invalid JSON value for parameter: " + param_name);
-                    }
-                    return val->get<std::string>();
-                }
-            }
-            if (auto value = get_form_value(request.body(), param_name)) {
-                return *value;
-            }
-            if (auto value = get_form_value(request.body(), "Value")) {
-                return *value;
-            }
-            throw_invalid_value("Missing parameter: " + param_name);
-        };
-        
+
         // GET-only boolean properties
         if (request.method() == HttpMethod::GET) {
             if (method_name == "cansetrightascensionrate") {
@@ -3272,37 +3241,6 @@ Response Router::dispatch_camera_method(
         }
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
-        }
-        throw_invalid_value("Missing parameter: " + param_name);
-    };
-
-    auto parse_string = [&](const std::string& param_name) -> std::string {
-        if (request.has_query_param(param_name)) {
-            return request.get_query_param(param_name);
-        }
-        if (auto query_value = get_query_param_case_insensitive(request, param_name)) {
-            return *query_value;
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (!val->is_string()) {
-                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
-                }
-                return val->get<std::string>();
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (!val->is_string()) {
-                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
-                }
-                return val->get<std::string>();
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return *value;
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return *value;
         }
         throw_invalid_value("Missing parameter: " + param_name);
     };
@@ -5038,34 +4976,6 @@ Response Router::dispatch_observingconditions_method(
         }
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
-        }
-        throw_invalid_value("Missing parameter: " + param_name);
-    };
-
-    auto parse_string = [&](const std::string& param_name) -> std::string {
-        if (request.has_query_param(param_name)) {
-            return request.get_query_param(param_name);
-        }
-        auto json_opt = parse_json(request.body());
-        if (json_opt) {
-            if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (!val->is_string()) {
-                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
-                }
-                return val->get<std::string>();
-            }
-            if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (!val->is_string()) {
-                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
-                }
-                return val->get<std::string>();
-            }
-        }
-        if (auto value = get_form_value(request.body(), param_name)) {
-            return *value;
-        }
-        if (auto value = get_form_value(request.body(), "Value")) {
-            return *value;
         }
         throw_invalid_value("Missing parameter: " + param_name);
     };

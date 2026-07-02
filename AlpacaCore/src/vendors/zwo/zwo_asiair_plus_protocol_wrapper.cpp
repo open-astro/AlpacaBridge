@@ -282,7 +282,7 @@ public:
         port_states_[index]->value.store(value, std::memory_order_release);
     }
 
-    std::string device_path() const { return device_path_; }
+    const std::string& device_path() const { return device_path_; }
     std::uint32_t pwm_frequency_hz() const { return pwm_frequency_hz_; }
 
 private:
@@ -392,7 +392,9 @@ private:
             // the duty cycle over many cycles.
             const auto t_on_end = clock_t::now() + on_ns;
             if (!write_level_locked(true)) break;
-            last_level = 1;
+            // No `last_level = 1` here: the OFF write below unconditionally
+            // resets it to 0 before the next iteration's steady-state check
+            // reads it, so a store would be dead (nothing reads mid-cycle).
             std::this_thread::sleep_until(t_on_end);
 
             if (state.stop_pwm.load(std::memory_order_acquire)) break;

@@ -453,11 +453,14 @@ void init_logging(const Config& config) {
     // default-yaml level on restart.
     if (auto persisted = load_runtime_log_level()) {
         alpacacore::logging::set_log_level(*persisted);
+        // "INFO" doubles as the LogLevel::Info case and the safety net for a
+        // future enum value the switch doesn't know about.
         const char* name = "INFO";
         switch (*persisted) {
             case alpacacore::logging::LogLevel::Trace:    name = "TRACE"; break;
             case alpacacore::logging::LogLevel::Debug:    name = "DEBUG"; break;
-            case alpacacore::logging::LogLevel::Info:     name = "INFO"; break;
+            case alpacacore::logging::LogLevel::Info:
+                break;
             case alpacacore::logging::LogLevel::Warn:     name = "WARNING"; break;
             case alpacacore::logging::LogLevel::Error:    name = "ERROR"; break;
             case alpacacore::logging::LogLevel::Critical: name = "CRITICAL"; break;
