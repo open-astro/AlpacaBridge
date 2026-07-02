@@ -36,8 +36,9 @@ constexpr const char* kLogTag = "ToupTek";
 
 class ToupTekFilterWheelDriver : public FilterWheelDriver {
 public:
-    ToupTekFilterWheelDriver(int device_number, std::optional<int> wheel_index, std::optional<std::string> wheel_id)
-        : device_number_(device_number), wheel_index_(wheel_index), wheel_id_(std::move(wheel_id)) {}
+    ToupTekFilterWheelDriver(int device_number, std::optional<int> wheel_index, std::optional<std::string> wheel_id,
+                             ToupTekSDK& sdk)
+        : sdk_(sdk), device_number_(device_number), wheel_index_(wheel_index), wheel_id_(std::move(wheel_id)) {}
 
     ~ToupTekFilterWheelDriver() override {
         {
@@ -93,7 +94,7 @@ public:
     // Vendor SDK (library) version, surfaced in the web UI only (never in
     // DriverInfo). Toupcam_Version() returns e.g. "57.27567.20260128".
     std::optional<std::string> get_device_sdk_version() const override {
-        auto version = ToupTekSDKWrapper::instance().get_sdk_version();
+        auto version = sdk_.get_sdk_version();
         if (version.empty() || version == "unknown") {
             return std::nullopt;
         }
@@ -128,7 +129,7 @@ public:
             return;
         }
 
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
 
         if (connected) {
             if (connecting_homing_) {
@@ -280,7 +281,7 @@ public:
         }
         // The SDK returns -1 while the wheel is in motion, which is exactly the
         // ASCOM "moving" sentinel — pass it through unchanged.
-        return ToupTekSDKWrapper::instance().get_filter_wheel_position(handle_);
+        return sdk_.get_filter_wheel_position(handle_);
     }
 
     void set_position(int position) override {
@@ -308,7 +309,7 @@ public:
         }
         // Single absolute move; the wheel was homed at connect so the firmware
         // can traverse to any slot. get_position() reports -1 until it arrives.
-        ToupTekSDKWrapper::instance().set_filter_wheel_position(handle_, position);
+        sdk_.set_filter_wheel_position(handle_, position);
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -436,7 +437,7 @@ private:
         }
     }
 
-    ToupFilterWheelInfo resolve_wheel_locked(ToupTekSDKWrapper& sdk) {
+    ToupFilterWheelInfo resolve_wheel_locked(ToupTekSDK& sdk) {
         auto wheels = sdk.enumerate_filter_wheels();
         if (wheels.empty()) {
             ALPACA_LOG_WARN(kLogTag, "No ToupTek AFW filter wheels detected by SDK");
@@ -497,7 +498,7 @@ private:
     // settles via the same consecutive-read requirement rather than waiting out
     // the full timeout. The unconditional stability requirement costs at most
     // kStableReads poll intervals over an on-first-slot return.
-    static bool wait_for_home(ToupTekSDKWrapper& sdk, HToupcam handle) {
+    static bool wait_for_home(ToupTekSDK& sdk, HToupcam handle) {
         constexpr int kPollMs = 100;
         constexpr int kMaxWaitMs = 6000;  // total wait is exactly this: the loop
                                           // condition rejects waited == kMaxWaitMs
@@ -557,6 +558,8 @@ private:
         }
     }
 
+    // Injected SDK seam (issue #104); see touptek_sdk_wrapper.h.
+    ToupTekSDK& sdk_;
     int device_number_;
     std::optional<int> wheel_index_;
     std::optional<std::string> wheel_id_;
@@ -600,11 +603,23 @@ private:
 };
 
 std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_index(int device_number, int wheel_index) {
-    return std::make_unique<ToupTekFilterWheelDriver>(device_number, wheel_index, std::nullopt);
+    return std::make_unique<ToupTekFilterWheelDriver>(device_number, wheel_index, std::nullopt,
+                                                      ToupTekSDKWrapper::instance());
 }
 
 std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_id(int device_number, const std::string& wheel_id) {
-    return std::make_unique<ToupTekFilterWheelDriver>(device_number, std::nullopt, wheel_id);
+    return std::make_unique<ToupTekFilterWheelDriver>(device_number, std::nullopt, wheel_id,
+                                                      ToupTekSDKWrapper::instance());
+}
+
+std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_index(int device_number, int wheel_index,
+                                                                       ToupTekSDK& sdk) {
+    return std::make_unique<ToupTekFilterWheelDriver>(device_number, wheel_index, std::nullopt, sdk);
+}
+
+std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_id(int device_number, const std::string& wheel_id,
+                                                                    ToupTekSDK& sdk) {
+    return std::make_unique<ToupTekFilterWheelDriver>(device_number, std::nullopt, wheel_id, sdk);
 }
 
 }  // namespace alpacacore::vendor::touptek

@@ -143,6 +143,122 @@ namespace ToupAAF {
 }
 
 /**
+ * Abstract interface over the ToupTek SDK operations the drivers use.
+ *
+ * This is the fault-injection seam (issue #104): production code talks to the
+ * ToupTekSDKWrapper singleton below; unit tests substitute a scripted fake
+ * (AlpacaCore/tests/fake_touptek_sdk.h) that can throw from any specific call,
+ * return canned enumerations/positions, and count opens vs closes — so the
+ * highest-risk driver paths (error/throw handling, cleanup, ref-counting,
+ * reconnect) are exercisable without hardware. Every driver factory has an
+ * overload taking a ToupTekSDK&; the default overload passes the singleton.
+ *
+ * Contract notes for implementors (fakes included):
+ * - Methods report failure by THROWING AlpacaException, never by return code
+ *   (except wait_image's documented bool-on-timeout).
+ * - open_*_by_id are reference-counted per id: the physical open happens on
+ *   the first opener, the physical close when the last holder releases, and
+ *   two opens of the same id return the SAME handle.
+ */
+class ToupTekSDK {
+public:
+    virtual ~ToupTekSDK() = default;
+
+    virtual std::string get_sdk_version() = 0;
+
+    virtual std::vector<ToupCameraInfo> enumerate_cameras() = 0;
+    virtual HToupcam open_camera_by_id(const std::string& id) = 0;
+    virtual void close_camera(HToupcam handle) = 0;
+
+    // Streaming lifecycle
+    virtual void start_pull_mode(HToupcam handle, void (*event_callback)(unsigned event, void* ctx), void* ctx) = 0;
+    virtual void stop(HToupcam handle) = 0;
+    virtual void put_trigger_mode(HToupcam handle, int mode) = 0;
+    virtual void trigger(HToupcam handle, unsigned short n_frames) = 0;
+    virtual bool wait_image(HToupcam handle, unsigned timeout_ms, void* buffer, int bits, int row_pitch,
+                            unsigned& actual_width, unsigned& actual_height) = 0;
+
+    // Exposure & gain
+    virtual ToupExpRange get_exposure_range(HToupcam handle) = 0;
+    virtual unsigned get_exposure_us(HToupcam handle) = 0;
+    virtual void put_exposure_us(HToupcam handle, unsigned exposure_us) = 0;
+    virtual void put_auto_exposure(HToupcam handle, bool enable) = 0;
+    virtual ToupGainRange get_gain_range(HToupcam handle) = 0;
+    virtual unsigned short get_gain(HToupcam handle) = 0;
+    virtual void put_gain(HToupcam handle, unsigned short gain) = 0;
+
+    // ROI / format / binning
+    virtual ToupROIFormat get_roi(HToupcam handle) = 0;
+    virtual void put_roi(HToupcam handle, unsigned x, unsigned y, unsigned w, unsigned h) = 0;
+    virtual void put_binning(HToupcam handle, int bin) = 0;
+    virtual int get_binning(HToupcam handle) = 0;
+    virtual void put_bitdepth(HToupcam handle, int bitdepth) = 0;
+    virtual int get_bitdepth(HToupcam handle) = 0;
+    virtual void put_raw(HToupcam handle, int enable) = 0;
+    virtual int get_option(HToupcam handle, unsigned option) = 0;
+    virtual void put_option(HToupcam handle, unsigned option, int value) = 0;
+
+    // Frame size / format
+    virtual void get_size(HToupcam handle, int& width, int& height) = 0;
+    virtual void get_final_size(HToupcam handle, int& width, int& height) = 0;
+    virtual void get_raw_format(HToupcam handle, unsigned& four_cc, unsigned& bits_per_pixel) = 0;
+
+    // Cooler
+    virtual int get_temperature_deciC(HToupcam handle) = 0;
+    virtual void put_tec_enable(HToupcam handle, bool enable) = 0;
+    virtual bool get_tec_enable(HToupcam handle) = 0;
+    virtual void put_tec_target_deciC(HToupcam handle, int deci_c) = 0;
+    virtual int get_tec_target_deciC(HToupcam handle) = 0;
+    virtual int get_tec_voltage_deciV(HToupcam handle) = 0;
+    virtual int get_tec_voltage_max_deciV(HToupcam handle) = 0;
+
+    // High full well / conversion gain / black level
+    virtual int get_high_fullwell(HToupcam handle) = 0;
+    virtual void put_high_fullwell(HToupcam handle, bool enable) = 0;
+    virtual int get_cg(HToupcam handle) = 0;
+    virtual void put_cg(HToupcam handle, int cg) = 0;
+    virtual int get_blacklevel(HToupcam handle) = 0;
+    virtual void put_blacklevel(HToupcam handle, int value) = 0;
+    virtual int get_blacklevel_max(HToupcam handle, int deep_bits) = 0;
+
+    // Thermal controls (cooled-camera Switch)
+    virtual int get_heat_max(HToupcam handle) = 0;
+    virtual int get_heat(HToupcam handle) = 0;
+    virtual void put_heat(HToupcam handle, int level) = 0;
+    virtual int get_fan(HToupcam handle) = 0;
+    virtual void put_fan(HToupcam handle, int speed) = 0;
+    virtual int get_taillight(HToupcam handle) = 0;
+    virtual void put_taillight(HToupcam handle, bool on) = 0;
+
+    // Camera metadata
+    virtual std::string get_serial_number(HToupcam handle) = 0;
+    virtual std::string get_firmware_version(HToupcam handle) = 0;
+    virtual void get_pixel_size(HToupcam handle, unsigned resolution_index, float& x, float& y) = 0;
+
+    // ST4 pulse guide
+    virtual void pulse_guide(HToupcam handle, ToupGuideDirection direction, unsigned duration_ms) = 0;
+    virtual bool is_guiding(HToupcam handle) = 0;
+
+    // AAF (Astro Auto Focuser)
+    virtual std::vector<ToupFocuserInfo> enumerate_focusers() = 0;
+    virtual HToupcam open_focuser_by_id(const std::string& id) = 0;
+    virtual void close_focuser(HToupcam handle) = 0;
+    virtual void aaf_set(HToupcam handle, int action, int value, const char* context) = 0;
+    virtual int aaf_get(HToupcam handle, int action, const char* context) = 0;
+    virtual int aaf_range(HToupcam handle, int range_action, int target_action, const char* context) = 0;
+
+    // AFW (Astro Filter Wheel)
+    virtual std::vector<ToupFilterWheelInfo> enumerate_filter_wheels() = 0;
+    virtual HToupcam open_filter_wheel_by_id(const std::string& id) = 0;
+    virtual void close_filter_wheel(HToupcam handle) = 0;
+    virtual int get_filter_wheel_slot_count(HToupcam handle) = 0;
+    virtual void set_filter_wheel_slot_count(HToupcam handle, int slot_count) = 0;
+    virtual void reset_filter_wheel(HToupcam handle) = 0;
+    virtual int get_filter_wheel_position(HToupcam handle) = 0;
+    virtual void set_filter_wheel_position(HToupcam handle, int position) = 0;
+};
+
+/**
  * Thin wrapper around the ToupTek SDK (toupcamsdk 20260128).
  *
  * - Singleton because the SDK global enumeration state is process-scoped.
@@ -153,13 +269,13 @@ namespace ToupAAF {
  * HRESULT < 0 translates to AlpacaException via throw_on_error(). S_FALSE (1)
  * is treated as success (no-op) per SDK semantics.
  */
-class ToupTekSDKWrapper {
+class ToupTekSDKWrapper final : public ToupTekSDK {
 public:
     static ToupTekSDKWrapper& instance();
 
-    std::string get_sdk_version();
+    std::string get_sdk_version() override;
 
-    std::vector<ToupCameraInfo> enumerate_cameras();
+    std::vector<ToupCameraInfo> enumerate_cameras() override;
 
     // Returns the opened handle (non-null). Throws on failure.
     //
@@ -170,159 +286,152 @@ public:
     // id. No production path uses it. Always open by id via open_camera_by_id().
     [[deprecated("index space diverges from enumerate_cameras(); use open_camera_by_id()")]]
     HToupcam open_camera_by_index(int camera_index);
-    HToupcam open_camera_by_id(const std::string& id);
+    HToupcam open_camera_by_id(const std::string& id) override;
 
-    void close_camera(HToupcam handle);
+    void close_camera(HToupcam handle) override;
 
     // Streaming lifecycle ----------------------------------------------------
-    void start_pull_mode(HToupcam handle,
-                         void (*event_callback)(unsigned event, void* ctx),
-                         void* ctx);
-    void stop(HToupcam handle);
-    void put_trigger_mode(HToupcam handle, int mode); // 0=video, 1=software
-    void trigger(HToupcam handle, unsigned short n_frames);
+    void start_pull_mode(HToupcam handle, void (*event_callback)(unsigned event, void* ctx), void* ctx) override;
+    void stop(HToupcam handle) override;
+    void put_trigger_mode(HToupcam handle, int mode) override;  // 0=video, 1=software
+    void trigger(HToupcam handle, unsigned short n_frames) override;
     // Returns true if a frame was delivered within timeout_ms. Throws on
     // non-timeout errors. On success, actual_width/height carry the frame
     // dimensions reported by the SDK.
-    bool wait_image(HToupcam handle,
-                    unsigned timeout_ms,
-                    void* buffer,
-                    int bits,
-                    int row_pitch,
-                    unsigned& actual_width,
-                    unsigned& actual_height);
+    bool wait_image(HToupcam handle, unsigned timeout_ms, void* buffer, int bits, int row_pitch, unsigned& actual_width,
+                    unsigned& actual_height) override;
 
     // Exposure & gain --------------------------------------------------------
-    ToupExpRange get_exposure_range(HToupcam handle);
-    unsigned get_exposure_us(HToupcam handle);
-    void put_exposure_us(HToupcam handle, unsigned exposure_us);
-    void put_auto_exposure(HToupcam handle, bool enable);
-    ToupGainRange get_gain_range(HToupcam handle);
-    unsigned short get_gain(HToupcam handle);
-    void put_gain(HToupcam handle, unsigned short gain);
+    ToupExpRange get_exposure_range(HToupcam handle) override;
+    unsigned get_exposure_us(HToupcam handle) override;
+    void put_exposure_us(HToupcam handle, unsigned exposure_us) override;
+    void put_auto_exposure(HToupcam handle, bool enable) override;
+    ToupGainRange get_gain_range(HToupcam handle) override;
+    unsigned short get_gain(HToupcam handle) override;
+    void put_gain(HToupcam handle, unsigned short gain) override;
 
     // ROI / format / binning -------------------------------------------------
-    ToupROIFormat get_roi(HToupcam handle);
-    void put_roi(HToupcam handle, unsigned x, unsigned y, unsigned w, unsigned h);
-    void put_binning(HToupcam handle, int bin); // 1, 2, 3, 4...
-    int get_binning(HToupcam handle);
+    ToupROIFormat get_roi(HToupcam handle) override;
+    void put_roi(HToupcam handle, unsigned x, unsigned y, unsigned w, unsigned h) override;
+    void put_binning(HToupcam handle, int bin) override;  // 1, 2, 3, 4...
+    int get_binning(HToupcam handle) override;
     // 0 = 8-bit mode, 1 = 16-bit mode (subset of PIXEL_FORMAT). Reconfiguring
     // requires the stream to be stopped — the driver handles that.
-    void put_bitdepth(HToupcam handle, int bitdepth);
-    int get_bitdepth(HToupcam handle);
-    void put_raw(HToupcam handle, int enable);
-    int get_option(HToupcam handle, unsigned option);
-    void put_option(HToupcam handle, unsigned option, int value);
+    void put_bitdepth(HToupcam handle, int bitdepth) override;
+    int get_bitdepth(HToupcam handle) override;
+    void put_raw(HToupcam handle, int enable) override;
+    int get_option(HToupcam handle, unsigned option) override;
+    void put_option(HToupcam handle, unsigned option, int value) override;
 
     // Frame size / format ----------------------------------------------------
-    void get_size(HToupcam handle, int& width, int& height);
-    void get_final_size(HToupcam handle, int& width, int& height);
+    void get_size(HToupcam handle, int& width, int& height) override;
+    void get_final_size(HToupcam handle, int& width, int& height) override;
     // FourCC returned by the SDK (e.g. 'RGGB', 'YYYY'). bits_per_pixel carries
     // the native pixel depth.
-    void get_raw_format(HToupcam handle, unsigned& four_cc, unsigned& bits_per_pixel);
+    void get_raw_format(HToupcam handle, unsigned& four_cc, unsigned& bits_per_pixel) override;
 
     // Cooler -----------------------------------------------------------------
     // Temperature is returned in 0.1 degrees Celsius.
-    int get_temperature_deciC(HToupcam handle);
-    void put_tec_enable(HToupcam handle, bool enable);
-    bool get_tec_enable(HToupcam handle);
-    void put_tec_target_deciC(HToupcam handle, int deci_c);
-    int get_tec_target_deciC(HToupcam handle);
-    int get_tec_voltage_deciV(HToupcam handle);
-    int get_tec_voltage_max_deciV(HToupcam handle);
+    int get_temperature_deciC(HToupcam handle) override;
+    void put_tec_enable(HToupcam handle, bool enable) override;
+    bool get_tec_enable(HToupcam handle) override;
+    void put_tec_target_deciC(HToupcam handle, int deci_c) override;
+    int get_tec_target_deciC(HToupcam handle) override;
+    int get_tec_voltage_deciV(HToupcam handle) override;
+    int get_tec_voltage_max_deciV(HToupcam handle) override;
 
     // High full well ---------------------------------------------------------
     // TOUPCAM_OPTION_HIGH_FULLWELL: 0 = disable, 1 = enable. Gated by
     // supports_high_fullwell; exposed to ASCOM as a ReadoutMode.
-    int get_high_fullwell(HToupcam handle);
-    void put_high_fullwell(HToupcam handle, bool enable);
+    int get_high_fullwell(HToupcam handle) override;
+    void put_high_fullwell(HToupcam handle, bool enable) override;
 
     // Conversion gain (TOUPCAM_OPTION_CG): 0 = LCG, 1 = HCG, 2 = HDR (only on
     // FLAG_CGHDR cameras). Gated by supports_cg; folded into ASCOM ReadoutModes.
-    int get_cg(HToupcam handle);
-    void put_cg(HToupcam handle, int cg);
+    int get_cg(HToupcam handle) override;
+    void put_cg(HToupcam handle, int cg) override;
 
     // Black level (ASCOM Offset) ---------------------------------------------
     // TOUPCAM_OPTION_BLACKLEVEL. Range is [0, get_blacklevel_max]; the max scales
     // with the current output bit depth (31 at 8-bit up to 31*256 at 16-bit), so
     // it takes the camera's deep-mode bit count. Gated by supports_blacklevel.
-    int get_blacklevel(HToupcam handle);
-    void put_blacklevel(HToupcam handle, int value);
-    int get_blacklevel_max(HToupcam handle, int deep_bits);
+    int get_blacklevel(HToupcam handle) override;
+    void put_blacklevel(HToupcam handle, int value) override;
+    int get_blacklevel_max(HToupcam handle, int deep_bits) override;
 
     // Thermal controls (cooled-camera Switch) --------------------------------
     // Dew (anti-fog) heater: level in [0, get_heat_max]. 0 = off.
-    int get_heat_max(HToupcam handle);
-    int get_heat(HToupcam handle);
-    void put_heat(HToupcam handle, int level);
+    int get_heat_max(HToupcam handle) override;
+    int get_heat(HToupcam handle) override;
+    void put_heat(HToupcam handle, int level) override;
     // Cooling fan: speed in [0, model->maxfanspeed]. 0 = off.
-    int get_fan(HToupcam handle);
-    void put_fan(HToupcam handle, int speed);
+    int get_fan(HToupcam handle) override;
+    void put_fan(HToupcam handle, int speed) override;
 
     // Tail indicator LED (TOUPCAM_OPTION_TAILLIGHT): 0 = off, 1 = on. There is
     // no capability flag — probe by calling get_taillight and catching the
     // error on cameras that don't support it.
-    int get_taillight(HToupcam handle);
-    void put_taillight(HToupcam handle, bool on);
+    int get_taillight(HToupcam handle) override;
+    void put_taillight(HToupcam handle, bool on) override;
 
     // Camera metadata --------------------------------------------------------
-    std::string get_serial_number(HToupcam handle);
-    std::string get_firmware_version(HToupcam handle);
-    void get_pixel_size(HToupcam handle, unsigned resolution_index, float& x, float& y);
+    std::string get_serial_number(HToupcam handle) override;
+    std::string get_firmware_version(HToupcam handle) override;
+    void get_pixel_size(HToupcam handle, unsigned resolution_index, float& x, float& y) override;
 
     // ST4 pulse guide --------------------------------------------------------
-    void pulse_guide(HToupcam handle, ToupGuideDirection direction, unsigned duration_ms);
+    void pulse_guide(HToupcam handle, ToupGuideDirection direction, unsigned duration_ms) override;
     // Returns true if the camera is currently guiding.
-    bool is_guiding(HToupcam handle);
+    bool is_guiding(HToupcam handle) override;
 
     // AAF (Astro Auto Focuser) -----------------------------------------------
     // Enumeration filters Toupcam_EnumV2 results by TOUPCAM_FLAG_AUTOFOCUSER.
-    std::vector<ToupFocuserInfo> enumerate_focusers();
+    std::vector<ToupFocuserInfo> enumerate_focusers() override;
 
     // Open by Toupcam_EnumV2 id. Throws on failure.
-    HToupcam open_focuser_by_id(const std::string& id);
+    HToupcam open_focuser_by_id(const std::string& id) override;
 
-    void close_focuser(HToupcam handle);
+    void close_focuser(HToupcam handle) override;
 
     // Generic AAF write: Toupcam_AAF(handle, action, value, nullptr).
-    void aaf_set(HToupcam handle, int action, int value, const char* context);
+    void aaf_set(HToupcam handle, int action, int value, const char* context) override;
 
     // Generic AAF read: Toupcam_AAF(handle, action, 0, &out).
-    int aaf_get(HToupcam handle, int action, const char* context);
+    int aaf_get(HToupcam handle, int action, const char* context) override;
 
     // AAF range query: Toupcam_AAF(handle, RANGEMAX|RANGEMIN|RANGEDEF, action, &out).
-    int aaf_range(HToupcam handle, int range_action, int target_action, const char* context);
+    int aaf_range(HToupcam handle, int range_action, int target_action, const char* context) override;
 
     // AFW (Astro Filter Wheel) ----------------------------------------------
     // Enumeration filters Toupcam_EnumV2 results by TOUPCAM_FLAG_FILTERWHEEL.
-    std::vector<ToupFilterWheelInfo> enumerate_filter_wheels();
+    std::vector<ToupFilterWheelInfo> enumerate_filter_wheels() override;
 
     // Open by Toupcam_EnumV2 id. Throws on failure.
-    HToupcam open_filter_wheel_by_id(const std::string& id);
+    HToupcam open_filter_wheel_by_id(const std::string& id) override;
 
-    void close_filter_wheel(HToupcam handle);
+    void close_filter_wheel(HToupcam handle) override;
 
     // Number of filter slots reported by the wheel firmware
     // (TOUPCAM_OPTION_FILTERWHEEL_SLOT).
-    int get_filter_wheel_slot_count(HToupcam handle);
+    int get_filter_wheel_slot_count(HToupcam handle) override;
 
     // Write the slot count back to the wheel (TOUPCAM_OPTION_FILTERWHEEL_SLOT is
     // [RW]). The toupbase reference driver does this at connect right after
     // reading it, re-applying the wheel's slot configuration.
-    void set_filter_wheel_slot_count(HToupcam handle, int slot_count);
+    void set_filter_wheel_slot_count(HToupcam handle, int slot_count) override;
 
     // Home/reset the wheel (TOUPCAM_OPTION_FILTERWHEEL_POSITION = -1). Required
     // at connect so the firmware establishes its slot reference — without it the
     // wheel hunts and never lands (notably after a firmware update).
-    void reset_filter_wheel(HToupcam handle);
+    void reset_filter_wheel(HToupcam handle) override;
 
     // Current slot (0-based). Returns -1 while the wheel is in motion, matching
     // the ASCOM FilterWheel Position contract (TOUPCAM_OPTION_FILTERWHEEL_POSITION).
-    int get_filter_wheel_position(HToupcam handle);
+    int get_filter_wheel_position(HToupcam handle) override;
 
     // Move to slot 0..N-1 (single absolute move; direction bit left at 0 =
     // clockwise, matching the toupbase default).
-    void set_filter_wheel_position(HToupcam handle, int position);
+    void set_filter_wheel_position(HToupcam handle, int position) override;
 
 private:
     class Impl;

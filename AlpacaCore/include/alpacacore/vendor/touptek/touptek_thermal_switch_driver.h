@@ -18,6 +18,8 @@
 
 namespace alpacacore::vendor::touptek {
 
+class ToupTekSDK;  // fault-injection seam (touptek_sdk_wrapper.h, issue #104)
+
 /**
  * @brief Create a ToupTek thermal switch device (dew heater + cooling fan).
  *
@@ -36,5 +38,8 @@ namespace alpacacore::vendor::touptek {
  * @param camera_index ToupTek SDK camera index (0-based, enumeration order)
  */
 std::unique_ptr<SwitchDriver> create_touptek_thermal_switch(int device_number, int camera_index);
+
+// Test seam: identical driver wired to an injected SDK implementation.
+std::unique_ptr<SwitchDriver> create_touptek_thermal_switch(int device_number, int camera_index, ToupTekSDK& sdk);
 
 }  // namespace alpacacore::vendor::touptek

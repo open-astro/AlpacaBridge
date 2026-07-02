@@ -18,6 +18,8 @@
 
 namespace alpacacore::vendor::touptek {
 
+class ToupTekSDK;  // fault-injection seam (touptek_sdk_wrapper.h, issue #104)
+
 /**
  * @brief Create a ToupTek AAF (Astro Auto Focuser) driver by enumeration index.
  *
@@ -40,5 +42,10 @@ std::unique_ptr<FocuserDriver> create_touptek_focuser_by_index(int device_number
  */
 std::unique_ptr<FocuserDriver> create_touptek_focuser_by_id(int device_number,
                                                              const std::string& focuser_id);
+
+// Test seams: identical drivers wired to an injected SDK implementation.
+std::unique_ptr<FocuserDriver> create_touptek_focuser_by_index(int device_number, int focuser_index, ToupTekSDK& sdk);
+std::unique_ptr<FocuserDriver> create_touptek_focuser_by_id(int device_number, const std::string& focuser_id,
+                                                            ToupTekSDK& sdk);
 
 } // namespace alpacacore::vendor::touptek

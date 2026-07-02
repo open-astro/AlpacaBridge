@@ -17,6 +17,8 @@
 
 namespace alpacacore::vendor::touptek {
 
+class ToupTekSDK;  // fault-injection seam (touptek_sdk_wrapper.h, issue #104)
+
 /**
  * @brief Create a ToupTek camera driver by camera index (enumeration order).
  *
@@ -25,5 +27,8 @@ namespace alpacacore::vendor::touptek {
  * @return Unique pointer to camera driver
  */
 std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index);
+
+// Test seam: identical driver wired to an injected SDK implementation.
+std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index, ToupTekSDK& sdk);
 
 } // namespace alpacacore::vendor::touptek
