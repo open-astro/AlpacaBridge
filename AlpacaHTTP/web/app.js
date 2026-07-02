@@ -227,6 +227,7 @@ function resetDeviceForm() {
     updateVendorOptions();
     zwoFilterwheelSlotUI.syncSlotsFromTextarea();
     playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
+    touptekFilterwheelSlotUI.syncSlotsFromTextarea();
     const messageDiv = document.getElementById('form-message');
     if (messageDiv) {
         messageDiv.style.display = 'none';
@@ -304,7 +305,10 @@ const INDEX_FIELDS = [
     { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
+    { fieldId: 'touptek-filterwheel-index', vendor: 'touptek', deviceType: 'filterwheel', configKey: 'filterwheelIndex', idFieldId: 'touptek-filterwheel-id' },
+    { fieldId: 'touptek-thermal-camera-index', vendor: 'touptek', deviceType: 'switch', configKey: 'cameraIndex' },
     { fieldId: 'playerone-camera-index', vendor: 'playerone', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'playerone-switch-camera-index', vendor: 'playerone', deviceType: 'switch', configKey: 'cameraIndex' },
     { fieldId: 'playerone-filterwheel-index', vendor: 'playerone', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
@@ -420,7 +424,7 @@ async function loadDevices() {
         }
         
         if (data.ErrorNumber !== 0) {
-            devicesList.innerHTML = `<p class="error">Error: ${data.ErrorMessage || 'Unknown error'}</p>`;
+            devicesList.innerHTML = `<p class="error">Error: ${escapeHtml(data.ErrorMessage || 'Unknown error')}</p>`;
             return;
         }
 
@@ -767,6 +771,19 @@ function startEditDevice(device) {
     } else if (vendor === 'svbony') {
         setFormValue('svbony-camera-index', config.cameraIndex);
     } else if (vendor === 'touptek' && deviceType === 'switch') {
+        // switchType selects the backend: 'thermal' (camera dew heater + fan) or
+        // 'stellavita' (GPIO PowerBox, the default for legacy configs).
+        const touptekSwitchType = config.switchType || 'stellavita';
+        setFormValue('touptek-switch-type', touptekSwitchType);
+        if (touptekSwitchType === 'thermal') {
+            setFormValue('touptek-thermal-camera-index', config.cameraIndex);
+        }
+        // Re-run the sub-block toggle now that switchType is set, so the thermal
+        // vs StellaVita fields match the loaded config (mirrors ZWO's pattern).
+        const touptekSwitchTypeEl = document.getElementById('touptek-switch-type');
+        if (touptekSwitchTypeEl) {
+            touptekSwitchTypeEl.dispatchEvent(new Event('change'));
+        }
         // StellaVita PowerBox: optional GPIO chip override plus PWM frequency
         // and per-port PWM flags (positional: index 0 = Port 1 .. 3 = Port 4).
         if (config.gpioChip !== undefined && config.gpioChip !== null) {
@@ -787,16 +804,33 @@ function startEditDevice(device) {
         setFormValue('touptek-camera-index', config.cameraIndex);
         setFormValue('touptek-focuser-index', config.focuserIndex);
         setFormValue('touptek-focuser-id', config.focuserId);
+        setFormValue('touptek-filterwheel-index', config.filterwheelIndex);
+        setFormValue('touptek-filterwheel-id', config.filterwheelId);
+        // Only touch the filter-name/slot UI when editing a filter wheel;
+        // otherwise editing a ToupTek camera/focuser would blank the slot list.
+        if (deviceType === 'filterwheel') {
+            const touptekFilterNamesField = document.getElementById('touptek-filter-names');
+            if (touptekFilterNamesField) {
+                touptekFilterNamesField.value = Array.isArray(config.filterNames)
+                    ? config.filterNames.join('\n')
+                    : '';
+                touptekFilterwheelSlotUI.syncSlotsFromTextarea();
+            }
+        }
     } else if (vendor === 'playerone') {
         setFormValue('playerone-camera-index', config.cameraIndex);
         setFormValue('playerone-switch-camera-index', config.cameraIndex);
         setFormValue('playerone-filterwheel-index', config.filterwheelIndex);
-        const playerOneFilterNamesField = document.getElementById('playerone-filter-names');
-        if (playerOneFilterNamesField) {
-            playerOneFilterNamesField.value = Array.isArray(config.filterNames)
-                ? config.filterNames.join('\n')
-                : '';
-            playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
+        // Only touch the filter-name/slot UI when editing a filter wheel;
+        // otherwise editing a Player One camera/switch would blank the slot list.
+        if (deviceType === 'filterwheel') {
+            const playerOneFilterNamesField = document.getElementById('playerone-filter-names');
+            if (playerOneFilterNamesField) {
+                playerOneFilterNamesField.value = Array.isArray(config.filterNames)
+                    ? config.filterNames.join('\n')
+                    : '';
+                playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
+            }
         }
     } else if (vendor === 'weewx') {
         setFormValue('weewx-url', config.weewxUrl);
@@ -997,7 +1031,7 @@ async function loadServerInfo() {
         }
         
         if (data.ErrorNumber !== 0) {
-            serverInfo.innerHTML = `<p class="error">Error: ${data.ErrorMessage || 'Unknown error'}</p>`;
+            serverInfo.innerHTML = `<p class="error">Error: ${escapeHtml(data.ErrorMessage || 'Unknown error')}</p>`;
             return;
         }
 
@@ -1608,9 +1642,9 @@ function updateVendorOptions() {
     }
     const touptekOption = vendorSelect.querySelector('option[value="touptek"]');
     if (touptekOption) {
-        // ToupTek provides cameras, the AAF focuser, and the StellaVita
-        // PowerBox (switch).
-        const allowTouptek = isCamera || isFocuser || isSwitch;
+        // ToupTek provides cameras, the AAF focuser, the AFW filter wheel, and
+        // the StellaVita PowerBox (switch).
+        const allowTouptek = isCamera || isFocuser || isFilterWheel || isSwitch;
         touptekOption.disabled = !allowTouptek;
         touptekOption.hidden = !allowTouptek;
     }
@@ -1661,7 +1695,7 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'svbony') {
         vendorSelect.value = '';
     }
-    if (!isCamera && !isFocuser && !isSwitch && vendorSelect.value === 'touptek') {
+    if (!isCamera && !isFocuser && !isFilterWheel && !isSwitch && vendorSelect.value === 'touptek') {
         vendorSelect.value = '';
     }
     if (!isCamera && !isFilterWheel && !isSwitch && vendorSelect.value === 'playerone') {
@@ -1750,6 +1784,11 @@ if (zwoSwitchTypeSelect) {
     zwoSwitchTypeSelect.addEventListener('change', updateZwoConfigFields);
 }
 
+const touptekSwitchTypeSelect = document.getElementById('touptek-switch-type');
+if (touptekSwitchTypeSelect) {
+    touptekSwitchTypeSelect.addEventListener('change', updateTouptekConfigFields);
+}
+
 const synscanConnectionType = document.getElementById('synscan-connection-type');
 if (synscanConnectionType) {
     synscanConnectionType.addEventListener('change', function() {
@@ -1831,6 +1870,13 @@ const playerOneFilterwheelSlotUI = createFilterwheelSlotUI({
     namesTextareaId: 'playerone-filter-names'
 });
 
+const touptekFilterwheelSlotUI = createFilterwheelSlotUI({
+    countSelectId: 'touptek-filterwheel-slot-count',
+    customInputId: 'touptek-filterwheel-slot-custom',
+    slotListId: 'touptek-filterwheel-slot-list',
+    namesTextareaId: 'touptek-filter-names'
+});
+
 const apertureDiameterInput = document.getElementById('aperture-diameter');
 if (apertureDiameterInput) {
     apertureDiameterInput.addEventListener('input', () =>
@@ -1864,7 +1910,13 @@ function normalizeFilterName(name) {
     return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function parseFilterNamesInput(rawValue) {
+// expandShorthand: when true (the live UI preview), a single all-caps token is
+// split into per-character names for display. On SUBMIT it must be false so the
+// raw token is sent to the server, where the C++ expand_shorthand_locked expands
+// it ONLY when its length matches the wheel's real slot count. Splitting here
+// without knowing the slot count would send e.g. "LRGB" as 4 names to a 5-slot
+// wheel, which gets silently padded (pre-connect) or rejected (post-connect).
+function parseFilterNamesInput(rawValue, expandShorthand = true) {
     if (!rawValue) {
         return [];
     }
@@ -1873,9 +1925,13 @@ function parseFilterNamesInput(rawValue) {
         .split(/\r?\n/)
         .map(name => name.trim())
         .filter(name => name.length > 0);
-    if (names.length === 1) {
+    if (expandShorthand && names.length === 1) {
+        // Expand a single delimiter-less token into per-slot single-character
+        // names ("LRGB" -> L,R,G,B) only when it looks like a shorthand code:
+        // no lowercase letters. This keeps ordinary names like "Clear" or
+        // "Ha_NB" intact instead of exploding them into characters.
         const candidate = names[0];
-        if (candidate.length > 1 && !/[,\s;]/.test(candidate)) {
+        if (candidate.length > 1 && !/[,\s;]/.test(candidate) && !/[a-z]/.test(candidate)) {
             names = candidate.split('');
         }
     }
@@ -2143,10 +2199,12 @@ function updateTouptekConfigFields() {
     }
     const cameraFields = document.getElementById('touptek-camera-fields');
     const focuserFields = document.getElementById('touptek-focuser-fields');
+    const filterwheelFields = document.getElementById('touptek-filterwheel-fields');
     const switchFields = document.getElementById('touptek-switch-fields');
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
     const isCamera = deviceType === 'camera';
     const isFocuser = deviceType === 'focuser';
+    const isFilterWheel = deviceType === 'filterwheel';
     const isSwitch = deviceType === 'switch';
     if (cameraFields) {
         cameraFields.style.display = isCamera ? 'block' : 'none';
@@ -2156,9 +2214,29 @@ function updateTouptekConfigFields() {
         focuserFields.style.display = isFocuser ? 'block' : 'none';
         setFieldGroupEnabled(focuserFields, isFocuser);
     }
+    if (filterwheelFields) {
+        filterwheelFields.style.display = isFilterWheel ? 'block' : 'none';
+        setFieldGroupEnabled(filterwheelFields, isFilterWheel);
+    }
     if (switchFields) {
         switchFields.style.display = isSwitch ? 'block' : 'none';
         setFieldGroupEnabled(switchFields, isSwitch);
+    }
+    // ToupTek has two switch backends selected by switchType: the camera thermal
+    // switch (dew heater + fan) and the StellaVita PowerBox (GPIO). Show only the
+    // relevant sub-block so hidden fields don't submit.
+    const switchTypeSelect = document.getElementById('touptek-switch-type');
+    const thermalFields = document.getElementById('touptek-thermal-switch-fields');
+    const stellavitaFields = document.getElementById('touptek-stellavita-switch-fields');
+    const isThermal = isSwitch && switchTypeSelect && switchTypeSelect.value === 'thermal';
+    const isStellavita = isSwitch && !isThermal;
+    if (thermalFields) {
+        thermalFields.style.display = isThermal ? 'block' : 'none';
+        setFieldGroupEnabled(thermalFields, isThermal);
+    }
+    if (stellavitaFields) {
+        stellavitaFields.style.display = isStellavita ? 'block' : 'none';
+        setFieldGroupEnabled(stellavitaFields, isStellavita);
     }
 }
 
@@ -2484,7 +2562,9 @@ document.getElementById('device-form').addEventListener('submit', async function
                 }
             }
             const filterNamesRaw = formData.get('filterNames');
-            const names = parseFilterNamesInput(filterNamesRaw);
+            // Submit: don't expand shorthand client-side — send the raw token and
+            // let the slot-count-aware C++ expansion handle it (see parseFilterNamesInput).
+            const names = parseFilterNamesInput(filterNamesRaw, false);
             if (names.length > 0) {
                 deviceData.filterNames = names;
             }
@@ -2527,37 +2607,64 @@ document.getElementById('device-form').addEventListener('submit', async function
         const svbonyCameraIndex = readOptionalNumber(formData, 'svbonyCameraIndex');
         deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
     } else if (deviceData.vendor === 'touptek' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
-        // StellaVita PowerBox: local GPIO, no camera/focuser index. Optional
-        // GPIO chip override (defaults to /dev/gpiochip0 server-side) plus
-        // optional PWM dimming on any of the four ports.
-        const gpioChip = (formData.get('touptekPowerboxGpioChip') || '').trim();
-        if (gpioChip) {
-            deviceData.gpioChip = gpioChip;
+        // Unique field name (not "switchType") to avoid the FormData collision
+        // with ZWO's switch-type select, which also submits while hidden.
+        const touptekSwitchType = formData.get('touptekSwitchType') || 'stellavita';
+        deviceData.switchType = touptekSwitchType;
+        if (touptekSwitchType === 'thermal') {
+            // Camera thermal switch: dew heater + fan, bound by camera index and
+            // sharing the camera's SDK connection.
+            const thermalCameraIndex = readOptionalNumber(formData, 'touptekThermalCameraIndex');
+            deviceData.cameraIndex = thermalCameraIndex !== null ? thermalCameraIndex : 0;
+        } else {
+            // StellaVita PowerBox: local GPIO, no camera/focuser index. Optional
+            // GPIO chip override (defaults to /dev/gpiochip0 server-side) plus
+            // optional PWM dimming on any of the four ports.
+            const gpioChip = (formData.get('touptekPowerboxGpioChip') || '').trim();
+            if (gpioChip) {
+                deviceData.gpioChip = gpioChip;
+            }
+            const portPwm = [0, 1, 2, 3].map(function(i) {
+                return formData.get('touptekPortPwm' + i) === 'on';
+            });
+            // Always persist the PWM frequency so a custom value survives even if
+            // the user temporarily un-ticks every port; it applies the next time a
+            // port is switched back to PWM.
+            const pwmFreq = Number.parseInt(formData.get('touptekPowerboxPwmFrequency'), 10);
+            if (!Number.isNaN(pwmFreq)) {
+                deviceData.pwmFrequencyHz = pwmFreq;
+            }
+            // Always emit the positional ports overlay (even all-false) so any
+            // per-port config carried in the saved device (e.g. names) is not
+            // dropped on a re-save with every PWM box un-ticked.
+            deviceData.ports = portPwm.map(function(pwm) {
+                return { pwm: pwm };
+            });
         }
-        const portPwm = [0, 1, 2, 3].map(function(i) {
-            return formData.get('touptekPortPwm' + i) === 'on';
-        });
-        // Always persist the PWM frequency so a custom value survives even if
-        // the user temporarily un-ticks every port; it applies the next time a
-        // port is switched back to PWM.
-        const pwmFreq = Number.parseInt(formData.get('touptekPowerboxPwmFrequency'), 10);
-        if (!Number.isNaN(pwmFreq)) {
-            deviceData.pwmFrequencyHz = pwmFreq;
-        }
-        // Always emit the positional ports overlay (even all-false) so any
-        // per-port config carried in the saved device (e.g. names) is not
-        // dropped on a re-save with every PWM box un-ticked.
-        deviceData.ports = portPwm.map(function(pwm) {
-            return { pwm: pwm };
-        });
     } else if (deviceData.vendor === 'touptek') {
         if (normalizeDeviceType(deviceData.deviceType) === 'focuser') {
-            const touptekFocuserId = formData.get('focuserId');
+            // Unique field name (not the bare 'focuserId') to avoid the
+            // FormData collision with ZWO's focuser-id input, which appears
+            // first in the DOM and would otherwise win formData.get().
+            const touptekFocuserId = formData.get('touptekFocuserId');
             if (touptekFocuserId && touptekFocuserId.trim() !== '') {
                 deviceData.focuserId = touptekFocuserId.trim();
             } else {
                 const touptekFocuserIndex = readOptionalNumber(formData, 'touptekFocuserIndex');
                 deviceData.focuserIndex = touptekFocuserIndex !== null ? touptekFocuserIndex : 0;
+            }
+        } else if (normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
+            // Bind by SDK id string when supplied (like focuserId), else by index.
+            const touptekWheelId = formData.get('touptekFilterwheelId');
+            if (touptekWheelId && touptekWheelId.trim() !== '') {
+                deviceData.filterwheelId = touptekWheelId.trim();
+            } else {
+                const touptekWheelIndex = readOptionalNumber(formData, 'touptekFilterwheelIndex');
+                deviceData.filterwheelIndex = touptekWheelIndex !== null ? touptekWheelIndex : 0;
+            }
+            const touptekFilterNames = parseFilterNamesInput(formData.get('touptekFilterNames'), false);
+            if (touptekFilterNames.length > 0) {
+                deviceData.filterNames = touptekFilterNames;
             }
         } else {
             const touptekCameraIndex = readOptionalNumber(formData, 'touptekCameraIndex');
@@ -2567,7 +2674,7 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
             const playerOneWheelIndex = readOptionalNumber(formData, 'playerOneFilterwheelIndex');
             deviceData.filterwheelIndex = playerOneWheelIndex !== null ? playerOneWheelIndex : 0;
-            const playerOneFilterNames = parseFilterNamesInput(formData.get('playerOneFilterNames'));
+            const playerOneFilterNames = parseFilterNamesInput(formData.get('playerOneFilterNames'), false);
             if (playerOneFilterNames.length > 0) {
                 deviceData.filterNames = playerOneFilterNames;
             }

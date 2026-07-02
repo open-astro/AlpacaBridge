@@ -74,6 +74,10 @@ endif()
 if(TARGET alpacacore_touptek)
     list(APPEND TEST_SOURCES test_touptek_camera.cpp)
     list(APPEND TEST_SOURCES test_touptek_focuser.cpp)
+    list(APPEND TEST_SOURCES test_touptek_filterwheel.cpp)
+    # The thermal switch (camera dew heater + fan) uses the camera SDK only, so
+    # it always builds with the ToupTek target.
+    list(APPEND TEST_SOURCES test_touptek_thermal_switch.cpp)
     # The StellaVita Switch test only builds when its driver was compiled in
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_TOUPTEK_STELLAVITA)

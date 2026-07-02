@@ -549,7 +549,7 @@
                             <div class="form-group">
                                 <label for="filterwheel-names">Filter Names (optional):</label>
                                 <textarea id="filterwheel-names" name="filterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
-                                <small>One name per line. Provide the same number of names as filter slots.</small>
+                                <small>One name per line. Provide the same number of names as filter slots. Tip: a single all-caps run with no spaces (e.g. <code>LRGB</code>) expands to one letter per slot &mdash; so a word like <code>DARK</code> on a 4-slot wheel becomes D, A, R, K; add a trailing comma (<code>DARK,</code>) to keep it as one name.</small>
                             </div>
                         </details>
                     </div>
@@ -678,13 +678,40 @@
                         </div>
                         <div class="form-group">
                             <label for="touptek-focuser-id">Focuser ID (optional):</label>
-                            <input type="text" id="touptek-focuser-id" name="focuserId" placeholder="(leave blank to use index)">
+                            <input type="text" id="touptek-focuser-id" name="touptekFocuserId" placeholder="(leave blank to use index)">
                             <small>SDK device id from Toupcam_EnumV2. Overrides the index when set.</small>
                         </div>
                     </div>
 
                     <!-- StellaVita PowerBox (switch) configuration -->
                     <div id="touptek-switch-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="touptek-switch-type">Switch Type:</label>
+                            <select id="touptek-switch-type" name="touptekSwitchType">
+                                <option value="stellavita">StellaVita PowerBox (12V GPIO ports)</option>
+                                <option value="thermal">Camera Thermal (Dew Heater + Fan)</option>
+                            </select>
+                            <small>StellaVita drives the CM4's on-board 12V ports; Thermal exposes a cooled ToupTek camera's dew heater and radiator fan.</small>
+                        </div>
+
+                        <!-- Camera thermal switch (dew heater + fan) -->
+                        <div id="touptek-thermal-switch-fields" style="display: none;">
+                            <p class="hint">
+                                Exposes a cooled ToupTek camera's anti-fog dew heater
+                                (and radiator fan) as switch elements. Binds to the camera
+                                by index and shares its SDK connection, so it can be added
+                                alongside the camera device. Cooling itself stays on the
+                                Camera device (Cooler / Target Temp), not here.
+                            </p>
+                            <div class="form-group">
+                                <label for="touptek-thermal-camera-index">Camera Index:</label>
+                                <input type="number" id="touptek-thermal-camera-index" name="touptekThermalCameraIndex" value="0" min="0">
+                                <small>0-based index of the cooled ToupTek camera whose dew heater and fan this switch controls.</small>
+                            </div>
+                        </div>
+
+                        <!-- StellaVita PowerBox (local GPIO) -->
+                        <div id="touptek-stellavita-switch-fields">
                         <h3>ToupTek StellaVita Configuration</h3>
                         <p class="hint">
                             Controls the StellaVita's on-board 12V DC power ports over
@@ -735,6 +762,43 @@
                                 </tr>
                             </tbody>
                         </table>
+                        </div>
+                    </div>
+
+                    <!-- AFW (Astro Filter Wheel) configuration -->
+                    <div id="touptek-filterwheel-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="touptek-filterwheel-index">Filter Wheel Index:</label>
+                            <input type="number" id="touptek-filterwheel-index" name="touptekFilterwheelIndex" value="0" min="0">
+                            <small>0-based index among ToupTek AFW (Astro Filter Wheel) devices.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="touptek-filterwheel-id">Filter Wheel ID (optional):</label>
+                            <input type="text" id="touptek-filterwheel-id" name="touptekFilterwheelId" placeholder="(leave blank to use index)">
+                            <small>Bind to a specific wheel by its SDK id string instead of the index (survives re-enumeration if multiple wheels are attached).</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="touptek-filterwheel-slot-count">Filter Wheel Slots:</label>
+                            <div class="filterwheel-slot-controls">
+                                <select id="touptek-filterwheel-slot-count">
+                                    <option value="">Select slot count</option>
+                                    <option value="5">5 slots (AFW-M 5)</option>
+                                    <option value="7">7 slots (AFW-M 7)</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                                <input type="number" id="touptek-filterwheel-slot-custom" min="1" max="16" placeholder="Custom">
+                            </div>
+                            <small>Pick a slot count to build filter dropdowns, or leave blank &mdash; the driver reads the real slot count from the wheel at connect.</small>
+                        </div>
+                        <div id="touptek-filterwheel-slot-list" class="filterwheel-slot-list"></div>
+                        <details class="filterwheel-advanced">
+                            <summary>Advanced: edit filter names as lines</summary>
+                            <div class="form-group">
+                                <label for="touptek-filter-names">Filter Names (optional):</label>
+                                <textarea id="touptek-filter-names" name="touptekFilterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                                <small>One name per line. Leave blank to use default Filter N names. Tip: a single all-caps run with no spaces (e.g. <code>LRGB</code>) expands to one letter per slot &mdash; so a word like <code>DARK</code> on a 4-slot wheel becomes D, A, R, K; add a trailing comma (<code>DARK,</code>) to keep it as one name.</small>
+                            </div>
+                        </details>
                     </div>
 
                 </div>

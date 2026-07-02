@@ -54,6 +54,13 @@ struct ToupCameraInfo {
     bool supports_cooler{};
     bool supports_tec_onoff{};
     bool supports_trigger_software{};
+    bool supports_high_fullwell{};  // TOUPCAM_FLAG_HIGH_FULLWELL
+    bool supports_cg{};             // TOUPCAM_FLAG_CG (HCG/LCG conversion gain)
+    bool supports_cghdr{};          // TOUPCAM_FLAG_CGHDR (adds an HDR conversion gain)
+    bool supports_blacklevel{};     // TOUPCAM_FLAG_BLACKLEVEL (ASCOM Offset)
+    bool supports_heat{};           // TOUPCAM_FLAG_HEAT (anti-fog dew heater)
+    bool supports_fan{};            // TOUPCAM_FLAG_FAN (cooling fan)
+    unsigned max_fan_speed{};       // model->maxfanspeed (fan speed range [0, max])
     int bit_depth_max{};
 };
 
@@ -81,6 +88,19 @@ struct ToupGainRange {
  * Toupcam_EnumV2. Identified by the TOUPCAM_FLAG_AUTOFOCUSER capability bit.
  */
 struct ToupFocuserInfo {
+    int index{};
+    std::string id;          // opaque id from Toupcam_EnumV2, used for Toupcam_Open
+    std::string name;        // displayname
+    std::string model_name;  // model->name
+    unsigned long long flags{};
+};
+
+/**
+ * Information about a ToupTek AFW (Astro Filter Wheel) device discovered via
+ * Toupcam_EnumV2. Identified by the TOUPCAM_FLAG_FILTERWHEEL capability bit.
+ * Covers the standalone AFW-M models (5- and 7-slot).
+ */
+struct ToupFilterWheelInfo {
     int index{};
     std::string id;          // opaque id from Toupcam_EnumV2, used for Toupcam_Open
     std::string name;        // displayname
@@ -142,6 +162,13 @@ public:
     std::vector<ToupCameraInfo> enumerate_cameras();
 
     // Returns the opened handle (non-null). Throws on failure.
+    //
+    // DEPRECATED: this index is the SDK's raw Toupcam_EnumV2 order (still includes
+    // AFW/AAF accessories), NOT the camera-only index space that enumerate_cameras()
+    // and the web UI's cameraIndex use, and it opens OUTSIDE the reference-counted
+    // by-id sharing — so it can Toupcam_Close a device another driver holds open by
+    // id. No production path uses it. Always open by id via open_camera_by_id().
+    [[deprecated("index space diverges from enumerate_cameras(); use open_camera_by_id()")]]
     HToupcam open_camera_by_index(int camera_index);
     HToupcam open_camera_by_id(const std::string& id);
 
@@ -204,6 +231,40 @@ public:
     int get_tec_voltage_deciV(HToupcam handle);
     int get_tec_voltage_max_deciV(HToupcam handle);
 
+    // High full well ---------------------------------------------------------
+    // TOUPCAM_OPTION_HIGH_FULLWELL: 0 = disable, 1 = enable. Gated by
+    // supports_high_fullwell; exposed to ASCOM as a ReadoutMode.
+    int get_high_fullwell(HToupcam handle);
+    void put_high_fullwell(HToupcam handle, bool enable);
+
+    // Conversion gain (TOUPCAM_OPTION_CG): 0 = LCG, 1 = HCG, 2 = HDR (only on
+    // FLAG_CGHDR cameras). Gated by supports_cg; folded into ASCOM ReadoutModes.
+    int get_cg(HToupcam handle);
+    void put_cg(HToupcam handle, int cg);
+
+    // Black level (ASCOM Offset) ---------------------------------------------
+    // TOUPCAM_OPTION_BLACKLEVEL. Range is [0, get_blacklevel_max]; the max scales
+    // with the current output bit depth (31 at 8-bit up to 31*256 at 16-bit), so
+    // it takes the camera's deep-mode bit count. Gated by supports_blacklevel.
+    int get_blacklevel(HToupcam handle);
+    void put_blacklevel(HToupcam handle, int value);
+    int get_blacklevel_max(HToupcam handle, int deep_bits);
+
+    // Thermal controls (cooled-camera Switch) --------------------------------
+    // Dew (anti-fog) heater: level in [0, get_heat_max]. 0 = off.
+    int get_heat_max(HToupcam handle);
+    int get_heat(HToupcam handle);
+    void put_heat(HToupcam handle, int level);
+    // Cooling fan: speed in [0, model->maxfanspeed]. 0 = off.
+    int get_fan(HToupcam handle);
+    void put_fan(HToupcam handle, int speed);
+
+    // Tail indicator LED (TOUPCAM_OPTION_TAILLIGHT): 0 = off, 1 = on. There is
+    // no capability flag — probe by calling get_taillight and catching the
+    // error on cameras that don't support it.
+    int get_taillight(HToupcam handle);
+    void put_taillight(HToupcam handle, bool on);
+
     // Camera metadata --------------------------------------------------------
     std::string get_serial_number(HToupcam handle);
     std::string get_firmware_version(HToupcam handle);
@@ -231,6 +292,37 @@ public:
 
     // AAF range query: Toupcam_AAF(handle, RANGEMAX|RANGEMIN|RANGEDEF, action, &out).
     int aaf_range(HToupcam handle, int range_action, int target_action, const char* context);
+
+    // AFW (Astro Filter Wheel) ----------------------------------------------
+    // Enumeration filters Toupcam_EnumV2 results by TOUPCAM_FLAG_FILTERWHEEL.
+    std::vector<ToupFilterWheelInfo> enumerate_filter_wheels();
+
+    // Open by Toupcam_EnumV2 id. Throws on failure.
+    HToupcam open_filter_wheel_by_id(const std::string& id);
+
+    void close_filter_wheel(HToupcam handle);
+
+    // Number of filter slots reported by the wheel firmware
+    // (TOUPCAM_OPTION_FILTERWHEEL_SLOT).
+    int get_filter_wheel_slot_count(HToupcam handle);
+
+    // Write the slot count back to the wheel (TOUPCAM_OPTION_FILTERWHEEL_SLOT is
+    // [RW]). The toupbase reference driver does this at connect right after
+    // reading it, re-applying the wheel's slot configuration.
+    void set_filter_wheel_slot_count(HToupcam handle, int slot_count);
+
+    // Home/reset the wheel (TOUPCAM_OPTION_FILTERWHEEL_POSITION = -1). Required
+    // at connect so the firmware establishes its slot reference — without it the
+    // wheel hunts and never lands (notably after a firmware update).
+    void reset_filter_wheel(HToupcam handle);
+
+    // Current slot (0-based). Returns -1 while the wheel is in motion, matching
+    // the ASCOM FilterWheel Position contract (TOUPCAM_OPTION_FILTERWHEEL_POSITION).
+    int get_filter_wheel_position(HToupcam handle);
+
+    // Move to slot 0..N-1 (single absolute move; direction bit left at 0 =
+    // clockwise, matching the toupbase default).
+    void set_filter_wheel_position(HToupcam handle, int position);
 
 private:
     class Impl;

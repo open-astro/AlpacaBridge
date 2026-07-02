@@ -135,3 +135,37 @@ TEST_CASE("ToupTek Camera Driver - State Machine Contracts", "[touptek][camera][
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);
 }
+
+TEST_CASE("ToupTek Camera Driver - Readout modes (conversion gain + High Full Well)", "[touptek][camera][unit]") {
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
+
+    // ReadoutModes fold the camera's conversion-gain (HCG/LCG/HDR) and High Full
+    // Well capabilities into one flat list. The exact contents depend on the
+    // camera attached to the test host (caps are preloaded at construction), so
+    // assert only hardware-independent invariants. The LIST is readable while
+    // disconnected (never empty — at least "Normal"), matching every other camera
+    // driver: imaging clients enumerate ReadoutModes before connecting. The
+    // current-index getter needs live registers, so it throws NotConnected;
+    // `set_readout_mode` validates the range BEFORE the connection check, so an
+    // out-of-range index is InvalidValue even disconnected. Connected mode
+    // toggles are exercised by ConformU.
+    REQUIRE_FALSE(driver->get_readout_modes().empty());
+    require_alpaca_error([&]() { driver->get_readout_mode(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_readout_mode(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_readout_mode(999999); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+TEST_CASE("ToupTek Camera Driver - Offset (black level)", "[touptek][camera][unit]") {
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
+
+    // Offset maps to the black level on cameras reporting TOUPCAM_FLAG_BLACKLEVEL.
+    // Operational reads require a connection first, so disconnected they report
+    // NotConnected (not a generic DriverException); the connected value range is
+    // exercised by ConformU. Named offset descriptions are never implemented
+    // (integer OffsetMin/OffsetMax mode), regardless of hardware.
+    require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_offset(0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offset_min(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offset_max(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_offsets(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}

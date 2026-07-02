@@ -109,7 +109,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | QHY | Camera | SDK wrapper | Production |
 | Player One | Camera, FilterWheel (Phoenix Wheel), Switch (dew heater + fan) | SDK wrapper | Production |
 | SVBONY | Camera | SDK wrapper | Production |
-| ToupTek | Camera, Focuser (AAF), Switch (StellaVita power) | SDK + protocol wrapper | Production |
+| ToupTek | Camera (incl. cooled + High Full Well), Focuser (AAF), FilterWheel (AFW-M), Switch (camera thermal: dew heater + fan; StellaVita power) | SDK + protocol wrapper | Production |
 | iOptron | Telescope, Switch (iMate PowerBox) | Protocol wrapper | Production |
 | SynScan | Telescope | Protocol wrapper | Production |
 | Celestron | Telescope | Protocol wrapper | Production |

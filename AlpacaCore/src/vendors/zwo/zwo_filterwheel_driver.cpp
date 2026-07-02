@@ -190,16 +190,40 @@ public:
 
     int get_position() const override {
         ensure_connected();
-        return ZWOEFWSDKWrapper::instance().get_position(wheel_id_value());
+        // Hold mutex_ across the SDK call: set_connected(false) closes the wheel
+        // under mutex_, so serialising here prevents a concurrent disconnect from
+        // invalidating wheel_id_ mid-call (matches the ToupTek/thermal pattern).
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!wheel_id_.has_value()) {
+            throw AlpacaException("Filter wheel ID not set", AlpacaError::NotConnected);
+        }
+        return ZWOEFWSDKWrapper::instance().get_position(wheel_id_.value());
     }
 
     void set_position(int position) override {
-        ensure_connected();
-        int slot_count = slot_count_value();
-        if (position < 0 || position >= slot_count) {
+        // Range validation precedes the connection check (ASCOM precedence, per
+        // AGENTS.md): a negative position is unconditionally invalid, so it is
+        // InvalidValue even while disconnected. The upper bound depends on the
+        // slot count (unknown until connect), so it is checked below under the lock.
+        if (position < 0) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
-        ZWOEFWSDKWrapper::instance().set_position(wheel_id_value(), position);
+        ensure_connected();
+        // Hold mutex_ across validation and the SDK move for the same
+        // use-after-close reason as get_position.
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Check the disconnect sentinel first so a concurrent disconnect yields
+        // NotConnected, not a generic DriverException (matches get_position).
+        if (!wheel_id_.has_value()) {
+            throw AlpacaException("Filter wheel ID not set", AlpacaError::NotConnected);
+        }
+        if (!wheel_info_valid_ || wheel_info_.slot_count <= 0) {
+            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
+        }
+        if (position >= wheel_info_.slot_count) {
+            throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
+        }
+        ZWOEFWSDKWrapper::instance().set_position(wheel_id_.value(), position);
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -222,10 +246,17 @@ public:
 
     void set_names(const std::vector<std::string>& names) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Expand a single-token shorthand ("LRGB" -> L,R,G,B) BEFORE validating
+        // the count so it works when connected too, not only on the pre-connect
+        // config path (matches normalize_slot_data_locked). Stage on a local copy
+        // and only commit on success, so a validation throw leaves the existing
+        // filter_names_ untouched. Per the "fix shared patterns everywhere" rule.
+        std::vector<std::string> staged = names;
+        expand_shorthand_locked(staged);
         if (wheel_info_valid_ && wheel_info_.slot_count > 0) {
-            validate_slot_count_locked(static_cast<int>(names.size()), "names");
+            validate_slot_count_locked(static_cast<int>(staged.size()), "names");
         }
-        filter_names_ = names;
+        filter_names_ = std::move(staged);
         apply_default_names_locked();
     }
 
@@ -301,38 +332,12 @@ private:
         throw AlpacaException("Failed to read filter wheel info", AlpacaError::DriverException);
     }
 
-    int wheel_id_value() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!wheel_id_.has_value()) {
-            throw AlpacaException("Filter wheel ID not set", AlpacaError::NotConnected);
-        }
-        return wheel_id_.value();
-    }
-
-    int slot_count_value() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!wheel_info_valid_ || wheel_info_.slot_count <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
-        }
-        return wheel_info_.slot_count;
-    }
-
     void normalize_slot_data_locked() {
         if (!wheel_info_valid_ || wheel_info_.slot_count <= 0) {
             return;
         }
         const std::size_t slots = static_cast<std::size_t>(wheel_info_.slot_count);
-        if (filter_names_.size() == 1) {
-            const std::string& candidate = filter_names_[0];
-            if (candidate.size() == slots &&
-                candidate.find_first_of(",; \t") == std::string::npos) {
-                filter_names_.clear();
-                filter_names_.reserve(slots);
-                for (char ch : candidate) {
-                    filter_names_.emplace_back(1, ch);
-                }
-            }
-        }
+        expand_shorthand_locked(filter_names_);
         if (filter_names_.empty()) {
             filter_names_.assign(slots, std::string());
         } else if (filter_names_.size() != slots) {
@@ -349,6 +354,27 @@ private:
                                        ") does not match wheel slot count (" + std::to_string(slots) +
                                        "); resizing to match the wheel");
             focus_offsets_.resize(slots);
+        }
+    }
+
+    // Expand a single delimiter-less token into per-slot single-character names
+    // ("LRGB" -> L,R,G,B) only when it looks like a shorthand code (no lowercase
+    // letters), so ordinary names like "Clear" or "Ha_NB" that happen to match
+    // the slot count are left intact. No-op until the slot count is known.
+    void expand_shorthand_locked(std::vector<std::string>& names) const {
+        if (!wheel_info_valid_ || wheel_info_.slot_count <= 0 || names.size() != 1) {
+            return;
+        }
+        const std::size_t slots = static_cast<std::size_t>(wheel_info_.slot_count);
+        const std::string& candidate = names[0];
+        const bool has_lowercase = candidate.find_first_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos;
+        if (candidate.size() == slots && !has_lowercase && candidate.find_first_of(",; \t") == std::string::npos) {
+            std::vector<std::string> expanded;
+            expanded.reserve(slots);
+            for (char ch : candidate) {
+                expanded.emplace_back(1, ch);
+            }
+            names = std::move(expanded);
         }
     }
 

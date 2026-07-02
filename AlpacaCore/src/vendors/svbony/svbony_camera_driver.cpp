@@ -183,11 +183,27 @@ public:
     }
 
     void set_connected(bool connected) override {
+        std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
+        if (!connected) {
+            // Join the exposure thread BEFORE taking mutex_ and closing the camera,
+            // so the disconnect never tears down the SDK session under a live
+            // exposure loop (deterministic shutdown on both the sync path and the
+            // async connection task, which calls set_connected directly). Must be
+            // outside mutex_: the thread takes mutex_ to publish its results, so
+            // joining under the lock would deadlock. Hold exposure_lifecycle_mutex_
+            // from before the join through the close, so a concurrent start_exposure
+            // can neither spawn a fresh thread in the join→close gap nor race this
+            // join with its thread-assignment (join vs operator= on the same
+            // std::thread is UB). Lock order: exposure_lifecycle_mutex_ -> mutex_.
+            lifecycle_lock.lock();
+            stop_exposure_thread();
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         if (connected == connected_.load()) {
-            if (connected) {
-                reset_exposure_state_locked();
-            }
+            // Idempotent (ASCOM): a redundant Connect/Disconnect is a no-op and must
+            // NOT reset exposure state. The Platform-7 `connect` endpoint calls
+            // connect() unconditionally, so wiping here would abort an in-flight
+            // exposure or discard a just-completed image. Matches the QHY driver.
             return;
         }
 
@@ -653,18 +669,14 @@ public:
         return num_x_;
     }
 
-    void set_num_x(int num_x) override {
-        set_roi_size_locked(num_x, get_num_y());
-    }
+    void set_num_x(int num_x) override { set_roi_size_locked(num_x, std::nullopt); }
 
     int get_num_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return num_y_;
     }
 
-    void set_num_y(int num_y) override {
-        set_roi_size_locked(get_num_x(), num_y);
-    }
+    void set_num_y(int num_y) override { set_roi_size_locked(std::nullopt, num_y); }
 
     int get_offset() const override {
         ensure_connected();
@@ -782,18 +794,14 @@ public:
         return start_x_;
     }
 
-    void set_start_x(int start_x) override {
-        set_start_pos_locked(start_x, get_start_y());
-    }
+    void set_start_x(int start_x) override { set_start_pos_locked(start_x, std::nullopt); }
 
     int get_start_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return start_y_;
     }
 
-    void set_start_y(int start_y) override {
-        set_start_pos_locked(get_start_x(), start_y);
-    }
+    void set_start_y(int start_y) override { set_start_pos_locked(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
@@ -859,6 +867,13 @@ public:
         if (duration < 0.0) {
             throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
         }
+
+        // Held through the thread spawn at the end: serialises the spawn against
+        // the joins in stop_exposure and the disconnect's join→close (a spawn
+        // slipping into that gap would run the exposure loop against a closed
+        // camera; and join racing the thread-assignment is UB on std::thread).
+        // Lock order: exposure_lifecycle_mutex_ -> mutex_ (all locks below nest).
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
 
         auto caps = get_control_caps_or_throw(SVBControlType::Exposure);
         long exposure_us = static_cast<long>(std::lround(duration * 1'000'000.0));
@@ -1026,6 +1041,9 @@ public:
 
     void stop_exposure() override {
         ensure_connected();
+        // Serialise this join against start_exposure's spawn and the disconnect's
+        // join+close (join vs thread-assignment on the same std::thread is UB).
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         exposure_active_.store(false);
         try {
             SVBSDKWrapper::instance().stop_video_capture(camera_id_value());
@@ -1086,6 +1104,13 @@ private:
 
     mutable std::atomic<bool> exposure_active_;
     std::thread exposure_thread_;
+    // Serialises the exposure thread's lifecycle: spawn (start_exposure) vs join
+    // (stop_exposure, set_connected(false)'s pre-close stop). Join racing the
+    // spawn's thread-assignment is UB on std::thread, and a spawn between the
+    // disconnect's join and the SDK close would run the exposure loop against a
+    // closed camera. Lock order: exposure_lifecycle_mutex_ -> mutex_. The
+    // exposure thread itself never takes it, so joins under it can't deadlock.
+    std::mutex exposure_lifecycle_mutex_;
     // Watchdog deadline: get_camera_state forces Idle once now >= this, even
     // if the exposure thread is still hung in an SVBONY SDK call. Protected
     // by mutex_; mutable because get_camera_state (const) clears the flag
@@ -1392,12 +1417,18 @@ private:
         image_cached_ = false;
     }
 
-    void set_roi_size_locked(int width, int height) {
+    // width/height (or sx/sy) of std::nullopt means "leave that axis unchanged",
+    // resolved UNDER mutex_: each public setter passes only its own axis, so a
+    // concurrent setter for the other axis can no longer be clobbered by a stale
+    // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
+    void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
         ensure_connected();
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int width = width_opt.value_or(num_x_);
+        const int height = height_opt.value_or(num_y_);
         if (width <= 0 || height <= 0) {
             throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
         if (num_x_ == width && num_y_ == height) {
             return;
         }
@@ -1414,12 +1445,14 @@ private:
         image_cached_ = false;
     }
 
-    void set_start_pos_locked(int sx, int sy) {
+    void set_start_pos_locked(std::optional<int> sx_opt, std::optional<int> sy_opt) {
         ensure_connected();
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int sx = sx_opt.value_or(start_x_);
+        const int sy = sy_opt.value_or(start_y_);
         if (sx < 0 || sy < 0) {
             throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
         if (start_x_ == sx && start_y_ == sy) {
             return;
         }

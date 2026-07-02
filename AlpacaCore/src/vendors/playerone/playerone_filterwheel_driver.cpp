@@ -142,16 +142,40 @@ public:
 
     int get_position() const override {
         ensure_connected();
-        return PlayerOnePWSDKWrapper::instance().get_position(handle_value());
+        // Hold mutex_ across the SDK call: set_connected(false) closes the wheel
+        // under mutex_, so serialising here prevents a concurrent disconnect from
+        // invalidating handle_ mid-call (matches the ToupTek/thermal pattern).
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (handle_ < 0) {
+            throw AlpacaException("Filter wheel handle not set", AlpacaError::NotConnected);
+        }
+        return PlayerOnePWSDKWrapper::instance().get_position(handle_);
     }
 
     void set_position(int position) override {
-        ensure_connected();
-        int slot_count = slot_count_value();
-        if (position < 0 || position >= slot_count) {
+        // Range validation precedes the connection check (ASCOM precedence, per
+        // AGENTS.md): a negative position is unconditionally invalid, so it is
+        // InvalidValue even while disconnected. The upper bound depends on the
+        // slot count (unknown until connect), so it is checked below under the lock.
+        if (position < 0) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
-        PlayerOnePWSDKWrapper::instance().goto_position(handle_value(), position);
+        ensure_connected();
+        // Hold mutex_ across validation and the SDK move for the same
+        // use-after-close reason as get_position.
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Check the disconnect sentinel first so a concurrent disconnect yields
+        // NotConnected, not a generic DriverException (matches get_position).
+        if (handle_ < 0) {
+            throw AlpacaException("Filter wheel handle not set", AlpacaError::NotConnected);
+        }
+        if (!wheel_info_valid_ || wheel_info_.position_count <= 0) {
+            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
+        }
+        if (position >= wheel_info_.position_count) {
+            throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
+        }
+        PlayerOnePWSDKWrapper::instance().goto_position(handle_, position);
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -291,22 +315,6 @@ private:
                                       std::to_string(wheel_info_.position_count),
                                   AlpacaError::InvalidValue);
         }
-    }
-
-    int handle_value() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (handle_ < 0) {
-            throw AlpacaException("Filter wheel handle not set", AlpacaError::NotConnected);
-        }
-        return handle_;
-    }
-
-    int slot_count_value() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!wheel_info_valid_ || wheel_info_.position_count <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
-        }
-        return wheel_info_.position_count;
     }
 
     int device_number_;
