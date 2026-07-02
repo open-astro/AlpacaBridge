@@ -7203,6 +7203,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("ports");
         } else {
             copy_if_present("connectionType");
+            // mountIndex is read by the auto-detect registration path; without
+            // it here the saved index silently reverted to 0 (issue #102 —
+            // Celestron was the only mount vendor allowlisting it).
+            copy_if_present("mountIndex");
             std::string connection_type = config.value("connectionType", "");
             if (connection_type == "serial") {
                 copy_if_present("portPath");
@@ -7215,6 +7219,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "synscan") {
         copy_if_present("synscanVersion");
         copy_if_present("connectionType");
+        copy_if_present("mountIndex");  // same issue-#102 gap as ioptron above
         std::string connection_type = config.value("connectionType", "");
         if (connection_type == "serial") {
             copy_if_present("portPath");
