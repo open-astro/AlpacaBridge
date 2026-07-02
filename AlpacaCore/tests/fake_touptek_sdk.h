@@ -411,12 +411,12 @@ public:
     void aaf_set(HToupcam h, int action, int value, const char*) override {
         hit("aaf_set");
         require_open(h);
-        aaf_values_[action] = value;
+        aaf_values_[canonical_aaf_key(action)] = value;
     }
     int aaf_get(HToupcam h, int action, const char*) override {
         hit("aaf_get");
         require_open(h);
-        return aaf_values_[action];
+        return aaf_values_[canonical_aaf_key(action)];
     }
     int aaf_range(HToupcam h, int range_action, int target_action, const char*) override {
         hit("aaf_range");
@@ -477,6 +477,33 @@ private:
         ++calls[fn];
         if (throw_from.count(fn) != 0) {
             throw AlpacaException(std::string("fake: injected failure in ") + fn, AlpacaError::DriverException);
+        }
+    }
+
+    // AAF Set and Get use DISTINCT action codes for the same register
+    // (SetPosition=0x01 reads back via GetPosition=0x02, etc.). Store both
+    // sides of each pair under the Get code so writes round-trip on reads.
+    static int canonical_aaf_key(int action) {
+        using namespace vendor::touptek;
+        switch (action) {
+            case ToupAAF::SetPosition:
+                return ToupAAF::GetPosition;
+            case ToupAAF::SetDirection:
+                return ToupAAF::GetDirection;
+            case ToupAAF::SetMaxIncrement:
+                return ToupAAF::GetMaxIncrement;
+            case ToupAAF::SetFine:
+                return ToupAAF::GetFine;
+            case ToupAAF::SetCoarse:
+                return ToupAAF::GetCoarse;
+            case ToupAAF::SetBuzzer:
+                return ToupAAF::GetBuzzer;
+            case ToupAAF::SetBacklash:
+                return ToupAAF::GetBacklash;
+            case ToupAAF::SetMaxStep:
+                return ToupAAF::GetMaxStep;
+            default:
+                return action;
         }
     }
 

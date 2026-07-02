@@ -163,3 +163,20 @@ TEST_CASE("ToupTek focuser - connect-path failure releases the shared open", "[t
     CHECK(fake.ref_count("fake-aaf-0") == 0);
     CHECK(fake.underflow_closes == 0);
 }
+
+TEST_CASE("ToupTek focuser - position round-trips through the AAF Set/Get pair", "[touptek][focuser][unit][fakesdk]") {
+    FakeToupTekSDK fake;
+    FakeToupTekSDK::ToupFocuserInfo focuser;
+    focuser.id = "fake-aaf-0";
+    focuser.name = "FakeAAF";
+    focuser.model_name = "AAF";
+    fake.focusers.push_back(focuser);
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", fake);
+    driver->set_connected(true);
+    // SetPosition (0x01) and GetPosition (0x02) are distinct action codes for
+    // one register — the write must be visible to the read.
+    driver->move(1234);
+    CHECK(driver->get_position() == 1234);
+    driver->set_connected(false);
+}
