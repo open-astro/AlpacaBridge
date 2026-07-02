@@ -49,6 +49,36 @@ alpacahttp::Response route_request(alpacahttp::Router& router,
     return router.route(request, 1);
 }
 
+// Issue #102 back-fill helper: POST a device config, then read it back from
+// configureddevices. Returns the round-tripped Config object for
+// (device_type, device_number), or a null json if configuration failed or the
+// device is missing — callers EXPECT(!cfg.is_null()) first, then assert every
+// persisted field survived (the automated catch for sanitize_device_config
+// allowlist gaps and FormData-style key loss).
+nlohmann::json roundtrip_config(alpacahttp::Router& router, const nlohmann::json& configure_body,
+                                const std::string& device_type, int device_number) {
+    const auto configure_response =
+        route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+    const auto configure_json = nlohmann::json::parse(configure_response.body());
+    if (configure_json.value("ErrorNumber", -1) != 0) {
+        return nlohmann::json();
+    }
+    const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+    const auto configured_json = nlohmann::json::parse(configured_response.body());
+    for (const auto& entry : configured_json["Value"]) {
+        if (entry.value("DeviceType", "") == device_type && entry.value("DeviceNumber", -1) == device_number) {
+            return entry.value("Config", nlohmann::json());
+        }
+    }
+    return nlohmann::json();
+}
+
+void remove_device(alpacahttp::Router& router, const std::string& vendor, const std::string& device_type,
+                   int device_number) {
+    nlohmann::json body = {{"vendor", vendor}, {"deviceType", device_type}, {"deviceNumber", device_number}};
+    route_request(router, "POST", "/management/v1/removedevice", body.dump());
+}
+
 // Minimal driver used to verify the management configureddevices response
 // surfaces get_device_firmware() and get_device_sdk_version() (web-UI only)
 // when, and only when, the driver reports each value.
@@ -825,6 +855,326 @@ int main() {
         EXPECT(configure_json.value("ErrorNumber", 0) != 0);
 #endif
     }
+
+    // =====================================================================
+    // Issue #102 back-fill: config save->load round-trips for every
+    // (vendor, deviceType) that persists fields. Each block POSTs distinctive
+    // values, reads configureddevices back, and asserts EVERY persisted field
+    // survived sanitize_device_config. Required Test Case #6 for each driver.
+    // Device numbers 96xx.
+    // =====================================================================
+
+#ifdef ALPACACORE_ENABLE_ZWO
+    {
+        // zwo / camera
+        const auto cfg = roundtrip_config(
+            router,
+            {{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9601}, {"cameraIndex", 1}, {"cameraId", 7}},
+            "Camera", 9601);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("cameraIndex", -1) == 1);
+        EXPECT(cfg.value("cameraId", -1) == 7);
+        remove_device(router, "zwo", "camera", 9601);
+    }
+    {
+        // zwo / filterwheel
+        const auto cfg =
+            roundtrip_config(router,
+                             {{"vendor", "zwo"},
+                              {"deviceType", "filterwheel"},
+                              {"deviceNumber", 9602},
+                              {"filterwheelIndex", 1},
+                              {"filterwheelId", 5},
+                              {"filterNames", nlohmann::json::array({"Lum", "Red", "Green", "Blue", "Ha"})}},
+                             "FilterWheel", 9602);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("filterwheelIndex", -1) == 1);
+        EXPECT(cfg.value("filterwheelId", -1) == 5);
+        EXPECT(cfg.contains("filterNames"));
+        EXPECT(cfg["filterNames"].size() == 5);
+        EXPECT(cfg["filterNames"][4] == "Ha");
+        remove_device(router, "zwo", "filterwheel", 9602);
+    }
+    {
+        // zwo / focuser
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9603},
+                                           {"focuserIndex", 1},
+                                           {"focuserId", 3}},
+                                          "Focuser", 9603);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("focuserIndex", -1) == 1);
+        EXPECT(cfg.value("focuserId", -1) == 3);
+        remove_device(router, "zwo", "focuser", 9603);
+    }
+    {
+        // zwo / rotator
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "rotator"},
+                                           {"deviceNumber", 9604},
+                                           {"rotatorIndex", 1},
+                                           {"rotatorId", 2}},
+                                          "Rotator", 9604);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("rotatorIndex", -1) == 1);
+        EXPECT(cfg.value("rotatorId", -1) == 2);
+        remove_device(router, "zwo", "rotator", 9604);
+    }
+    {
+        // zwo / switch (dew heater — the default switchType)
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "switch"},
+                                           {"deviceNumber", 9605},
+                                           {"switchType", "dewheater"},
+                                           {"cameraIndex", 1},
+                                           {"cameraId", 4}},
+                                          "Switch", 9605);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("switchType", "") == "dewheater");
+        EXPECT(cfg.value("cameraIndex", -1) == 1);
+        EXPECT(cfg.value("cameraId", -1) == 4);
+        remove_device(router, "zwo", "switch", 9605);
+    }
+    {
+        // zwo / switch (ASIAIR Pro/CM4 — libgpiod backend): gpioChip +
+        // pwmFrequencyHz + per-port gpio/name/pwm must all survive (the ports
+        // array is copied wholesale; a deep-filter regression would strip gpio).
+        nlohmann::json ports = nlohmann::json::array(
+            {{{"gpio", 12}, {"name", "Mount"}, {"pwm", false}}, {{"gpio", 13}, {"name", "Dew Heater"}, {"pwm", true}}});
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "switch"},
+                                           {"deviceNumber", 9606},
+                                           {"switchType", "asiair"},
+                                           {"gpioChip", "/dev/gpiochip0"},
+                                           {"pwmFrequencyHz", 200},
+                                           {"ports", ports}},
+                                          "Switch", 9606);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("switchType", "") == "asiair");
+        EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip0");
+        EXPECT(cfg.value("pwmFrequencyHz", -1) == 200);
+        EXPECT(cfg.contains("ports"));
+        EXPECT(cfg["ports"].size() == 2);
+        EXPECT(cfg["ports"][0].value("gpio", -1) == 12);
+        EXPECT(cfg["ports"][1].value("name", "") == "Dew Heater");
+        EXPECT(cfg["ports"][1].value("pwm", false) == true);
+        remove_device(router, "zwo", "switch", 9606);
+    }
+    {
+        // zwo / switch (ASIAIR Plus RK3568 — kernel-module backend):
+        // devicePath instead of gpioChip; ports entries carry name/pwm only.
+        nlohmann::json ports = nlohmann::json::array({{{"name", "DC1"}, {"pwm", true}}});
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "switch"},
+                                           {"deviceNumber", 9607},
+                                           {"switchType", "asiair-plus-rk3568"},
+                                           {"devicePath", "/dev/pwm-gpio-misc"},
+                                           {"pwmFrequencyHz", 50},
+                                           {"ports", ports}},
+                                          "Switch", 9607);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("switchType", "") == "asiair-plus-rk3568");
+        EXPECT(cfg.value("devicePath", "") == "/dev/pwm-gpio-misc");
+        EXPECT(cfg.value("pwmFrequencyHz", -1) == 50);
+        EXPECT(cfg.contains("ports"));
+        EXPECT(cfg["ports"][0].value("pwm", false) == true);
+        // The gpioChip key belongs to the libgpiod variants only.
+        EXPECT(!cfg.contains("gpioChip"));
+        remove_device(router, "zwo", "switch", 9607);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_QHY
+    {
+        // qhy / camera — cameraId is a STRING for QHY (char[32] ids).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "qhy"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9608},
+                                           {"cameraIndex", 1},
+                                           {"cameraId", "QHY-TEST-1"}},
+                                          "Camera", 9608);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("cameraIndex", -1) == 1);
+        EXPECT(cfg.value("cameraId", "") == "QHY-TEST-1");
+        remove_device(router, "qhy", "camera", 9608);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_SVBONY
+    {
+        // svbony / camera
+        const auto cfg = roundtrip_config(
+            router, {{"vendor", "svbony"}, {"deviceType", "camera"}, {"deviceNumber", 9609}, {"cameraIndex", 2}},
+            "Camera", 9609);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("cameraIndex", -1) == 2);
+        remove_device(router, "svbony", "camera", 9609);
+    }
+#endif
+
+#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
+    {
+        // touptek / switch (StellaVita PowerBox) — field survival, not just
+        // the existing no-crash test.
+        nlohmann::json ports =
+            nlohmann::json::array({{{"name", "Flat Panel"}, {"pwm", true}}, {{"name", "Camera"}, {"pwm", false}}});
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "touptek"},
+                                           {"deviceType", "switch"},
+                                           {"deviceNumber", 9610},
+                                           {"switchType", "stellavita"},
+                                           {"gpioChip", "/dev/gpiochip0"},
+                                           {"pwmFrequencyHz", 100},
+                                           {"ports", ports}},
+                                          "Switch", 9610);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("switchType", "") == "stellavita");
+        EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip0");
+        EXPECT(cfg.value("pwmFrequencyHz", -1) == 100);
+        EXPECT(cfg.contains("ports"));
+        EXPECT(cfg["ports"][0].value("pwm", false) == true);
+        remove_device(router, "touptek", "switch", 9610);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+    {
+        // playerone / camera — full round-trip (previous test was configure-only).
+        const auto cfg = roundtrip_config(
+            router, {{"vendor", "playerone"}, {"deviceType", "camera"}, {"deviceNumber", 9611}, {"cameraIndex", 3}},
+            "Camera", 9611);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("cameraIndex", -1) == 3);
+        remove_device(router, "playerone", "camera", 9611);
+    }
+    {
+        // playerone / filterwheel
+        const auto cfg =
+            roundtrip_config(router,
+                             {{"vendor", "playerone"},
+                              {"deviceType", "filterwheel"},
+                              {"deviceNumber", 9612},
+                              {"filterwheelIndex", 1},
+                              {"filterNames", nlohmann::json::array({"Lum", "Red", "Green", "Blue", "Ha"})}},
+                             "FilterWheel", 9612);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("filterwheelIndex", -1) == 1);
+        EXPECT(cfg.contains("filterNames"));
+        EXPECT(cfg["filterNames"].size() == 5);
+        remove_device(router, "playerone", "filterwheel", 9612);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_GEMINI
+    {
+        // gemini / focuser
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "gemini"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9613},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB7"},
+                                           {"baudRate", 19200},
+                                           {"focuserIndex", 1}},
+                                          "Focuser", 9613);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB7");
+        EXPECT(cfg.value("baudRate", -1) == 19200);
+        EXPECT(cfg.value("focuserIndex", -1) == 1);
+        remove_device(router, "gemini", "focuser", 9613);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_WEEWX
+    {
+        // weewx / observingconditions
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "weewx"},
+                                           {"deviceType", "observingconditions"},
+                                           {"deviceNumber", 9614},
+                                           {"weewxUrl", "http://weewx.test:8998/current.json"},
+                                           {"pollIntervalSeconds", 300},
+                                           {"timeoutMs", 2500}},
+                                          "ObservingConditions", 9614);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("weewxUrl", "") == "http://weewx.test:8998/current.json");
+        EXPECT(cfg.value("pollIntervalSeconds", -1) == 300);
+        EXPECT(cfg.value("timeoutMs", -1) == 2500);
+        remove_device(router, "weewx", "observingconditions", 9614);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_IOPTRON
+    {
+        // ioptron / telescope — asserts mountIndex survival: it is read by the
+        // auto-detect registration path but was missing from the sanitizer
+        // allowlist until issue #102 (saved index silently reverted to 0).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "ioptron"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9615},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB6"},
+                                           {"baudRate", 115200},
+                                           {"mountIndex", 1}},
+                                          "Telescope", 9615);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB6");
+        EXPECT(cfg.value("baudRate", -1) == 115200);
+        EXPECT(cfg.value("mountIndex", -1) == 1);
+        remove_device(router, "ioptron", "telescope", 9615);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+    {
+        // synscan / telescope — same mountIndex gap as ioptron; also the
+        // synscanVersion discriminator must survive.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "synscan"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9616},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB5"},
+                                           {"baudRate", 9600},
+                                           {"synscanVersion", "v4"},
+                                           {"mountIndex", 2}},
+                                          "Telescope", 9616);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB5");
+        EXPECT(cfg.value("baudRate", -1) == 9600);
+        EXPECT(cfg.value("synscanVersion", "") == "v4");
+        EXPECT(cfg.value("mountIndex", -1) == 2);
+        remove_device(router, "synscan", "telescope", 9616);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_BISQUE
+    {
+        // bisque / telescope (TheSkyX TCP)
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "bisque"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9617},
+                                           {"host", "skyx.test"},
+                                           {"tcpPort", 3041}},
+                                          "Telescope", 9617);
+        EXPECT(!cfg.is_null());
+        EXPECT(cfg.value("host", "") == "skyx.test");
+        EXPECT(cfg.value("tcpPort", -1) == 3041);
+        remove_device(router, "bisque", "telescope", 9617);
+    }
+#endif
 
     // configureddevices surfaces Firmware and SdkVersion independently, each only
     // when the live driver reports that specific value.
