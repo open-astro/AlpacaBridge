@@ -47,19 +47,27 @@ public:
      */
     std::vector<DeviceState> get_device_state() const override {
         std::vector<DeviceState> state;
+        int count = 0;
         try {
-            const int count = get_max_switch();
-            for (int id = 0; id < count; ++id) {
-                try {
-                    state.push_back({"GetSwitch" + std::to_string(id), get_switch(id)});
-                    state.push_back({"GetSwitchValue" + std::to_string(id), get_switch_value(id)});
-                    state.push_back({"StateChangeComplete" + std::to_string(id), get_state_change_complete(id)});
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-                    // Omit unavailable members per the DeviceState contract.
-                }
-            }
+            count = get_max_switch();
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
             // MaxSwitch itself unavailable -- report TimeStamp only.
+        }
+        for (int id = 0; id < count; ++id) {
+            try {
+                // Read all three before pushing: the getters acquire the driver
+                // mutex independently, so a disconnect racing between them can
+                // throw mid-id -- computing first keeps the push all-or-nothing
+                // (no orphaned GetSwitchN without its siblings).
+                const bool on = get_switch(id);
+                const double value = get_switch_value(id);
+                const bool complete = get_state_change_complete(id);
+                state.push_back({"GetSwitch" + std::to_string(id), on});
+                state.push_back({"GetSwitchValue" + std::to_string(id), value});
+                state.push_back({"StateChangeComplete" + std::to_string(id), complete});
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Omit this id's members per the DeviceState contract.
+            }
         }
         state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
