@@ -184,6 +184,10 @@ public:
     }
 
     bool get_is_moving() const override {
+        // Hold mutex_ across the SDK call (concurrency-checklist shape (a)):
+        // set_connected(false) closes handle_ under the same lock, so the
+        // connected check and the aaf_get can't straddle a disconnect.
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         return sdk_.aaf_get(handle_, ToupAAF::IsMoving, "Toupcam_AAF(ISMOVING)") != 0;
     }
@@ -201,6 +205,7 @@ public:
     }
 
     int get_position() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         return sdk_.aaf_get(handle_, ToupAAF::GetPosition, "Toupcam_AAF(GETPOSITION)");
     }
@@ -227,24 +232,26 @@ public:
     }
 
     double get_temperature() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         int t = sdk_.aaf_get(handle_, ToupAAF::GetTemp, "Toupcam_AAF(GETTEMP)");
         return static_cast<double>(t) / 10.0;
     }
 
     void halt() override {
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         sdk_.aaf_set(handle_, ToupAAF::Halt, 0, "Toupcam_AAF(HALT)");
     }
 
     void move(int position) override {
+        // One mutex_ hold across validation AND the SDK write: the old shape
+        // released the lock after reading max_step_current_, leaving the
+        // aaf_set free to race a disconnect's close (use-after-close).
+        // Exception ordering is unchanged (NotConnected, then InvalidValue).
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        int max_step;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            max_step = max_step_current_;
-        }
-        if (position < 0 || position > max_step) {
+        if (position < 0 || position > max_step_current_) {
             throw AlpacaException("Focuser position out of range",
                                   AlpacaError::InvalidValue);
         }

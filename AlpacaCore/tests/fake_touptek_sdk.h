@@ -230,24 +230,14 @@ public:
     void get_size(HToupcam h, int& width, int& height) override {
         hit("get_size");
         require_open(h);
-        // Resolve the handle to ITS camera so multi-camera tests with
-        // differing sensor sizes read the right dimensions.
-        for (const auto& [id, handle] : handles_by_id_) {
-            if (handle != h) continue;
-            for (const auto& cam : cameras) {
-                if (cam.id == id) {
-                    width = cam.max_width;
-                    height = cam.max_height;
-                    return;
-                }
-            }
-        }
-        width = 1920;
-        height = 1080;
+        lookup_size(h, width, height);
     }
     void get_final_size(HToupcam h, int& width, int& height) override {
         hit("get_final_size");
-        get_size(h, width, height);
+        require_open(h);
+        // Independent of get_size so each is separately faultable/countable
+        // (the real SDK's get_Size and get_FinalSize are distinct calls).
+        lookup_size(h, width, height);
     }
     void get_raw_format(HToupcam h, unsigned& four_cc, unsigned& bits) override {
         hit("get_raw_format");
@@ -505,6 +495,23 @@ private:
             default:
                 return action;
         }
+    }
+
+    // Resolve the handle to ITS camera so multi-camera tests with differing
+    // sensor sizes read the right dimensions.
+    void lookup_size(HToupcam h, int& width, int& height) const {
+        for (const auto& [id, handle] : handles_by_id_) {
+            if (handle != h) continue;
+            for (const auto& cam : cameras) {
+                if (cam.id == id) {
+                    width = cam.max_width;
+                    height = cam.max_height;
+                    return;
+                }
+            }
+        }
+        width = 1920;
+        height = 1080;
     }
 
     HToupcam open_shared(const std::string& id) {
