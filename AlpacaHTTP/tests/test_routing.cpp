@@ -87,7 +87,11 @@ nlohmann::json roundtrip_config(alpacahttp::Router& router, const nlohmann::json
 void remove_device(alpacahttp::Router& router, const std::string& vendor, const std::string& device_type,
                    int device_number) {
     nlohmann::json body = {{"vendor", vendor}, {"deviceType", device_type}, {"deviceNumber", device_number}};
-    route_request(router, "POST", "/management/v1/removedevice", body.dump());
+    const auto response = route_request(router, "POST", "/management/v1/removedevice", body.dump());
+    const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+    // A failed cleanup leaves the device registered and poisons later blocks
+    // that reuse the number or read configureddevices -- fail HERE instead.
+    EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
 }
 
 // Minimal driver used to verify the management configureddevices response
@@ -882,7 +886,7 @@ int main() {
             router,
             {{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9601}, {"cameraIndex", 1}, {"cameraId", 7}},
             "Camera", 9601);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("cameraIndex", -1) == 1);
         EXPECT(cfg.value("cameraId", -1) == 7);
         remove_device(router, "zwo", "camera", 9601);
@@ -898,7 +902,7 @@ int main() {
                               {"filterwheelId", 5},
                               {"filterNames", nlohmann::json::array({"Lum", "Red", "Green", "Blue", "Ha"})}},
                              "FilterWheel", 9602);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("filterwheelIndex", -1) == 1);
         EXPECT(cfg.value("filterwheelId", -1) == 5);
         EXPECT(cfg.contains("filterNames"));
@@ -915,7 +919,7 @@ int main() {
                                            {"focuserIndex", 1},
                                            {"focuserId", 3}},
                                           "Focuser", 9603);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("focuserIndex", -1) == 1);
         EXPECT(cfg.value("focuserId", -1) == 3);
         remove_device(router, "zwo", "focuser", 9603);
@@ -929,7 +933,7 @@ int main() {
                                            {"rotatorIndex", 1},
                                            {"rotatorId", 2}},
                                           "Rotator", 9604);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("rotatorIndex", -1) == 1);
         EXPECT(cfg.value("rotatorId", -1) == 2);
         remove_device(router, "zwo", "rotator", 9604);
@@ -944,7 +948,7 @@ int main() {
                                            {"cameraIndex", 1},
                                            {"cameraId", 4}},
                                           "Switch", 9605);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("switchType", "") == "dewheater");
         EXPECT(cfg.value("cameraIndex", -1) == 1);
         EXPECT(cfg.value("cameraId", -1) == 4);
@@ -965,7 +969,7 @@ int main() {
                                            {"pwmFrequencyHz", 200},
                                            {"ports", ports}},
                                           "Switch", 9606);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("switchType", "") == "asiair");
         EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip0");
         EXPECT(cfg.value("pwmFrequencyHz", -1) == 200);
@@ -989,7 +993,7 @@ int main() {
                                            {"pwmFrequencyHz", 50},
                                            {"ports", ports}},
                                           "Switch", 9607);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("switchType", "") == "asiair-plus-rk3568");
         EXPECT(cfg.value("devicePath", "") == "/dev/pwm-gpio-misc");
         EXPECT(cfg.value("pwmFrequencyHz", -1) == 50);
@@ -1011,7 +1015,7 @@ int main() {
                                            {"cameraIndex", 1},
                                            {"cameraId", "QHY-TEST-1"}},
                                           "Camera", 9608);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("cameraIndex", -1) == 1);
         EXPECT(cfg.value("cameraId", "") == "QHY-TEST-1");
         remove_device(router, "qhy", "camera", 9608);
@@ -1024,7 +1028,7 @@ int main() {
         const auto cfg = roundtrip_config(
             router, {{"vendor", "svbony"}, {"deviceType", "camera"}, {"deviceNumber", 9609}, {"cameraIndex", 2}},
             "Camera", 9609);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("cameraIndex", -1) == 2);
         remove_device(router, "svbony", "camera", 9609);
     }
@@ -1045,7 +1049,7 @@ int main() {
                                            {"pwmFrequencyHz", 100},
                                            {"ports", ports}},
                                           "Switch", 9610);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("switchType", "") == "stellavita");
         EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip0");
         EXPECT(cfg.value("pwmFrequencyHz", -1) == 100);
@@ -1061,7 +1065,7 @@ int main() {
         const auto cfg = roundtrip_config(
             router, {{"vendor", "playerone"}, {"deviceType", "camera"}, {"deviceNumber", 9611}, {"cameraIndex", 3}},
             "Camera", 9611);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("cameraIndex", -1) == 3);
         remove_device(router, "playerone", "camera", 9611);
     }
@@ -1075,7 +1079,7 @@ int main() {
                               {"filterwheelIndex", 1},
                               {"filterNames", nlohmann::json::array({"Lum", "Red", "Green", "Blue", "Ha"})}},
                              "FilterWheel", 9612);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("filterwheelIndex", -1) == 1);
         EXPECT(cfg.contains("filterNames"));
         EXPECT(cfg["filterNames"].size() == 5);
@@ -1095,7 +1099,7 @@ int main() {
                                            {"baudRate", 19200},
                                            {"focuserIndex", 1}},
                                           "Focuser", 9613);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("connectionType", "") == "serial");
         EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB7");
         EXPECT(cfg.value("baudRate", -1) == 19200);
@@ -1115,7 +1119,7 @@ int main() {
                                            {"pollIntervalSeconds", 300},
                                            {"timeoutMs", 2500}},
                                           "ObservingConditions", 9614);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("weewxUrl", "") == "http://weewx.test:8998/current.json");
         EXPECT(cfg.value("pollIntervalSeconds", -1) == 300);
         EXPECT(cfg.value("timeoutMs", -1) == 2500);
@@ -1137,7 +1141,7 @@ int main() {
                                            {"baudRate", 115200},
                                            {"mountIndex", 1}},
                                           "Telescope", 9615);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("connectionType", "") == "serial");
         EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB6");
         EXPECT(cfg.value("baudRate", -1) == 115200);
@@ -1160,7 +1164,7 @@ int main() {
                                            {"synscanVersion", "v4"},
                                            {"mountIndex", 2}},
                                           "Telescope", 9616);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("connectionType", "") == "serial");
         EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB5");
         EXPECT(cfg.value("baudRate", -1) == 9600);
@@ -1180,7 +1184,7 @@ int main() {
                                            {"host", "skyx.test"},
                                            {"tcpPort", 3041}},
                                           "Telescope", 9617);
-        EXPECT(!cfg.is_null());
+        EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("host", "") == "skyx.test");
         EXPECT(cfg.value("tcpPort", -1) == 3041);
         remove_device(router, "bisque", "telescope", 9617);
