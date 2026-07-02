@@ -152,6 +152,7 @@ public:
                 elements_.clear();
                 camera_id_.clear();
                 serial_number_.clear();
+                camera_name_ = "ToupTek Camera";  // ctor default; full cleanup symmetry
                 throw;
             }
             connected_.store(true);
@@ -169,6 +170,7 @@ public:
         // SN-based ID (matches the camera driver's disconnect path; the failed-
         // connect catch above already clears it).
         serial_number_.clear();
+        camera_name_ = "ToupTek Camera";  // ctor default; full cleanup symmetry
         connected_.store(false);
     }
 

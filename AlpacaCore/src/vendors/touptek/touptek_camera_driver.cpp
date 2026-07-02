@@ -793,11 +793,20 @@ public:
         ensure_not_exposing();
         // A single "Normal" mode sets neither axis: no SDK write, but the
         // ensure_not_exposing() check above still rejects a mid-exposure change.
+        //
+        // Write order matters when LEAVING High Full Well: disable HFW before
+        // writing CG, in case the firmware treats the two as mutually exclusive
+        // and rejects OPTION_CG while OPTION_HIGH_FULLWELL is still enabled —
+        // that would throw with only half the mode applied (camera stuck in
+        // HFW). Entering HFW keeps the CG-first order for the same reason.
+        if (s.set_hfw && !s.hfw) {
+            sdk.put_high_fullwell(handle_, false);
+        }
         if (s.set_cg) {
             sdk.put_cg(handle_, s.cg);
         }
-        if (s.set_hfw) {
-            sdk.put_high_fullwell(handle_, s.hfw);
+        if (s.set_hfw && s.hfw) {
+            sdk.put_high_fullwell(handle_, true);
         }
     }
     std::vector<std::string> get_readout_modes() const override {
