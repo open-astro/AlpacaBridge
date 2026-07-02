@@ -65,8 +65,9 @@ std::pair<int, int> bayer_offsets(ToupBayerPattern pattern) {
 
 class ToupTekCameraDriver : public CameraDriver {
 public:
-    ToupTekCameraDriver(int device_number, int camera_index)
-        : device_number_(device_number),
+    ToupTekCameraDriver(int device_number, int camera_index, ToupTekSDK& sdk)
+        : sdk_(sdk),
+          device_number_(device_number),
           camera_index_(camera_index),
           handle_(nullptr),
           camera_info_(),
@@ -189,7 +190,7 @@ public:
             return;
         }
 
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
 
         if (connected) {
             // Enumerate and resolve the target camera.
@@ -437,7 +438,7 @@ public:
 
     double get_ccd_temperature() const override {
         ensure_connected();
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         int deci_c = with_handle([&](HToupcam h) { return sdk.get_temperature_deciC(h); });
         return static_cast<double>(deci_c) / 10.0;
     }
@@ -445,7 +446,7 @@ public:
     bool get_cooler_on() const override {
         ensure_connected();
         if (!get_can_get_cooler_power()) return false;
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         return with_handle([&](HToupcam h) { return sdk.get_tec_enable(h); });
     }
     void set_cooler_on(bool cooler_on) override {
@@ -456,13 +457,13 @@ public:
             }
             return;
         }
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         with_handle([&](HToupcam h) { sdk.put_tec_enable(h, cooler_on); });
     }
     double get_cooler_power() const override {
         ensure_connected();
         if (!get_can_get_cooler_power()) return 0.0;
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         try {
             // Both reads under one with_handle so they come from the same open.
             int v = 0;
@@ -485,13 +486,13 @@ public:
 
     double get_exposure_max() const override {
         ensure_connected();
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         auto r = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
         return static_cast<double>(r.max_us) / 1'000'000.0;
     }
     double get_exposure_min() const override {
         ensure_connected();
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         auto r = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
         return static_cast<double>(r.min_us) / 1'000'000.0;
     }
@@ -512,12 +513,12 @@ public:
 
     int get_gain() const override {
         ensure_connected();
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         return static_cast<int>(with_handle([&](HToupcam h) { return sdk.get_gain(h); }));
     }
     void set_gain(int gain) override {
         ensure_connected();
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         // Read the valid range, range-check, and write the register under mutex_ +
         // readout_mutex_ held together (same fix as set_offset). The range was
         // previously read OUTSIDE readout_mutex_, so a concurrent reconnect to a
@@ -539,12 +540,12 @@ public:
     }
     int get_gain_max() const override {
         ensure_connected();
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         return static_cast<int>(with_handle([&](HToupcam h) { return sdk.get_gain_range(h).max; }));
     }
     int get_gain_min() const override {
         ensure_connected();
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         return static_cast<int>(with_handle([&](HToupcam h) { return sdk.get_gain_range(h).min; }));
     }
     std::vector<std::string> get_gains() const override {
@@ -575,7 +576,7 @@ public:
         if (!connected_.load()) return false;
         if (!pulse_guiding_.load()) return false;
         try {
-            auto& sdk = ToupTekSDKWrapper::instance();
+            auto& sdk = sdk_;
             bool guiding = with_handle([&](HToupcam h) { return sdk.is_guiding(h); });
             if (!guiding) pulse_guiding_.store(false);
             return guiding;
@@ -629,7 +630,7 @@ public:
     // / IMX571). Cameras without it throw PropertyNotImplemented, as before.
     int get_offset() const override {
         ensure_connected();
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         return with_handle([&](HToupcam h) {
             ensure_blacklevel_supported_locked();  // same mutex_ hold as the read
             return sdk.get_blacklevel(h);
@@ -637,7 +638,7 @@ public:
     }
     void set_offset(int offset) override {
         ensure_connected();
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         // Compute the max bound (which scales with the live bit depth), range-check,
         // and write the register under mutex_ + readout_mutex_ held together. The
         // bound was previously computed OUTSIDE readout_mutex_, so a concurrent
@@ -711,7 +712,7 @@ public:
         ensure_connected();  // ASCOM: properties throw NotConnected when
                              // disconnected — even the single-mode early return
                              // below must not short-circuit that (matches the setter)
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         std::vector<ReadoutModeSpec> specs;
         int cur_cg = 0;
         bool cur_hfw = false;
@@ -767,7 +768,7 @@ public:
         // NotConnected here rather than silently succeeding on the early-return.
         ensure_connected();
 
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         // Derive the spec, validate the handle, and apply the CG/HFW writes with
         // mutex_ + readout_mutex_ held together, reading handle_ AND the mode list
         // from ONE connection snapshot (both off camera_info_/handle_ under mutex_).
@@ -840,14 +841,14 @@ public:
 
     double get_set_ccd_temperature() const override {
         ensure_connected();
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         int t = with_handle([&](HToupcam h) { return sdk.get_tec_target_deciC(h); });
         return static_cast<double>(t) / 10.0;
     }
     void set_set_ccd_temperature(double temperature) override {
         ensure_connected();
         int deci = static_cast<int>(std::lround(temperature * 10.0));
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         with_handle([&](HToupcam h) { sdk.put_tec_target_deciC(h, deci); });
     }
 
@@ -889,7 +890,7 @@ public:
         case 2: dir = ToupGuideDirection::East;  break;
         case 3: dir = ToupGuideDirection::West;  break;
         }
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         with_handle([&](HToupcam h) { sdk.pulse_guide(h, dir, static_cast<unsigned>(duration)); });
         // Cancel + join any prior timer (fast — the cancel wakes it), then start a
         // fresh joinable one. On cancel the old timer leaves pulse_guiding_ alone so
@@ -939,7 +940,7 @@ public:
         // Lock order: exposure_lifecycle_mutex_ -> mutex_ (all locks below nest).
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
 
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         // Snapshot the handle for the exposure thread below (line ~1011). The
         // thread's use is safe because stop_exposure_thread() joins it before any
         // set_connected(false) can Toupcam_Close the handle (both under
@@ -1085,7 +1086,7 @@ public:
 
         exposure_thread_ = std::thread([this, handle, exposure_us, active_bin, active_num_x, active_num_y, roi_x, roi_y,
                                         roi_w, roi_h, dirty_format, dirty_roi]() {
-            auto& sdk_local = ToupTekSDKWrapper::instance();
+            auto& sdk_local = sdk_;
             // Track which reconfigure stages actually completed, so the catch
             // re-marks ONLY the stage that failed — re-marking an
             // already-applied stage would trigger a spurious stream restart on
@@ -1214,7 +1215,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             if (handle_) {
                 try {
-                    ToupTekSDKWrapper::instance().stop(handle_);
+                    sdk_.stop(handle_);
                 } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
                 }
             }
@@ -1236,6 +1237,10 @@ public:
     }
 
 private:
+    // Injected SDK seam (issue #104): production passes the singleton
+    // wrapper; tests pass a scripted fake. Reference outlives the driver
+    // (singleton, or test-scoped fake created before the driver).
+    ToupTekSDK& sdk_;
     int device_number_;
     int camera_index_;
     HToupcam handle_;
@@ -1424,7 +1429,7 @@ private:
     }
 
     int offset_max_value() const {
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         // handle_ and camera_info_.bit_depth_max read together under one mutex_ hold
         // (via with_handle), so the SDK read uses a live handle and a consistent
         // bit depth.
@@ -1538,7 +1543,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             if (handle_) {
                 try {
-                    ToupTekSDKWrapper::instance().stop(handle_);
+                    sdk_.stop(handle_);
                 } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
                 }
             }
@@ -1554,7 +1559,7 @@ private:
     void preload_camera_info() {
         std::lock_guard<std::mutex> lock(mutex_);
         try {
-            auto cameras = ToupTekSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
                 camera_info_valid_ = true;
@@ -1568,7 +1573,7 @@ private:
     void refresh_cached_camera_info_if_needed() {
         if (connected_.load()) return;
         try {
-            auto cameras = ToupTekSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
@@ -1690,7 +1695,11 @@ private:
 };
 
 std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index) {
-    return std::make_unique<ToupTekCameraDriver>(device_number, camera_index);
+    return create_touptek_camera(device_number, camera_index, ToupTekSDKWrapper::instance());
+}
+
+std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index, ToupTekSDK& sdk) {
+    return std::make_unique<ToupTekCameraDriver>(device_number, camera_index, sdk);
 }
 
 } // namespace alpacacore::vendor::touptek

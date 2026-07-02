@@ -49,8 +49,9 @@ struct ThermalElement {
 
 class ToupTekThermalSwitchDriver : public SwitchDriver {
 public:
-    ToupTekThermalSwitchDriver(int device_number, int camera_index)
-        : device_number_(device_number),
+    ToupTekThermalSwitchDriver(int device_number, int camera_index, ToupTekSDK& sdk)
+        : sdk_(sdk),
+          device_number_(device_number),
           camera_index_(camera_index),
           camera_name_("ToupTek Camera"),
           connected_(false) {}
@@ -124,7 +125,7 @@ public:
             return;
         }
 
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         if (connected) {
             auto cameras = sdk.enumerate_cameras();
             if (cameras.empty()) {
@@ -280,7 +281,7 @@ public:
     // verified handle_ is non-null (so the read is serialised against a
     // concurrent disconnect/close).
     int read_element_value_locked(const ThermalElement& element) const {
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         switch (element.kind) {
             case ThermalElementKind::DewHeater:
                 return sdk.get_heat(handle_);
@@ -298,7 +299,7 @@ public:
     // trivially in range). Shared by set_switch and set_switch_value so both
     // resolve-and-write under a single lock (no cross-call TOCTOU).
     void write_element_value_locked(const ThermalElement& element, long value_long) {
-        auto& sdk = ToupTekSDKWrapper::instance();
+        auto& sdk = sdk_;
         switch (element.kind) {
             case ThermalElementKind::DewHeater:
                 sdk.put_heat(handle_, static_cast<int>(value_long));
@@ -434,7 +435,7 @@ private:
         return elements_[static_cast<std::size_t>(id)];
     }
 
-    void build_elements_locked(ToupTekSDKWrapper& sdk, HToupcam handle, const ToupCameraInfo& info) {
+    void build_elements_locked(ToupTekSDK& sdk, HToupcam handle, const ToupCameraInfo& info) {
         elements_.clear();
         if (info.supports_heat) {
             int heat_max = sdk.get_heat_max(handle);
@@ -561,6 +562,8 @@ private:
         }
     }
 
+    // Injected SDK seam (issue #104); see touptek_sdk_wrapper.h.
+    ToupTekSDK& sdk_;
     int device_number_;
     int camera_index_;
     std::string camera_id_;
@@ -590,7 +593,11 @@ private:
 };
 
 std::unique_ptr<SwitchDriver> create_touptek_thermal_switch(int device_number, int camera_index) {
-    return std::make_unique<ToupTekThermalSwitchDriver>(device_number, camera_index);
+    return std::make_unique<ToupTekThermalSwitchDriver>(device_number, camera_index, ToupTekSDKWrapper::instance());
+}
+
+std::unique_ptr<SwitchDriver> create_touptek_thermal_switch(int device_number, int camera_index, ToupTekSDK& sdk) {
+    return std::make_unique<ToupTekThermalSwitchDriver>(device_number, camera_index, sdk);
 }
 
 }  // namespace alpacacore::vendor::touptek

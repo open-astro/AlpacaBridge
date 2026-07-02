@@ -602,6 +602,25 @@ Every new driver **must** ship with at least the following test cases. Use the e
 
 6. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). The automated catch for the two silent-data-loss classes described in [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors). Model it on the existing ToupTek AFW filter-wheel round-trip test.
 
+### Hardware-free driver tests via the SDK seam (ToupTek pattern — extend to other vendors)
+
+The ToupTek drivers take the SDK through the abstract `ToupTekSDK` interface
+(`touptek_sdk_wrapper.h`): production factories pass the `ToupTekSDKWrapper`
+singleton; every factory has an overload taking a `ToupTekSDK&` that tests use
+to inject the scripted `FakeToupTekSDK` (`tests/fake_touptek_sdk.h` — throws
+from any named call, canned enumerations, ref-counted open/close counting,
+scripted wheel-position sequences). This makes the highest-risk paths —
+error/throw cleanup, ref-count balance, reconnect, enumeration index math —
+unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
+
+- New ToupTek driver code must reach the SDK only through the injected `sdk_`
+  member, never `ToupTekSDKWrapper::instance()` directly.
+- A connect-path or cleanup fix in a ToupTek driver should come with a fake-SDK
+  test reproducing the failure (throw from the exact call that regressed).
+- When touching another vendor's wrapper significantly, adopt the same seam
+  shape there (one abstract interface + factory overload + scripted fake) —
+  the reusable pattern from issue #104.
+
 ### Test CMake Integration
 
 When adding a test file for a new vendor device:
