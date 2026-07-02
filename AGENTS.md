@@ -33,6 +33,15 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 - Core/driver layers should avoid heavy framework dependencies.
 - License headers must remain SSPL v1 and unmodified in all source files.
 
+## Units and Behavior Conventions
+
+- Exposure: seconds
+- Angles: degrees
+- RA: hours
+- Dec: degrees
+- Pixel size: microns
+- Time: UTC with `std::chrono`
+
 ## Target Architecture
 
 - **Linux arm64 only** (ARMv8 — Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate). amd64/x86_64 is no longer supported, built, packaged, or validated. CMake, `debian/rules`, `build_and_run.sh`, and `install_alpaca_service.sh` all hard-fail on non-arm64 hosts.
@@ -127,10 +136,10 @@ The rules are vendor-agnostic; do them in the driver from the start.
   otherwise throws `NotConnected` when disconnected (no early-return that skips it).
 
 **Config round-trip (silent data loss on save)**
-- Every persisted field must be `copy_if_present`-ed **per device type** in
-  `sanitize_device_config` (`router.cpp`) — anything unlisted is dropped on save.
-  Every non-ZWO web-UI form field `name` must be vendor-prefixed or it collides with
-  ZWO's bare name in `FormData` (see [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors)).
+- Every persisted field allowlisted per device type in `sanitize_device_config`, every
+  non-ZWO form field `name` vendor-prefixed — the full rules live in ONE place:
+  [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors).
+  The round-trip test (Required Test Case #6) is the automated catch.
 
 > The connection-thread + `shutting_down_` pattern is copy-pasted across ~26
 > drivers; the four ToupTek drivers have the guard, the rest still need it —
@@ -222,6 +231,66 @@ connect/open path — the fd is typically opened `O_NONBLOCK`, so `connect_seria
 must `clear_nonblocking()` after `tcsetattr` (not just the probe), or reads ignore
 `VMIN`/`VTIME` and `write_all` fails on `EAGAIN`. Use the **same abort-on-failure
 pattern** (`close(fd); return false/""`) at every call site.
+
+### Camera ROI alignment (all camera vendors)
+
+Every camera SDK constrains ROI geometry, and the pattern is the same everywhere:
+**keep the client-requested values for the Alpaca interface, align down for the SDK
+call, and pad outputs if needed** — ConformU's read-back checks must see the requested
+geometry. Per-SDK constraints (the only vendor-specific part): ZWO width%8 / height%2
+after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek even
+sensor-resolution width/height/offset (see the ToupTek odd-bin-factor note for the
+3×3 subtlety).
+
+### FilterWheel semantics (all vendors)
+
+- **`Position == -1` IS the ASCOM "moving" sentinel.** SDKs that report `-1` while in
+  motion (ToupTek AFW) or a distinct moving state (Player One `PW_ERROR_IS_MOVING`)
+  map directly onto it — pass it through; don't invent a separate is-moving flag, and
+  never translate the SDK's moving-read into an exception on the read path.
+- **Names must be non-empty** — default `"Filter 1..N"`; names and focus offsets are
+  settable while disconnected.
+- **DeviceState includes operational fields only** (e.g. `Position`); omit `Connected`
+  for ConformU compatibility.
+
+### GPIO power-switch / soft-PWM drivers (general rules)
+
+All GPIO 12V power-port Switch drivers (ZWO ASIAIR Pro / Plus CM4 / Plus RK3568,
+ToupTek StellaVita, iOptron iMate, and any future board) share these rules; the vendor
+notes carry only the pin map and per-board deltas.
+
+- **libgpiod v2 only** (`libgpiod-dev (>= 2.0)`, `libgpiod3` runtime): one
+  `gpiod_line_request*` owns all lines together; values go through
+  `gpiod_line_request_set_value`. Never port back to the v1 per-line API. The daemon
+  user needs `gpio`-group access to the chip/char device via a udev rule.
+- **Boot-high preserve**: these boards drive the DC ports HIGH at boot
+  (`gpio=...=op,dh[,pu]`), so attached gear is powered before userspace runs. The
+  wrapper requests lines with an initial value of high and defaults its cached state
+  to "on" — connecting the driver must not glitch power.
+- **Never power-cycle on disconnect**: `close()` releases the lines without driving a
+  boolean line low; a PWM port first stops its worker and drives a defined steady
+  level (duty > 0 ⇒ high). Users who want a port off must set it off in the client
+  before disconnecting. Do NOT add a drive-low-on-close path without making it opt-in
+  config — it would silently flip the policy for everyone who upgrades. Documented
+  user-facing in [`AlpacaCore/PowerPorts.md`](AlpacaCore/PowerPorts.md).
+- **Userspace soft-PWM, per-port worker threads** (`sleep_until` bit-bang): hardware
+  or DMA PWM is board-specific and unavailable/unreachable on every board we ship, so
+  userspace toggling is the standard mechanism. Steady-state 0%/100% skips the
+  per-period syscall. Every line write checks the return code — on failure, log at
+  ERROR and set the per-port stop flag so the thread exits cleanly instead of looping
+  while the ASCOM API reports success. Two-phase shutdown: signal stop under the
+  mutex, join outside it, release/close back under it (the classic
+  join-under-the-same-mutex deadlock otherwise).
+- **PWM frequency is the lever, not load type** — a flat panel's internal LED driver
+  smooths a too-fast chop into plain on/off (a panel that "won't dim" at 1 kHz dims
+  fine at 50 Hz); resistive dew heaters dim at any frequency; regulated gear
+  (cameras/mounts) stays on/off regardless. The default is **per-driver**, verified
+  against the stock firmware's actual value or on real hardware — never re-derived
+  from bench psychoacoustics: ASIAIR Pro/CM4 1 kHz, ASIAIR Plus RK3568 50 Hz, iMate
+  50 Hz, StellaVita 100 Hz.
+- **Read-only pass-through ports** (e.g. iMate DC3): writes throw `NotImplemented`
+  *before* the connection check, so the static capability holds while disconnected
+  and is unit-testable without hardware.
 
 ### Device firmware / SDK version: web UI only, never `DriverInfo`
 
@@ -398,8 +467,9 @@ the JS and C++ conditions in step (both layers run the same rule).
   labels where known). Known lineups: ZWO EFW 5/7/8; Player One Phoenix Wheel 5/7/8
   (PW5/PW7/PW8).
 - Use unique, vendor-prefixed form field `name`s (e.g. `playerOneFilterwheelIndex`,
-  `playerOneFilterNames`) — generic names collide in FormData with other vendors'
-  hidden-but-enabled fields (ZWO's `filterwheelIndex` shadows any later duplicate).
+  `playerOneFilterNames`) — the
+  [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors)
+  FormData-collision rule.
 - When editing an existing device, populate the textarea from `config.filterNames` and
   call the instance's `syncSlotsFromTextarea()` so the dropdowns reflect the saved names.
 
@@ -458,6 +528,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   - `200` — request was interpreted and reached the driver. Driver exceptions (NotImplemented, InvalidValue, NotConnected, etc.) ride in the JSON `ErrorNumber`/`ErrorMessage` fields with a `200`. `apply_error_status` exists to keep these at 200 — never downgrade a driver error to 4xx/5xx.
   - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, and unregistered device number. A genuinely unroutable URL (no device/management match) stays 404.
   - `500` — unexpected internal error only.
+- **The Alpaca `Value` is structured JSON, never a re-parsed string.** `AlpacaResponse::value` is `std::optional<nlohmann::json>` and `to_json` emits it verbatim. Handlers assign the real type directly — scalar, string, array, or object (e.g. `alpaca_response.value = actions;` for `SupportedActions`, **not** `actions.dump()`; `make_success_response(..., gains)` where `gains` is a `nlohmann::json` array). Do NOT serialize a structured payload to a string and rely on it being re-parsed downstream. The old `to_json` ran `json::parse()` on every string `Value` and substituted the result if it parsed — which (a) corrupted scalar string properties whose text is valid JSON (`"12345"` → number, `"true"` → bool, wrong ASCOM type on the wire) and (b) forced every array/object endpoint to round-trip through `.dump()`. That heuristic bit `SupportedActions`/`DeviceState` (every device) plus camera `Gains`/`Offsets`/`ReadoutModes`, telescope `AxisRates`, and filter `Names`/`FocusOffsets` — ConformU rejected the stringified arrays ("could not be converted to IList`<String>`"). The web UI mirror (`web/app.js parseResponseValue`) only parses a string that begins with `{`/`[`, never a bare scalar. The large camera image payload uses its own `build_image_*_payload` path and never goes through `Value`.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging
@@ -474,6 +545,16 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   - `/etc/alpacabridge/` — default config (`registered_devices.json`).
 - When adding a new vendor with shared libraries, update `debian/rules` `override_dh_auto_install` to copy them into `$(STAGING)/usr/lib/alpacabridge/`.
 - To cut a release, bump the `VERSION` file and date the `## [X.Y.Z]` CHANGELOG.md heading — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
+
+### Version bump policy (SemVer)
+
+`VERSION` and the `## [X.Y.Z] - UNRELEASED` CHANGELOG heading move together, per
+SemVer: **new driver/feature = minor bump; fix- or docs-only = patch; breaking change
+(dropped platform, config-schema break) = major.** The UNRELEASED section carries
+forward cumulatively until release — if it already sits at a minor bump and another
+driver lands, the number stays; a feature landing on a patch-level UNRELEASED raises
+it to the next minor. `/commit` and `/submit-pr` enforce this; it is documented here
+so a driver-building agent bumps correctly without them.
 
 ## Testing Requirements
 
@@ -519,7 +600,7 @@ Every new driver **must** ship with at least the following test cases. Use the e
    - Switches: `get_max_switch`, invalid switch ID handling.
    - Rotators: `get_can_reverse`, device state telemetry.
 
-6. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). This is the automated catch for the two recurring silent-data-loss classes: `sanitize_device_config` dropping an un-allowlisted field, and a web-UI `FormData` name collision. Model it on the existing ToupTek AFW filter-wheel round-trip test.
+6. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). The automated catch for the two silent-data-loss classes described in [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors). Model it on the existing ToupTek AFW filter-wheel round-trip test.
 
 ### Test CMake Integration
 
@@ -549,18 +630,12 @@ When adding a test file for a new vendor device:
 - Web portal exposes `GET /management/v1/logfiles`, `GET /management/v1/logfiles/{name}[?download=1]`, and `DELETE /management/v1/logfiles/{name}`. Filenames are validated against the daily pattern to prevent path traversal. `util::read_log_file` enforces a 10 MiB per-request cap; web viewer warns and suggests download above 5 MiB.
 - Log level set via `POST/PUT /management/v1/loglevel` is persisted to `config/runtime_state.json` and reapplied on the next start (overrides `default.yaml`'s `logging.level`). Delete that file to fall back to the YAML default. Persistence failures are logged at WARNING and never block the API response.
 - Alpaca-style management responses (including the new logfile endpoints) return HTTP 200 even when `ErrorNumber != 0` — clients must inspect the body, not the HTTP status.
-- **The Alpaca `Value` is structured JSON, never a re-parsed string.** `AlpacaResponse::value` is `std::optional<nlohmann::json>` and `to_json` emits it verbatim. Handlers assign the real type directly — scalar, string, array, or object (e.g. `alpaca_response.value = actions;` for `SupportedActions`, **not** `actions.dump()`; `make_success_response(..., gains)` where `gains` is a `nlohmann::json` array). Do NOT serialize a structured payload to a string and rely on it being re-parsed downstream. The old `to_json` ran `json::parse()` on every string `Value` and substituted the result if it parsed — which (a) corrupted scalar string properties whose text is valid JSON (`"12345"` → number, `"true"` → bool, wrong ASCOM type on the wire) and (b) forced every array/object endpoint to round-trip through `.dump()`. That heuristic bit `SupportedActions`/`DeviceState` (every device) plus camera `Gains`/`Offsets`/`ReadoutModes`, telescope `AxisRates`, and filter `Names`/`FocusOffsets` — ConformU rejected the stringified arrays ("could not be converted to IList`<String>`"). The web UI mirror (`web/app.js parseResponseValue`) only parses a string that begins with `{`/`[`, never a bare scalar. The large camera image payload uses its own `build_image_*_payload` path and never goes through `Value`.
-
-## Units and Behavior Conventions
-
-- Exposure: seconds
-- Angles: degrees
-- RA: hours
-- Dec: degrees
-- Pixel size: microns
-- Time: UTC with `std::chrono`
 
 ## Vendor-Specific Notes
+
+Vendor notes contain **vendor specifics and deltas only** — general rules (concurrency,
+ROI alignment, GPIO/soft-PWM, FilterWheel semantics, config round-trip) live in the
+sections above. If a rule would apply to a second vendor, it belongs up there, not here.
 
 ### ZWO
 
@@ -568,7 +643,7 @@ Devices: Camera, FilterWheel, Focuser (EAF), Rotator, Switch (dew heater, ASIAIR
 
 SDK locations: `AlpacaCore/external/ZWO/ASI_Camera_SDK/`, `EAF/`, `EFW/`, `CAA/`, `AM/`. The ASIair Pro switch driver does not use an SDK — it talks directly to the on-board Pi 4 GPIO via libgpiod v2.
 
-- ROI sizing rules: width must be a multiple of 8 and height a multiple of 2 after binning. Keep requested sizes for Alpaca, align effective sizes down for SDK calls, and pad outputs if needed.
+- ROI divisors: width%8, height%2 after binning (see [Camera ROI alignment](#camera-roi-alignment-all-camera-vendors)).
 - Dew heater is exposed as an Alpaca Switch device (not a camera action) and is camera-dependent.
 - ST4 pulse guiding should be enabled only when the SDK reports `has_st4_port`.
 - PulseGuide: do not apply permanent RA/Dec offsets based on expected guide motion. If synthetic offsets are needed, keep them temporary and clear after the pulse completes to avoid double-counting mount motion.
@@ -582,22 +657,19 @@ End-user setup instructions live in [AlpacaCore/PowerPorts.md](AlpacaCore/PowerP
 - **Port-to-GPIO mapping** (Pi 4 ASIair Pro): Port 1 = GPIO 12, Port 2 = GPIO 13, Port 3 = GPIO 26, Port 4 = GPIO 18 on `/dev/gpiochip0`. Confirmed against the stock app via direct probe. Note: the order in `/boot/config.txt` (18,12,13,26) is *not* the port order.
 - **Persistent state shape**: The stock ZWO `zwoair_imager` binary persists per-port settings in `~/.ZWO/ASIAIR_imager.xml` under the XPath `setting2/imager/gpio/port_N/` (zero-indexed: `port_0`..`port_3`). Each port has an `is_pwm` boolean flag. No per-port GPIO pin number is stored — the port-index→GPIO mapping is hard-coded in the stock binary. The AlpacaBridge driver makes the mapping configurable via `ports: [{gpio: N, pwm: bool}]` in the device config so it can be reused on other arm64 SBCs (e.g. RK3568-based ASIair Plus) with different wiring.
 - **App role abstraction is cosmetic**: the ASIair mobile app lets users assign a *role* to each port (Mount / Camera / Focuser / Dew Heater / Flat Panel / Other). Roles "Dew Heater" and "Flat Panel" enable software PWM dimming; the others are plain on/off. Under the hood every port can do either — the "role" is just a UI tag that sets the `is_pwm` flag. The AlpacaBridge driver does not model roles; it exposes 4 ASCOM Switch channels and lets users name them however they want.
-- **PWM mechanism**: Stock app uses pigpio's DMA-based software PWM at 40 kHz. AlpacaBridge uses **libgpiod v2** with per-port worker threads doing userspace soft-PWM (default 1 kHz, configurable). The lower frequency keeps the driver portable across non-RPi arm64 SBCs (DMA-based PWM is BCM-specific). Dew heaters are resistive thermal loads and don't care about audible PWM frequency — sub-1-kHz works fine.
-- **libgpiod version**: The driver targets libgpiod **v2** (`libgpiod-dev (>= 2.0)`, `libgpiod3` runtime). The v2 API uses a single `gpiod_line_request*` that owns all four lines together and routes value get/set through `gpiod_line_request_set_value(request, offset, GPIOD_LINE_VALUE_ACTIVE/INACTIVE)`. Do **not** port back to v1's per-line `gpiod_line_request_output` API — that would block Trixie and the upcoming RPi OS 2025 base. If you need to support older Bullseye/Bookworm hosts, install libgpiod 2.x from backports rather than dual-targeting.
+- **PWM delta**: the stock app uses pigpio's DMA-based soft-PWM at 40 kHz; this driver uses the standard userspace soft-PWM ([general rules](#gpio-power-switch--soft-pwm-drivers-general-rules)) at a 1 kHz default — dew heaters don't care about frequency, and it stays portable off-BCM.
+- **libgpiod v2** per the general rule; for older Bullseye/Bookworm hosts install libgpiod 2.x from backports rather than dual-targeting.
 - **OS architecture gate**: AlpacaBridge is arm64-only. The factory stock ASIair Pro ships **32-bit Raspbian Buster armv7l** — our `.deb` will not install on the stock OS. Deployment requires re-imaging with Raspberry Pi OS 64-bit (Bookworm or Trixie). Once re-imaged, the stock `zwoair_imager` / `pigpiod` daemons must be disabled because they hold the GPIO lines via pigpio and would prevent libgpiod from claiming them (EBUSY on `gpiod_chip_request_lines`).
-- **Default-on power-up surprise**: Because the kernel cmdline drives all four GPIO lines HIGH at boot before the AlpacaBridge daemon starts, gear plugged into the DC ports gets a few seconds of unmanaged 12V before the driver claims the lines. Users who want a different boot state must either edit `/boot/config.txt` to omit specific pins from the `gpio=` directive, or live with the brief default-on window. Document this in the install notes for users moving from stock ASIair to AlpacaBridge.
-- **Disconnect leaves lines in their last-driven state — by design**: `AsiairProtocolWrapper::close()` releases the `gpiod_line_request` without first driving the four lines LOW. With the boot-time `gpio=...=op,dh,pu` directive setting pull-ups, a released line stays HIGH (12V outputs remain powered). This is intentional — it mirrors the boot-time default-on behavior and avoids surprising users with a power cycle they didn't ask for when an ASCOM client disconnects (a common transient operation during a session). Users who want a port OFF on disconnect should set it OFF in the client first. Do **not** add a "drive LOW on close" path without making it opt-in via config, because it would silently flip the policy for everyone who upgrades. This trade-off is documented user-facing in [`AlpacaCore/PowerPorts.md`](../AlpacaCore/PowerPorts.md) under "Disconnect behavior".
-- **PWM worker error handling**: each `gpiod_line_request_set_value` call inside the PWM worker thread checks the return code; on failure it logs at ERROR level and sets the per-port `stop` flag so the thread exits cleanly. Without this, a kernel-side write failure (hardware fault, line revocation) would loop silently and the ASCOM API would keep reporting success while the hardware stayed dark. The PWM thread also caches the last-written value so steady-state 0% / 100% ports don't issue a kernel ioctl every period — important because at 1 kHz PWM that would be 1000 wasted syscalls per port per second.
+- **Boot default-on / disconnect**: general boot-high-preserve and never-power-cycle rules; with the boot-time pull-ups a released line stays HIGH. Users wanting a different boot state must edit the `/boot/config.txt` `gpio=` directive — document in install notes for users migrating from stock.
 - **Coexistence with stock app is not supported**: libgpiod and pigpio cannot share GPIO line ownership. The stock `pigpiod` daemon (started by `/etc/rc.local → /home/pi/ASIAIR/asiair.sh`) must be disabled, and the stock `zwoair_imager` must not run. There is no way to run AlpacaBridge alongside the stock ASIair app on the same device.
 
 #### ZWO ASIAIR Plus Switch (Pi CM4 variant — same libgpiod path as the Pro)
 
-The CM4-based ASIAIR Plus is electrically a Pi-class board and **reuses the existing libgpiod `asiair` driver unchanged** — there is no separate CM4 driver, wrapper, or test file. It is surfaced only as a router/UI alias. Confirmed against live hardware on 2026-05-31 (host `asiair.lan` / `192.168.1.171`, stock firmware).
+The CM4-based ASIAIR Plus is electrically a Pi-class board and **reuses the existing libgpiod `asiair` driver unchanged** — there is no separate CM4 driver, wrapper, or test file. It is surfaced only as a router/UI alias. Confirmed against live hardware on 2026-05-31 (host `astro.lan` / `192.168.1.171` — earlier notes said `asiair.lan`; the box was renamed, same device — stock firmware).
 
 - **Hardware reality**: Raspberry Pi Compute Module 4 (BCM2711). `/proc/device-tree/model` = "Raspberry Pi Compute Module 4 Rev 1.0"; `/dev/gpiochip0` = `pinctrl-bcm2711` (58 lines) — the same bank the Pro driver targets. The board also carries a PCA9685 at I²C `0x40` and an `asiair-overlay` referencing `pwm-2chan` / MCP23017 / AXP209, **but none of those drive the four DC power ports** — they are red herrings (LED/PMIC/expander). The DC ports are plain BCM GPIO.
 - **Port→GPIO mapping is IDENTICAL to the Pi 4 ASIAIR Pro**: Port 1 = GPIO 12, Port 2 = GPIO 13, Port 3 = GPIO 26, Port 4 = GPIO 18 on `/dev/gpiochip0`, active-high, default-on at boot. The stock `/boot/firmware/config.txt` directive is `gpio=12,13,18,26,5,6,16,17=op,dh` (the four DC ports plus four extra control lines 5/6/16/17 that the v1 driver ignores). So `default_asiair_pro_config()` is correct as-is for the CM4 Plus.
-- **How the mapping was verified (reusable method)**: set known states in the stock app (Port 1 ON, Port 2 dew heater 59%, Port 3 flat panel 34%, Port 4 ON), then correlate against the live BCM bank. `pigs gdc 13` returned **590**/1000 and `pigs gdc 26` returned **340**/1000 (exact duty match for ports 2 and 3); GPIO 12 and 18 read static-high; `raspi-gpio get` showed 12/13/26/18 as `func=OUTPUT pull=UP`. This is the same "drive a known config, read it back" approach used to pin down the RK3568 PWM frequency.
-- **Probing gotcha**: a single `pigs r <pin>` snapshot of a PWM pin races the duty cycle and frequently reads 0 — it caught all four DC pins "low" on the first pass and sent me chasing the PCA9685. Use `pigs gdc` (pigpio's tracked duty) or sample the level ~200× to recover the real duty before concluding anything about a pin.
+- **Mapping verified by "drive a known config, read it back"**: stock-app duty cycles matched `pigs gdc` exactly (59% → 590, 34% → 340). Gotcha: a single `pigs r <pin>` snapshot of a PWM pin races the duty cycle and often reads 0 — use `pigs gdc` or sample ~200× before concluding anything about a pin.
 - **Reuse wiring**: router accepts `switchType: "asiair-plus-picm4"` and routes it to `create_zwo_asiair_switch` / `default_asiair_pro_config()` with the same config sanitization as `asiair` (the `picm4` id was pre-reserved on the roadmap). Web UI adds an "ASIAIR Plus 12V Power Switch (Pi CM4)" dropdown option that reuses the Pro's per-port GPIO table. End-user setup lives in [AlpacaCore/PowerPorts.md](AlpacaCore/PowerPorts.md) under "ZWO ASIair Plus (Raspberry Pi CM4)".
 - **Same OS / coexistence constraints as the Pro**: stock OS is 32-bit `armv7l` (kernel `5.10.27-v7l`) — requires re-imaging to arm64; the stock `pigpiod` / `zwoair_imager` must be disabled (libgpiod vs pigpio line-ownership conflict, `EBUSY`).
 - **Model label (config-driven)**: the CM4 Plus reuses the Pro driver but reports the correct model. `AsiairSwitchConfig` carries a `model_name` (default `"ASIAIR Pro"`) that `get_name()`/`get_description()`/`get_driver_info()` interpolate; the router sets it to `"ASIAIR Plus (Pi CM4)"` for `switchType: asiair-plus-picm4`. So the same driver serves both the Pro and the CM4 Plus, differing only by this label. ConformU 4.3.0 re-validated 2026-06-04 on the live CM4 (host `astro.lan`, `192.168.1.171`) — 0 errors / 0 issues / 0 timing, reporting "ASIAIR Plus (Pi CM4)".
@@ -616,11 +688,10 @@ The CM4-based ASIAIR Plus is electrically a Pi-class board and **reuses the exis
 
 - **SET_LEVEL polarity is INVERTED from typical gpiod semantics.** Verified by reading `/sys/kernel/debug/gpio` after each ioctl AND physically observing a 12V flat panel on DC port 2: `SET_LEVEL(0)` resolves the line to `in hi` (input, pulled high externally) which **powers the panel ON**; `SET_LEVEL(1)` resolves to `out lo` (output driven low) which **cuts power**. So in the wrapper, ASCOM `value=1` (on) maps to ioctl `level=0`, and `value=0` (off) maps to ioctl `level=1`. This is non-standard — typical gpiod chips treat `level=1` as drive-high — and the cause is almost certainly a quirk in the closed pwm_gpio.ko's level-argument interpretation (likely `level=1` maps internally to `gpiod_direction_output_raw(0)` while `level=0` maps to `gpiod_direction_input`, judging by the kernel debug state transitions). Don't "fix" this by flipping it back — the previous polarity produced the inverted-feeling NINA behavior the user reported on 2026-05-30 ("when I flip it on it goes off") and connected gear lost power on every value-set transition.
 
-- **The kernel module's PWM mode is unreachable from documented ioctls — we do userspace soft-PWM instead.** SET_MODE(PWM) → ENABLE → SET_CONFIG returns success on every input (GET_CONFIG echoes back the period/duty we wrote), but the kernel's hrtimer dispatch branch never actually arms — `/proc/timer_list` shows no `pwm_gpio_timer_func` scheduled regardless of ordering, period, or duty. Disassembly of `pwm_gpio_misc_ioctl` shows the `hrtimer_init` + `hrtimer_start_range_ns` call sites do exist at file offset 0x7c0–0x7ec inside the misc-ioctl dispatcher, but they're gated by a condition we cannot trigger from userspace. The closed source means we can't confirm the gate definitively (the inventory's "GPL" license claim notwithstanding — try ZWO support if source-level fixes are ever needed). The DTS also confirms there's no hardware PWM controller mapped to the airplus-gpios pins on GPIO bank 4, so even if we triggered the hrtimer branch we wouldn't get hardware PWM — just kernel-side soft-PWM. So we do soft-PWM in **userspace** instead: each PWM-enabled port runs a `pwm_loop` worker thread that uses `sleep_until` to toggle `SET_LEVEL` at the configured frequency, with the polarity-inverted convention this kernel module uses. Confirmed against the extracted stock `zwoair_imager` daemon — the binary contains `pwm_gpio_start` symbols proving they take the same software-PWM approach. Default 50 Hz (matches the stock ZWO daemon's actual `period_ns = 20,000,000` config, read back live via `PWM_GPIO_GET_CONFIG` — see the comment block in `default_asiair_plus_rk3568_config`).
+- **The kernel module's PWM mode is unreachable from documented ioctls — we do userspace soft-PWM instead.** SET_MODE(PWM) → ENABLE → SET_CONFIG returns success on every input (GET_CONFIG echoes back the period/duty we wrote), but the kernel's hrtimer dispatch branch never actually arms — `/proc/timer_list` shows no `pwm_gpio_timer_func` scheduled regardless of ordering, period, or duty. Disassembly of `pwm_gpio_misc_ioctl` shows the `hrtimer_init` + `hrtimer_start_range_ns` call sites do exist at file offset 0x7c0–0x7ec inside the misc-ioctl dispatcher, but they're gated by a condition we cannot trigger from userspace. The closed source means we can't confirm the gate definitively (the inventory's "GPL" license claim notwithstanding — try ZWO support if source-level fixes are ever needed). The DTS also confirms there's no hardware PWM controller mapped to the airplus-gpios pins on GPIO bank 4, so even if we triggered the hrtimer branch we wouldn't get hardware PWM — just kernel-side soft-PWM. So we run the standard userspace soft-PWM ([general rules](#gpio-power-switch--soft-pwm-drivers-general-rules)) over `SET_LEVEL`, with this module's inverted polarity. Confirmed against the extracted stock `zwoair_imager` daemon (`pwm_gpio_start` symbols — same approach). Default 50 Hz = the stock daemon's actual `period_ns = 20,000,000`, read back live via `PWM_GPIO_GET_CONFIG` (see the comment in `default_asiair_plus_rk3568_config`); range 1–100,000 Hz via `pwmFrequencyHz`.
 
-- **Kernel module forensics worth saving.** `objdump -t /lib/modules/4.19.219/kernel/drivers/misc/pwm_gpio.ko | grep UND` shows the kernel APIs it imports: `devm_gpio_request_one`, `devm_pinctrl_get`, `gpiod_direction_input`, `gpiod_direction_output_raw`, `gpiod_get_raw_value`, `gpiod_set_raw_value`, `gpio_to_desc`, `hrtimer_*`, `misc_register`, `of_get_named_gpio_flags`, `pinctrl_lookup_state`, `pinctrl_select_state`, `platform_driver_register`. Author tag in the strings: `JerryCui` from `/home/jerry/rk3568/rk356x_linux_210520/pwm_gpio/ko/pwm_gpio.c`. License: GPL (so source MUST be available — try ZWO support if this driver ever needs source-level fixes). Useful runtime introspection: `cat /sys/kernel/debug/gpio` (line directions/levels), `cat /sys/firmware/devicetree/base/pinctrl/airplus_gpios/airplus-ports` (the pin map), `cat /sys/firmware/devicetree/base/airplus-gpios` (the platform binding).
-- **PWM is userspace soft-PWM** (same architecture as the Pi 4 ASIair Pro driver, just over a different kernel interface). Each PWM-enabled port spawns a `pwm_loop` worker thread at `open()` that uses `sleep_until` to toggle `SET_LEVEL` at the configured frequency. Threads are joined in `close()` (two-phase shutdown: signal stop under the mutex, join outside the mutex, close the fd back under the mutex — avoids the classic join-under-the-same-mutex deadlock). The kernel module's own hrtimer dispatch is reachable on stock ZWO (`/proc/timer_list` shows `pwm_gpio_timer_func` scheduled when the stock daemon runs) but the activation sequence is opaque to us, and GPIO bank 4 has no hardware PWM mux on the RK3568 anyway, so software PWM is the only viable path for our driver. Default frequency 50 Hz — confirmed against the stock ZWO daemon's actual config (`PWM_GPIO_GET_CONFIG` returns `period_ns = 20,000,000` = 50 Hz for every PWM-enabled port). Range 1–100,000 Hz still configurable via `pwmFrequencyHz`. Earlier defaults in this driver (1 kHz, then 200 Hz) came from indoor bench tests against a load whose own internal dimming controller created cascaded-PWM artifacts that don't show up against real astrophotography loads — when in doubt, mirror ZWO's actual value rather than re-derive it from bench psychoacoustics.
-- **Disconnect policy: same as the Pro**: `close()` releases our fd without first driving the lines LOW. The kernel module retains per-port mode + level across opens, so disconnecting from the ASCOM client does not power-cycle anything. Same rationale as the Pro — set ports OFF in the client *before* disconnecting if you want a cold release.
+- **Module forensics one-liners**: license GPL, author `JerryCui` — source must be obtainable from ZWO if kernel-side fixes are ever needed. Runtime introspection: `cat /sys/kernel/debug/gpio` (true line directions/levels), `/sys/firmware/devicetree/base/pinctrl/airplus_gpios/airplus-ports` (pin map).
+- **Disconnect**: general never-power-cycle rule — the kernel module retains per-port mode + level across opens, so releasing our fd power-cycles nothing.
 - **Permissions**: `/dev/pwm-gpio-misc` is created with root-only mode by the kernel module. We ship a udev rule (`AlpacaCore/external/ZWO/asiair-plus/99-zwo-asiair-plus.rules`) that grants the `gpio` group `0660` access. `build_and_run.sh` and the `.deb` postinst both install it via the existing rules-discovery loop in `external/`. The AlpacaBridge daemon user (and any human user wanting to poke at the device) must be in the `gpio` group.
 - **Kernel module hard dependency**: `pwm_gpio.ko` ships only with ZWO's stock kernel build (4.19.219). Re-flashes that swap to mainline RK3568 distros (Armbian, etc.) will **not** include it, and the driver will fail to open `/dev/pwm-gpio-misc`. The flashing tool tracked at `rk-flashtool` is the supported path; document any alternatives here as they emerge.
 - **Router config schema** (`switchType: "asiair-plus-rk3568"`): much simpler than the Pro because the kernel module fixes the index mapping. Fields are `devicePath` (default `/dev/pwm-gpio-misc`), `pwmFrequencyHz`, and a `ports[]` array where each entry is just `{ name, pwm }`. No `gpio` / `gpioChip` fields — they would be meaningless for this hardware.
@@ -652,7 +723,7 @@ SDK location: `AlpacaCore/external/SVBONY/lib/armv8/`, headers under `external/S
 - **Auto control writes**: `disable_auto_if_needed` reads the current value/auto flag and only writes back if currently auto, since some SVBONY models reject manual writes while auto is active with the same `SVB_ERROR_GENERAL_ERROR`.
 - **`SVBSetControlValue` retry**: The wrapper retries up to 3 times with a 50 ms backoff specifically on `SVB_ERROR_GENERAL_ERROR` to absorb genuinely transient hardware-op faults; deterministic rejections still surface after the retries are exhausted.
 - **Camera mode**: We use `SVB_MODE_NORMAL` (continuous video) and start/stop `SVBStartVideoCapture` per exposure. INDI's `indi-svbony` driver instead uses `SVB_MODE_TRIG_SOFT` with persistent video capture for stills — keep this in mind if a future SVBONY model needs trigger-mode behavior.
-- **Bin/ROI quirks**: ROI width must be a multiple of 8 and height a multiple of 2 (SDK requirement). The driver aligns down for SDK calls while preserving the requested values for the Alpaca interface. ROI updates and `FrameSpeedMode` writes are deferred to `start_exposure` because some SDK control writes take ~1.1 s and would otherwise blow ASCOM client timing budgets.
+- **Bin/ROI quirks**: divisors width%8, height%2 (see [Camera ROI alignment](#camera-roi-alignment-all-camera-vendors)). ROI updates and `FrameSpeedMode` writes are deferred to `start_exposure` because some SDK control writes take ~1.1 s and would otherwise blow ASCOM client timing budgets.
 - **`SVBRestoreDefaultParam`** is called immediately after `SVBOpenCamera` to clear any leftover state from a previous session, mirroring `indi-svbony`. Tolerate failure for older SDK builds that don't export the symbol.
 
 ### ToupTek
@@ -669,7 +740,7 @@ SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between
 - **Offset = black level**: ASCOM `Offset` maps to `TOUPCAM_OPTION_BLACKLEVEL`, gated on `TOUPCAM_FLAG_BLACKLEVEL`. Integer `OffsetMin`(0)/`OffsetMax` mode (no named `Offsets` list). `OffsetMax` scales with the current output bit depth — `31 << (bits - 8)` (`TOUPCAM_BLACKLEVEL8_MAX` = 31), where bits is 8 in 8-bit output mode else the camera's deep bit count — so it's computed in the wrapper (`get_blacklevel_max`) which reads `OPTION_BITDEPTH`. ToupTek was previously the only camera driver stubbing offset to `PropertyNotImplemented`; it now matches ZWO/SVBONY/Player One/QHY. **`FullWellCapacity` is NOT queryable from the SDK** — the driver returns the ADU saturation (`2^bitdepth − 1`), not electrons; the true full well is a sensor datasheet spec (IMX571: ~51 ke⁻ Normal, ~100 ke⁻ High Full Well), and the High Full Well ReadoutMode is what switches between them.
 - **Conversion gain + High Full Well → ReadoutModes**: the two ToupTek sensor-mode axes — conversion gain (`TOUPCAM_OPTION_CG`: 0=LCG, 1=HCG, 2=HDR-if-`FLAG_CGHDR`) and High Full Well (`TOUPCAM_OPTION_HIGH_FULLWELL`) — are folded into ONE flat ASCOM `ReadoutModes` list (ASCOM has only one readout-mode axis). `readout_mode_specs()` builds the list from capabilities: `HCG/LCG(/HDR)/High Full Well` when both, `HCG/LCG(/HDR)` for CG-only, `Normal/High Full Well` for HFW-only, else `Normal`. **Each spec fully specifies BOTH axes** (e.g. "High Full Well" = CG-LCG + HFW-on) so `get_readout_mode` round-trips to a stable index by reading both options. This is the idiomatic ASCOM home for hardware sensor modes (NINA shows a dropdown), NOT a custom Action. Both `get_readout_modes()` (the list) and `get_readout_mode()` (the current index) throw `NotConnected` while disconnected (ASCOM contract — keep them consistent), while `set_readout_mode` validates the range *before* the connection check so an out-of-range index is `InvalidValue` even disconnected. `preload_camera_info()` populates caps at *construction*, so a unit test must NOT assert a specific mode list (it depends on the attached camera); assert only the hardware-independent invariants — both getters throw `NotConnected` disconnected, and out-of-range `set_readout_mode` throws `InvalidValue`.
 - **Odd bin factors need an even ROI span (3×3 hang)**: `Toupcam_put_Roi` coordinates are in ORIGINAL (sensor) resolution for digital binning (SDK header note (a)), and the SDK requires **even** width/height/offset. The binned ROI span is `num × bin`; for an odd bin factor that product can be odd (full-frame 3×3 on the ATR2600M → 4167-tall), which `put_Roi` rejects — the exposure then hangs and `ImageReady` never sets (2×2/4×4 are always even, so only 3×3 fails ConformU). Fix in `start_exposure`: round the sensor span UP to even and the offset DOWN to even; digital binning floor-bins the padded span back to exactly `num` pixels (the +1 pad is `< bin` for any `bin ≥ 2`), so the buffer and reported `NumX`/`NumY` stay correct. **Crucially, derive the max binned dimension from the EVEN sensor size** (`(max_width & ~1) / bin`, not `max_width / bin`): the largest deliverable binned width is `floor(even_max/bin)`, so a client requesting `floor(raw/bin)` on an odd-width sensor can't ask for a span that, once even-rounded, exceeds the sensor and clamps back to fewer than `num` columns (a zero-filled black edge column). With the limit derived from the even size, `ceil_even(num×bin) ≤ even_max` always holds and the clamp is unreachable. Keep a small buffer margin as crash-insurance.
-- **Thermal switch (dew heater + fan + tail LED)** — `touptek_thermal_switch_driver.{h,cpp}`, mirroring `playerone_switch_driver`. Dew heater = `TOUPCAM_OPTION_HEAT` (level 0..`OPTION_HEAT_MAX`), fan = `TOUPCAM_OPTION_FAN` (speed 0..`model->maxfanspeed` — the fan max comes from the enumerated model, not an option), tail indicator LED = `TOUPCAM_OPTION_TAILLIGHT` (boolean on/off; astro users turn it off to avoid reflections/light leaks). Heater/fan are capability-probed via `TOUPCAM_FLAG_HEAT`/`_FAN`; the **tail LED has no capability flag**, so it is probed by *reading* `get_taillight` in a try/catch and only exposed if the camera accepts it. A camera exposing none of the three throws `NotImplemented`. `kMaxThermalElements` = 3 (the disconnected switch-ID bound). **The cooler is NOT a switch element** — it lives on the Camera interface (`CoolerOn`/`SetCCDTemperature`/`CoolerPower`), matching ASCOM and Player One. The `(touptek, switch)` router branch and the config sanitizer pick the backend from `switchType`: `"thermal"` (bound by `cameraIndex`) vs `"stellavita"` (default, GPIO). The thermal switch builds on any ToupTek host (camera SDK only); StellaVita still needs libgpiod. **Gotcha (bit us):** the web-UI switch-type `<select>` must use a *unique* form-field `name` (`touptekSwitchType`), NOT the bare `switchType` — ZWO's switch-type select already uses `name="switchType"` and submits even while its vendor section is hidden, so `formData.get('switchType')` returns ZWO's value and the ToupTek switch silently registers as StellaVita (fails to connect: no GPIO). The submit handler reads `touptekSwitchType` and maps it to `deviceData.switchType`. This is the same FormData-collision class as the index fields — it applies to *any* shared field name, discriminator selects included.
+- **Thermal switch (dew heater + fan + tail LED)** — `touptek_thermal_switch_driver.{h,cpp}`, mirroring `playerone_switch_driver`. Dew heater = `TOUPCAM_OPTION_HEAT` (level 0..`OPTION_HEAT_MAX`), fan = `TOUPCAM_OPTION_FAN` (speed 0..`model->maxfanspeed` — the fan max comes from the enumerated model, not an option), tail indicator LED = `TOUPCAM_OPTION_TAILLIGHT` (boolean on/off; astro users turn it off to avoid reflections/light leaks). Heater/fan are capability-probed via `TOUPCAM_FLAG_HEAT`/`_FAN`; the **tail LED has no capability flag**, so it is probed by *reading* `get_taillight` in a try/catch and only exposed if the camera accepts it. A camera exposing none of the three throws `NotImplemented`. `kMaxThermalElements` = 3 (the disconnected switch-ID bound). **The cooler is NOT a switch element** — it lives on the Camera interface (`CoolerOn`/`SetCCDTemperature`/`CoolerPower`), matching ASCOM and Player One. The `(touptek, switch)` router branch and the config sanitizer pick the backend from `switchType`: `"thermal"` (bound by `cameraIndex`) vs `"stellavita"` (default, GPIO). The thermal switch builds on any ToupTek host (camera SDK only); StellaVita still needs libgpiod. **Gotcha (bit us):** the web-UI switch-type `<select>` must use `name="touptekSwitchType"`, not the bare `switchType` — ZWO's hidden select wins the FormData collision and the ToupTek switch silently registers as StellaVita (fails to connect: no GPIO). The discriminator-select instance of the [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors) rule.
 - **AFW (Astro Filter Wheel) — option-based, no dedicated API**: unlike the AAF focuser (which has the `Toupcam_AAF` action interface), the filter wheel is driven through the generic `Toupcam_get/put_Option`. Slot count = `TOUPCAM_OPTION_FILTERWHEEL_SLOT` (read once at connect, like ZWO EFW's `slotNum` — never hardcode 5/7; the web UI's 5/7/Custom picker is config-only). Position = `TOUPCAM_OPTION_FILTERWHEEL_POSITION`: **get returns `-1` while in motion** — that maps *directly* onto the ASCOM FilterWheel `Position` "moving" sentinel, so pass it through unchanged (no extra is-moving flag needed). On set, the low byte is the target slot (mask with `& 0xff`) and `(val>>8)&0x1` is a direction bit (`0` = clockwise, `1` = "auto direction"). **The wheel MUST be homed at connect or it hunts and never lands** — the single most important thing about this driver, and it bit us hard: without homing, moves make the wheel tick/rock in place ("tick-tick pause, never completes a revolution"), especially right after a firmware update (the firmware loses its slot reference). The fix mirrors the **INDI `indi_toupwheel` reference driver's** connect sequence exactly: (1) `get_Option(FILTERWHEEL_SLOT)` read the slot count; (2) `put_Option(FILTERWHEEL_SLOT, slot)` write it straight back (re-applies the wheel's slot config; the option is `[RW]`); (3) `put_Option(FILTERWHEEL_POSITION, -1)` home/reset so the firmware references its slots (in INDI this is `SelectFilter(0)` → `put_Option(POSITION, SpinningDirection | (0-1))` = `-1`). `reset_filter_wheel` returns immediately but the firmware takes ~1.5 s to home — **wait for the home to settle (poll `get_filter_wheel_position` until it returns a non-negative slot; it reports `-1` while moving) BEFORE reporting `Connected`**, otherwise a `SetPosition` arriving during the home window aborts the cycle and leaves the slot reference unknown (moves then land on wrong slots — the exact failure homing was added to prevent). Once homed, a **single absolute move** (`put_Option(POSITION, position)`, 0-based, direction bit `0`) traverses to any slot fine — do NOT step one slot at a time, and do NOT set the direction bit to `1`/auto (that made single-slot moves oscillate in place on our hardware). ASCOM `Position` is already 0-based so no `±1` offset is needed (INDI carries a `-1`/`+1` only because it is internally 1-based). The wrapper hides these option constants inside `touptek_sdk_wrapper.cpp` (same as the camera `TOUPCAM_OPTION_*` calls) so driver code never includes `toupcam.h`.
 - **AFW driver mirrors ZWO EFW for filter semantics, ToupTek focuser for handle/connection**: `Names`/`FocusOffsets` normalization (length tied to slot count, single-string-to-chars expansion, default `Filter N` names) is copied verbatim from `zwo_filterwheel_driver.cpp`; the `HToupcam handle_` + async connection-thread lifecycle is copied from `touptek_focuser_driver.cpp`. Constructed by index or SDK id (string), same as the ToupTek focuser — not the ZWO `int wheel_id`.
 - **AAF API convention** (`Toupcam_AAF(handle, action, value, *out)`):
@@ -688,8 +759,8 @@ The StellaVita is a **Raspberry Pi CM4 (BCM2711)** observatory controller. Its f
 
 - **GPIO mapping (verified on hardware)**: the four DC ports are BCM GPIO **18 (Port 1), 10 (Port 2), 17 (Port 3), 4 (Port 4)** on `/dev/gpiochip0` (`pinctrl-bcm2711`), where the libgpiod line offset equals the BCM GPIO number. Source of truth is the board's `config.txt`: `gpio=18,10,17,4,9,11=op,dh,pu`.
 - **GPIO 9 and 11 are deliberately excluded**: that same config.txt line drives them high too, but they power the on-board **Cypress USB hub** — exposing them as switch channels would let a client cut power to every attached USB camera/focuser. Never add them to `default_stellavita_config()`.
-- **Boot-high preserve**: `op,dh` drives all ports high at boot. The wrapper requests each line with an initial value of high and defaults its cached state to "on", so connecting the driver does not glitch power on attached gear. `close()` releases the request without driving a boolean line low (PWM ports are first driven to a defined steady level) — disconnecting never cuts power.
-- **PWM frequency — 100 Hz is the StellaVita sweet spot**: tested best on hardware; it dims flat panels smoothly without the visible flicker some panels show at the iMate/ASIAIR 50 Hz default. `default_stellavita_config()` uses `pwm_frequency_hz = 100`. (Contrast: iMate and ASIAIR Plus default to 50 Hz — the right value is panel-dependent, so the default is per-driver, not global.)
+- **Boot-high preserve / never-power-cycle**: general rules (`op,dh,pu` boot directive).
+- **PWM frequency 100 Hz** (`default_stellavita_config()`): hardware-tested sweet spot — some panels flicker at the 50 Hz iMate/ASIAIR default.
 - All four ports are writable and boolean by default, each switchable to soft-PWM (0–100%) — unlike the iMate there is no always-on read-only pass-through port.
 
 ### Player One
@@ -699,7 +770,7 @@ Devices: Camera, FilterWheel (Phoenix Wheel), Switch (thermal: dew heater + fan 
 SDK locations: `AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/` (cameras) and `AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/` (Phoenix Wheel). These are **two unrelated SDK libraries** (`libPlayerOneCamera`, `libPlayerOnePW`) with separate C APIs — the filter wheel has its own wrapper (`playerone_pw_wrapper`, mirroring `zwo_efw_wrapper`) rather than extending `playerone_sdk_wrapper`. Both `.so` files ship in the `.deb` and via the install scripts.
 
 - **Guide direction mapping (camera)**: Player One ST4 guide config IDs map North=0/South=1/East=2/West=3 — already matching ASCOM order.
-- **ROI alignment (camera)**: SDK requires width%4==0, height%2==0. The driver aligns down for SDK calls and preserves the requested values for the Alpaca interface.
+- **ROI alignment (camera)**: divisors width%4, height%2 (see [Camera ROI alignment](#camera-roi-alignment-all-camera-vendors)).
 - **Wheel stores filter aliases and focus offsets on-device** (`POAGetPWFilterAlias`, `POAGetPWFocusOffset`, settable via Player One's own software). The filterwheel driver seeds `Names`/`FocusOffsets` from the wheel at connect; `filterNames` from config (set via `set_names`) takes precedence. The driver does not write aliases/offsets back to the wheel.
 - **Position while moving**: `POAGetCurrentPosition` returns `PW_ERROR_IS_MOVING` while the wheel is rotating. The wrapper's `get_position` checks `POAGetPWState` first and maps the moving window to `-1`, which is exactly the ASCOM `Position` contract — don't translate that SDK error into an exception on the read path.
 - **`PW_ERROR_FIRMWARE_ERROR`** means filter position and hole are misaligned; the SDK doc says to call `POAResetPW` (exposed as `reset_wheel` in the wrapper) to recover.
@@ -709,7 +780,7 @@ SDK locations: `AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0
 - **Dew heater / fan are runtime-only, by design (no persisted config)**: exposed via camera custom Actions (`GetHeaterPower`/`SetHeaterPower`/`GetFanPower`/`SetFanPower`) and a Switch device (`playerone_switch_driver`, "Player One Thermal Switch") with one multi-value element per control — the Switch is what gives NINA-style clients sliders. A connect-time `heaterPower`/`fanPower` config was implemented and deliberately removed: a persisted "heater on" set in December would silently re-apply every connect months later (wasted power, heat fighting the TEC, no client visibility). On power-up the camera uses its own firmware/SDK defaults; turning the heater on is an explicit per-session act. The cooler is intentionally NOT on the Switch — `CoolerOn`/`SetCCDTemperature` on the standard Camera interface are the single owner of cooling, same as ZWO.
 - **SDK wrapper open/close is reference-counted** (mirrors `zwo_sdk_wrapper`): the camera and thermal switch devices share one `POAOpenCamera` handle; the camera is physically closed only when the last user disconnects. Any new Player One device type that opens a camera must go through the wrapper's open/close, never raw SDK calls.
 - **Switch ID validation order**: out-of-range switch IDs throw `InvalidValue` even while disconnected (ASCOM contract, same as the ZWO dew heater switch). Since the element count is per-model (heater and/or fan) and only known after connect, the disconnected bound is the potential count and `MaxSwitch` reports 2 until connect refines it.
-- **Uranus-C PRO hardware validation (2026-06-12, IMX585)**: firmware powers up with heater at 10% / fan at a quiet default. Heater verified by calorimetry: at a held -10°C target, heater 0→100% raised steady-state cooler power ~34%→~44% (≈10 points of TEC headroom at full heater), symmetric on heater-off. Fan slider responds audibly and immediately; cooler power barely reacts to fan changes when headroom is ample (fan matters near max TEC load). Camera + switch connected concurrently in NINA on the shared refcounted handle.
+- **Uranus-C PRO validated on hardware (2026-06-12, IMX585)**: heater effect confirmed by calorimetry (full heater costs ≈10 points of TEC headroom at a held -10 °C target); firmware powers up with heater at 10%; camera + thermal switch ran concurrently in NINA on the shared refcounted handle.
 
 ### SynScan (SkyWatcher)
 
@@ -757,12 +828,10 @@ The iMate is iOptron's embedded astronomy computer (OrangePi 3 LTS / Allwinner H
 - **Switch mapping** (`MaxSwitch = 3`): switch 0 = `DC3 (always on)` (read-only, `CanWrite=false`, `GetSwitch` always true, writes throw `NotImplemented`); switch 1 = `DC1`; switch 2 = `DC2`. DC1/DC2 default boolean (min 0 / max 1 / step 1) and can each opt into soft-PWM (min 0 / max 100 / step 1) via the per-port `pwm_enabled` flag. DC3 is always boolean read-only.
 - **Discovery of the control path**: stock iMate drives the ports via the setuid WiringPi `gpio` tool (`/usr/local/bin/gpio mode/write/read`) from `/home/imate/imatepowerbox.sh`, and configures them as outputs driven high at boot via `dc-power-ports.service` (`gpio mode 2/6 out; gpio write 2/6 1`). There is also a Dart `tcp_server.service` (port 3000) used by iOptron's own apps, but it is not required (and was inactive on the test unit). We use libgpiod directly for consistency with the ZWO ASIAIR switch driver rather than shelling out.
 - **WiringPi → SoC GPIO mapping**: WiringPi pin numbers (2, 6) are NOT the libgpiod line offsets. Use `gpio readall` on the device to map wPi → GPIO (wPi 2 = GPIO 118, wPi 6 = GPIO 114). libgpiod addresses lines by SoC offset.
-- **Never power off on disconnect**: the wrapper defaults controllable ports to "on" at `open()` so connecting preserves the boot state, and `close()` only releases the request — it must not drive a boolean port low (that would cut power to attached gear). For a PWM port, `close()` stops the worker and first drives the line to a defined steady level (duty > 0 ⇒ high) before releasing, so a port left mid-cycle doesn't strand low. Note libgpiod releases the line on `close()`; keep AlpacaBridge connected for the session.
-- **Soft-PWM (opt-in per port)**: DC1/DC2 can be PWM-dimmed using the same per-port worker-thread bit-bang as `zwo_asiair_protocol_wrapper` (**50 Hz default**, 0–100% duty; steady-state 0/100 skips the ioctl). Driver mirrors ZWO: a PWM port reports max 100 and `set_switch` maps on→100. **Hardware findings (validated on the iMate):** (1) the GPIO→MOSFET stage chops cleanly, so soft-PWM is electrically viable; (2) **PWM frequency is the lever, not load type** — a flat panel has its own LED driver + input cap, so at ~1 kHz the cap smooths the chop and the driver gates on/off (we first saw a panel go on→off→on with no dimming at 1 kHz and wrongly concluded "regulated loads can't dim"), but at **~50 Hz the driver fully cycles each ~20 ms period and the panel visibly dims** (confirmed on the user's real panel). 50 Hz matches what ZWO drives the ASIAIR Plus at, hence the default. Resistive loads (dew heaters) dim at any frequency; truly regulated gear (cameras/mounts) stays on/off; (3) **no usable hardware PWM**: although `gpio readall` labels DC1 (wPi 2 / PD22) `PWM.0`, the stock WiringPi sunxi build rejects `gpio mode 2 pwm` ("doesn't support hardware PWM… use wiringPi pin 42"), and DC2 (PD18) isn't a PWM pin at all — so soft-PWM on both is the right call. A library-free bench test is a sysfs bit-bang (`/sys/class/gpio`, PD22=118/PD18=114) via a tiny C program.
-- **Read-only write ordering**: `set_switch`/`set_switch_value` on the read-only DC3 throws `NotImplemented` *before* the connection check, so the read-only contract holds even when disconnected (ConformU connects first in practice, but this keeps the static capability honest and unit-testable without hardware).
+- **Boot-high preserve / never-power-cycle**: general rules; note libgpiod releases the line on `close()`, so keep AlpacaBridge connected for the session.
+- **Soft-PWM (opt-in per port)**: general soft-PWM at a **50 Hz default** — this hardware is where the general "PWM frequency is the lever" finding was made. The GPIO→MOSFET stage chops cleanly, but there is **no usable hardware PWM**: `gpio readall` labels DC1 (wPi 2 / PD22) `PWM.0`, yet the stock WiringPi sunxi build rejects `gpio mode 2 pwm`, and DC2 (PD18) isn't a PWM pin at all. A PWM port reports max 100 and `set_switch` maps on→100. Library-free bench test: sysfs bit-bang (`/sys/class/gpio`, PD22=118 / PD18=114).
+- **DC3 read-only write ordering**: general read-only-port rule (`NotImplemented` before the connection check).
 - **Permissions**: the service user needs access to `/dev/gpiochip1` (root, or a `gpio`-style group with a udev rule). The OpenAstro image already creates a `gpio` group, adds the `alpacabridge` user to it, and installs a `KERNEL=="gpiochip[0-9]*", GROUP="gpio", MODE="0660"` udev rule — so on the shipped image this is already handled. (The old stock `gpio` tool sidestepped it via setuid; libgpiod does not.)
-- Build dependency: `libgpiod-dev` (>= 2.0), same as the ZWO ASIAIR switch.
-
 ### Celestron (NexStar)
 
 Devices: Telescope.
@@ -858,8 +927,6 @@ No external SDK — reads weather data from a local WeeWX weather station instan
 
 - On Linux, ensure udev rules in `AlpacaCore/external/**/*.rules` are installed. Some vendor SDKs (e.g. QHY) ship multiple copies of the same rules file under different subdirectories — deduplicate by basename when installing so only one copy lands in `/etc/udev/rules.d/`. Keep `build_and_run.sh` and `install_alpaca_service.sh` in sync; both contain the udev/firmware install logic.
 - ConformU logs live under `AlpacaCore/conformu/`.
-- Filter wheel DeviceState should only include operational fields (e.g., `Position`); omit `Connected` for ConformU compatibility.
-- Filter wheel Names must be non-empty; default to `"Filter 1..N"` and allow setting names/offsets while disconnected.
 
 ## Out of Scope Guardrails
 
