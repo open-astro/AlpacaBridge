@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 namespace alpacacore::util {
 
 /**
@@ -42,7 +44,7 @@ namespace alpacacore::util {
  */
 class ConsecutiveSettle {
 public:
-    enum class State { Pending, Settled, TimedOut };
+    enum class State : std::uint8_t { Pending, Settled, TimedOut };
 
     ConsecutiveSettle(int stable_reads_required, int max_polls)
         : stable_required_(stable_reads_required), max_polls_(max_polls) {}
