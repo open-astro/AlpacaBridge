@@ -168,7 +168,11 @@ public:
     }
 
     std::string get_driver_info() const override {
-        return "AlpacaCore QHY Camera Driver (SDK " + QHYSDKWrapper::instance().get_sdk_version() + ")";
+        // The SDK version cache is empty until the first connect (the wrapper
+        // must not touch libqhyccd pre-init); omit the suffix rather than
+        // rendering a malformed "(SDK )".
+        const auto ver = QHYSDKWrapper::instance().get_sdk_version();
+        return ver.empty() ? "AlpacaCore QHY Camera Driver" : "AlpacaCore QHY Camera Driver (SDK " + ver + ")";
     }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }

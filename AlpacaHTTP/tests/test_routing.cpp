@@ -59,12 +59,17 @@ nlohmann::json roundtrip_config(alpacahttp::Router& router, const nlohmann::json
                                 const std::string& device_type, int device_number) {
     const auto configure_response =
         route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
-    const auto configure_json = nlohmann::json::parse(configure_response.body());
-    if (configure_json.value("ErrorNumber", -1) != 0) {
+    // Non-JSON bodies (server error paths) yield a null return -- a clean
+    // EXPECT diagnostic -- rather than an uncaught parse_error.
+    const auto configure_json = nlohmann::json::parse(configure_response.body(), nullptr, false);
+    if (configure_json.is_discarded() || configure_json.value("ErrorNumber", -1) != 0) {
         return nlohmann::json();
     }
     const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
-    const auto configured_json = nlohmann::json::parse(configured_response.body());
+    const auto configured_json = nlohmann::json::parse(configured_response.body(), nullptr, false);
+    if (configured_json.is_discarded()) {
+        return nlohmann::json();
+    }
     // An error envelope has no "Value"; return null for a clean EXPECT
     // diagnostic instead of an uncaught json::out_of_range on the const
     // subscript below.
