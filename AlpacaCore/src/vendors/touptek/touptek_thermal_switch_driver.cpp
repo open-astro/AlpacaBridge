@@ -164,6 +164,11 @@ public:
         }
         camera_id_.clear();
         elements_.clear();
+        // Clear the serial so get_unique_id() falls back to the device-number
+        // form while disconnected instead of reporting the previous camera's
+        // SN-based ID (matches the camera driver's disconnect path; the failed-
+        // connect catch above already clears it).
+        serial_number_.clear();
         connected_.store(false);
     }
 
