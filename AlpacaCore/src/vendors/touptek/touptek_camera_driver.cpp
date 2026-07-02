@@ -629,13 +629,14 @@ public:
     // / IMX571). Cameras without it throw PropertyNotImplemented, as before.
     int get_offset() const override {
         ensure_connected();
-        ensure_blacklevel_supported();
         auto& sdk = ToupTekSDKWrapper::instance();
-        return with_handle([&](HToupcam h) { return sdk.get_blacklevel(h); });
+        return with_handle([&](HToupcam h) {
+            ensure_blacklevel_supported_locked();  // same mutex_ hold as the read
+            return sdk.get_blacklevel(h);
+        });
     }
     void set_offset(int offset) override {
         ensure_connected();
-        ensure_blacklevel_supported();
         auto& sdk = ToupTekSDKWrapper::instance();
         // Compute the max bound (which scales with the live bit depth), range-check,
         // and write the register under mutex_ + readout_mutex_ held together. The
@@ -651,6 +652,7 @@ public:
         if (!handle_) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
+        ensure_blacklevel_supported_locked();  // same mutex_ hold as the write
         const int max = sdk.get_blacklevel_max(handle_, camera_info_.bit_depth_max);
         if (offset < 0 || offset > max) {
             throw AlpacaException("Offset out of range", AlpacaError::InvalidValue);
@@ -660,12 +662,12 @@ public:
     }
     int get_offset_max() const override {
         ensure_connected();
-        ensure_blacklevel_supported();
-        return offset_max_value();
+        return offset_max_value();  // support checked inside, under the same lock
     }
     int get_offset_min() const override {
         ensure_connected();
-        ensure_blacklevel_supported();
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_blacklevel_supported_locked();
         return 0;  // TOUPCAM_BLACKLEVEL_MIN
     }
     std::vector<std::string> get_offsets() const override {
@@ -799,8 +801,12 @@ public:
         }
     }
     std::vector<std::string> get_readout_modes() const override {
-        ensure_connected();  // ASCOM: properties throw NotConnected when disconnected
-                             // (consistent with the get_readout_mode index getter)
+        // Deliberately NO connection check: every other camera driver (ZWO, QHY,
+        // SVBONY, Player One) returns a static/cached list while disconnected,
+        // and imaging clients (NINA/APT/SGPro) read ReadoutModes during device
+        // enumeration before connecting to populate dropdowns. Disconnected, the
+        // list derives from the preloaded camera_info_ caps (or just "Normal");
+        // the index getter/setter still require a live handle.
         const auto specs = readout_mode_specs();
         std::vector<std::string> names;
         names.reserve(specs.size());
@@ -1396,8 +1402,12 @@ private:
         return specs;
     }
 
-    void ensure_blacklevel_supported() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+    // Assumes mutex_ is held. Checked inside the SAME lock hold as the SDK
+    // call/return it guards: a take-and-release helper left a TOCTOU where a
+    // reconnect to a model without TOUPCAM_FLAG_BLACKLEVEL between the check and
+    // the body surfaced an SDK error (DriverException) instead of the expected
+    // PropertyNotImplemented.
+    void ensure_blacklevel_supported_locked() const {
         if (!camera_info_valid_ || !camera_info_.supports_blacklevel) {
             throw AlpacaException("Offset (black level) not supported by this camera",
                                   AlpacaError::PropertyNotImplemented);
@@ -1409,7 +1419,10 @@ private:
         // handle_ and camera_info_.bit_depth_max read together under one mutex_ hold
         // (via with_handle), so the SDK read uses a live handle and a consistent
         // bit depth.
-        return with_handle([&](HToupcam h) { return sdk.get_blacklevel_max(h, camera_info_.bit_depth_max); });
+        return with_handle([&](HToupcam h) {
+            ensure_blacklevel_supported_locked();  // same mutex_ hold as the read
+            return sdk.get_blacklevel_max(h, camera_info_.bit_depth_max);
+        });
     }
 
     void reset_exposure_state_locked() {

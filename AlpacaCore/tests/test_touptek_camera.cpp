@@ -142,12 +142,14 @@ TEST_CASE("ToupTek Camera Driver - Readout modes (conversion gain + High Full We
     // ReadoutModes fold the camera's conversion-gain (HCG/LCG/HDR) and High Full
     // Well capabilities into one flat list. The exact contents depend on the
     // camera attached to the test host (caps are preloaded at construction), so
-    // assert only hardware-independent invariants. Both the list (`get_readout_modes`)
-    // and the current-index getter throw NotConnected while disconnected (ASCOM
-    // contract); `set_readout_mode` validates the range BEFORE the connection check,
-    // so an out-of-range index is InvalidValue even disconnected. Connected mode
+    // assert only hardware-independent invariants. The LIST is readable while
+    // disconnected (never empty — at least "Normal"), matching every other camera
+    // driver: imaging clients enumerate ReadoutModes before connecting. The
+    // current-index getter needs live registers, so it throws NotConnected;
+    // `set_readout_mode` validates the range BEFORE the connection check, so an
+    // out-of-range index is InvalidValue even disconnected. Connected mode
     // toggles are exercised by ConformU.
-    require_alpaca_error([&]() { driver->get_readout_modes(); }, alpacacore::AlpacaError::NotConnected);
+    REQUIRE_FALSE(driver->get_readout_modes().empty());
     require_alpaca_error([&]() { driver->get_readout_mode(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_readout_mode(-1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_readout_mode(999999); }, alpacacore::AlpacaError::InvalidValue);
