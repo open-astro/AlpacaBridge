@@ -474,11 +474,11 @@ private:
     }
 
     void close_shared(HToupcam handle) {
-        for (auto& [id, h] : handles_by_id_) {
-            if (h == handle && ref_counts_[id] > 0) {
-                if (--ref_counts_[id] == 0) {
+        for (auto it = handles_by_id_.begin(); it != handles_by_id_.end(); ++it) {
+            if (it->second == handle && ref_counts_[it->first] > 0) {
+                if (--ref_counts_[it->first] == 0) {
                     ++physical_closes;
-                    handles_by_id_.erase(id);
+                    handles_by_id_.erase(it);  // iterator not touched afterwards
                 }
                 return;
             }

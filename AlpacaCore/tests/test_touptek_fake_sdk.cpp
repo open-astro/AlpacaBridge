@@ -18,6 +18,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
+#include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
 #include "catch2_compat.h"
@@ -133,5 +134,32 @@ TEST_CASE("ToupTek thermal switch - failed connect releases the shared open", "[
     CHECK(thermal->get_connected() == false);
     CHECK(fake.ref_count("fake-cam-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
+    CHECK(fake.underflow_closes == 0);
+}
+
+TEST_CASE("ToupTek focuser - connect-path failure releases the shared open", "[touptek][focuser][unit][fakesdk]") {
+    FakeToupTekSDK fake;
+    FakeToupTekSDK::ToupFocuserInfo focuser;
+    focuser.id = "fake-aaf-0";
+    focuser.name = "FakeAAF";
+    focuser.model_name = "AAF";
+    fake.focusers.push_back(focuser);
+    // Throw from the connect-time range discovery (MaxStep/backlash probing):
+    // the open must be balanced on the way out, same as the camera path.
+    fake.throw_from.insert("aaf_range");
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", fake);
+    CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+    CHECK(driver->get_connected() == false);
+    CHECK(fake.ref_count("fake-aaf-0") == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
+
+    // Recovery: clear the fault and the same driver connects cleanly.
+    fake.throw_from.clear();
+    driver->set_connected(true);
+    CHECK(driver->get_connected() == true);
+    CHECK(fake.ref_count("fake-aaf-0") == 1);
+    driver->set_connected(false);
+    CHECK(fake.ref_count("fake-aaf-0") == 0);
     CHECK(fake.underflow_closes == 0);
 }

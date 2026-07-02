@@ -293,7 +293,7 @@ public:
     // Streaming lifecycle ----------------------------------------------------
     void start_pull_mode(HToupcam handle, void (*event_callback)(unsigned event, void* ctx), void* ctx) override;
     void stop(HToupcam handle) override;
-    void put_trigger_mode(HToupcam handle, int mode); // 0=video, 1=software
+    void put_trigger_mode(HToupcam handle, int mode) override; // 0=video, 1=software
     void trigger(HToupcam handle, unsigned short n_frames) override;
     // Returns true if a frame was delivered within timeout_ms. Throws on
     // non-timeout errors. On success, actual_width/height carry the frame
@@ -313,7 +313,7 @@ public:
     // ROI / format / binning -------------------------------------------------
     ToupROIFormat get_roi(HToupcam handle) override;
     void put_roi(HToupcam handle, unsigned x, unsigned y, unsigned w, unsigned h) override;
-    void put_binning(HToupcam handle, int bin); // 1, 2, 3, 4...
+    void put_binning(HToupcam handle, int bin) override; // 1, 2, 3, 4...
     int get_binning(HToupcam handle) override;
     // 0 = 8-bit mode, 1 = 16-bit mode (subset of PIXEL_FORMAT). Reconfiguring
     // requires the stream to be stopped — the driver handles that.
