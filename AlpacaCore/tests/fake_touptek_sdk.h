@@ -20,6 +20,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace alpacacore::test {
@@ -42,6 +43,10 @@ namespace alpacacore::test {
  *
  * Not thread-hardened beyond a coarse recursive story: driver code already
  * serializes SDK access; tests drive one connect path at a time.
+ *
+ * LIFETIME: drivers hold a plain ToupTekSDK& — the fake MUST outlive every
+ * driver constructed on it. Declare the fake before the driver (locals
+ * destroy in reverse order); never stash a driver beyond the fake's scope.
  */
 class FakeToupTekSDK : public vendor::touptek::ToupTekSDK {
 public:
@@ -60,6 +65,9 @@ public:
     std::vector<ToupFilterWheelInfo> wheels;
     std::deque<int> wheel_position_script;  // consumed by get_filter_wheel_position
     int wheel_slot_count = 5;
+    // Per-(range_action, target_action) results for aaf_range; unlisted pairs
+    // return 100000 so range validation is testable per action.
+    std::map<std::pair<int, int>, int> aaf_range_script;
     bool taillight_supported = true;
 
     // --- observability -----------------------------------------------------
@@ -222,8 +230,20 @@ public:
     void get_size(HToupcam h, int& width, int& height) override {
         hit("get_size");
         require_open(h);
-        width = cameras.empty() ? 1920 : cameras.front().max_width;
-        height = cameras.empty() ? 1080 : cameras.front().max_height;
+        // Resolve the handle to ITS camera so multi-camera tests with
+        // differing sensor sizes read the right dimensions.
+        for (const auto& [id, handle] : handles_by_id_) {
+            if (handle != h) continue;
+            for (const auto& cam : cameras) {
+                if (cam.id == id) {
+                    width = cam.max_width;
+                    height = cam.max_height;
+                    return;
+                }
+            }
+        }
+        width = 1920;
+        height = 1080;
     }
     void get_final_size(HToupcam h, int& width, int& height) override {
         hit("get_final_size");
@@ -398,10 +418,11 @@ public:
         require_open(h);
         return aaf_values_[action];
     }
-    int aaf_range(HToupcam h, int, int, const char*) override {
+    int aaf_range(HToupcam h, int range_action, int target_action, const char*) override {
         hit("aaf_range");
         require_open(h);
-        return 100000;
+        auto it = aaf_range_script.find({range_action, target_action});
+        return it != aaf_range_script.end() ? it->second : 100000;
     }
 
     std::vector<ToupFilterWheelInfo> enumerate_filter_wheels() override {
@@ -478,6 +499,7 @@ private:
             if (it->second == handle && ref_counts_[it->first] > 0) {
                 if (--ref_counts_[it->first] == 0) {
                     ++physical_closes;
+                    ref_counts_.erase(it->first);
                     handles_by_id_.erase(it);  // iterator not touched afterwards
                 }
                 return;
@@ -523,6 +545,10 @@ private:
     int blacklevel_ = 0;
     int heat_ = 0;
     int fan_ = 0;
+    // ON matches real ATR2600M cold-start: the tail LED lights at power-up,
+    // which is why the thermal switch exposes it (users turn it OFF to avoid
+    // reflections/light leaks). A fake that boots dark would hide the
+    // driver's most common first action.
     int taillight_ = 1;
     std::map<int, int> aaf_values_;
     int wheel_position_ = 0;
