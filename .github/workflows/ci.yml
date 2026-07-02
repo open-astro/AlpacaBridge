@@ -112,26 +112,13 @@ jobs:
         run: |
           set -euo pipefail
           ver=2.2.4
-          # kernel.org's /pub/software tree has gone 404 before (2026-07-01),
-          # so fall back through mirrors that carry the byte-identical tarball.
-          # The pinned checksum below makes the transport irrelevant for
-          # integrity — any mirror serving a modified archive fails the check.
-          fetched=""
-          for base in \
-            "https://mirrors.edge.kernel.org/pub/software/libs/libgpiod" \
-            "https://www.mirrorservice.org/sites/ftp.kernel.org/pub/software/libs/libgpiod" \
-            "https://mirror.math.princeton.edu/pub/kernel/software/libs/libgpiod"; do
-            if curl -fsSL --retry 2 --max-time 120 "${base}/libgpiod-${ver}.tar.xz" \
-                 -o /tmp/libgpiod.tar.xz; then
-              fetched="yes"
-              break
-            fi
-            echo "download failed from ${base}, trying next mirror" >&2
-          done
-          test -n "$fetched"
-          # Pin a known-good checksum (matches kernel.org's published
-          # sha256sums) so a compromised mirror/CDN cannot substitute a
-          # modified archive.
+          # The tarball is VENDORED (AlpacaCore/external/libgpiod/ — see the
+          # README there): kernel.org removed old libgpiod point releases on
+          # 2026-07-01 and every mirror synced the deletion within hours,
+          # 404-ing this step twice in one day. No network fetch remains. The
+          # pinned checksum (kernel.org's published sha256) still gates the
+          # artifact, so a tampered in-repo tarball fails loudly.
+          cp "AlpacaCore/external/libgpiod/libgpiod-${ver}.tar.xz" /tmp/libgpiod.tar.xz
           echo "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod
@@ -285,26 +272,13 @@ jobs:
         run: |
           set -euo pipefail
           ver=2.2.4
-          # kernel.org's /pub/software tree has gone 404 before (2026-07-01),
-          # so fall back through mirrors that carry the byte-identical tarball.
-          # The pinned checksum below makes the transport irrelevant for
-          # integrity — any mirror serving a modified archive fails the check.
-          fetched=""
-          for base in \
-            "https://mirrors.edge.kernel.org/pub/software/libs/libgpiod" \
-            "https://www.mirrorservice.org/sites/ftp.kernel.org/pub/software/libs/libgpiod" \
-            "https://mirror.math.princeton.edu/pub/kernel/software/libs/libgpiod"; do
-            if curl -fsSL --retry 2 --max-time 120 "${base}/libgpiod-${ver}.tar.xz" \
-                 -o /tmp/libgpiod.tar.xz; then
-              fetched="yes"
-              break
-            fi
-            echo "download failed from ${base}, trying next mirror" >&2
-          done
-          test -n "$fetched"
-          # Pin a known-good checksum (matches kernel.org's published
-          # sha256sums) so a compromised mirror/CDN cannot substitute a
-          # modified archive.
+          # The tarball is VENDORED (AlpacaCore/external/libgpiod/ — see the
+          # README there): kernel.org removed old libgpiod point releases on
+          # 2026-07-01 and every mirror synced the deletion within hours,
+          # 404-ing this step twice in one day. No network fetch remains. The
+          # pinned checksum (kernel.org's published sha256) still gates the
+          # artifact, so a tampered in-repo tarball fails loudly.
+          cp "AlpacaCore/external/libgpiod/libgpiod-${ver}.tar.xz" /tmp/libgpiod.tar.xz
           echo "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592  /tmp/libgpiod.tar.xz" \
             | sha256sum -c -
           mkdir -p /tmp/libgpiod

@@ -49,6 +49,7 @@ Thumbs.db
 !external/SVBONY/**
 !external/ToupTek/**
 !external/PlayerOne/**
+!external/libgpiod/**
 
 # Vendor SDKs - exclude all files except documentation
 # Explicitly exclude .DS_Store files even in allowed directories
