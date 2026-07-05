@@ -107,7 +107,7 @@ public:
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect()) {
+        if (connected && consume_pending_disconnect(connected_.load())) {
             return;
         }
         if (connected == connected_.load()) {

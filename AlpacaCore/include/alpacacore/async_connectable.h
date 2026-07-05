@@ -72,7 +72,10 @@ namespace alpacacore {
  *    where it reads `connected_`:
  *        if (record_disconnect_if_connect_in_flight(connected_.load())) return;
  * 5. The set_connected(true) body, same position:
- *        if (consume_pending_disconnect()) return;  // newer disconnect wins
+ *        if (consume_pending_disconnect(connected_.load())) return;
+ *    (newer disconnect wins; consumed only when this is a REAL connect —
+ *    a no-op connect on an already-connected device must leave the flag
+ *    for the task tail, or the recorded disconnect is silently lost)
  * Rules 4/5 keep the driver's own `connected_` reads under the driver's own
  * mutex; the base's pending flag has a dedicated leaf mutex (lock order:
  * driver mutex -> pending flag mutex; never the reverse).
@@ -155,12 +158,26 @@ protected:
     /// mutex held, passing the current connected_ value read under it.
     /// Returns true if the disconnect was recorded against an in-flight
     /// connect and the caller should return without touching hardware.
+    ///
+    /// conn_task_ is re-read INSIDE pending_mutex_, which pairs with the task
+    /// tail publishing Idle BEFORE its pending-consume (also under
+    /// pending_mutex_): either this recorder wins the pending lock first and
+    /// the tail is guaranteed to see the flag, or the tail already consumed —
+    /// in which case Idle was published before it released the lock, this
+    /// re-read observes Idle, and we return false so the caller performs the
+    /// disconnect synchronously itself. No stale-flag window (the round-4
+    /// TOCTOU: check-then-record without the lock let a finishing tail slip
+    /// between, leaving a flag no task would ever honor).
     bool record_disconnect_if_connect_in_flight(bool connected_now) {
-        if (!connected_now && conn_task_.load() == kConnConnect) {
-            record_pending_disconnect();
-            return true;
+        if (connected_now) {
+            return false;
         }
-        return false;
+        std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+        if (conn_task_.load() != kConnConnect) {
+            return false;
+        }
+        pending_disconnect_ = true;
+        return true;
     }
 
     /// Unconditionally record a pending disconnect. For drivers with an extra
@@ -174,9 +191,23 @@ protected:
     }
 
     /// Connect-entry gate (driver obligation 5). Call with the driver state
-    /// mutex held. Returns true if a newer disconnect was pending — the
-    /// caller must return without connecting.
-    bool consume_pending_disconnect() {
+    /// mutex held, passing the current connected_ value read under it.
+    /// Returns true if a newer disconnect was pending AND this is a real
+    /// connect (device currently disconnected) — the caller must return
+    /// without connecting.
+    ///
+    /// A NO-OP connect (device already connected — possible whenever a client
+    /// calls Connect/Connected=true on a connected device) must NOT consume
+    /// the flag: it performs no hardware transition, so eating the flag here
+    /// silently loses the recorded disconnect (round-4 finding — the old
+    /// iOptron spawn-skip masked this; the sync setter path never had a
+    /// guard anywhere). Left un-consumed, the flag is honored by the task
+    /// tail's deferred disconnect (async path) or by the next real
+    /// transition, and the idempotency early-return keeps the no-op a no-op.
+    bool consume_pending_disconnect(bool connected_now) {
+        if (connected_now) {
+            return false;
+        }
         std::lock_guard<std::mutex> pending_lock(pending_mutex_);
         if (pending_disconnect_) {
             pending_disconnect_ = false;
@@ -210,6 +241,15 @@ private:
         // (the sync setter never held both locks at once), and a stale value
         // is benign: the deferred disconnect below is idempotent.
         const bool connected_now = connect && get_connected();
+        // Publish Idle BEFORE the pending-consume. Paired with the recorder
+        // re-reading conn_task_ under pending_mutex_, this closes the
+        // stale-flag TOCTOU: a recorder that wins pending_mutex_ first is
+        // guaranteed this consume sees its flag; a recorder that loses
+        // observes Idle (published before this lock was released) and falls
+        // back to disconnecting synchronously itself. Idle-before-deferred
+        // also keeps the deferred set_connected(false) below from being
+        // mistaken for another racing disconnect by the sync gate.
+        conn_task_.store(kConnIdle);
         bool need_disconnect = false;
         {
             std::lock_guard<std::mutex> pending_lock(pending_mutex_);
@@ -218,7 +258,6 @@ private:
                 need_disconnect = connected_now;
             }
         }
-        conn_task_.store(kConnIdle);
         if (need_disconnect) {
             try {
                 set_connected(false);

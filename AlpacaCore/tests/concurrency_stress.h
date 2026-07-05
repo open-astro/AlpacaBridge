@@ -155,6 +155,30 @@ inline void run_destruction_during_connect_stress(const std::function<std::uniqu
     }
 }
 
+/// Deterministic protocol check (PR #115 round 4): connect() on an ALREADY
+/// CONNECTED device spawns a no-op task; a disconnect racing it is recorded
+/// against that task and must still be honored — the no-op connect must not
+/// consume the pending flag (it performs no transition), leaving the task
+/// tail to run the deferred disconnect. A driver where the flag is eaten
+/// sits Connected until the deadline and fails the caller's assert.
+/// Returns the settled connected state; the caller asserts it is false.
+inline bool connected_then_connect_disconnect_settles_disconnected(
+    AlpacaDriver& driver, std::chrono::milliseconds settle_budget = std::chrono::seconds(10)) {
+    if (!settle_connected(driver, true)) {
+        return true;  // could not reach the precondition; surface as failure
+    }
+    driver.connect();     // no-op connect task on a connected device
+    driver.disconnect();  // recorded against the in-flight connect task
+    const auto deadline = std::chrono::steady_clock::now() + settle_budget;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!driver.get_connecting() && !driver.get_connected()) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return driver.get_connected();
+}
+
 /// Deterministic protocol check: a disconnect issued while a connect is in
 /// flight must never be dropped — the device must settle Disconnected.
 /// The deferred-disconnect tail runs AFTER the task publishes Idle (by

@@ -103,6 +103,18 @@ TEST_CASE("ToupTek camera - racing disconnect is never dropped", "[touptek][came
     CHECK(fake.ref_count("fake-cam-0") == 0);
 }
 
+TEST_CASE("ToupTek camera - disconnect racing a NO-OP connect is never dropped (round-4)",
+          "[touptek][camera][stress]") {
+    auto fake = make_fake_with_camera();
+    LockedToupTekSDK sdk(fake);
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, sdk);
+    // connect() on an already-connected device + immediate disconnect(): the
+    // no-op connect task must not eat the recorded disconnect.
+    CHECK(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver) == false);
+    CHECK(fake.ref_count("fake-cam-0") == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
+}
+
 TEST_CASE("ToupTek AFW - concurrent connect/disconnect/operate stress", "[touptek][filterwheel][stress]") {
     auto fake = make_fake_with_wheel();
     LockedToupTekSDK sdk(fake);

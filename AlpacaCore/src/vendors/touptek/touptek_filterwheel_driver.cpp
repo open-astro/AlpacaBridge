@@ -146,7 +146,7 @@ public:
                 // guards the async path — set_connected is a public sync entry too.)
                 return;
             }
-            if (consume_pending_disconnect()) {
+            if (consume_pending_disconnect(connected_.load())) {
                 // A disconnect arrived AFTER this connect was requested but before
                 // this thread acquired mutex_ (the spawner publishes the in-flight
                 // state first; acquiring mutex_ can also wait behind property
@@ -189,7 +189,7 @@ public:
                 lock.unlock();
                 const bool settled = wait_for_home(sdk, handle);
                 lock.lock();
-                if (consume_pending_disconnect()) {
+                if (consume_pending_disconnect(connected_.load())) {
                     // A set_connected(false) landed during the mutex-released homing
                     // poll. Honor it: close the just-opened handle and stay
                     // disconnected rather than publishing handle_/connected_. This is
@@ -230,7 +230,7 @@ public:
                 // homing: the connect failed, so the device already ends in the
                 // disconnected state that request wanted — and a stale flag must
                 // not abort the user's NEXT (retry) connect at its entry check.
-                consume_pending_disconnect();
+                consume_pending_disconnect(connected_.load());
                 throw;
             }
             connecting_homing_ = false;  // cleared under mutex_ on success
