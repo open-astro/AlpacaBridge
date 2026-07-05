@@ -69,8 +69,10 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 ### Driver concurrency & lifecycle (read before writing a driver)
 
 **Apply this checklist up front.** ConformU is single-threaded and catches *none*
-of the races below — only code review does, so every miss becomes a review round.
-The rules are vendor-agnostic; do them in the driver from the start.
+of the races below — code review plus the TSan concurrency stress suite do
+(`[stress]` tests under the `sanitizers-tsan` CI job / `RUN_TSAN=1` pre-flight,
+issue #101); a miss that neither catches becomes a review round. The rules are
+vendor-agnostic; do them in the driver from the start.
 
 **Threads & shutdown**
 - Async connect: inherit the shared base —
@@ -651,12 +653,12 @@ When adding a test file for a new vendor device:
 
 ## Continuous Integration and Pre-flight
 
-- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner: `build-test` (vendors OFF) + `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `clang-format`, `clang-tidy`, `cppcheck`, `unicode`, `shellcheck`, `javascript`, and `zizmor`.
+- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner: `build-test` (vendors OFF) + `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON), `clang-format`, `clang-tidy`, `cppcheck`, `unicode`, `shellcheck`, `javascript`, and `zizmor`.
 - **Run `scripts/ci_preflight.sh` before opening a PR** (it is the `/submit-pr` Step 4 hard gate). It reproduces the CI gates locally, auto-installing missing tools, and exits non-zero if any mandatory gate fails — catching failures before they ever reach CI.
 - **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`.**
 - **Web UI JavaScript is gated only by `node --check`** (the `javascript` job + pre-flight gate). The web UI is hand-written static JS with no bundler/eslint/`package.json`, so this parse-only check is its sole automated validation — there is nothing else stopping a stray brace from shipping.
 - `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together.
-- **Coverage gap you must compensate for by hand: nothing automated exercises concurrency.** The `sanitizers` job is ASan+UBSan (memory/UB on a single thread), and ConformU is single-threaded — so the #1 driver-review bug class (concurrent connect/disconnect vs an in-flight SDK call, exposure-vs-register-write, ref-count races) is caught *only* by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver). Reason about those paths deliberately; do not assume green CI means thread-safe. (Recommended follow-up: a ThreadSanitizer job + a small per-driver connect/disconnect/operate stress harness would close this gap.)
+- **Concurrency now has automated coverage — but only where a driver is registered with the stress harness.** The `sanitizers-tsan` job (issue #101) builds all-vendors with ThreadSanitizer and runs the `[stress]` connect/disconnect/operate suite (`AlpacaCore/tests/concurrency_stress.h`): lifecycle storms from N threads, destruction racing an in-flight connect, and the racing-disconnect-never-dropped settle check. Locally: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. Registered so far: ToupTek camera / AFW / thermal switch (over the fake SDK seam, wrapped in `LockedToupTekSDK`), ZWO EFW, Player One Phoenix. **When you add or substantially change a driver, add a `[stress]` TEST_CASE for it** — one factory + one operate callback (see `test_touptek_concurrency_stress.cpp`). Drivers without a registration are still covered only by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver); do not assume green CI means thread-safe for them.
 
 ## Logging, Threading, and Errors
 

@@ -9,6 +9,7 @@
 #   ./scripts/ci_preflight.sh                 # base = main
 #   PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh   # fork contributors
 #   RUN_SANITIZERS=1 ./scripts/ci_preflight.sh # also run the ASan+UBSan job
+#   RUN_TSAN=1 ./scripts/ci_preflight.sh       # also run the TSan concurrency stress job
 #   RUN_SCAN_BUILD=1 ./scripts/ci_preflight.sh # also run Clang Static Analyzer (advisory)
 #   PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh         # never apt-install
 #
@@ -374,6 +375,31 @@ if [ "${RUN_SANITIZERS:-0}" = "1" ]; then
     record PASS "sanitizers"
   else
     record FAIL "sanitizers"
+  fi
+fi
+
+# --- optional: ThreadSanitizer concurrency stress ---------------------------
+#
+# Mirrors the sanitizers-tsan CI job (issue #101): all-vendors TSan build of
+# the AlpacaCore tests, then the [stress] connect/disconnect/operate
+# concurrency suite. The suppressions file mutes only the uninstrumented
+# proprietary vendor blobs — never our code.
+
+if [ "${RUN_TSAN:-0}" = "1" ]; then
+  section "ThreadSanitizer (concurrency stress, all vendors)"
+  TSAN_BUILD_DIR="AlpacaCore/build-tsan"
+  if cmake -S AlpacaCore -B "${TSAN_BUILD_DIR}" \
+       -DALPACACORE_BUILD_TESTS=ON \
+       -DALPACACORE_ENABLE_ALL_VENDORS=ON \
+       -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -O1 -g" \
+       -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+     && cmake --build "${TSAN_BUILD_DIR}" --parallel "$(nproc)" \
+     && [ -x "${TSAN_BUILD_DIR}/tests/alpacacore_tests" ] \
+     && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
+        "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]"; then
+    record PASS "tsan stress"
+  else
+    record FAIL "tsan stress"
   fi
 fi
 

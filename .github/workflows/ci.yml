@@ -13,6 +13,8 @@
 #   build-vendors  stage in-tree vendor SDK .so libs, build+test with all
 #                  vendors ON
 #   sanitizers     build+test under AddressSanitizer + UndefinedBehaviorSanitizer
+#   sanitizers-tsan  build all-vendors under ThreadSanitizer + run the [stress]
+#                  connect/disconnect/operate concurrency suite (issue #101)
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   unicode        scan sources for Trojan-Source / invisible Unicode
@@ -202,6 +204,98 @@ jobs:
           ASAN_OPTIONS: "abort_on_error=1:detect_leaks=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: ./run_all_tests.sh
+
+  sanitizers-tsan:
+    name: Sanitizers (TSan concurrency stress, arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        # libgpiod-dev intentionally omitted (needs >= 2.0, built from source
+        # below) — mirrors the build-vendors job. catch2 is required: without
+        # it the tests CMakeLists silently skips the suite and this job would
+        # green-light while running nothing.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            g++ \
+            catch2 \
+            pkg-config \
+            libusb-1.0-0-dev \
+            libudev-dev \
+            nlohmann-json3-dev \
+            zlib1g-dev \
+            libcurl4-openssl-dev
+
+      - name: Build libgpiod v2 from source
+        # Same vendored tarball + pinned checksum as the build-vendors job
+        # (see the README beside the tarball).
+        run: |
+          set -euo pipefail
+          cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
+          echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
+            | sha256sum -c -
+          mkdir -p /tmp/libgpiod
+          tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
+          cd /tmp/libgpiod
+          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+
+      - name: Stage vendor SDK shared libraries
+        # Mirrors the build-vendors job: the vendor-ON build links the in-tree
+        # arm64 vendor .so files from the loader path.
+        run: |
+          set -euo pipefail
+          core="AlpacaCore/external"
+          libs=(
+            "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
+            "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
+            "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
+            "$core/QHY/sdk_Arm64_25.09.29/usr/local/lib/libqhyccd.so"
+          )
+          for lib in "${libs[@]}"; do
+            if compgen -G "${lib}*" > /dev/null; then
+              echo "Staging $(basename "$lib")*"
+              sudo cp -a "${lib}"* /usr/local/lib/
+            else
+              echo "WARNING: ${lib}* not found — skipping"
+            fi
+          done
+          sudo ldconfig
+
+      - name: Build AlpacaCore tests with TSan and run the concurrency stress suite
+        # The [stress] tests (issue #101) hammer connect()/disconnect()/
+        # set_connected() and operational calls from many threads — the #1
+        # driver-review bug class (use-after-close, dropped racing
+        # disconnects, destructor vs connection-thread races), which the
+        # single-threaded ASan job and ConformU cannot see. ThreadSanitizer
+        # turns a latent data race into a hard job failure. Vendors are ON so
+        # every AsyncConnectable driver compiles; the ToupTek stress targets
+        # run over the fake SDK seam (no hardware), and the suppressions file
+        # mutes the uninstrumented proprietary vendor blobs, whose internals
+        # we can neither see nor fix.
+        env:
+          TSAN_OPTIONS: "halt_on_error=1 second_deadlock_stack=1 suppressions=${{ github.workspace }}/scripts/tsan_suppressions.txt"
+        run: |
+          set -euo pipefail
+          cmake -S AlpacaCore -B AlpacaCore/build-tsan \
+            -DALPACACORE_BUILD_TESTS=ON \
+            -DALPACACORE_ENABLE_ALL_VENDORS=ON \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -O1 -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          cmake --build AlpacaCore/build-tsan --parallel "$(nproc)"
+          test -x AlpacaCore/build-tsan/tests/alpacacore_tests  # Catch2 missing = silent skip; fail loudly instead
+          ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]"
 
   format:
     name: clang-format (changed lines)
