@@ -140,9 +140,12 @@ public:
             return;
         }
 
-        if (camera_id_.has_value()) {
-            sdk.close_camera(camera_id_.value());
-        }
+        // Clear driver state and publish disconnected BEFORE the SDK close so
+        // a racing operational call fails fast at ensure_connected() instead
+        // of hitting a just-closed camera (ops here snapshot the id and call
+        // the SDK without holding mutex_) — same order as the EFW/CAA/EAF
+        // siblings, per the AGENTS.md disconnect rule.
+        const std::optional<int> close_id = camera_id_;
         if (camera_index_.has_value()) {
             camera_id_.reset();
             camera_name_ = "ZWO Camera";
@@ -150,6 +153,9 @@ public:
         }
         dew_caps_.reset();
         connected_.store(false);
+        if (close_id.has_value()) {
+            sdk.close_camera(close_id.value());
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override {

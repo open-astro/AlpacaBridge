@@ -130,7 +130,11 @@ inline bool settle_connected(AlpacaDriver& driver, bool want,
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    return driver.get_connected() == want;
+    // Same condition as the loop exit: a budget-expired driver with a task
+    // still in flight is wedged, not settled — without the get_connecting()
+    // conjunct, want=false would vacuously "pass" on a stuck driver whose
+    // in-flight task could still flip the state after the check.
+    return driver.get_connected() == want && !driver.get_connecting();
 }
 
 /// The issue-#100 destructor race: destroy the driver while its async connect

@@ -141,12 +141,18 @@ public:
             return;
         }
 
-        if (camera_id_ >= 0) {
-            sdk.close_camera(camera_id_);
-        }
+        // Clear driver state and publish disconnected BEFORE the SDK close so
+        // a racing operational call fails fast at ensure_connected() instead
+        // of hitting a just-closed camera (ops here snapshot the id via
+        // camera_id_copy() and call the SDK without holding mutex_) — same
+        // fix as the ZWO dew-heater switch, per the AGENTS.md disconnect rule.
+        const int close_id = camera_id_;
         camera_id_ = -1;
         elements_.clear();
         connected_.store(false);
+        if (close_id >= 0) {
+            sdk.close_camera(close_id);
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override { return {}; }

@@ -41,6 +41,13 @@ namespace alpacacore {
  * - A disconnect racing an in-flight connect is NEVER dropped: it is recorded
  *   (pending_disconnect_) and either consumed by the connect at entry (newer
  *   request wins, camera stays disconnected) or run by the task's tail.
+ *   DELIBERATELY ASYMMETRIC: a connect racing an in-flight DISCONNECT is
+ *   dropped (early return, no recording). A dropped disconnect leaves
+ *   hardware energized unattended — a safety problem the user cannot see;
+ *   a dropped connect leaves the device visibly disconnected, which the
+ *   client observes immediately (Connected stays false) and simply retries.
+ *   Mirroring the flag for connects would double the tail/entry protocol
+ *   surface for a case with a trivial user-side recovery.
  * - conn_task_ only transitions to Idle inside the task's tail UNDER
  *   connection_mutex_ — the same lock every start_connection_task holds — so
  *   a recorder can never misjudge the in-flight state (the double-read race).
