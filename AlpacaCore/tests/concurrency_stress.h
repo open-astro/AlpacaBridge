@@ -41,9 +41,9 @@ namespace alpacacore::test {
  * happen is a crash, a hang, or a TSan report.
  */
 struct StressOptions {
-    int lifecycle_threads = 4;               // hammer connect()/disconnect()/set_connected()
-    int op_threads = 4;                      // hammer the operate callback
-    std::chrono::milliseconds duration{750}; // per-scenario wall clock
+    int lifecycle_threads = 4;                // hammer connect()/disconnect()/set_connected()
+    int op_threads = 4;                       // hammer the operate callback
+    std::chrono::milliseconds duration{750};  // per-scenario wall clock
 };
 
 /// Hammer one driver instance from many threads: async connect/disconnect,
@@ -62,10 +62,18 @@ inline void run_lifecycle_stress(AlpacaDriver& driver, const std::function<void(
             while (!stop.load()) {
                 try {
                     switch ((i + n) % 5) {
-                        case 0: driver.connect(); break;
-                        case 1: driver.disconnect(); break;
-                        case 2: driver.set_connected(true); break;
-                        case 3: driver.set_connected(false); break;
+                        case 0:
+                            driver.connect();
+                            break;
+                        case 1:
+                            driver.disconnect();
+                            break;
+                        case 2:
+                            driver.set_connected(true);
+                            break;
+                        case 3:
+                            driver.set_connected(false);
+                            break;
                         default:
                             static_cast<void>(driver.get_connecting());
                             static_cast<void>(driver.get_connected());
@@ -150,9 +158,8 @@ inline void run_destruction_during_connect_stress(const std::function<std::uniqu
 /// (and stays) disconnected well inside the budget; a driver that drops the
 /// racing disconnect sits Connected until the deadline and fails the assert.
 /// Returns the settled connected state; the caller asserts it is false.
-inline bool connect_then_disconnect_settles_disconnected(AlpacaDriver& driver,
-                                                         std::chrono::milliseconds settle_budget =
-                                                             std::chrono::seconds(10)) {
+inline bool connect_then_disconnect_settles_disconnected(
+    AlpacaDriver& driver, std::chrono::milliseconds settle_budget = std::chrono::seconds(10)) {
     driver.connect();
     driver.disconnect();
     const auto deadline = std::chrono::steady_clock::now() + settle_budget;

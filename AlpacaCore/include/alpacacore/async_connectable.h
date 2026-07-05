@@ -47,6 +47,11 @@ namespace alpacacore {
  *   Idle is published BEFORE the tail's deferred disconnect runs, so the
  *   deferred call can't be mistaken for another racing disconnect
  *   (self-block: device stays Connected, stale flag no-ops the next connect).
+ *   COST: the deferred disconnect runs while connection_mutex_ is held, so a
+ *   concurrent connect()/disconnect() blocks for the full hardware teardown.
+ *   Deliberate — correctness over latency; it only bites on the rare
+ *   disconnect-races-connect path, but drivers with slow disconnects
+ *   (long serial timeouts, USB re-enumeration) should know it's there.
  * - stop_connection_thread() joins OUTSIDE connection_mutex_ (the tail takes
  *   it; joining under it deadlocks with a finishing task).
  *
@@ -179,6 +184,12 @@ private:
             set_connected(connect);
         } catch (const std::exception& e) {
             ALPACA_LOG_ERROR(log_tag_.c_str(), std::string("Connection task failed: ") + e.what());
+        } catch (...) {
+            // A non-std exception escaping a std::thread entry point calls
+            // std::terminate. Every driver throws std:: exceptions today, but
+            // this base is now the single chokepoint for 26 drivers' connect
+            // paths — swallow-and-log rather than bet on that forever.
+            ALPACA_LOG_ERROR(log_tag_.c_str(), "Connection task failed: non-std exception");
         }
         // Tail under connection_mutex_: see the class comment for why the
         // Idle publish and the deferred-disconnect handoff must both
@@ -198,6 +209,8 @@ private:
                 set_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_ERROR(log_tag_.c_str(), std::string("Deferred disconnect failed: ") + e.what());
+            } catch (...) {
+                ALPACA_LOG_ERROR(log_tag_.c_str(), "Deferred disconnect failed: non-std exception");
             }
         }
     }
