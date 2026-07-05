@@ -228,14 +228,12 @@ private:
             std::thread telemetry_to_join;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                // Base gates BEFORE the idempotency check: a sync disconnect during an
-                // in-flight connect looks idempotent (both sides see disconnected) and
-                // would be silently dropped without the record; a connect must honor a
-                // newer pending disconnect by staying down.
-                if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
-                    return;
-                }
-                if (connected && consume_pending_disconnect(connected_.load())) {
+                // Base gate (obligation 4) BEFORE the idempotency check: a sync
+                // disconnect during an in-flight connect looks idempotent (both
+                // sides see disconnected) and would be silently dropped without
+                // the record. This function split on `connected` above, so only
+                // the disconnect-side gate belongs in this branch.
+                if (record_disconnect_if_connect_in_flight(connected_.load())) {
                     return;
                 }
                 if (!connected_.load()) {
@@ -287,14 +285,10 @@ private:
 
         // Connection path
         std::unique_lock<std::mutex> lock(mutex_);
-        // Base gates BEFORE the idempotency check: a sync disconnect during an
-        // in-flight connect looks idempotent (both sides see disconnected) and
-        // would be silently dropped without the record; a connect must honor a
-        // newer pending disconnect by staying down.
-        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
-            return;
-        }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        // Base gate (obligation 5) BEFORE the idempotency check: a connect must
+        // honor a newer pending disconnect by staying down. This function split
+        // on `connected` above, so only the connect-side gate belongs here.
+        if (consume_pending_disconnect(connected_.load())) {
             return;
         }
         if (connected_.load()) {
