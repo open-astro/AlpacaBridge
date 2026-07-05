@@ -295,6 +295,13 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
           cmake --build AlpacaCore/build-tsan --parallel "$(nproc)"
           test -x AlpacaCore/build-tsan/tests/alpacacore_tests  # Catch2 missing = silent skip; fail loudly instead
+          # A tag filter matching ZERO tests exits 0 ("No tests ran") — if an
+          # environment change ever drops the vendor targets that register the
+          # [stress] cases, the job must fail rather than green-light with no
+          # concurrency coverage. Require at least one matching test up front.
+          listed=$(./AlpacaCore/build-tsan/tests/alpacacore_tests --list-tests --verbosity quiet "[stress]" | wc -l)
+          echo "[stress] tests discovered: ${listed}"
+          test "${listed}" -ge 1
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]"
 
   format:

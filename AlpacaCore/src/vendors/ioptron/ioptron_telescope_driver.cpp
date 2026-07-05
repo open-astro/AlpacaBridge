@@ -161,6 +161,18 @@ public:
         return connected_;
     }
 
+    // Base always spawns (the old spawn-skip `if (connect == get_connected())`
+    // is gone — it masked the no-op-connect flag-consumption bug, PR #115
+    // round 4). A connect() on an already-connected mount costs one short
+    // no-op task; a disconnect() racing that window is recorded and honored
+    // by the task tail rather than spawning immediately.
+    //
+    // LATENCY NOTE: this driver's teardown joins the clock-sync thread, which
+    // can sit in multi-second serial protocol retries. When that teardown runs
+    // as the base's DEFERRED disconnect (disconnect-races-connect path only),
+    // connection_mutex_ is held throughout — concurrent connect()/disconnect()
+    // and the destructor serialize behind it for the duration. Deliberate
+    // (base class "COST" note); this driver is the worst case of it.
     void connect() override {
         start_connection_task(true);
     }

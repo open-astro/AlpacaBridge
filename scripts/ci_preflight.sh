@@ -395,6 +395,7 @@ if [ "${RUN_TSAN:-0}" = "1" ]; then
        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
      && cmake --build "${TSAN_BUILD_DIR}" --parallel "$(nproc)" \
      && [ -x "${TSAN_BUILD_DIR}/tests/alpacacore_tests" ] \
+     && [ "$("${TSAN_BUILD_DIR}/tests/alpacacore_tests" --list-tests --verbosity quiet "[stress]" | wc -l)" -ge 1 ] \
      && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
         "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]"; then
     record PASS "tsan stress"
