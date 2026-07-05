@@ -162,13 +162,26 @@ inline void run_destruction_during_connect_stress(const std::function<std::uniqu
 /// tail to run the deferred disconnect. A driver where the flag is eaten
 /// sits Connected until the deadline and fails the caller's assert.
 /// Returns the settled connected state; the caller asserts it is false.
+/// use_sync_disconnect selects the disconnect entry point: the async route
+/// (disconnect() -> start_connection_task(false), which records via the
+/// task-spawn path) or the SYNC route (set_connected(false) — the ASCOM
+/// Connected=false PUT, which records via obligation 4 and tears hardware
+/// down itself). Both must survive the racing no-op connect task; they
+/// exercise different recording paths in the base (round-6 finding: the sync
+/// route's record was skipped when the device was still connected, letting
+/// the no-op task reconnect).
 inline bool connected_then_connect_disconnect_settles_disconnected(
-    AlpacaDriver& driver, std::chrono::milliseconds settle_budget = std::chrono::seconds(10)) {
+    AlpacaDriver& driver, bool use_sync_disconnect = false,
+    std::chrono::milliseconds settle_budget = std::chrono::seconds(10)) {
     if (!settle_connected(driver, true)) {
         return true;  // could not reach the precondition; surface as failure
     }
-    driver.connect();     // no-op connect task on a connected device
-    driver.disconnect();  // recorded against the in-flight connect task
+    driver.connect();  // no-op connect task on a connected device
+    if (use_sync_disconnect) {
+        driver.set_connected(false);  // sync PUT path: records + tears down itself
+    } else {
+        driver.disconnect();  // async path: recorded against the in-flight task
+    }
     const auto deadline = std::chrono::steady_clock::now() + settle_budget;
     while (std::chrono::steady_clock::now() < deadline) {
         if (!driver.get_connecting() && !driver.get_connected()) {

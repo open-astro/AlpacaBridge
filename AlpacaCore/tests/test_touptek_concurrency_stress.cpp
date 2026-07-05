@@ -110,7 +110,21 @@ TEST_CASE("ToupTek camera - disconnect racing a NO-OP connect is never dropped (
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, sdk);
     // connect() on an already-connected device + immediate disconnect(): the
     // no-op connect task must not eat the recorded disconnect.
-    CHECK(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver) == false);
+    CHECK(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false) == false);
+    CHECK(fake.ref_count("fake-cam-0") == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
+}
+
+TEST_CASE("ToupTek camera - SYNC disconnect racing a NO-OP connect is never undone (round-6)",
+          "[touptek][camera][stress]") {
+    auto fake = make_fake_with_camera();
+    LockedToupTekSDK sdk(fake);
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, sdk);
+    // connect() on a connected device + sync set_connected(false): the record
+    // must be left for the no-op task even though the sync caller tears down
+    // the hardware itself — otherwise the task RECONNECTS at its idempotency
+    // fall-through and the explicit disconnect is silently undone.
+    CHECK(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true) == false);
     CHECK(fake.ref_count("fake-cam-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
 }

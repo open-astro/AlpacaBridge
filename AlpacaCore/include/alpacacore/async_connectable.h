@@ -169,15 +169,22 @@ protected:
     /// TOCTOU: check-then-record without the lock let a finishing tail slip
     /// between, leaving a flag no task would ever honor).
     bool record_disconnect_if_connect_in_flight(bool connected_now) {
-        if (connected_now) {
-            return false;
-        }
         std::lock_guard<std::mutex> pending_lock(pending_mutex_);
         if (conn_task_.load() != kConnConnect) {
             return false;
         }
+        // Record REGARDLESS of connected_now: with a connect task in flight,
+        // even a sync disconnect that is about to run real hardware teardown
+        // (connected_now = true -> return false, caller proceeds) must leave
+        // the flag so the in-flight task cannot undo it — a NO-OP connect
+        // task that finds the device freshly disconnected would otherwise
+        // pass its consume gate empty-handed and RECONNECT at the idempotency
+        // fall-through (round-6 finding). The task consumes the flag at entry
+        // and stays down; the tail then sees no flag and no deferred
+        // disconnect runs (no double-teardown).
         pending_disconnect_ = true;
-        return true;
+        // Skip-hardware only when there is nothing to tear down.
+        return !connected_now;
     }
 
     /// Unconditionally record a pending disconnect. For drivers with an extra
