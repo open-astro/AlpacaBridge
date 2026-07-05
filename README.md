@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-AlpacaBridge is a complete ASCOM Alpaca server for Linux. Install it on a machine at the mount, connect your gear once, and access cameras, focusers, filter wheels, rotators, mounts, and weather stations over the network from any Alpaca-compatible software (N.I.N.A., SGP, and others). All drivers are validated against ConformU.
+AlpacaBridge turns a small Linux computer at the telescope into a complete ASCOM Alpaca server. Connect your gear once — cameras, mounts, focusers, filter wheels, rotators, switches, and weather stations — and control everything over the network from any Alpaca-compatible software, including N.I.N.A. and Sequence Generator Pro. Every driver ships ConformU-validated.
 
 #### [2.2.0] - 2026-07-01 &middot; [Changelog](CHANGELOG.md)
 
@@ -89,4 +89,4 @@ AlpacaBridge is developed and maintained independently. Contributions help fund 
 
 ## License
 
-AGPL-3.0-or-later with a vendor-SDK linking exception. See [LICENSE](LICENSE).
+AlpacaBridge is licensed under the [GNU AGPL v3 or later](LICENSE) — derived versions stay open even when the bridge is embedded in a device and served over the network rather than shipped. An additional permission appended to the license (the vendor-SDK linking exception) allows combining AlpacaBridge with the proprietary device-vendor SDKs it needs to operate hardware.
