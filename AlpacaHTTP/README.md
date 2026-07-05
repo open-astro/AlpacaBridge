@@ -79,4 +79,4 @@ int main() {
 
 ## License
 
-Server Side Public License v1
+GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later), with an additional permission allowing combination with proprietary device-vendor SDKs — see the vendor-SDK linking exception appended to the license text.

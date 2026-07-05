@@ -89,4 +89,4 @@ AlpacaBridge is developed and maintained independently. Contributions help fund 
 
 ## License
 
-See [LICENSE](LICENSE).
+AGPL-3.0-or-later with a vendor-SDK linking exception. See [LICENSE](LICENSE).

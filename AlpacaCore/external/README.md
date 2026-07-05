@@ -72,6 +72,27 @@ For complete instructions on building vendor-specific drivers:
 - Do not redistribute SDK files without proper authorization
 - Document any license requirements in your driver implementation
 
+AlpacaBridge itself is AGPL-3.0-or-later with an additional permission (GPLv3
+§7) allowing it to be combined with these proprietary vendor SDKs and conveyed
+— see the vendor-SDK linking exception appended to the repository `LICENSE`.
+That exception covers *AlpacaBridge's* side of the combination only; each SDK's
+own redistribution terms still apply to the SDK files themselves.
+
+### Vendored SDK provenance and license status
+
+| Vendor SDK | Written license in tree | Status |
+|------------|------------------------|--------|
+| ZWO (ASI/EAF/CAA) | MIT (`license.txt` in the SDK tree) | Redistribution and linking fully permitted |
+| Player One (camera + filter wheel) | Vendor `license.txt` ("develop any products without any restrictions", keep the notice) | Permitted with notice retained |
+| QHY | None for `libqhyccd` itself; bundled Cypress `fxload` loader is GPL-2 (`COPYING` in the SDK) | Redistributed unmodified, as downloaded from QHY's official SDK page, for turnkey device support |
+| ToupTek | None in the vendored subset | Redistributed unmodified, as downloaded from ToupTek's official SDK page, for turnkey device support |
+| SVBONY | None (`readme.txt` is a changelog) | Redistributed unmodified, as downloaded from SVBONY's official SDK page, for turnkey device support |
+
+The QHY/ToupTek/SVBONY subsets carry no written redistribution grant from the
+vendor; they are vendored unmodified from the vendors' public SDK downloads so
+builds are turnkey. If any vendor objects, the subset will be removed and that
+vendor's driver will return to download-the-SDK-yourself builds.
+
 ## Additional Resources
 
 - [Driver Development Guide](../docs/development/driver-development.md) - Complete guide to building drivers

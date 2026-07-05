@@ -5,22 +5,52 @@ Source: https://github.com/open-astro/AlpacaBridge
 
 Files: *
 Copyright: 2024-2026 OpenAstro Contributors
-License: SSPL-1.0
+License: AGPL-3.0-or-later with vendor-SDK linking exception
 
-License: SSPL-1.0
- Server Side Public License, version 1, as published by MongoDB, Inc.
+License: AGPL-3.0-or-later with vendor-SDK linking exception
+ This program is free software: you can redistribute it and/or modify it
+ under the terms of the GNU Affero General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or (at
+ your option) any later version.
  .
- See the full license text at:
- https://www.mongodb.com/licensing/server-side-public-license
+ As an additional permission under GNU AGPL version 3 section 7, the
+ copyright holders grant you permission to combine or link this program
+ with proprietary device-vendor SDKs required to operate astronomy device
+ hardware, and to convey the resulting combined work, without those SDKs
+ being subject to the AGPL. The full exception text is appended to the
+ LICENSE file in the source tree.
  .
- Or in the file LICENSE in the source tree.
+ On Debian systems, the complete text of the GNU Affero General Public
+ License version 3 can be found in "/usr/share/common-licenses/AGPL-3".
+
+Files: AlpacaCore/external/ZWO/*
+Copyright: ZWO Inc.
+License: Expat
+ ZWO ASI/EAF SDKs — MIT license text distributed with the SDK
+ (license.txt in the SDK tree).
+
+Files: AlpacaCore/external/PlayerOne/*
+Copyright: Player One Astronomy Co., Ltd.
+License: PlayerOne-SDK
+ Player One camera and filter-wheel SDKs — vendor license permits
+ developing and distributing products using the SDK without restriction,
+ provided the license notice is retained (license.txt in the SDK tree).
 
 Files: AlpacaCore/external/QHY/*
 Copyright: QHY CCD Technology Co., Ltd.
 License: Proprietary
- QHY SDK — proprietary binary redistribution permitted for device support.
+ QHY SDK — proprietary binaries redistributed unmodified for device
+ support. The bundled Cypress fxload firmware loader is GPL-2 (see the
+ COPYING file shipped with the SDK).
 
-Files: AlpacaCore/external/ZWO/*
-Copyright: ZWO Inc.
+Files: AlpacaCore/external/ToupTek/*
+Copyright: ToupTek Photonics Co., Ltd.
 License: Proprietary
- ZWO SDK — proprietary binary redistribution permitted for device support.
+ ToupTek SDK — proprietary binaries redistributed unmodified for device
+ support.
+
+Files: AlpacaCore/external/SVBONY/*
+Copyright: SVBONY (Hong Kong SVBONY Technology Co., Ltd.)
+License: Proprietary
+ SVBONY camera SDK — proprietary binaries redistributed unmodified for
+ device support.

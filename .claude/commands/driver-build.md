@@ -239,9 +239,9 @@ Existing examples:
 - Protocol wrappers: `synscan_protocol_wrapper`, `ioptron_protocol_wrapper`, `celestron_protocol_wrapper`, `bisque_protocol_wrapper`, `gemini_protocol_wrapper`, `zwo_mount_protocol_wrapper`
 - SDK wrappers: `zwo_sdk_wrapper`, `qhy_sdk_wrapper`, `svbony_sdk_wrapper`, `playerone_sdk_wrapper`, `touptek_sdk_wrapper`
 
-### SSPL license header (required on every new file)
+### AGPL license header (required on every new file)
 
-Every new `.h`, `.hpp`, `.cpp` file must include the SSPL v1 license header. Copy it from any existing source file in the same directory — do not write it from scratch or modify it.
+Every new `.h`, `.hpp`, `.cpp` file must include the AGPL-3.0-or-later license header. Copy it from any existing source file in the same directory — do not write it from scratch or modify it.
 
 ### Boundary rules
 - `AlpacaCore` has NO HTTP/REST/sockets/JSON transport code.
@@ -256,7 +256,7 @@ Every new `.h`, `.hpp`, `.cpp` file must include the SSPL v1 license header. Cop
 - No `using namespace std;` in headers.
 - Fixed-width types (`int32_t`, `uint16_t`) for hardware registers and protocol fields.
 - Use `double` for floating-point protocol values (never `long double`).
-- License headers must remain SSPL v1 and unmodified.
+- License headers must remain AGPL-3.0-or-later and unmodified.
 
 ### Architecture target
 - **Linux arm64 only.** Targets include Raspberry Pi 3B+/4/5, Rockchip-based SBCs, OrangePi, and embedded astronomy computers (e.g. iOptron iMate). Do not assume Raspberry Pi — test portability across arm64 SoCs.
