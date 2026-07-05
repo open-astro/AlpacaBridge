@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/version_format.h>
@@ -26,28 +27,28 @@
 
 namespace alpacacore::vendor::zwo {
 
-class ZWOCAARotatorDriver : public RotatorDriver {
+class ZWOCAARotatorDriver : public RotatorDriver, protected alpacacore::AsyncConnectable {
 public:
     ZWOCAARotatorDriver(int device_number, std::optional<int> rotator_id, std::optional<int> rotator_index)
-        : device_number_(device_number)
-        , rotator_id_(rotator_id)
-        , rotator_index_(rotator_index)
-        , serial_number_()
-        , rotator_type_()
-        , rotator_info_()
-        , rotator_info_valid_(false)
-        , min_degree_(0.0)
-        , max_degree_(360.0)
-        , target_position_(0.0)
-        , has_target_position_(false)
-        , sync_offset_(0.0)
-        , connected_(false)
-        , connecting_(false)
-    {
-    }
+        : AsyncConnectable("ZWO"),
+          device_number_(device_number),
+          rotator_id_(rotator_id),
+          rotator_index_(rotator_index),
+          serial_number_(),
+          rotator_type_(),
+          rotator_info_(),
+          rotator_info_valid_(false),
+          min_degree_(0.0),
+          max_degree_(360.0),
+          target_position_(0.0),
+          has_target_position_(false),
+          sync_offset_(0.0),
+          connected_(false) {}
 
     ~ZWOCAARotatorDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -118,12 +119,20 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect(connected_.load())) {
+            return;
+        }
         if (connected == connected_.load()) {
             return;
         }
@@ -315,32 +324,6 @@ private:
         }
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("ZWO", "CAA connection failed: " + std::string(e.what()));
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     int resolve_rotator_id_locked() {
         if (rotator_index_.has_value()) {
             auto rotators = ZWOCAASDKWrapper::instance().enumerate_rotators();
@@ -438,10 +421,7 @@ private:
     bool has_target_position_;
     double sync_offset_;
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
     mutable std::mutex mutex_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 };
 
 std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rotator_id) {

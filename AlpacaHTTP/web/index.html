@@ -683,19 +683,19 @@
                         </div>
                     </div>
 
-                    <!-- StellaVita PowerBox (switch) configuration -->
+                    <!-- ToupTek switch configuration (camera thermal / StellaVita PowerBox) -->
                     <div id="touptek-switch-fields" style="display: none;">
                         <div class="form-group">
                             <label for="touptek-switch-type">Switch Type:</label>
                             <select id="touptek-switch-type" name="touptekSwitchType">
-                                <option value="stellavita">StellaVita PowerBox (12V GPIO ports)</option>
                                 <option value="thermal">Camera Thermal (Dew Heater + Fan)</option>
+                                <option value="stellavita">StellaVita PowerBox (12V GPIO ports)</option>
                             </select>
-                            <small>StellaVita drives the CM4's on-board 12V ports; Thermal exposes a cooled ToupTek camera's dew heater and radiator fan.</small>
+                            <small>Thermal exposes a cooled ToupTek camera's dew heater and radiator fan; StellaVita drives the CM4's on-board 12V ports.</small>
                         </div>
 
                         <!-- Camera thermal switch (dew heater + fan) -->
-                        <div id="touptek-thermal-switch-fields" style="display: none;">
+                        <div id="touptek-thermal-switch-fields">
                             <p class="hint">
                                 Exposes a cooled ToupTek camera's anti-fog dew heater
                                 (and radiator fan) as switch elements. Binds to the camera
@@ -711,7 +711,7 @@
                         </div>
 
                         <!-- StellaVita PowerBox (local GPIO) -->
-                        <div id="touptek-stellavita-switch-fields">
+                        <div id="touptek-stellavita-switch-fields" style="display: none;">
                         <h3>ToupTek StellaVita Configuration</h3>
                         <p class="hint">
                             Controls the StellaVita's on-board 12V DC power ports over

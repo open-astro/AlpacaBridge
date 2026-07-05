@@ -69,16 +69,28 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 ### Driver concurrency & lifecycle (read before writing a driver)
 
 **Apply this checklist up front.** ConformU is single-threaded and catches *none*
-of the races below — only code review does, so every miss becomes a review round.
-The rules are vendor-agnostic; do them in the driver from the start.
+of the races below — code review plus the TSan concurrency stress suite do
+(`[stress]` tests under the `sanitizers-tsan` CI job / `RUN_TSAN=1` pre-flight,
+issue #101); a miss that neither catches becomes a review round. The rules are
+vendor-agnostic; do them in the driver from the start.
 
 **Threads & shutdown**
-- Async connect: `start_connection_task(bool)` spawns `connection_thread_`. Guard
-  it with a `bool shutting_down_` under `connection_mutex_` — the destructor sets it
-  `true` under the lock *before* `stop_connection_thread()`, and
-  `start_connection_task` returns early when it is set. Without it a `connect()`
-  racing `~Driver` spawns a thread that outlives the object and is never joined →
-  `std::terminate`.
+- Async connect: inherit the shared base —
+  `class FooDriver : public XDriver, protected alpacacore::AsyncConnectable`
+  (`<alpacacore/async_connectable.h>`, issue #100). It owns the connection
+  thread, the `shutting_down_` destructor guard, and the never-drop-a-racing-
+  disconnect protocol (pending-disconnect record/consume + Idle-published-
+  under-the-lock tail). **Do not hand-roll `start_connection_task` /
+  `connection_thread_` / `connecting_` in a driver.** The driver obligations
+  (each one line, all contractual — see the header comment): destructor calls
+  `shutdown_connection()` FIRST; `connect()`/`disconnect()` forward to
+  `start_connection_task(true/false)`; `get_connecting()` returns
+  `connection_task_active()`; `set_connected` gates with
+  `record_disconnect_if_connect_in_flight(...)` / `consume_pending_disconnect()`
+  after taking the driver mutex, before the idempotency early-return. A driver
+  with an extra sync-connect window the base can't see (e.g. the AFW's
+  mutex-released homing poll) records it itself via
+  `record_pending_disconnect()`.
 - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
   writes a member (e.g. a pulse-guide flag) is the classic trap: if the object dies
   mid-sleep the wakeup writes freed memory (UB). Make it a joinable member thread
@@ -141,10 +153,10 @@ The rules are vendor-agnostic; do them in the driver from the start.
   [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors).
   The round-trip test (Required Test Case #6) is the automated catch.
 
-> The connection-thread + `shutting_down_` pattern is copy-pasted across ~26
-> drivers; the four ToupTek drivers have the guard, the rest still need it —
-> ideally extract a shared `AsyncConnectable` base so it (and the lock discipline
-> above) exists in one place. Tracked follow-up.
+> The connection-thread lifecycle lives in ONE place: `AsyncConnectable`
+> (`AlpacaCore/include/alpacacore/async_connectable.h`). Every vendor driver
+> inherits it (issue #100); a new driver that copy-pastes its own
+> `connection_thread_` machinery is a review-blocking regression.
 
 Two of our worst deadlocks are documented later, not in the checklist above — read
 [`disconnect_locked()`](#reconnect-must-not-self-deadlock-disconnect_locked) and the
@@ -641,12 +653,12 @@ When adding a test file for a new vendor device:
 
 ## Continuous Integration and Pre-flight
 
-- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner: `build-test` (vendors OFF) + `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `clang-format`, `clang-tidy`, `cppcheck`, `unicode`, `shellcheck`, `javascript`, and `zizmor`.
+- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner: `build-test` (vendors OFF) + `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON), `clang-format`, `clang-tidy`, `cppcheck`, `unicode`, `shellcheck`, `javascript`, and `zizmor`.
 - **Run `scripts/ci_preflight.sh` before opening a PR** (it is the `/submit-pr` Step 4 hard gate). It reproduces the CI gates locally, auto-installing missing tools, and exits non-zero if any mandatory gate fails — catching failures before they ever reach CI.
 - **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`.**
 - **Web UI JavaScript is gated only by `node --check`** (the `javascript` job + pre-flight gate). The web UI is hand-written static JS with no bundler/eslint/`package.json`, so this parse-only check is its sole automated validation — there is nothing else stopping a stray brace from shipping.
 - `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together.
-- **Coverage gap you must compensate for by hand: nothing automated exercises concurrency.** The `sanitizers` job is ASan+UBSan (memory/UB on a single thread), and ConformU is single-threaded — so the #1 driver-review bug class (concurrent connect/disconnect vs an in-flight SDK call, exposure-vs-register-write, ref-count races) is caught *only* by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver). Reason about those paths deliberately; do not assume green CI means thread-safe. (Recommended follow-up: a ThreadSanitizer job + a small per-driver connect/disconnect/operate stress harness would close this gap.)
+- **Concurrency now has automated coverage — but only where a driver is registered with the stress harness.** The `sanitizers-tsan` job (issue #101) builds all-vendors with ThreadSanitizer and runs the `[stress]` connect/disconnect/operate suite (`AlpacaCore/tests/concurrency_stress.h`): lifecycle storms from N threads, destruction racing an in-flight connect, and the racing-disconnect-never-dropped settle check. Locally: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. Registered so far: ToupTek camera / AFW / thermal switch (over the fake SDK seam, wrapped in `LockedToupTekSDK`), ZWO EFW, Player One Phoenix. **When you add or substantially change a driver, add a `[stress]` TEST_CASE for it** — one factory + one operate callback (see `test_touptek_concurrency_stress.cpp`). Drivers without a registration are still covered only by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver); do not assume green CI means thread-safe for them. **SDK-callback paths especially**: the TSan suppressions mute any report with a vendor-blob frame on the stack, so a race in driver code invoked from an SDK internal thread is invisible to CI unless that callback path is exercised through a fake-SDK seam (fully instrumented, no suppression applies) — when you add an SDK callback to a driver, register a fake-seam stress path for it in the same change.
 
 ## Logging, Threading, and Errors
 

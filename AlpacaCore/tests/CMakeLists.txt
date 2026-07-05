@@ -33,6 +33,7 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_camera.cpp)
     list(APPEND TEST_SOURCES test_zwo_focuser.cpp)
     list(APPEND TEST_SOURCES test_zwo_filterwheel.cpp)
+    list(APPEND TEST_SOURCES test_zwo_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_zwo_rotator.cpp)
     list(APPEND TEST_SOURCES test_zwo_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_asiair_switch.cpp)
@@ -71,6 +72,9 @@ if(TARGET alpacacore_celestron)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
+    # Covers the mutex-guarded get_connected() driver shape in the [stress]
+    # pool (PR #115 round-2 ABBA regression coverage).
+    list(APPEND TEST_SOURCES test_bisque_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_touptek)
     list(APPEND TEST_SOURCES test_touptek_camera.cpp)
@@ -80,6 +84,9 @@ if(TARGET alpacacore_touptek)
     # it always builds with the ToupTek target.
     list(APPEND TEST_SOURCES test_touptek_thermal_switch.cpp)
     list(APPEND TEST_SOURCES test_touptek_fake_sdk.cpp)
+    # Concurrency stress over the fake SDK seam (issue #101); run under the
+    # sanitizers-tsan CI job to turn latent data races into hard failures.
+    list(APPEND TEST_SOURCES test_touptek_concurrency_stress.cpp)
     # The StellaVita Switch test only builds when its driver was compiled in
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_TOUPTEK_STELLAVITA)
@@ -90,6 +97,7 @@ if(TARGET alpacacore_playerone)
     list(APPEND TEST_SOURCES test_playerone_camera.cpp)
     list(APPEND TEST_SOURCES test_playerone_filterwheel.cpp)
     list(APPEND TEST_SOURCES test_playerone_switch.cpp)
+    list(APPEND TEST_SOURCES test_playerone_concurrency_stress.cpp)
 endif()
 
 # Create test executable

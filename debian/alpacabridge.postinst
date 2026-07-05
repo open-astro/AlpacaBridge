@@ -27,14 +27,17 @@ case "$1" in
             usermod -aG input alpacabridge || true
         fi
 
-        # Grant gpio membership for libgpiod GPIO access. The Switch drivers that
-        # drive on-board 12V power ports (iOptron iMate, ToupTek StellaVita, ZWO
-        # ASIAIR Pro / Plus Pi CM4) open /dev/gpiochip*, which the OpenAstro images
-        # own root:gpio 0660 via a udev rule. Without this the service user gets
-        # EACCES and Switch connect fails ("Failed to open GPIO chip ...").
-        if getent group gpio > /dev/null 2>&1; then
-            usermod -aG gpio alpacabridge || true
-        fi
+        # Grant gpio membership for GPIO access. The Switch drivers that drive
+        # on-board 12V power ports (iOptron iMate, ToupTek StellaVita, ZWO
+        # ASIAIR Pro / Plus Pi CM4) open /dev/gpiochip*, and the ASIAIR Plus
+        # RK3568 driver opens /dev/pwm-gpio-misc — all owned root:gpio 0660 by
+        # udev rules (ours or the OpenAstro images'). Create the group when the
+        # image doesn't ship one (e.g. ZWO's stock RK3568 kernel image, which
+        # our packaged 99-zwo-asiair-plus.rules targets): without it the rule's
+        # GROUP="gpio" silently falls back to root and the service user gets
+        # EACCES at connect ("Failed to open ..."). Mirrors build_and_run.sh.
+        groupadd -f --system gpio || true
+        usermod -aG gpio alpacabridge || true
 
         # Create and set ownership of the working / config directory
         if [ ! -d /etc/alpacabridge ]; then

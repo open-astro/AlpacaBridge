@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -26,19 +27,19 @@
 
 namespace alpacacore::vendor::gemini {
 
-class GeminiFocuserDriver : public FocuserDriver {
+class GeminiFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
     GeminiFocuserDriver(int device_number, ConnectionConfig config)
-        : device_number_(device_number)
-        , config_(std::move(config))
-        , connected_(false)
-        , connecting_(false)
-        , protocol_()
-    {
-    }
+        : AsyncConnectable("Gemini"),
+          device_number_(device_number),
+          config_(std::move(config)),
+          connected_(false),
+          protocol_() {}
 
     ~GeminiFocuserDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -108,11 +109,19 @@ public:
         }
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect(connected_.load())) {
+            return;
+        }
         if (connected == connected_.load()) {
             return;
         }
@@ -255,42 +264,13 @@ private:
         }
     }
 
-    void start_connection_task(bool do_connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, do_connect]() {
-            try {
-                set_connected(do_connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("Gemini", "Focuser connection failed: " + std::string(e.what()));
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     int device_number_;
     ConnectionConfig config_;
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
     GeminiProtocolWrapper protocol_;
-    mutable std::mutex connection_mutex_;  // serialises the connection thread lifecycle only
-    std::thread connection_thread_;
-    // firmware_ has its OWN mutex, NOT connection_mutex_: set_connected() runs on
-    // connection_thread_ and caches firmware, while stop_connection_thread() joins
-    // that thread under connection_mutex_ — sharing one mutex would deadlock.
+    // firmware_ has its OWN mutex, NOT the base's connection mutex:
+    // set_connected() runs on the connection thread and caches firmware, while
+    // the base joins that thread — sharing one mutex would deadlock.
     mutable std::mutex firmware_mutex_;
     std::string firmware_;  // captured at connect; web-UI only (guarded by firmware_mutex_)
 };

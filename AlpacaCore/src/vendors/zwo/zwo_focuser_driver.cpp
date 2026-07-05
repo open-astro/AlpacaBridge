@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/version_format.h>
@@ -25,22 +26,22 @@
 
 namespace alpacacore::vendor::zwo {
 
-class ZWOEAFFocuserDriver : public FocuserDriver {
+class ZWOEAFFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
     ZWOEAFFocuserDriver(int device_number, std::optional<int> focuser_id, std::optional<int> focuser_index)
-        : device_number_(device_number)
-        , focuser_id_(focuser_id)
-        , focuser_index_(focuser_index)
-        , serial_number_()
-        , focuser_info_()
-        , focuser_info_valid_(false)
-        , connected_(false)
-        , connecting_(false)
-    {
-    }
+        : AsyncConnectable("ZWO"),
+          device_number_(device_number),
+          focuser_id_(focuser_id),
+          focuser_index_(focuser_index),
+          serial_number_(),
+          focuser_info_(),
+          focuser_info_valid_(false),
+          connected_(false) {}
 
     ~ZWOEAFFocuserDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -113,12 +114,20 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect(connected_.load())) {
+            return;
+        }
         if (connected == connected_.load()) {
             return;
         }
@@ -259,32 +268,6 @@ private:
         }
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("ZWO", "EAF connection failed: " + std::string(e.what()));
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     int resolve_focuser_id_locked() {
         if (focuser_index_.has_value()) {
             auto focusers = ZWOEAFSDKWrapper::instance().enumerate_focusers();
@@ -337,10 +320,7 @@ private:
     ZWOEAFFocuserInfo focuser_info_;
     bool focuser_info_valid_;
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
     mutable std::mutex mutex_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 };
 
 std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id) {

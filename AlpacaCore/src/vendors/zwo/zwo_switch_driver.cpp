@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
@@ -31,24 +32,24 @@ constexpr int kDewHeaterSwitchId = 0;
 
 } // namespace
 
-class ZWODewHeaterSwitchDriver : public SwitchDriver {
+class ZWODewHeaterSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
     ZWODewHeaterSwitchDriver(int device_number, std::optional<int> camera_id, std::optional<int> camera_index)
-        : device_number_(device_number)
-        , camera_id_(camera_id)
-        , camera_index_(camera_index)
-        , serial_number_()
-        , camera_name_("ZWO Camera")
-        , dew_caps_()
-        , connected_(false)
-        , connecting_(false)
-        , switch_name_("DewHeater")
-        , switch_description_("ZWO camera anti-dew heater control")
-    {
-    }
+        : AsyncConnectable("ZWO"),
+          device_number_(device_number),
+          camera_id_(camera_id),
+          camera_index_(camera_index),
+          serial_number_(),
+          camera_name_("ZWO Camera"),
+          dew_caps_(),
+          connected_(false),
+          switch_name_("DewHeater"),
+          switch_description_("ZWO camera anti-dew heater control") {}
 
     ~ZWODewHeaterSwitchDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -104,12 +105,20 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect(connected_.load())) {
+            return;
+        }
         if (connected == connected_.load()) {
             return;
         }
@@ -131,9 +140,12 @@ public:
             return;
         }
 
-        if (camera_id_.has_value()) {
-            sdk.close_camera(camera_id_.value());
-        }
+        // Clear driver state and publish disconnected BEFORE the SDK close so
+        // a racing operational call fails fast at ensure_connected() instead
+        // of hitting a just-closed camera (ops here snapshot the id and call
+        // the SDK without holding mutex_) — same order as the EFW/CAA/EAF
+        // siblings, per the AGENTS.md disconnect rule.
+        const std::optional<int> close_id = camera_id_;
         if (camera_index_.has_value()) {
             camera_id_.reset();
             camera_name_ = "ZWO Camera";
@@ -141,6 +153,9 @@ public:
         }
         dew_caps_.reset();
         connected_.store(false);
+        if (close_id.has_value()) {
+            sdk.close_camera(close_id.value());
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -308,32 +323,6 @@ private:
         return dew_caps_.value();
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("ZWO", "Dew heater connection failed: " + std::string(e.what()));
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     int resolve_camera_id_locked() {
         if (camera_index_.has_value()) {
             auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
@@ -393,10 +382,7 @@ private:
     std::string camera_name_;
     std::optional<ZWOControlCaps> dew_caps_;
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
     mutable std::mutex mutex_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
     std::string switch_name_;
     std::string switch_description_;
 };

@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
@@ -44,14 +45,13 @@ AsiairSwitchConfig default_asiair_pro_config() {
     return cfg;
 }
 
-class ZWOAsiairSwitchDriver : public SwitchDriver {
+class ZWOAsiairSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
     ZWOAsiairSwitchDriver(int device_number, AsiairSwitchConfig config)
-        : device_number_(device_number)
-        , config_(std::move(config))
-        , wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz)
-        , connecting_(false)
-    {
+        : AsyncConnectable(kLogCategory),
+          device_number_(device_number),
+          config_(std::move(config)),
+          wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz) {
         switch_names_.reserve(config_.ports.size());
         for (const auto& p : config_.ports) {
             switch_names_.emplace_back(p.name);
@@ -59,7 +59,9 @@ public:
     }
 
     ~ZWOAsiairSwitchDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         try {
             wrapper_.close();
         } catch (const std::exception& e) {
@@ -92,9 +94,19 @@ public:
 
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connecting_.load(); }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(wrapper_.is_open())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect(wrapper_.is_open())) {
+            return;
+        }
         if (connected) {
             if (!wrapper_.is_open()) {
                 wrapper_.open();
@@ -250,43 +262,12 @@ private:
         return config_.ports[static_cast<std::size_t>(id)].pwm_enabled ? 100.0 : 1.0;
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR(kLogCategory,
-                                 std::string("ASIAIR connection task failed: ") + e.what());
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     const int device_number_;
     const AsiairSwitchConfig config_;
     AsiairProtocolWrapper wrapper_;
 
     mutable std::mutex name_mutex_;
     std::vector<std::string> switch_names_;
-
-    std::atomic<bool> connecting_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 };
 
 std::unique_ptr<SwitchDriver> create_zwo_asiair_switch(int device_number, AsiairSwitchConfig config) {

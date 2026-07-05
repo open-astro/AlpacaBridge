@@ -1,0 +1,27 @@
+# ThreadSanitizer suppressions for the sanitizers-tsan CI job and the
+# RUN_TSAN=1 pre-flight (issue #101).
+#
+# ONLY the proprietary vendor SDK blobs belong here. They are shipped
+# uninstrumented (we build from vendor .so files, not source), so TSan cannot
+# see their internal synchronization and may report false races inside them.
+# We can neither verify nor fix those internals; races in OUR drivers and in
+# AlpacaCore itself must never be suppressed — fix the code instead.
+#
+# RESIDUAL RISK (know what called_from_lib actually matches): it suppresses
+# any report whose stack contains a frame from the library — including a real
+# race in DRIVER callback code invoked from a vendor SDK internal thread,
+# whenever an SDK frame sits on the reporting stack. Symbol-level `race:`
+# suppressions would be narrower, but the vendor blobs ship without symbol
+# names to pin. So: a green TSan run does NOT fully cover SDK-callback-driven
+# driver paths; those still need the code-review concurrency checklist. The
+# stress suite runs against the fake SDK seam (fully instrumented, no
+# suppression applies), which is where callback-path coverage should be added.
+called_from_lib:libASICamera2*
+called_from_lib:libEFWFilter*
+called_from_lib:libEAFFocuser*
+called_from_lib:libCAARotator*
+called_from_lib:libSVBCameraSDK*
+called_from_lib:libtoupcam*
+called_from_lib:libPlayerOneCamera*
+called_from_lib:libPlayerOnePW*
+called_from_lib:libqhyccd*

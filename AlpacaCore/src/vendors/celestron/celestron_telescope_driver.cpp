@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
@@ -112,49 +113,48 @@ LocalTimeInfo compute_local_timezone_info(std::time_t base_time) {
 
 } // namespace
 
-class CelestronTelescopeDriver : public TelescopeDriver {
+class CelestronTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
 public:
-    CelestronTelescopeDriver(int device_number,
-                             const ConnectionInfo& connection_info,
-                             std::optional<double> site_latitude_deg,
-                             std::optional<double> site_longitude_deg,
-                             std::optional<double> site_elevation_m,
-                             std::optional<bool> sync_time_on_connect)
-        : device_number_(device_number)
-        , connection_info_(connection_info)
-        , connected_(false)
-        , target_ra_hours_(0.0)
-        , target_dec_degrees_(0.0)
-        , aperture_diameter_m_(0.0)
-        , aperture_area_m2_(0.0)
-        , focal_length_m_(0.0)
-        , site_latitude_cached_(0.0)
-        , site_longitude_cached_(0.0)
-        , site_info_valid_(false)
-        , site_elevation_m_(site_elevation_m.value_or(0.0))
-        , timezone_offset_minutes_(0)
-        , timezone_offset_valid_(false)
-        , dst_observed_(false)
-        , last_utc_set_{}
-        , last_utc_set_monotonic_(std::chrono::steady_clock::now())
-        , last_utc_valid_(false)
-        , tracking_mode_cached_(0)
-        , tracking_mode_valid_(false)
-        , parked_(false)
-        , at_home_(false)
-        , mount_model_id_(-1)
-        , use_precise_commands_(true)
-        , pending_site_latitude_(site_latitude_deg)
-        , pending_site_longitude_(site_longitude_deg)
-        , pending_site_elevation_(site_elevation_m)
-        , sync_time_on_connect_(sync_time_on_connect.value_or(false))
-    {
+    CelestronTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
+                             std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+                             std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect)
+        : AsyncConnectable("Celestron"),
+          device_number_(device_number),
+          connection_info_(connection_info),
+          connected_(false),
+          target_ra_hours_(0.0),
+          target_dec_degrees_(0.0),
+          aperture_diameter_m_(0.0),
+          aperture_area_m2_(0.0),
+          focal_length_m_(0.0),
+          site_latitude_cached_(0.0),
+          site_longitude_cached_(0.0),
+          site_info_valid_(false),
+          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          timezone_offset_minutes_(0),
+          timezone_offset_valid_(false),
+          dst_observed_(false),
+          last_utc_set_{},
+          last_utc_set_monotonic_(std::chrono::steady_clock::now()),
+          last_utc_valid_(false),
+          tracking_mode_cached_(0),
+          tracking_mode_valid_(false),
+          parked_(false),
+          at_home_(false),
+          mount_model_id_(-1),
+          use_precise_commands_(true),
+          pending_site_latitude_(site_latitude_deg),
+          pending_site_longitude_(site_longitude_deg),
+          pending_site_elevation_(site_elevation_m),
+          sync_time_on_connect_(sync_time_on_connect.value_or(false)) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
     }
 
     ~CelestronTelescopeDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_) {
             // Qualify the call so it binds statically (we want this class's
             // implementation, not virtual dispatch from a destructor), and
@@ -225,12 +225,20 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lock(mutex_);
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_)) {
+            return;
+        }
+        if (connected && consume_pending_disconnect(connected_)) {
+            return;
+        }
         if (connected == connected_) {
             return;
         }
@@ -1391,27 +1399,6 @@ private:
         }
     }
 
-    void start_connection_task(bool connect) {
-        if (connecting_.exchange(true)) {
-            return;
-        }
-        stop_connection_thread();
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& ex) {
-                ALPACA_LOG_ERROR("Celestron", std::string("Connection task failed: ") + ex.what());
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     void refresh_equatorial_cache_locked() const {
         auto now = std::chrono::steady_clock::now();
         if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
@@ -1822,8 +1809,6 @@ private:
     int device_number_;
     ConnectionInfo connection_info_;
     mutable std::mutex mutex_;
-    std::atomic<bool> connecting_{false};
-    std::thread connection_thread_;
     bool connected_;
 
     double target_ra_hours_;

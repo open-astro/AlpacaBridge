@@ -12,6 +12,7 @@
 // with all SSPL v1 requirements.
 
 #include <alpacacore/alpaca_errors.h>
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
@@ -222,80 +223,79 @@ double normalize_hour_angle_hours(double hours) {
 
 } // namespace
 
-class ZWOTelescopeDriver : public TelescopeDriver {
+class ZWOTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
 public:
-    ZWOTelescopeDriver(int device_number,
-                       const ConnectionInfo& connection_info,
-                       std::optional<double> site_latitude_deg,
-                       std::optional<double> site_longitude_deg,
-                       std::optional<double> site_elevation_m,
-                       std::optional<bool> sync_time_on_connect)
-        : device_number_(device_number)
-        , connection_info_(connection_info)
-        , connected_(false)
-        , connecting_(false)
-        , mount_info_()
-        , target_ra_hours_(0.0)
-        , target_dec_degrees_(0.0)
-        , target_ra_set_(false)
-        , target_dec_set_(false)
-        , ra_offset_hours_(0.0)
-        , dec_offset_deg_(0.0)
-        , aperture_diameter_m_(0.0)
-        , aperture_area_m2_(0.0)
-        , focal_length_m_(0.0)
-        , site_latitude_deg_(site_latitude_deg.value_or(0.0))
-        , site_longitude_deg_(site_longitude_deg.value_or(0.0))
-        , site_coords_valid_(site_latitude_deg.has_value() && site_longitude_deg.has_value())
-        , site_elevation_m_(site_elevation_m.value_or(0.0))
-        , does_refraction_(false)
-        , slew_settle_time_s_(0)
-        , guide_rate_({0.5 * kSiderealRateDegPerSec, 0.5 * kSiderealRateDegPerSec})
-        , tracking_rate_cached_(0)
-        , tracking_rate_valid_(false)
-        , tracking_state_cached_(false)
-        , tracking_state_valid_(false)
-        , tracking_state_at_(std::chrono::steady_clock::time_point{})
-        , cached_equatorial_()
-        , cached_horizontal_()
-        , cached_status_()
-        , cached_pier_side_()
-        , park_state_cached_()
-        , cached_equatorial_at_(std::chrono::steady_clock::time_point{})
-        , cached_horizontal_at_(std::chrono::steady_clock::time_point{})
-        , cached_status_at_(std::chrono::steady_clock::time_point{})
-        , cached_pier_side_at_(std::chrono::steady_clock::time_point{})
-        , park_state_at_(std::chrono::steady_clock::time_point{})
-        , pending_slew_adjust_(false)
-        , pending_slew_ra_hours_(0.0)
-        , pending_slew_dec_degrees_(0.0)
-        , pending_slew_at_(std::chrono::steady_clock::time_point{})
-        , poll_stop_(false)
-        , poll_pause_(false)
-        , last_utc_set_(std::chrono::system_clock::time_point{})
-        , last_utc_set_monotonic_(std::chrono::steady_clock::time_point{})
-        , last_utc_valid_(false)
-        , timezone_offset_minutes_(0)
-        , timezone_valid_(false)
-        , manual_axis_slewing_({false, false})
-        , manual_axis_tracking_restore_({std::nullopt, std::nullopt})
-        , slew_force_until_(std::chrono::steady_clock::time_point{})
-        , pulse_guiding_end_(std::chrono::steady_clock::time_point{})
-        , pulse_generation_(0)
-        , pulse_thread_stop_(false)
-        , pulse_cancel_(false)
-        , pulse_queue_end_(std::chrono::steady_clock::time_point{})
-        , parked_cached_(false)
-        , park_command_active_(false)
-        , park_command_started_(std::chrono::steady_clock::time_point{})
-        , park_motion_seen_(false)
-        , pending_site_latitude_(site_latitude_deg)
-        , pending_site_longitude_(site_longitude_deg)
-        , pending_site_elevation_(site_elevation_m)
-        , sync_time_on_connect_(sync_time_on_connect.value_or(true)) {}
+    ZWOTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
+                       std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+                       std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect)
+        : AsyncConnectable("ZWO"),
+          device_number_(device_number),
+          connection_info_(connection_info),
+          connected_(false),
+          mount_info_(),
+          target_ra_hours_(0.0),
+          target_dec_degrees_(0.0),
+          target_ra_set_(false),
+          target_dec_set_(false),
+          ra_offset_hours_(0.0),
+          dec_offset_deg_(0.0),
+          aperture_diameter_m_(0.0),
+          aperture_area_m2_(0.0),
+          focal_length_m_(0.0),
+          site_latitude_deg_(site_latitude_deg.value_or(0.0)),
+          site_longitude_deg_(site_longitude_deg.value_or(0.0)),
+          site_coords_valid_(site_latitude_deg.has_value() && site_longitude_deg.has_value()),
+          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          does_refraction_(false),
+          slew_settle_time_s_(0),
+          guide_rate_({0.5 * kSiderealRateDegPerSec, 0.5 * kSiderealRateDegPerSec}),
+          tracking_rate_cached_(0),
+          tracking_rate_valid_(false),
+          tracking_state_cached_(false),
+          tracking_state_valid_(false),
+          tracking_state_at_(std::chrono::steady_clock::time_point{}),
+          cached_equatorial_(),
+          cached_horizontal_(),
+          cached_status_(),
+          cached_pier_side_(),
+          park_state_cached_(),
+          cached_equatorial_at_(std::chrono::steady_clock::time_point{}),
+          cached_horizontal_at_(std::chrono::steady_clock::time_point{}),
+          cached_status_at_(std::chrono::steady_clock::time_point{}),
+          cached_pier_side_at_(std::chrono::steady_clock::time_point{}),
+          park_state_at_(std::chrono::steady_clock::time_point{}),
+          pending_slew_adjust_(false),
+          pending_slew_ra_hours_(0.0),
+          pending_slew_dec_degrees_(0.0),
+          pending_slew_at_(std::chrono::steady_clock::time_point{}),
+          poll_stop_(false),
+          poll_pause_(false),
+          last_utc_set_(std::chrono::system_clock::time_point{}),
+          last_utc_set_monotonic_(std::chrono::steady_clock::time_point{}),
+          last_utc_valid_(false),
+          timezone_offset_minutes_(0),
+          timezone_valid_(false),
+          manual_axis_slewing_({false, false}),
+          manual_axis_tracking_restore_({std::nullopt, std::nullopt}),
+          slew_force_until_(std::chrono::steady_clock::time_point{}),
+          pulse_guiding_end_(std::chrono::steady_clock::time_point{}),
+          pulse_generation_(0),
+          pulse_thread_stop_(false),
+          pulse_cancel_(false),
+          pulse_queue_end_(std::chrono::steady_clock::time_point{}),
+          parked_cached_(false),
+          park_command_active_(false),
+          park_command_started_(std::chrono::steady_clock::time_point{}),
+          park_motion_seen_(false),
+          pending_site_latitude_(site_latitude_deg),
+          pending_site_longitude_(site_longitude_deg),
+          pending_site_elevation_(site_elevation_m),
+          sync_time_on_connect_(sync_time_on_connect.value_or(true)) {}
 
     ~ZWOTelescopeDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -353,11 +353,19 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect(connected_.load())) {
+            return;
+        }
         if (!connected) {
             if (!connected_.exchange(false)) {
                 return;
@@ -2347,34 +2355,6 @@ private:
         }
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("ZWO", "ZWO mount connection change failed: " + std::string(e.what()));
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     void refresh_cached_values() const {
         if (!connected_.load()) {
             return;
@@ -2675,11 +2655,8 @@ private:
     const ConnectionInfo connection_info_;
 
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
 
     mutable std::mutex mutex_;
-    std::thread connection_thread_;
-    mutable std::mutex connection_mutex_;
 
     std::string mount_info_;
 

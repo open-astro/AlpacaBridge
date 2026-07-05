@@ -10,6 +10,7 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
@@ -30,21 +31,20 @@ constexpr const char* kLogTag = "ToupTek";
 
 } // namespace
 
-class ToupTekFocuserDriver : public FocuserDriver {
+class ToupTekFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
     ToupTekFocuserDriver(int device_number, std::optional<int> focuser_index, std::optional<std::string> focuser_id,
                          ToupTekSDK& sdk)
-        : sdk_(sdk), device_number_(device_number), focuser_index_(focuser_index), focuser_id_(std::move(focuser_id)) {}
+        : AsyncConnectable(kLogTag),
+          sdk_(sdk),
+          device_number_(device_number),
+          focuser_index_(focuser_index),
+          focuser_id_(std::move(focuser_id)) {}
 
     ~ToupTekFocuserDriver() override {
-        {
-            // Block any new connection task from spawning a thread that would
-            // outlive this object (destructor race -> std::terminate on an
-            // unjoined connection_thread_).
-            std::lock_guard<std::mutex> lock(connection_mutex_);
-            shutting_down_ = true;
-        }
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -108,12 +108,20 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect(connected_.load())) {
+            return;
+        }
         if (connected == connected_.load()) {
             return;
         }
@@ -265,36 +273,6 @@ private:
         }
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (shutting_down_) {
-            return;  // Destruction in progress; never spawn a new thread.
-        }
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR(kLogTag,
-                                 std::string("AAF connection failed: ") + e.what());
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     ToupFocuserInfo resolve_focuser_locked(ToupTekSDK& sdk) {
         auto focusers = sdk.enumerate_focusers();
         if (focusers.empty()) {
@@ -336,11 +314,7 @@ private:
     int backlash_max_{0};
 
     std::atomic<bool> connected_{false};
-    std::atomic<bool> connecting_{false};
-    bool shutting_down_ = false;  // guarded by connection_mutex_
     mutable std::mutex mutex_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 };
 
 std::unique_ptr<FocuserDriver> create_touptek_focuser_by_index(int device_number,

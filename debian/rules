@@ -108,6 +108,14 @@ override_dh_auto_install:
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/udev/99-player_one_astronomy.rules \
 	  $(STAGING)/lib/udev/rules.d/
+	# ASIAIR Plus (RK3568): /dev/pwm-gpio-misc is created root-only by ZWO's
+	# pwm_gpio.ko; this rule opens it to the gpio group (postinst guarantees
+	# the group exists and enrolls the service user). The shell installers
+	# pick this up via their *.rules discovery loop — the .deb previously
+	# missed it, leaving the RK3568 switch EACCES-dead on a stock-kernel box.
+	install -m 644 \
+	  $(CURDIR)/AlpacaCore/external/ZWO/asiair-plus/99-zwo-asiair-plus.rules \
+	  $(STAGING)/lib/udev/rules.d/
 
 	# --- Web UI assets ---
 	install -d $(STAGING)/usr/share/alpacabridge/web
