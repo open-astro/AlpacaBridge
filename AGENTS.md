@@ -73,12 +73,22 @@ of the races below — only code review does, so every miss becomes a review rou
 The rules are vendor-agnostic; do them in the driver from the start.
 
 **Threads & shutdown**
-- Async connect: `start_connection_task(bool)` spawns `connection_thread_`. Guard
-  it with a `bool shutting_down_` under `connection_mutex_` — the destructor sets it
-  `true` under the lock *before* `stop_connection_thread()`, and
-  `start_connection_task` returns early when it is set. Without it a `connect()`
-  racing `~Driver` spawns a thread that outlives the object and is never joined →
-  `std::terminate`.
+- Async connect: inherit the shared base —
+  `class FooDriver : public XDriver, protected alpacacore::AsyncConnectable`
+  (`<alpacacore/async_connectable.h>`, issue #100). It owns the connection
+  thread, the `shutting_down_` destructor guard, and the never-drop-a-racing-
+  disconnect protocol (pending-disconnect record/consume + Idle-published-
+  under-the-lock tail). **Do not hand-roll `start_connection_task` /
+  `connection_thread_` / `connecting_` in a driver.** The driver obligations
+  (each one line, all contractual — see the header comment): destructor calls
+  `shutdown_connection()` FIRST; `connect()`/`disconnect()` forward to
+  `start_connection_task(true/false)`; `get_connecting()` returns
+  `connection_task_active()`; `set_connected` gates with
+  `record_disconnect_if_connect_in_flight(...)` / `consume_pending_disconnect()`
+  after taking the driver mutex, before the idempotency early-return. A driver
+  with an extra sync-connect window the base can't see (e.g. the AFW's
+  mutex-released homing poll) records it itself via
+  `record_pending_disconnect()`.
 - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
   writes a member (e.g. a pulse-guide flag) is the classic trap: if the object dies
   mid-sleep the wakeup writes freed memory (UB). Make it a joinable member thread
@@ -141,10 +151,10 @@ The rules are vendor-agnostic; do them in the driver from the start.
   [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors).
   The round-trip test (Required Test Case #6) is the automated catch.
 
-> The connection-thread + `shutting_down_` pattern is copy-pasted across ~26
-> drivers; the four ToupTek drivers have the guard, the rest still need it —
-> ideally extract a shared `AsyncConnectable` base so it (and the lock discipline
-> above) exists in one place. Tracked follow-up.
+> The connection-thread lifecycle lives in ONE place: `AsyncConnectable`
+> (`AlpacaCore/include/alpacacore/async_connectable.h`). Every vendor driver
+> inherits it (issue #100); a new driver that copy-pastes its own
+> `connection_thread_` machinery is a review-blocking regression.
 
 Two of our worst deadlocks are documented later, not in the checklist above — read
 [`disconnect_locked()`](#reconnect-must-not-self-deadlock-disconnect_locked) and the

@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
@@ -41,7 +42,7 @@ namespace alpacacore::vendor::ioptron {
  * Implements the TelescopeDriver interface for iOptron mounts using
  * the RS-232 command protocol over serial or TCP connection.
  */
-class iOptronTelescopeDriver : public TelescopeDriver {
+class iOptronTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
 public:
     /**
      * @brief Construct iOptron telescope driver.
@@ -49,62 +50,61 @@ public:
      * @param device_number Alpaca device number
      * @param connection_info Connection information (serial or network)
      */
-    iOptronTelescopeDriver(int device_number,
-                           const ConnectionInfo& connection_info,
-                           std::optional<double> site_latitude_deg,
-                           std::optional<double> site_longitude_deg,
-                           std::optional<double> site_elevation_m,
-                           std::optional<bool> sync_time_on_connect)
-        : device_number_(device_number)
-        , connection_info_(connection_info)
-        , connected_(false)
-        , mount_info_()
-        , target_ra_hours_(0.0)
-        , target_dec_degrees_(0.0)
-        , aperture_diameter_m_(0.0)
-        , aperture_area_m2_(0.0)
-        , focal_length_m_(0.0)
-        , pulse_guiding_active_(false)
-        , pulse_guiding_end_ns_(0)
-        , site_latitude_cached_(0.0)
-        , site_longitude_cached_(0.0)
-        , site_info_valid_(false)
-        , hemisphere_north_(true)
-        , site_elevation_m_(site_elevation_m.value_or(0.0))
-        , timezone_offset_minutes_(0)
-        , timezone_offset_valid_(false)
-        , dst_observed_(false)
-        , last_site_info_fetch_(std::chrono::steady_clock::now())
-        , cached_ra_hours_(0.0)
-        , cached_dec_degrees_(0.0)
-        , cached_side_of_pier_(-1)
-        , position_cache_valid_(false)
-        , last_position_update_(std::chrono::steady_clock::now())
-        , cached_alt_degrees_(0.0)
-        , cached_az_degrees_(0.0)
-        , altaz_cache_valid_(false)
-        , last_altaz_update_(std::chrono::steady_clock::now())
-        , cached_guide_rate_()
-        , guide_rate_valid_(false)
-        , cached_status_()
-        , status_cache_valid_(false)
-        , last_status_update_(std::chrono::steady_clock::now())
-        , last_utc_set_{}
-        , last_utc_set_monotonic_(std::chrono::steady_clock::now())
-        , last_utc_valid_(false)
-        , utc_query_supported_(true)
-        , fast_cache_until_(std::chrono::steady_clock::time_point{})
-        , clock_sync_cancel_(false)
-        , pending_site_latitude_(site_latitude_deg)
-        , pending_site_longitude_(site_longitude_deg)
-        , pending_site_elevation_(site_elevation_m)
-        , sync_time_on_connect_(sync_time_on_connect.value_or(true))
-    {
+    iOptronTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
+                           std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+                           std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect)
+        : AsyncConnectable("iOptron"),
+          device_number_(device_number),
+          connection_info_(connection_info),
+          connected_(false),
+          mount_info_(),
+          target_ra_hours_(0.0),
+          target_dec_degrees_(0.0),
+          aperture_diameter_m_(0.0),
+          aperture_area_m2_(0.0),
+          focal_length_m_(0.0),
+          pulse_guiding_active_(false),
+          pulse_guiding_end_ns_(0),
+          site_latitude_cached_(0.0),
+          site_longitude_cached_(0.0),
+          site_info_valid_(false),
+          hemisphere_north_(true),
+          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          timezone_offset_minutes_(0),
+          timezone_offset_valid_(false),
+          dst_observed_(false),
+          last_site_info_fetch_(std::chrono::steady_clock::now()),
+          cached_ra_hours_(0.0),
+          cached_dec_degrees_(0.0),
+          cached_side_of_pier_(-1),
+          position_cache_valid_(false),
+          last_position_update_(std::chrono::steady_clock::now()),
+          cached_alt_degrees_(0.0),
+          cached_az_degrees_(0.0),
+          altaz_cache_valid_(false),
+          last_altaz_update_(std::chrono::steady_clock::now()),
+          cached_guide_rate_(),
+          guide_rate_valid_(false),
+          cached_status_(),
+          status_cache_valid_(false),
+          last_status_update_(std::chrono::steady_clock::now()),
+          last_utc_set_{},
+          last_utc_set_monotonic_(std::chrono::steady_clock::now()),
+          last_utc_valid_(false),
+          utc_query_supported_(true),
+          fast_cache_until_(std::chrono::steady_clock::time_point{}),
+          clock_sync_cancel_(false),
+          pending_site_latitude_(site_latitude_deg),
+          pending_site_longitude_(site_longitude_deg),
+          pending_site_elevation_(site_elevation_m),
+          sync_time_on_connect_(sync_time_on_connect.value_or(true)) {
         // Initialize mount info (will be populated on connect)
     }
-    
+
     ~iOptronTelescopeDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_) {
             // Destructors are implicitly noexcept; a throw from set_connected()
             // would call std::terminate(). Swallow any error during teardown.
@@ -169,15 +169,23 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lock(mutex_);
 
         ALPACA_LOG_INFO("iOptron", "set_connected called with: " + std::string(connected ? "true" : "false"));
-        
+
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_)) {
+            return;
+        }
+        if (connected && consume_pending_disconnect()) {
+            return;
+        }
         if (connected == connected_) {
             ALPACA_LOG_INFO("iOptron", "Already in requested state, returning");
             return;
@@ -2246,33 +2254,6 @@ private:
         clock_sync_cancel_.store(false);
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        if (connect == get_connected()) {
-            return;
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("iOptron", std::string("Async connection task failed: ") + e.what());
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(false);
-    }
-
     std::chrono::system_clock::time_point current_utc_time_locked() const {
         if (!last_utc_valid_) {
             return std::chrono::system_clock::now();
@@ -2495,9 +2476,6 @@ private:
     mutable std::chrono::steady_clock::time_point slew_override_until_{};
     std::thread clock_sync_thread_;
     std::atomic<bool> clock_sync_cancel_;
-    std::atomic<bool> connecting_{false};
-    std::thread connection_thread_;
-    mutable std::mutex connection_mutex_;
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;

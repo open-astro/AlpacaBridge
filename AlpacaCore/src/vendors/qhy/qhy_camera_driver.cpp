@@ -10,6 +10,7 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
@@ -81,37 +82,34 @@ enum class QHYExposureStatus {
 // QHYCameraDriver
 // ────────────────────────────────────────────────────────────────────────────
 
-class QHYCameraDriver : public CameraDriver {
+class QHYCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
-    QHYCameraDriver(int device_number,
-                    std::optional<std::string> camera_id,
-                    std::optional<int> camera_index)
-        : device_number_(device_number)
-        , camera_id_(std::move(camera_id))
-        , camera_index_(camera_index)
-        , camera_info_{}
-        , camera_info_valid_(false)
-        , readout_modes_{}
-        , readout_mode_(0)
-        , bin_x_(1)
-        , bin_y_(1)
-        , num_x_(0)
-        , num_y_(0)
-        , start_x_(0)
-        , start_y_(0)
-        , bits_(16)
-        , target_temp_(0.0)
-        , cooler_on_(true)
-        , connected_(false)
-        , connecting_(false)
-        , exposure_status_(QHYExposureStatus::Idle)
-        , image_ready_(false)
-        , last_exposure_duration_(0.0)
-        , last_exposure_start_{}
-        , last_exposure_valid_(false)
-        , pulse_guiding_(false)
-        , pulse_guiding_end_{}
-    {
+    QHYCameraDriver(int device_number, std::optional<std::string> camera_id, std::optional<int> camera_index)
+        : AsyncConnectable("QHY"),
+          device_number_(device_number),
+          camera_id_(std::move(camera_id)),
+          camera_index_(camera_index),
+          camera_info_{},
+          camera_info_valid_(false),
+          readout_modes_{},
+          readout_mode_(0),
+          bin_x_(1),
+          bin_y_(1),
+          num_x_(0),
+          num_y_(0),
+          start_x_(0),
+          start_y_(0),
+          bits_(16),
+          target_temp_(0.0),
+          cooler_on_(true),
+          connected_(false),
+          exposure_status_(QHYExposureStatus::Idle),
+          image_ready_(false),
+          last_exposure_duration_(0.0),
+          last_exposure_start_{},
+          last_exposure_valid_(false),
+          pulse_guiding_(false),
+          pulse_guiding_end_{} {
         // Deliberately NO SDK touch here (the old construction-time
         // try_preload_camera_info is gone): libqhyccd's first entry point
         // spawns its PnP listener thread, which segfaults the whole process
@@ -123,6 +121,9 @@ public:
     }
 
     ~QHYCameraDriver() override {
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         stop_all_threads();
         if (connected_.load()) {
             try {
@@ -203,9 +204,7 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         // Alpaca semantics require set_connected to be synchronous so that
@@ -229,6 +228,16 @@ private:
             std::thread telemetry_to_join;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                // Base gates BEFORE the idempotency check: a sync disconnect during an
+                // in-flight connect looks idempotent (both sides see disconnected) and
+                // would be silently dropped without the record; a connect must honor a
+                // newer pending disconnect by staying down.
+                if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+                    return;
+                }
+                if (connected && consume_pending_disconnect()) {
+                    return;
+                }
                 if (!connected_.load()) {
                     return; // already disconnected
                 }
@@ -278,6 +287,16 @@ private:
 
         // Connection path
         std::unique_lock<std::mutex> lock(mutex_);
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect()) {
+            return;
+        }
         if (connected_.load()) {
             return; // already connected
         }
@@ -1165,10 +1184,7 @@ private:
     bool cooler_on_;
 
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
     mutable std::mutex mutex_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 
     // Exposure state
     QHYExposureStatus exposure_status_;
@@ -1282,37 +1298,7 @@ private:
         }
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected_impl(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("QHY", "Connection task failed: " + std::string(e.what()));
-            }
-            connecting_.store(false);
-        });
-    }
-
     void stop_all_threads() {
-        {
-            std::lock_guard<std::mutex> lock(connection_mutex_);
-            if (connection_thread_.joinable()) {
-                try {
-                    connection_thread_.join();
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("QHY", "Connection thread join failed during shutdown: " +
-                        std::string(e.what()));
-                }
-            }
-        }
         // Do not hold mutex_ across join: temp and telemetry threads acquire
         // mutex_ in their loops; joining while holding it would deadlock.
         std::thread temp_to_join;

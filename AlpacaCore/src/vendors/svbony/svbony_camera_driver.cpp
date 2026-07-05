@@ -10,6 +10,7 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
@@ -55,42 +56,43 @@ bool supports_bin(const std::vector<int>& bins, int bin) {
 
 } // namespace
 
-class SVBONYCameraDriver : public CameraDriver {
+class SVBONYCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
     SVBONYCameraDriver(int device_number, int camera_index)
-        : device_number_(device_number)
-        , camera_index_(camera_index)
-        , camera_id_(-1)
-        , serial_number_()
-        , camera_info_()
-        , camera_info_valid_(false)
-        , control_caps_()
-        , connected_(false)
-        , connecting_(false)
-        , image_type_(SVBImageType::Raw8)
-        , bin_x_(1)
-        , bin_y_(1)
-        , num_x_(0)
-        , num_y_(0)
-        , roi_width_effective_(0)
-        , roi_height_effective_(0)
-        , start_x_(0)
-        , start_y_(0)
-        , image_ready_(false)
-        , image_cached_(false)
-        , last_image_()
-        , last_exposure_duration_(0.0)
-        , last_exposure_start_()
-        , last_exposure_valid_(false)
-        , exposure_active_(false)
-        , pulse_guiding_(false)
-        , pulse_guiding_end_(std::chrono::steady_clock::time_point{})
-    {
+        : AsyncConnectable("SVBONY"),
+          device_number_(device_number),
+          camera_index_(camera_index),
+          camera_id_(-1),
+          serial_number_(),
+          camera_info_(),
+          camera_info_valid_(false),
+          control_caps_(),
+          connected_(false),
+          image_type_(SVBImageType::Raw8),
+          bin_x_(1),
+          bin_y_(1),
+          num_x_(0),
+          num_y_(0),
+          roi_width_effective_(0),
+          roi_height_effective_(0),
+          start_x_(0),
+          start_y_(0),
+          image_ready_(false),
+          image_cached_(false),
+          last_image_(),
+          last_exposure_duration_(0.0),
+          last_exposure_start_(),
+          last_exposure_valid_(false),
+          exposure_active_(false),
+          pulse_guiding_(false),
+          pulse_guiding_end_(std::chrono::steady_clock::time_point{}) {
         preload_camera_info_locked();
     }
 
     ~SVBONYCameraDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         stop_exposure_thread();
         if (connected_.load()) {
             try {
@@ -178,9 +180,7 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
@@ -199,6 +199,16 @@ public:
             stop_exposure_thread();
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect()) {
+            return;
+        }
         if (connected == connected_.load()) {
             // Idempotent (ASCOM): a redundant Connect/Disconnect is a no-op and must
             // NOT reset exposure state. The Platform-7 `connect` endpoint calls
@@ -1076,10 +1086,7 @@ private:
     std::unordered_map<SVBControlType, SVBControlCaps> control_caps_;
 
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
     mutable std::mutex mutex_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 
     SVBImageType image_type_;
     int bin_x_;
@@ -1197,32 +1204,6 @@ private:
         adjusted_width = candidate_width;
         adjusted_height = candidate_height;
         return true;
-    }
-
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("SVBONY", "Connection task failed: " + std::string(e.what()));
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
     }
 
     void stop_exposure_thread() {

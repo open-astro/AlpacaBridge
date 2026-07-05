@@ -10,6 +10,7 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
@@ -47,24 +48,20 @@ struct ThermalElement {
 
 }  // namespace
 
-class ToupTekThermalSwitchDriver : public SwitchDriver {
+class ToupTekThermalSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
     ToupTekThermalSwitchDriver(int device_number, int camera_index, ToupTekSDK& sdk)
-        : sdk_(sdk),
+        : AsyncConnectable(kLogTag),
+          sdk_(sdk),
           device_number_(device_number),
           camera_index_(camera_index),
           camera_name_("ToupTek Camera"),
           connected_(false) {}
 
     ~ToupTekThermalSwitchDriver() override {
-        {
-            // Block any new connection task from spawning a thread that would
-            // outlive this object (destructor race -> std::terminate on an
-            // unjoined connection_thread_).
-            std::lock_guard<std::mutex> lock(connection_mutex_);
-            shutting_down_ = true;
-        }
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_.load()) {
             try {
                 ToupTekThermalSwitchDriver::set_connected(false);
@@ -100,25 +97,18 @@ public:
 
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return conn_task_.load() != kConnIdle; }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected && !connected_.load() && conn_task_.load() == kConnConnect) {
-            // Disconnect requested while an async connect is in flight but before
-            // its thread has run (connected_ still false) — the idempotency
-            // early-return below would silently drop it and the device would come
-            // up Connected despite the explicit request. Record the intent; the
-            // in-flight connect consumes it at entry or the connection task's
-            // post-connect re-check disconnects. Same pattern as the AFW driver.
-            pending_disconnect_ = true;
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && pending_disconnect_) {
-            // A disconnect arrived after this connect was requested (in the window
-            // before this thread acquired mutex_). It is newer — honor it: consume
-            // the flag and stay disconnected instead of opening the camera.
-            pending_disconnect_ = false;
+        if (connected && consume_pending_disconnect()) {
             return;
         }
         if (connected == connected_.load()) {
@@ -485,83 +475,6 @@ private:
         probed_element_count_ = static_cast<int>(elements_.size());
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (shutting_down_) {
-            return;  // Destruction in progress; never spawn a new thread.
-        }
-        const auto inflight = conn_task_.load();
-        if (inflight != kConnIdle) {
-            // An async disconnect racing an in-flight CONNECT must not be dropped
-            // (the device would come up Connected despite the explicit request).
-            // Record the intent; the connect consumes it at entry or the re-check
-            // below runs the disconnect. A disconnect racing an in-flight
-            // DISCONNECT needs nothing (idempotent). Same pattern as the AFW.
-            if (!connect && inflight == kConnConnect) {
-                std::lock_guard<std::mutex> state_lock(mutex_);
-                pending_disconnect_ = true;
-            }
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        conn_task_.store(connect ? kConnConnect : kConnDisconnect);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR(kLogTag, "Thermal switch connection failed: " + std::string(e.what()));
-            }
-            // Tail under connection_mutex_: conn_task_ only transitions to Idle
-            // here, under the same lock every start_connection_task holds — so a
-            // recorder can never misjudge the in-flight task (the double-read race),
-            // and a disconnect recorded against this connect is either honored
-            // RIGHT HERE or its caller is still waiting on connection_mutex_ and,
-            // once Idle is published, spawns a real disconnect task. No disconnect
-            // is dropped and no stale flag leaks into the next connect (which
-            // would consume it at entry and silently no-op).
-            std::lock_guard<std::mutex> conn_lock(connection_mutex_);
-            bool need_disconnect = false;
-            {
-                std::lock_guard<std::mutex> state_lock(mutex_);
-                if (pending_disconnect_) {
-                    pending_disconnect_ = false;
-                    need_disconnect = connect && connected_.load();
-                }
-            }
-            // Publish Idle BEFORE the deferred disconnect below (still under
-            // connection_mutex_, so recorders cannot misjudge the state): if the
-            // deferred set_connected(false) ran while conn_task_ was still
-            // ConnectInFlight, the sync gate would treat our own call as another
-            // racing disconnect, re-record the flag, and return without closing —
-            // leaving the device Connected and the stale flag silently no-opping
-            // the next connect.
-            conn_task_.store(kConnIdle);
-            if (need_disconnect) {
-                try {
-                    set_connected(false);
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_ERROR(kLogTag, "Thermal switch deferred disconnect failed: " + std::string(e.what()));
-                }
-            }
-        });
-    }
-
-    void stop_connection_thread() {
-        // Join OUTSIDE connection_mutex_: the connection task's tail takes
-        // connection_mutex_ (to publish Idle atomically w.r.t. recorders), so
-        // joining while holding it would deadlock with a finishing task.
-        std::thread thread_to_join;
-        {
-            std::lock_guard<std::mutex> lock(connection_mutex_);
-            thread_to_join = std::move(connection_thread_);
-        }
-        if (thread_to_join.joinable()) {
-            thread_to_join.join();
-        }
-    }
-
     // Injected SDK seam (issue #104); see touptek_sdk_wrapper.h.
     ToupTekSDK& sdk_;
     int device_number_;
@@ -573,23 +486,7 @@ private:
     std::vector<ThermalElement> elements_;
     int probed_element_count_ = 0;  // guarded by mutex_; cached MaxSwitch after first probe
     std::atomic<bool> connected_;
-    // Connection-task state, encoded as ONE atomic so readers can never observe
-    // a half-published (in-flight?, direction) pair — two separate atomics have
-    // an unavoidable window between the stores in which the sync set_connected
-    // gate (which holds mutex_, never connection_mutex_) could misjudge the
-    // in-flight task and drop a disconnect. Written in start_connection_task
-    // under connection_mutex_ and reset by the connection task itself.
-    enum ConnTaskState : std::uint8_t { kConnIdle = 0, kConnConnect = 1, kConnDisconnect = 2 };
-    std::atomic<ConnTaskState> conn_task_{kConnIdle};
-    // Set when a disconnect arrives while a connect is in flight (before its
-    // thread runs, connected_ still false — the idempotency early-return would
-    // otherwise drop it). Consumed at the connect's entry (stays disconnected)
-    // or by the connection task's post-connect re-check. Guarded by mutex_.
-    bool pending_disconnect_ = false;
-    bool shutting_down_ = false;  // guarded by connection_mutex_
     mutable std::mutex mutex_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 };
 
 std::unique_ptr<SwitchDriver> create_touptek_thermal_switch(int device_number, int camera_index) {

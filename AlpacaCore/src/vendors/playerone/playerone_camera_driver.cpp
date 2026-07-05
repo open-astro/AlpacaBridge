@@ -10,6 +10,7 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
@@ -109,15 +110,17 @@ PlayerOneImageFormat choose_default_format(const PlayerOneCameraInfo& info) {
 
 } // namespace
 
-class PlayerOneCameraDriver : public CameraDriver {
+class PlayerOneCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
     PlayerOneCameraDriver(int device_number, int camera_index)
-        : device_number_(device_number), camera_index_(camera_index) {
+        : AsyncConnectable("PlayerOne"), device_number_(device_number), camera_index_(camera_index) {
         preload_camera_info();
     }
 
     ~PlayerOneCameraDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         stop_exposure_thread();
         if (connected_.load()) {
             try {
@@ -168,7 +171,7 @@ public:
 
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connecting_.load(); }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
@@ -187,6 +190,16 @@ public:
             stop_exposure_thread();
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect()) {
+            return;
+        }
         if (connected == connected_.load()) {
             // Idempotent (ASCOM): a redundant Connect/Disconnect is a no-op and must
             // NOT reset exposure state. The Platform-7 `connect` endpoint calls
@@ -1025,10 +1038,7 @@ private:
     PlayerOneConfigCaps caps_{};
 
     std::atomic<bool> connected_{false};
-    std::atomic<bool> connecting_{false};
     mutable std::mutex mutex_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 
     int bin_{1};
     int start_x_{0};
@@ -1125,27 +1135,6 @@ private:
         last_exposure_valid_ = false;
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
-    }
-
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) return;
-        if (connection_thread_.joinable()) connection_thread_.join();
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR("PlayerOne",
-                                 "Connection task failed: " + std::string(e.what()));
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) connection_thread_.join();
     }
 
     void stop_exposure_thread() {

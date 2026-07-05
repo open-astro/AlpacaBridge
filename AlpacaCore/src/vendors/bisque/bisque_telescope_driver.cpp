@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -92,26 +93,26 @@ double shortest_ra_delta_hours(double a, double b) {
 
 } // namespace
 
-class BisqueTelescopeDriver : public TelescopeDriver {
+class BisqueTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
 public:
-    BisqueTelescopeDriver(int device_number,
-                          const ConnectionInfo& connection_info,
-                          std::optional<double> site_latitude_deg,
-                          std::optional<double> site_longitude_deg,
+    BisqueTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
+                          std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                           std::optional<double> site_elevation_m)
-        : device_number_(device_number)
-        , connection_info_(connection_info)
-        , site_latitude_(site_latitude_deg.value_or(0.0))
-        , site_longitude_(site_longitude_deg.value_or(0.0))
-        , site_elevation_m_(site_elevation_m.value_or(0.0))
-        , site_info_valid_(site_latitude_deg.has_value() && site_longitude_deg.has_value())
-    {
+        : AsyncConnectable("Bisque"),
+          device_number_(device_number),
+          connection_info_(connection_info),
+          site_latitude_(site_latitude_deg.value_or(0.0)),
+          site_longitude_(site_longitude_deg.value_or(0.0)),
+          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          site_info_valid_(site_latitude_deg.has_value() && site_longitude_deg.has_value()) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
     }
 
     ~BisqueTelescopeDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_) {
             try {
                 set_connected(false);
@@ -163,12 +164,20 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lock(mutex_);
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_)) {
+            return;
+        }
+        if (connected && consume_pending_disconnect()) {
+            return;
+        }
         if (connected == connected_) {
             return;
         }
@@ -817,27 +826,6 @@ private:
         }
     }
 
-    void start_connection_task(bool do_connect) {
-        if (connecting_.exchange(true)) {
-            return;
-        }
-        stop_connection_thread();
-        connection_thread_ = std::thread([this, do_connect]() {
-            try {
-                set_connected(do_connect);
-            } catch (const std::exception& ex) {
-                ALPACA_LOG_ERROR("Bisque", std::string("Connection task failed: ") + ex.what());
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     void refresh_equatorial_cache_locked() const {
         auto now = std::chrono::steady_clock::now();
         if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
@@ -928,8 +916,6 @@ private:
     int device_number_;
     ConnectionInfo connection_info_;
     mutable std::mutex mutex_;
-    std::atomic<bool> connecting_{false};
-    std::thread connection_thread_;
     bool connected_ = false;
 
     double target_ra_hours_ = 0.0;

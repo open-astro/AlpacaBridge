@@ -10,11 +10,10 @@
 // If you use this program to provide a network-accessible service, appliance,
 // or any commercial offering, you must comply with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
-
-#include <alpacacore/async_connectable.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 #include <alpacacore/version.h>
 
@@ -36,11 +35,11 @@ class ToupTekFocuserDriver : public FocuserDriver, protected alpacacore::AsyncCo
 public:
     ToupTekFocuserDriver(int device_number, std::optional<int> focuser_index, std::optional<std::string> focuser_id,
                          ToupTekSDK& sdk)
-        : AsyncConnectable(kLogTag)
-        , sdk_(sdk)
-        , device_number_(device_number)
-        , focuser_index_(focuser_index)
-        , focuser_id_(std::move(focuser_id)) {}
+        : AsyncConnectable(kLogTag),
+          sdk_(sdk),
+          device_number_(device_number),
+          focuser_index_(focuser_index),
+          focuser_id_(std::move(focuser_id)) {}
 
     ~ToupTekFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -109,9 +108,7 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connection_task_active();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         std::lock_guard<std::mutex> lock(mutex_);

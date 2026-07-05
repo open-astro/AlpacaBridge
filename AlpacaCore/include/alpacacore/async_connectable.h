@@ -105,35 +105,15 @@ protected:
             connection_thread_.join();  // finished task; reap before reuse
         }
         conn_task_.store(connect ? kConnConnect : kConnDisconnect);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR(log_tag_.c_str(),
-                                 std::string("Connection task failed: ") + e.what());
-            }
-            // Tail under connection_mutex_: see the class comment for why the
-            // Idle publish and the deferred-disconnect handoff must both
-            // happen under this lock, in this order.
-            std::lock_guard<std::mutex> conn_lock(connection_mutex_);
-            bool need_disconnect = false;
-            {
-                std::lock_guard<std::mutex> pending_lock(pending_mutex_);
-                if (pending_disconnect_) {
-                    pending_disconnect_ = false;
-                    need_disconnect = connect && get_connected();
-                }
-            }
+        try {
+            connection_thread_ = std::thread(&AsyncConnectable::run_connection_task, this, connect);
+        } catch (...) {
+            // std::thread ctor can throw (e.g. OS thread limit). Roll back the
+            // in-flight publish or conn_task_ stays non-Idle forever and every
+            // future connect/disconnect becomes a no-op.
             conn_task_.store(kConnIdle);
-            if (need_disconnect) {
-                try {
-                    set_connected(false);
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_ERROR(log_tag_.c_str(),
-                                     std::string("Deferred disconnect failed: ") + e.what());
-                }
-            }
-        });
+            throw;
+        }
     }
 
     /// Join a finished/running task. Never call while holding a lock the
@@ -165,11 +145,20 @@ protected:
     /// connect and the caller should return without touching hardware.
     bool record_disconnect_if_connect_in_flight(bool connected_now) {
         if (!connected_now && conn_task_.load() == kConnConnect) {
-            std::lock_guard<std::mutex> pending_lock(pending_mutex_);
-            pending_disconnect_ = true;
+            record_pending_disconnect();
             return true;
         }
         return false;
+    }
+
+    /// Unconditionally record a pending disconnect. For drivers with an extra
+    /// sync-connect window the conn_task_ gate cannot see — e.g. a
+    /// mutex-released homing poll inside a synchronous set_connected(true)
+    /// (ToupTek AFW) — which must record the disconnect themselves and consume
+    /// it when the window closes.
+    void record_pending_disconnect() {
+        std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+        pending_disconnect_ = true;
     }
 
     /// Connect-entry gate (driver obligation 5). Call with the driver state
@@ -185,15 +174,43 @@ protected:
     }
 
 private:
+    void run_connection_task(bool connect) {
+        try {
+            set_connected(connect);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_ERROR(log_tag_.c_str(), std::string("Connection task failed: ") + e.what());
+        }
+        // Tail under connection_mutex_: see the class comment for why the
+        // Idle publish and the deferred-disconnect handoff must both
+        // happen under this lock, in this order.
+        std::lock_guard<std::mutex> conn_lock(connection_mutex_);
+        bool need_disconnect = false;
+        {
+            std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+            if (pending_disconnect_) {
+                pending_disconnect_ = false;
+                need_disconnect = connect && get_connected();
+            }
+        }
+        conn_task_.store(kConnIdle);
+        if (need_disconnect) {
+            try {
+                set_connected(false);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_ERROR(log_tag_.c_str(), std::string("Deferred disconnect failed: ") + e.what());
+            }
+        }
+    }
+
     enum ConnTaskState : std::uint8_t { kConnIdle = 0, kConnConnect = 1, kConnDisconnect = 2 };
 
     std::string log_tag_;
     std::atomic<ConnTaskState> conn_task_{kConnIdle};
-    std::mutex connection_mutex_;   // guards shutting_down_, thread spawn, Idle publish
-    std::mutex pending_mutex_;      // leaf lock for pending_disconnect_ only
+    std::mutex connection_mutex_;  // guards shutting_down_, thread spawn, Idle publish
+    std::mutex pending_mutex_;     // leaf lock for pending_disconnect_ only
     bool pending_disconnect_ = false;
-    bool shutting_down_ = false;    // under connection_mutex_
+    bool shutting_down_ = false;  // under connection_mutex_
     std::thread connection_thread_;
 };
 
-} // namespace alpacacore
+}  // namespace alpacacore

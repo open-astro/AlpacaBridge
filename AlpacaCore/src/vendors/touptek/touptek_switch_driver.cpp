@@ -11,16 +11,15 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 #include <alpacacore/version.h>
 
-#include <atomic>
 #include <cmath>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace alpacacore::vendor::touptek {
@@ -48,13 +47,13 @@ TouptekSwitchConfig default_stellavita_config() {
     return cfg;
 }
 
-class TouptekSwitchDriver : public SwitchDriver {
+class TouptekSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
     TouptekSwitchDriver(int device_number, TouptekSwitchConfig config)
-        : device_number_(device_number),
+        : AsyncConnectable(kLogCategory),
+          device_number_(device_number),
           config_(std::move(config)),
-          wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz),
-          connecting_(false) {
+          wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz) {
         switch_names_.reserve(config_.ports.size());
         for (const auto& p : config_.ports) {
             switch_names_.emplace_back(p.name);
@@ -62,7 +61,9 @@ public:
     }
 
     ~TouptekSwitchDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         try {
             wrapper_.close();
         } catch (const std::exception& e) {
@@ -92,9 +93,19 @@ public:
 
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
-    bool get_connecting() const override { return connecting_.load(); }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // Base gates first: a sync disconnect during an in-flight connect
+        // looks idempotent (wrapper still closed) and would be silently
+        // dropped without the record; a connect must honor a newer pending
+        // disconnect by staying down. Connected state lives in the wrapper.
+        if (!connected && record_disconnect_if_connect_in_flight(wrapper_.is_open())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect()) {
+            return;
+        }
         if (connected) {
             if (!wrapper_.is_open()) {
                 wrapper_.open();
@@ -253,42 +264,12 @@ private:
         }
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR(kLogCategory, std::string("StellaVita connection task failed: ") + e.what());
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     const int device_number_;
     const TouptekSwitchConfig config_;
     TouptekPowerboxWrapper wrapper_;
 
     mutable std::mutex name_mutex_;
     std::vector<std::string> switch_names_;
-
-    std::atomic<bool> connecting_;
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 };
 
 std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config) {

@@ -11,6 +11,7 @@
 // or any commercial offering, you must comply
 // with all SSPL v1 requirements.
 
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -37,19 +38,21 @@ constexpr double kPositionToleranceDeg = 10.0;
 constexpr int kMaxBrightness = 255;
 }  // namespace
 
-class WandererCoverCalibratorDriver : public CoverCalibratorDriver {
+class WandererCoverCalibratorDriver : public CoverCalibratorDriver, protected alpacacore::AsyncConnectable {
 public:
     enum class CoverTarget : std::uint8_t { None, Opening, Closing };
 
     WandererCoverCalibratorDriver(int device_number, ConnectionConfig config)
-        : device_number_(device_number),
+        : AsyncConnectable("WandererAstro"),
+          device_number_(device_number),
           config_(std::move(config)),
           connected_(false),
-          connecting_(false),
           protocol_() {}
 
     ~WandererCoverCalibratorDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         if (connected_.load()) {
             try {
                 // Tear down directly rather than via the virtual set_connected(),
@@ -105,7 +108,7 @@ public:
         }
     }
 
-    bool get_connecting() const override { return connecting_.load(); }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
         // Serialize the whole connect/disconnect transition. Without this, two
@@ -115,6 +118,16 @@ public:
         // object (undefined behavior). Holding this for the duration also makes
         // the guard check-then-act atomic w.r.t. other transitions.
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        // Base gates BEFORE the idempotency check: a sync disconnect during an
+        // in-flight connect looks idempotent (both sides see disconnected) and
+        // would be silently dropped without the record; a connect must honor a
+        // newer pending disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect()) {
+            return;
+        }
         if (connected == connected_.load()) {
             return;
         }
@@ -401,44 +414,9 @@ private:
         }
     }
 
-    void start_connection_task(bool do_connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        try {
-            connection_thread_ = std::thread([this, do_connect]() {
-                try {
-                    set_connected(do_connect);
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_ERROR("WandererAstro", "Cover connection failed: " + std::string(e.what()));
-                }
-                connecting_.store(false);
-            });
-        } catch (...) {
-            // std::thread ctor can throw (e.g. OS thread limit). Reset the flag
-            // so the driver stays connectable instead of being wedged with
-            // connecting_ == true forever.
-            connecting_.store(false);
-            throw;
-        }
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     int device_number_;
     ConnectionConfig config_;
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
     WandererProtocolWrapper protocol_;
 
     mutable std::mutex state_mutex_;
@@ -448,8 +426,6 @@ private:
     int commanded_brightness_ = 0;
     bool calibrator_engaged_ = false;
 
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
     std::mutex transition_mutex_;  // serializes set_connected() connect/disconnect transitions
 };
 

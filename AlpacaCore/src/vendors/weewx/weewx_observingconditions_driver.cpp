@@ -12,6 +12,7 @@
 // with all SSPL v1 requirements.
 
 #include <alpacacore/alpaca_errors.h>
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
@@ -237,23 +238,24 @@ std::string http_get(const std::string& url, std::chrono::milliseconds timeout) 
     return response;
 }
 
-class WeeWxObservingConditionsDriver final : public ObservingConditionsDriver {
+class WeeWxObservingConditionsDriver final : public ObservingConditionsDriver, protected alpacacore::AsyncConnectable {
 public:
     WeeWxObservingConditionsDriver(int device_number, WeeWxHttpConfig config)
-        : device_number_(device_number)
-        , config_(std::move(config))
-        , connected_(false)
-        , connecting_(false)
-        , average_period_hours_(0.0)
-        , poll_running_(false)
-    {
+        : AsyncConnectable(kDriverComponent),
+          device_number_(device_number),
+          config_(std::move(config)),
+          connected_(false),
+          average_period_hours_(0.0),
+          poll_running_(false) {
         if (config_.url.empty()) {
             throw AlpacaException("WeeWX URL is required", AlpacaError::InvalidValue);
         }
     }
 
     ~WeeWxObservingConditionsDriver() override {
-        stop_connection_thread();
+        // Blocks new connection tasks, then joins the in-flight one — MUST be
+        // first, before members the task touches are destroyed (base contract).
+        shutdown_connection();
         stop_polling();
     }
 
@@ -297,11 +299,19 @@ public:
         start_connection_task(false);
     }
 
-    bool get_connecting() const override {
-        return connecting_.load();
-    }
+    bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // Base gates first: a sync disconnect during an in-flight connect
+        // looks idempotent (both sides see disconnected) and would be silently
+        // dropped without the record; a connect must honor a newer pending
+        // disconnect by staying down.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
+            return;
+        }
+        if (connected && consume_pending_disconnect()) {
+            return;
+        }
         if (connected) {
             SensorSnapshot snapshot = fetch_snapshot();
             {
@@ -504,32 +514,6 @@ private:
         return parse_snapshot(payload);
     }
 
-    void start_connection_task(bool connect) {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connecting_.load()) {
-            return;
-        }
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-        connecting_.store(true);
-        connection_thread_ = std::thread([this, connect]() {
-            try {
-                set_connected(connect);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR(kDriverComponent, "Connection task failed: " + std::string(e.what()));
-            }
-            connecting_.store(false);
-        });
-    }
-
-    void stop_connection_thread() {
-        std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (connection_thread_.joinable()) {
-            connection_thread_.join();
-        }
-    }
-
     void start_polling() {
         std::lock_guard<std::mutex> lock(poll_mutex_);
         if (poll_running_.load()) {
@@ -580,7 +564,6 @@ private:
     WeeWxHttpConfig config_;
 
     std::atomic<bool> connected_;
-    std::atomic<bool> connecting_;
 
     mutable std::mutex data_mutex_;
     SensorSnapshot last_snapshot_{};
@@ -596,9 +579,6 @@ private:
         {"skytemperature", "Sky sensor temperature (WeeWX sqmTemp)"}
     };
     double average_period_hours_;
-
-    std::mutex connection_mutex_;
-    std::thread connection_thread_;
 
     std::mutex poll_mutex_;
     std::condition_variable poll_cv_;
