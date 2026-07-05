@@ -195,12 +195,20 @@ private:
         // Idle publish and the deferred-disconnect handoff must both
         // happen under this lock, in this order.
         std::lock_guard<std::mutex> conn_lock(connection_mutex_);
+        // Read connected-now BEFORE taking pending_mutex_: get_connected() may
+        // take the driver state mutex (Bisque/Celestron/SynScan/iOptron
+        // telescopes), and the sync set_connected path takes driver mutex ->
+        // pending_mutex_ (obligations 4/5) — calling it under pending_mutex_
+        // is an ABBA deadlock. The read is a momentary snapshot either way
+        // (the sync setter never held both locks at once), and a stale value
+        // is benign: the deferred disconnect below is idempotent.
+        const bool connected_now = connect && get_connected();
         bool need_disconnect = false;
         {
             std::lock_guard<std::mutex> pending_lock(pending_mutex_);
             if (pending_disconnect_) {
                 pending_disconnect_ = false;
-                need_disconnect = connect && get_connected();
+                need_disconnect = connected_now;
             }
         }
         conn_task_.store(kConnIdle);
