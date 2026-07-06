@@ -876,23 +876,31 @@ public:
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
 
-        // One mutex_ hold across ROI validation, the exposure-register write,
-        // and the trigger: the ZWO exposure is SDK-async (no worker thread to
-        // stall), and holding the lock closes the snapshot-then-call gap a
-        // racing disconnect could exploit between the register write and the
-        // trigger.
+        int active_camera_id = -1;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!is_roi_valid_locked(num_x_, num_y_, start_x_, start_y_)) {
+                throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
+            }
+            if (!camera_id_.has_value()) {
+                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+            }
+            active_camera_id = camera_id_.value();
+        }
+
+        // The two SDK calls run on a bare id snapshot OUTSIDE mutex_ (same
+        // class and same justification as stop_exposure): a USB hang here
+        // must not freeze every mutex_-guarded state read. The trigger lock
+        // held since function entry serializes this against stop_exposure
+        // and the retry burst, so nothing can interleave between the
+        // register write and the trigger; a racing disconnect costs an SDK
+        // error surfaced to the caller, which is the correct outcome for a
+        // StartExposure that lost to a disconnect (round 10).
         auto& sdk = ZWOSDKWrapper::instance();
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!is_roi_valid_locked(num_x_, num_y_, start_x_, start_y_)) {
-            throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
-        }
-        if (!camera_id_.has_value()) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
-        }
-        const int active_camera_id = camera_id_.value();
         sdk.set_control_value(active_camera_id, ZWOControlType::Exposure, exposure_us, false);
         sdk.start_exposure(active_camera_id, !light);
 
+        std::lock_guard<std::mutex> lock(mutex_);
         exposure_is_dark_ = !light;
         exposure_reg_us_ = exposure_us;
         ++exposure_seq_;
