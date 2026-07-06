@@ -311,11 +311,7 @@ public:
         if (!connected_.load()) {
             return CameraState::Idle;
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_id_.has_value()) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
-        }
-        auto status = poll_exposure_status_locked(camera_id_.value());
+        auto status = poll_exposure_status();
         switch (status) {
             case ZWOExposureStatus::Working:
                 return CameraState::Exposing;
@@ -491,6 +487,7 @@ public:
         int active_camera_id = -1;
         std::size_t bytes = 0;
         std::uint64_t download_seq = 0;
+        bool need_status_check = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!last_exposure_valid_) {
@@ -503,21 +500,25 @@ public:
                 throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
             }
             active_camera_id = camera_id_.value();
-            if (!image_ready_) {
-                auto status = poll_exposure_status_locked(active_camera_id);
-                if (status == ZWOExposureStatus::Failed) {
-                    throw AlpacaException("Exposure failed", AlpacaError::DriverException);
-                }
-                if (status != ZWOExposureStatus::Success) {
-                    throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
-                }
-                image_ready_ = true;
-            }
+            need_status_check = !image_ready_;
             bytes = image_buffer_size_locked();
             if (bytes == 0) {
                 throw AlpacaException("Image buffer size is invalid", AlpacaError::InvalidOperation);
             }
             download_seq = exposure_seq_;
+        }
+        if (need_status_check) {
+            auto status = poll_exposure_status();
+            if (status == ZWOExposureStatus::Failed) {
+                throw AlpacaException("Exposure failed", AlpacaError::DriverException);
+            }
+            if (status != ZWOExposureStatus::Success) {
+                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+            }
+            // image_ready_ is deliberately NOT set here: only a completed
+            // download marks readiness. Setting it before the unlocked
+            // transfer left ImageReady stuck true when the transfer threw,
+            // with every subsequent ImageArray call failing (round 7).
         }
 
         // The USB bulk transfer runs OUTSIDE mutex_ (bare snapshot, like the
@@ -533,7 +534,7 @@ public:
         if (image_cached_) {
             return last_image_;
         }
-        if (!last_exposure_valid_ || !image_ready_) {
+        if (!last_exposure_valid_) {
             // stop_exposure/abort or a disconnect raced the unlocked
             // download — do NOT cache a cancelled exposure's pixels as a
             // fresh image (PR #119 round 4).
@@ -563,20 +564,20 @@ public:
 
     bool get_image_ready() const override {
         ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            image_ready_ = false;
-            image_cached_ = false;
-            return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!last_exposure_valid_) {
+                image_ready_ = false;
+                image_cached_ = false;
+                return false;
+            }
+            if (image_cached_ || image_ready_) {
+                return true;
+            }
         }
-        if (image_cached_ || image_ready_) {
-            return true;
-        }
-        if (!camera_id_.has_value()) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
-        }
-        auto status = poll_exposure_status_locked(camera_id_.value());
+        auto status = poll_exposure_status();
         bool ready = (status == ZWOExposureStatus::Success);
+        std::lock_guard<std::mutex> lock(mutex_);
         image_ready_ = ready;
         if (!ready) {
             image_cached_ = false;
@@ -946,11 +947,11 @@ private:
     mutable bool image_cached_;
     mutable ImageArray last_image_;
     double last_exposure_duration_;
-    // mutable: the retry path in poll_exposure_status_locked (reached from
+    // mutable: the retry path in poll_exposure_status (reached from
     // const status readers) restarts the exposure clock.
     mutable std::chrono::system_clock::time_point last_exposure_start_;
     bool last_exposure_valid_;
-    // Transient-failure recovery (see poll_exposure_status_locked): mutable
+    // Transient-failure recovery (see poll_exposure_status): mutable
     // because the const status readers drive the retry state machine.
     static constexpr int kExposureRetries = 2;
     static constexpr std::chrono::milliseconds kExposureRetryInterval{250};
@@ -990,59 +991,98 @@ private:
         last_exposure_retry_ = {};
     }
 
-    // Reads the SDK exposure status under mutex_ and absorbs the transient
-    // ASI_EXP_FAILED class: a failed in-flight exposure is re-triggered up
-    // to kExposureRetries times (USB timing hiccups — the same policy as
+    // Reads the SDK exposure status and absorbs the transient ASI_EXP_FAILED
+    // class: a failed in-flight exposure is re-triggered up to
+    // kExposureRetries times (USB timing hiccups — the same policy as
     // INDI's ASI driver) before the failure is latched. Found by ConformU
     // 4.4 on an ASI2600MM Pro: one transient 4x4-bin exposure failure,
     // unreproducible in four manual retries, cascaded into 18 issues
-    // because the Error state was sticky. Requires mutex_ held.
-    ZWOExposureStatus poll_exposure_status_locked(int id) const {
+    // because the Error state was sticky. Self-locking — must NOT be called
+    // with mutex_ held: the retry's SDK calls (stop, register re-apply,
+    // re-trigger) run on a bare id snapshot OUTSIDE the lock, so a
+    // flaky-USB retry — the exact scenario this exists for — cannot freeze
+    // every mutex_-guarded control read for three USB transfers (round 7).
+    ZWOExposureStatus poll_exposure_status() const {
+        int id = -1;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!camera_id_.has_value()) {
+                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+            }
+            id = camera_id_.value();
+        }
         auto status = ZWOSDKWrapper::instance().get_exposure_status(id);
         if (status != ZWOExposureStatus::Failed) {
             return status;
         }
-        if (exposure_failed_ || !last_exposure_valid_) {
-            return ZWOExposureStatus::Failed;
-        }
-        if (exposure_retries_left_ > 0) {
+        bool is_dark = false;
+        long reg_us = 0;
+        int retries_left = 0;
+        std::uint64_t retry_seq = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (exposure_failed_ || !last_exposure_valid_) {
+                return ZWOExposureStatus::Failed;
+            }
+            if (exposure_retries_left_ <= 0) {
+                exposure_failed_ = true;
+                ALPACA_LOG_ERROR("ZWO", "exposure failed after " + std::to_string(kExposureRetries) +
+                                            " retries; reporting failure to the client");
+                return ZWOExposureStatus::Failed;
+            }
             // Independent status pollers (CameraState, ImageReady) can land
             // milliseconds apart; without pacing they would burn every retry
             // before a transient USB condition has a chance to clear. Within
             // the pacing window, report Working and let a later poll retry.
+            // The pacing check and the decrement share one lock hold, so
+            // exactly one poller wins each window.
             const auto now = std::chrono::steady_clock::now();
             if (now - last_exposure_retry_ < kExposureRetryInterval) {
                 return ZWOExposureStatus::Working;
             }
             last_exposure_retry_ = now;
             --exposure_retries_left_;
-            // Stop the failed exposure before re-triggering: a stop on an
-            // already-failed/idle camera is a no-op, and if the SDK requires
-            // leaving the failed state before a new start, skipping it would
-            // make every retry fail instantly and burn the whole budget.
-            try {
-                ZWOSDKWrapper::instance().stop_exposure(id);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_DEBUG("ZWO", "best-effort stop before retry failed: " + std::string(e.what()));
-            }
-            // Re-apply the exposure register before re-triggering — the SDK
-            // is not guaranteed to retain it across the failure (the INDI
-            // ASI driver re-sets controls before each retry for the same
-            // reason).
-            ZWOSDKWrapper::instance().set_control_value(id, ZWOControlType::Exposure, exposure_reg_us_, false);
-            ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " +
-                                       std::to_string(exposure_retries_left_) + " retries left");
-            ZWOSDKWrapper::instance().start_exposure(id, exposure_is_dark_);
+            retries_left = exposure_retries_left_;
+            is_dark = exposure_is_dark_;
+            reg_us = exposure_reg_us_;
+            retry_seq = exposure_seq_;
             // The exposure effectively restarts now — without this,
             // PercentCompleted computes elapsed >= duration immediately and
             // reports a false 100% for the whole retried exposure.
             last_exposure_start_ = std::chrono::system_clock::now();
-            return ZWOExposureStatus::Working;
         }
-        exposure_failed_ = true;
-        ALPACA_LOG_ERROR("ZWO", "exposure failed after " + std::to_string(kExposureRetries) +
-                                    " retries; reporting failure to the client");
-        return ZWOExposureStatus::Failed;
+        // Stop the failed exposure before re-triggering: a stop on an
+        // already-failed/idle camera is a no-op, and if the SDK requires
+        // leaving the failed state before a new start, skipping it would
+        // make every retry fail instantly and burn the whole budget.
+        try {
+            ZWOSDKWrapper::instance().stop_exposure(id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ZWO", "best-effort stop before retry failed: " + std::string(e.what()));
+        }
+        // Re-apply the exposure register before re-triggering — the SDK
+        // is not guaranteed to retain it across the failure (the INDI
+        // ASI driver re-sets controls before each retry for the same
+        // reason).
+        ZWOSDKWrapper::instance().set_control_value(id, ZWOControlType::Exposure, reg_us, false);
+        ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " + std::to_string(retries_left) +
+                                   " retries left");
+        ZWOSDKWrapper::instance().start_exposure(id, is_dark);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (exposure_seq_ == retry_seq) {
+                return ZWOExposureStatus::Working;
+            }
+        }
+        // A stop/abort or disconnect raced the unlocked re-trigger (the
+        // sequence moved) — undo it rather than leave an unwanted exposure
+        // running.
+        try {
+            ZWOSDKWrapper::instance().stop_exposure(id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ZWO", "stop after cancelled retry failed: " + std::string(e.what()));
+        }
+        return ZWOExposureStatus::Idle;
     }
 
     bool is_roi_valid_locked(int width, int height, int start_x, int start_y) const {
