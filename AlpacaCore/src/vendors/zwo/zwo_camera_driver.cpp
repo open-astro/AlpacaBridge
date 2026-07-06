@@ -564,6 +564,7 @@ public:
 
     bool get_image_ready() const override {
         ensure_connected();
+        std::uint64_t poll_seq = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!last_exposure_valid_) {
@@ -574,10 +575,17 @@ public:
             if (image_cached_ || image_ready_) {
                 return true;
             }
+            poll_seq = exposure_seq_;
         }
         auto status = poll_exposure_status();
         bool ready = (status == ZWOExposureStatus::Success);
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!last_exposure_valid_ || exposure_seq_ != poll_seq) {
+            // A stop/abort or disconnect raced the unlocked poll — do not
+            // overwrite the stop's image_ready_=false with a stale Success
+            // (PR #119 round 8).
+            return false;
+        }
         image_ready_ = ready;
         if (!ready) {
             image_cached_ = false;
@@ -851,6 +859,9 @@ public:
 
     void start_exposure(double duration, bool light) override {
         ensure_connected();
+        // Serialize against stop_exposure and an in-flight retry burst
+        // (lock order: exposure_trigger_mutex_ before mutex_).
+        std::lock_guard<std::mutex> trigger_lock(exposure_trigger_mutex_);
         if (duration <= 0.0) {
             throw AlpacaException("Exposure duration must be positive", AlpacaError::InvalidValue);
         }
@@ -893,6 +904,11 @@ public:
 
     void stop_exposure() override {
         ensure_connected();
+        // Serialize against start_exposure and an in-flight retry burst, so
+        // a stop can never land between a retry's decide and its re-trigger
+        // (which previously let the cleanup stop cancel a user's brand-new
+        // exposure in a ~ms window — PR #119 round 8).
+        std::lock_guard<std::mutex> trigger_lock(exposure_trigger_mutex_);
         int stop_id = -1;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -955,6 +971,13 @@ private:
     // because the const status readers drive the retry state machine.
     static constexpr int kExposureRetries = 2;
     static constexpr std::chrono::milliseconds kExposureRetryInterval{250};
+    // Serializes the SDK exposure-lifecycle triggers (user start_exposure,
+    // user stop_exposure, and the retry's stop/re-apply/re-trigger burst) so
+    // a retry can never interleave with — or cancel — a user's new exposure.
+    // Status pollers try_lock it and report Working while a trigger is in
+    // flight, so they never block on USB. Lock order:
+    // exposure_trigger_mutex_ -> mutex_ -> SDK-wrapper mutex.
+    mutable std::mutex exposure_trigger_mutex_;
     bool exposure_is_dark_{false};
     // Exposure register value from the last start_exposure, re-applied on
     // retry: the SDK is not guaranteed to retain control registers across an
@@ -989,6 +1012,10 @@ private:
         exposure_retries_left_ = 0;
         exposure_failed_ = false;
         last_exposure_retry_ = {};
+        // A disconnect racing an in-flight pulse must not leave
+        // IsPulseGuiding=true for a freshly reconnected client.
+        pulse_guiding_.store(false);
+        pulse_guiding_end_ = {};
     }
 
     // Reads the SDK exposure status and absorbs the transient ASI_EXP_FAILED
@@ -1014,6 +1041,14 @@ private:
         auto status = ZWOSDKWrapper::instance().get_exposure_status(id);
         if (status != ZWOExposureStatus::Failed) {
             return status;
+        }
+        // A user trigger or another poller's retry burst is in flight —
+        // report Working rather than blocking a status poll on USB traffic
+        // (also prevents overlapping restarts when a retry burst outlasts
+        // the pacing window on a flaky bus — PR #119 round 8).
+        std::unique_lock<std::mutex> trigger_lock(exposure_trigger_mutex_, std::try_to_lock);
+        if (!trigger_lock.owns_lock()) {
+            return ZWOExposureStatus::Working;
         }
         bool is_dark = false;
         long reg_us = 0;

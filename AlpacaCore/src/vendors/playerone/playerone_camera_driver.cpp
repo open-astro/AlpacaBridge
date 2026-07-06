@@ -1172,6 +1172,10 @@ private:
     }
 
     void reset_exposure_state_locked() {
+        // A disconnect racing an in-flight pulse must not leave
+        // IsPulseGuiding=true for a freshly reconnected client.
+        pulse_guiding_.store(false);
+        pulse_guiding_end_ = {};
         image_ready_ = false;
         image_cached_ = false;
         last_exposure_duration_ = 0.0;
