@@ -490,6 +490,7 @@ public:
         ensure_connected();
         int active_camera_id = -1;
         std::size_t bytes = 0;
+        std::uint64_t download_seq = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!last_exposure_valid_) {
@@ -516,6 +517,7 @@ public:
             if (bytes == 0) {
                 throw AlpacaException("Image buffer size is invalid", AlpacaError::InvalidOperation);
             }
+            download_seq = exposure_seq_;
         }
 
         // The USB bulk transfer runs OUTSIDE mutex_ (bare snapshot, like the
@@ -536,6 +538,13 @@ public:
             // download — do NOT cache a cancelled exposure's pixels as a
             // fresh image (PR #119 round 4).
             throw AlpacaException("Exposure stopped during image download", AlpacaError::InvalidOperation);
+        }
+        if (exposure_seq_ != download_seq) {
+            // A disconnect/reconnect or a new exposure completed during the
+            // unlocked download; the flag checks above can all read true for
+            // the NEW exposure while the buffer holds the OLD one's pixels.
+            // The sequence token is unambiguous (PR #119 round 5).
+            throw AlpacaException("A new exposure started during image download", AlpacaError::InvalidOperation);
         }
         if (image_buffer_size_locked() != bytes) {
             // ROI/bin changed while the lock was released for the download —
@@ -869,6 +878,8 @@ public:
         sdk.start_exposure(active_camera_id, !light);
 
         exposure_is_dark_ = !light;
+        exposure_reg_us_ = exposure_us;
+        ++exposure_seq_;
         exposure_retries_left_ = kExposureRetries;
         exposure_failed_ = false;
         last_exposure_retry_ = {};
@@ -928,6 +939,14 @@ private:
     static constexpr int kExposureRetries = 2;
     static constexpr std::chrono::milliseconds kExposureRetryInterval{250};
     bool exposure_is_dark_{false};
+    // Exposure register value from the last start_exposure, re-applied on
+    // retry: the SDK is not guaranteed to retain control registers across an
+    // ASI_EXP_FAILED (e.g. a USB re-enumeration coinciding with the error).
+    long exposure_reg_us_{0};
+    // Bumped by every start_exposure and exposure-state reset; an unlocked
+    // image download validates it after relocking so pixels from a previous
+    // exposure sequence can never be cached as a fresh image.
+    std::uint64_t exposure_seq_{0};
     mutable int exposure_retries_left_{0};
     mutable bool exposure_failed_{false};
     mutable std::chrono::steady_clock::time_point last_exposure_retry_{};
@@ -948,6 +967,8 @@ private:
         last_exposure_start_ = std::chrono::system_clock::time_point{};
         last_exposure_valid_ = false;
         exposure_is_dark_ = false;
+        exposure_reg_us_ = 0;
+        ++exposure_seq_;
         exposure_retries_left_ = 0;
         exposure_failed_ = false;
         last_exposure_retry_ = {};
@@ -979,6 +1000,11 @@ private:
             }
             last_exposure_retry_ = now;
             --exposure_retries_left_;
+            // Re-apply the exposure register before re-triggering — the SDK
+            // is not guaranteed to retain it across the failure (the INDI
+            // ASI driver re-sets controls before each retry for the same
+            // reason).
+            ZWOSDKWrapper::instance().set_control_value(id, ZWOControlType::Exposure, exposure_reg_us_, false);
             ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " +
                                        std::to_string(exposure_retries_left_) + " retries left");
             ZWOSDKWrapper::instance().start_exposure(id, exposure_is_dark_);
