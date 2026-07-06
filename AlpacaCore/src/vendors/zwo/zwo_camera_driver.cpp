@@ -1051,7 +1051,11 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!camera_id_.has_value()) {
-                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+                // A disconnect completed between the caller's connected_
+                // check and this snapshot — report Idle like the guarded
+                // status read below, instead of throwing NotConnected out
+                // of a state getter (PR #121 round 1).
+                return ZWOExposureStatus::Idle;
             }
             id = camera_id_.value();
         }
