@@ -324,7 +324,8 @@ public:
         if (close_id >= 0) {
             try {
                 sdk.stop_exposure(close_id);
-            } catch (...) {
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("PlayerOne", "stop_exposure during disconnect failed: " + std::string(e.what()));
             }
             sdk.close_camera(close_id);
         }
@@ -528,7 +529,9 @@ public:
     int get_gain() const override {
         ensure_connected();
         return static_cast<int>(
-            with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_config_int(id, /*POA_GAIN=*/1); }));
+            with_camera([](int id) {
+                return PlayerOneSDKWrapper::instance().get_config_int(id, /*config_id=*/1);  // 1 = POA_GAIN
+            }));
     }
     void set_gain(int gain) override {
         ensure_connected();

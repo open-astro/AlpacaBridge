@@ -329,7 +329,8 @@ public:
         if (close_id >= 0) {
             try {
                 sdk.stop_video_capture(close_id);
-            } catch (const std::exception&) {
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("SVBONY", "stop_video_capture during disconnect failed: " + std::string(e.what()));
             }
             sdk.close_camera(close_id);
         }

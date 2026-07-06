@@ -241,7 +241,8 @@ public:
         if (close_id.has_value()) {
             try {
                 sdk.stop_exposure(close_id.value());
-            } catch (const std::exception&) {
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("ZWO", "stop_exposure during disconnect failed: " + std::string(e.what()));
             }
             sdk.close_camera(close_id.value());
         }
@@ -316,18 +317,17 @@ public:
         }
         auto status = poll_exposure_status_locked(camera_id_.value());
         switch (status) {
-        case ZWOExposureStatus::Idle:
-            return CameraState::Idle;
         case ZWOExposureStatus::Working:
             return CameraState::Exposing;
+        case ZWOExposureStatus::Idle:
         case ZWOExposureStatus::Success:
-            return CameraState::Idle;
         case ZWOExposureStatus::Failed:
-            // A failed (retries-exhausted) exposure leaves the camera fully
-            // ready for the next one — the failure surfaces through
-            // ImageReady staying false and ImageArray throwing. Reporting a
-            // sticky Error here poisoned every subsequent operation: one
-            // transient ASI_EXP_FAILED cascaded into 18 ConformU issues.
+            // Failed included deliberately: a failed (retries-exhausted)
+            // exposure leaves the camera fully ready for the next one — the
+            // failure surfaces through ImageReady staying false and
+            // ImageArray throwing. Reporting a sticky Error here poisoned
+            // every subsequent operation: one transient ASI_EXP_FAILED
+            // cascaded into 18 ConformU issues.
             return CameraState::Idle;
         default:
             return CameraState::Error;
