@@ -913,7 +913,9 @@ private:
     mutable bool image_cached_;
     mutable ImageArray last_image_;
     double last_exposure_duration_;
-    std::chrono::system_clock::time_point last_exposure_start_;
+    // mutable: the retry path in poll_exposure_status_locked (reached from
+    // const status readers) restarts the exposure clock.
+    mutable std::chrono::system_clock::time_point last_exposure_start_;
     bool last_exposure_valid_;
     // Transient-failure recovery (see poll_exposure_status_locked): mutable
     // because the const status readers drive the retry state machine.
@@ -962,6 +964,10 @@ private:
             ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " +
                                        std::to_string(exposure_retries_left_) + " retries left");
             ZWOSDKWrapper::instance().start_exposure(id, exposure_is_dark_);
+            // The exposure effectively restarts now — without this,
+            // PercentCompleted computes elapsed >= duration immediately and
+            // reports a false 100% for the whole retried exposure.
+            last_exposure_start_ = std::chrono::system_clock::now();
             return ZWOExposureStatus::Working;
         }
         exposure_failed_ = true;
