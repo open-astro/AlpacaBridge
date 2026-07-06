@@ -1022,7 +1022,9 @@ private:
             // make every retry fail instantly and burn the whole budget.
             try {
                 ZWOSDKWrapper::instance().stop_exposure(id);
-            } catch (const std::exception&) {
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG("ZWO",
+                                 "best-effort stop before retry failed: " + std::string(e.what()));
             }
             // Re-apply the exposure register before re-triggering — the SDK
             // is not guaranteed to retain it across the failure (the INDI
