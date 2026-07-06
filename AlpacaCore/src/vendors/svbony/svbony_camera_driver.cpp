@@ -631,13 +631,12 @@ public:
         if (!pulse_guiding_.load()) {
             return false;
         }
-        auto now = std::chrono::steady_clock::now();
-        std::chrono::steady_clock::time_point end_time;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            end_time = pulse_guiding_end_;
-        }
-        if (now >= end_time) {
+        // Expiry check and clear under ONE mutex_ hold: an unlocked
+        // store(false) after the check could overwrite a concurrent
+        // pulse_guide's fresh flag/end-time write and falsely report
+        // "not guiding" mid-pulse (PR #119 round 4).
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (std::chrono::steady_clock::now() >= pulse_guiding_end_) {
             pulse_guiding_.store(false);
             return false;
         }
@@ -875,8 +874,8 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
+            pulse_guiding_.store(true);
         }
-        pulse_guiding_.store(true);
         // SVBPulseGuide blocks on the camera side for the full pulse — it
         // must NOT hold mutex_ (it would stall every status poll for the
         // duration), so this keeps the bare id snapshot like the exposure

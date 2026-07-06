@@ -531,6 +531,12 @@ public:
         if (image_cached_) {
             return last_image_;
         }
+        if (!last_exposure_valid_ || !image_ready_) {
+            // stop_exposure/abort or a disconnect raced the unlocked
+            // download — do NOT cache a cancelled exposure's pixels as a
+            // fresh image (PR #119 round 4).
+            throw AlpacaException("Exposure stopped during image download", AlpacaError::InvalidOperation);
+        }
         if (image_buffer_size_locked() != bytes) {
             // ROI/bin changed while the lock was released for the download —
             // the buffer no longer matches the geometry build would use.
@@ -573,13 +579,12 @@ public:
         if (!pulse_guiding_.load()) {
             return false;
         }
-        auto now = std::chrono::steady_clock::now();
-        std::chrono::steady_clock::time_point end_time;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            end_time = pulse_guiding_end_;
-        }
-        if (now >= end_time) {
+        // Expiry check and clear under ONE mutex_ hold: an unlocked
+        // store(false) after the check could overwrite a concurrent
+        // pulse_guide's fresh flag/end-time write and falsely report
+        // "not guiding" mid-pulse (PR #119 round 4).
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (std::chrono::steady_clock::now() >= pulse_guiding_end_) {
             pulse_guiding_.store(false);
             return false;
         }
@@ -816,8 +821,8 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
+            pulse_guiding_.store(true);
         }
-        pulse_guiding_.store(true);
 
         // The detached turn-off thread captures NO object state — only the id
         // snapshot — so it cannot dereference a destroyed driver if the
@@ -866,6 +871,7 @@ public:
         exposure_is_dark_ = !light;
         exposure_retries_left_ = kExposureRetries;
         exposure_failed_ = false;
+        last_exposure_retry_ = {};
         last_exposure_duration_ = duration;
         last_exposure_start_ = std::chrono::system_clock::now();
         last_exposure_valid_ = true;
@@ -920,9 +926,11 @@ private:
     // Transient-failure recovery (see poll_exposure_status_locked): mutable
     // because the const status readers drive the retry state machine.
     static constexpr int kExposureRetries = 2;
+    static constexpr std::chrono::milliseconds kExposureRetryInterval{250};
     bool exposure_is_dark_{false};
     mutable int exposure_retries_left_{0};
     mutable bool exposure_failed_{false};
+    mutable std::chrono::steady_clock::time_point last_exposure_retry_{};
 
     mutable std::atomic<bool> pulse_guiding_;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
@@ -942,6 +950,7 @@ private:
         exposure_is_dark_ = false;
         exposure_retries_left_ = 0;
         exposure_failed_ = false;
+        last_exposure_retry_ = {};
     }
 
     // Reads the SDK exposure status under mutex_ and absorbs the transient
@@ -960,6 +969,15 @@ private:
             return ZWOExposureStatus::Failed;
         }
         if (exposure_retries_left_ > 0) {
+            // Independent status pollers (CameraState, ImageReady) can land
+            // milliseconds apart; without pacing they would burn every retry
+            // before a transient USB condition has a chance to clear. Within
+            // the pacing window, report Working and let a later poll retry.
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_exposure_retry_ < kExposureRetryInterval) {
+                return ZWOExposureStatus::Working;
+            }
+            last_exposure_retry_ = now;
             --exposure_retries_left_;
             ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " +
                                        std::to_string(exposure_retries_left_) + " retries left");
