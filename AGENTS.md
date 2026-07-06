@@ -31,7 +31,7 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 - Prefer `enum class`, `std::chrono`, `std::string_view` where appropriate.
 - No `using namespace std;` in headers.
 - Core/driver layers should avoid heavy framework dependencies.
-- License headers must remain SSPL v1 and unmodified in all source files.
+- License headers must remain AGPL-3.0-or-later and unmodified in all source files.
 
 ## Units and Behavior Conventions
 

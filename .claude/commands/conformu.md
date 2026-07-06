@@ -245,7 +245,7 @@ For each diagnosed issue, identify the exact file + function + lines to change, 
 Honor the project rules from `/driver-build`:
 - Don't touch the Alpaca interface header (`AlpacaCore/include/alpacacore/<device>_driver.h`) unless the spec genuinely demands it.
 - Driver `.cpp` calls the wrapper; the wrapper does protocol/SDK I/O. Don't add raw SDK calls to the driver.
-- SSPL license headers stay intact.
+- AGPL license headers stay intact.
 - Don't add error handling or fallbacks for scenarios that can't happen — fix the actual cause.
 
 ### 5f. Apply the fix

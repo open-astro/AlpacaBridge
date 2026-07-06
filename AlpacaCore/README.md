@@ -97,7 +97,7 @@ See the [Documentation Index](docs/README.md) for all available guides.
 
 ## License
 
-Server Side Public License v1 (SSPL v1)
+GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later), with an additional permission allowing combination with proprietary device-vendor SDKs — see the vendor-SDK linking exception appended to the license text.
 
 See [LICENSE](LICENSE) for details.
 

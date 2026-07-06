@@ -3,12 +3,12 @@
 //
 // This file is part of AlpacaHTTP.
 //
-// AlpacaHTTP is licensed under the Server Side Public License, Version 1 (SSPL v1).
-// See the LICENSE file in this repository or the official license at:
-// https://www.mongodb.com/legal/licensing/server-side-public-license
-//
-// If you use this program to provide a network-accessible service, appliance,
-// or any commercial offering, you must comply with all SSPL v1 requirements.
+// AlpacaHTTP is licensed under the GNU Affero General Public License,
+// version 3 or (at your option) any later version (AGPL-3.0-or-later),
+// with an additional permission allowing combination with proprietary
+// device-vendor SDKs. See the LICENSE file in this repository for the full
+// license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/camera_driver.h>
