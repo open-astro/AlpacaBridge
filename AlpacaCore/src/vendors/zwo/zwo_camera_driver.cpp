@@ -892,15 +892,31 @@ public:
 
     void stop_exposure() override {
         ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_id_.has_value()) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+        int stop_id = -1;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!camera_id_.has_value()) {
+                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+            }
+            stop_id = camera_id_.value();
+            // The stop is authoritative for this exposure regardless of how
+            // the SDK call below fares: retries are cancelled and pending
+            // image state discarded up front, so a concurrent status poll
+            // cannot re-trigger the exposure while the stop is in flight,
+            // and an in-flight unlocked download is invalidated by the
+            // sequence bump.
+            exposure_retries_left_ = 0;
+            exposure_failed_ = false;
+            image_ready_ = false;
+            image_cached_ = false;
+            ++exposure_seq_;
         }
-        ZWOSDKWrapper::instance().stop_exposure(camera_id_.value());
-        exposure_retries_left_ = 0;
-        exposure_failed_ = false;
-        image_ready_ = false;
-        image_cached_ = false;
+        // The SDK stop runs on a bare id snapshot OUTSIDE mutex_: it is a
+        // fast control transfer, but a USB hang here must not freeze every
+        // mutex_-guarded state read (PR #119 round 6). A racing disconnect
+        // costs at most an SDK error on a closed id — the abort intent has
+        // already been recorded above either way.
+        ZWOSDKWrapper::instance().stop_exposure(stop_id);
     }
 
 private:
@@ -1000,6 +1016,14 @@ private:
             }
             last_exposure_retry_ = now;
             --exposure_retries_left_;
+            // Stop the failed exposure before re-triggering: a stop on an
+            // already-failed/idle camera is a no-op, and if the SDK requires
+            // leaving the failed state before a new start, skipping it would
+            // make every retry fail instantly and burn the whole budget.
+            try {
+                ZWOSDKWrapper::instance().stop_exposure(id);
+            } catch (const std::exception&) {
+            }
             // Re-apply the exposure register before re-triggering — the SDK
             // is not guaranteed to retain it across the failure (the INDI
             // ASI driver re-sets controls before each retry for the same
