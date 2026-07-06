@@ -434,7 +434,12 @@ public:
         case QHYExposureStatus::Working:
             return CameraState::Exposing;
         case QHYExposureStatus::Failed:
-            return CameraState::Error;
+            // A failed exposure leaves the camera fully ready for the next
+            // one — the failure surfaces through ImageReady staying false and
+            // ImageArray throwing. A sticky Error state poisons every
+            // subsequent operation (same class ConformU exposed on the ZWO
+            // camera: one transient failure cascaded into 18 issues).
+            return CameraState::Idle;
         case QHYExposureStatus::Idle:
         case QHYExposureStatus::Success:
         default:

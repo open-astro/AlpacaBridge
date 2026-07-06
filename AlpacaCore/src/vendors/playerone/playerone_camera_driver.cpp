@@ -308,17 +308,27 @@ public:
             return;
         }
 
-        // Disconnecting.
+        // Disconnecting. Clear driver state and publish disconnected BEFORE
+        // the SDK close so a racing operational call fails fast at its
+        // connection check instead of hitting a just-closed camera, and a
+        // throwing close can't trap the driver half-connected — same order as
+        // the switch/EFW siblings, per the AGENTS.md disconnect rule (#116).
+        // The exposure worker is already joined (lifecycle lock above).
         exposure_active_.store(false);
-        if (camera_info_valid_ && camera_info_.camera_id >= 0) {
-            try { sdk.stop_exposure(camera_info_.camera_id); } catch (...) {}
-            sdk.close_camera(camera_info_.camera_id);
-        }
+        const int close_id = (camera_info_valid_ && camera_info_.camera_id >= 0) ? camera_info_.camera_id : -1;
         camera_info_ = {};
         camera_info_valid_ = false;
         caps_ = {};
         reset_exposure_state_locked();
         connected_.store(false);
+        if (close_id >= 0) {
+            try {
+                sdk.stop_exposure(close_id);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("PlayerOne", "stop_exposure during disconnect failed: " + std::string(e.what()));
+            }
+            sdk.close_camera(close_id);
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -331,27 +341,29 @@ public:
         if (name == "getheaterpower") {
             ensure_connected();
             ensure_heater_supported();
-            return std::to_string(PlayerOneSDKWrapper::instance().get_heater_power_percent(camera_id_copy()));
+            return std::to_string(
+                with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_heater_power_percent(id); }));
         }
         if (name == "setheaterpower") {
             ensure_connected();
             ensure_heater_supported();
             int percent = parse_power_percent(parameters, "SetHeaterPower");
             validate_heater_range(percent);
-            PlayerOneSDKWrapper::instance().set_heater_power_percent(camera_id_copy(), percent);
+            with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_heater_power_percent(id, percent); });
             return "";
         }
         if (name == "getfanpower") {
             ensure_connected();
             ensure_fan_supported();
-            return std::to_string(PlayerOneSDKWrapper::instance().get_fan_power_percent(camera_id_copy()));
+            return std::to_string(
+                with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_fan_power_percent(id); }));
         }
         if (name == "setfanpower") {
             ensure_connected();
             ensure_fan_supported();
             int percent = parse_power_percent(parameters, "SetFanPower");
             validate_fan_range(percent);
-            PlayerOneSDKWrapper::instance().set_fan_power_percent(camera_id_copy(), percent);
+            with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_fan_power_percent(id, percent); });
             return "";
         }
         throw AlpacaException("Action not supported: " + std::string(action_name),
@@ -441,15 +453,13 @@ public:
 
     double get_ccd_temperature() const override {
         ensure_connected();
-        int id = camera_id_copy();
-        auto& sdk = PlayerOneSDKWrapper::instance();
-        return sdk.get_temperature_c(id);
+        return with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_temperature_c(id); });
     }
 
     bool get_cooler_on() const override {
         ensure_connected();
         if (!cooler_available_copy()) return false;
-        return PlayerOneSDKWrapper::instance().get_cooler_on(camera_id_copy());
+        return with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_cooler_on(id); });
     }
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
@@ -459,14 +469,13 @@ public:
             }
             return;
         }
-        PlayerOneSDKWrapper::instance().set_cooler_on(camera_id_copy(), cooler_on);
+        with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_cooler_on(id, cooler_on); });
     }
     double get_cooler_power() const override {
         ensure_connected();
         if (!cooler_available_copy()) return 0.0;
         try {
-            int pct = PlayerOneSDKWrapper::instance()
-                          .get_cooler_power_percent(camera_id_copy());
+            int pct = with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_cooler_power_percent(id); });
             if (pct < 0) pct = 0;
             if (pct > 100) pct = 100;
             return static_cast<double>(pct);
@@ -519,8 +528,9 @@ public:
 
     int get_gain() const override {
         ensure_connected();
-        return static_cast<int>(
-            PlayerOneSDKWrapper::instance().get_config_int(camera_id_copy(), /*POA_GAIN=*/1));
+        return static_cast<int>(with_camera([](int id) {
+            return PlayerOneSDKWrapper::instance().get_config_int(id, /*config_id=*/1);  // 1 = POA_GAIN
+        }));
     }
     void set_gain(int gain) override {
         ensure_connected();
@@ -580,7 +590,21 @@ public:
         return last_exposure_valid_ && image_ready_ && image_cached_;
     }
 
-    bool get_is_pulse_guiding() const override { return pulse_guiding_.load(); }
+    bool get_is_pulse_guiding() const override {
+        if (!pulse_guiding_->load()) {
+            return false;
+        }
+        // Expiry check and clear under ONE mutex_ hold: an unlocked
+        // store(false) after the check could overwrite a concurrent
+        // pulse_guide's fresh flag/end-time write and falsely report
+        // "not guiding" mid-pulse (PR #119 round 4).
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (std::chrono::steady_clock::now() >= pulse_guiding_end_) {
+            pulse_guiding_->store(false);
+            return false;
+        }
+        return true;
+    }
 
     double get_last_exposure_duration() const override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -724,7 +748,7 @@ public:
                                   AlpacaError::NotImplemented);
         }
         return static_cast<double>(
-            PlayerOneSDKWrapper::instance().get_target_temp_c(camera_id_copy()));
+            with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_target_temp_c(id); }));
     }
     void set_set_ccd_temperature(double temperature) override {
         ensure_connected();
@@ -740,7 +764,7 @@ public:
                                       AlpacaError::InvalidValue);
             }
         }
-        PlayerOneSDKWrapper::instance().set_target_temp_c(camera_id_copy(), target_c);
+        with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_target_temp_c(id, target_c); });
     }
 
     int get_start_x() const override {
@@ -784,23 +808,37 @@ public:
         case 3: dir = PlayerOneGuideDirection::West;  break;
         }
 
-        int id = camera_id_copy();
-        auto& sdk = PlayerOneSDKWrapper::instance();
-        sdk.pulse_guide_on(id, dir);
-        pulse_guiding_.store(true);
-        std::thread([id, dir, duration]() {
+        const int pulse_camera_id = with_camera([&](int id) {
+            PlayerOneSDKWrapper::instance().pulse_guide_on(id, dir);
+            return id;
+        });
+        // End timestamp BEFORE the flag: a reader that observes the flag as
+        // true must never see a stale (epoch) end time, or the self-clearing
+        // getter would clear the pulse immediately.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
+            pulse_guiding_->store(true);
+        }
+        // The detached turn-off thread captures NO object state — only the id
+        // snapshot — so it cannot dereference a destroyed driver if the
+        // object is torn down mid-pulse (the previous flag-clear thread
+        // captured `this` for exactly that hazard; IsPulseGuiding now
+        // self-clears from pulse_guiding_end_ in the getter instead — the
+        // ZWO shape). A disconnect racing the sleep costs at most a rejected
+        // pulse_guide_off on a closed id.
+        std::thread([pulse_camera_id, dir, duration, flag = pulse_guiding_]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(duration));
             try {
-                PlayerOneSDKWrapper::instance().pulse_guide_off(id, dir);
+                PlayerOneSDKWrapper::instance().pulse_guide_off(pulse_camera_id, dir);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("PlayerOne",
                     "pulse_guide_off failed: " + std::string(e.what()));
             }
-        }).detach();
-        // Clear the "guiding" flag on the same schedule the SDK was told to stop.
-        std::thread([this, duration]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
-            pulse_guiding_.store(false);
+            // Unconditional clear for fire-and-forget clients that never
+            // poll IsPulseGuiding; the shared_ptr keeps the flag alive even
+            // if the driver is destroyed mid-pulse (round 9).
+            flag->store(false);
         }).detach();
     }
 
@@ -1022,7 +1060,7 @@ public:
         exposure_active_.store(false);
         if (exposure_thread_.joinable()) exposure_thread_.join();
         try {
-            PlayerOneSDKWrapper::instance().stop_exposure(camera_id_copy());
+            with_camera([](int id) { PlayerOneSDKWrapper::instance().stop_exposure(id); });
         } catch (const std::exception&) {}
         std::lock_guard<std::mutex> lock(mutex_);
         image_ready_ = false;
@@ -1068,7 +1106,13 @@ private:
     mutable std::chrono::steady_clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 
-    std::atomic<bool> pulse_guiding_{false};
+    // shared_ptr so the detached pulse-off thread can co-own the flag and
+    // clear it unconditionally after the pulse WITHOUT capturing `this`
+    // (destructor-safe): a fire-and-forget client that never polls
+    // IsPulseGuiding must not leave the flag latched true (round 9). The
+    // timestamp getter still self-clears for readers in the interim.
+    std::shared_ptr<std::atomic<bool>> pulse_guiding_{std::make_shared<std::atomic<bool>>(false)};
+    std::chrono::steady_clock::time_point pulse_guiding_end_{};
 
     void ensure_connected() const {
         if (!connected_.load()) {
@@ -1076,12 +1120,18 @@ private:
         }
     }
 
-    int camera_id_copy() const {
+    // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
+    // cannot close the camera underneath the SDK call (AGENTS.md shape (a)).
+    // Fast register/control calls only — the exposure worker keeps its bare
+    // id snapshot because it must not hold mutex_ across the blocking image
+    // wait. Must NOT be called with mutex_ already held (non-recursive).
+    template <typename Fn>
+    auto with_camera(Fn&& fn) const -> decltype(fn(0)) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || camera_info_.camera_id < 0) {
             throw AlpacaException("Camera ID not available", AlpacaError::NotConnected);
         }
-        return camera_info_.camera_id;
+        return fn(camera_info_.camera_id);
     }
 
     bool cooler_available_copy() const {
@@ -1128,6 +1178,10 @@ private:
     }
 
     void reset_exposure_state_locked() {
+        // A disconnect racing an in-flight pulse must not leave
+        // IsPulseGuiding=true for a freshly reconnected client.
+        pulse_guiding_->store(false);
+        pulse_guiding_end_ = {};
         image_ready_ = false;
         image_cached_ = false;
         last_exposure_duration_ = 0.0;

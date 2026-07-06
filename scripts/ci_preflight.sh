@@ -395,9 +395,10 @@ if [ "${RUN_TSAN:-0}" = "1" ]; then
        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
      && cmake --build "${TSAN_BUILD_DIR}" --parallel "$(nproc)" \
      && [ -x "${TSAN_BUILD_DIR}/tests/alpacacore_tests" ] \
-     && [ "$("${TSAN_BUILD_DIR}/tests/alpacacore_tests" --list-tests --verbosity quiet "[stress]" | wc -l)" -ge 1 ] \
      && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
-        "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]"; then
+        "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" | tee "${TSAN_BUILD_DIR}/stress-run.log" \
+     `# binary exit code (pipefail) is the pass/fail gate; grep only guards zero-test runs` \
+     && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-run.log"; then
     record PASS "tsan stress"
   else
     record FAIL "tsan stress"

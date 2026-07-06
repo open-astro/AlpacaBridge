@@ -18,7 +18,9 @@
 // review findings lived. With a wheel attached the same tests exercise the
 // full connect path.
 
+#include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 
 #include "catch2_compat.h"
@@ -47,4 +49,33 @@ TEST_CASE("ZWO EFW - concurrent connect/disconnect/operate stress", "[zwo][filte
 TEST_CASE("ZWO EFW - destruction races an in-flight connect", "[zwo][filterwheel][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(0, 0); });
+}
+
+// Camera lifecycle storm (issue #116): the ZWO camera's operational calls
+// were converted from snapshot-then-call to the held-mutex_ shape, and its
+// disconnect now publishes disconnected before the SDK close. On a
+// hardware-free host every connect fails fast at enumeration, which still
+// storms the connect-failure cleanup, the with_camera gate, and the
+// disconnect ordering from many threads; with a camera attached the same
+// test exercises the full path.
+TEST_CASE("ZWO camera - concurrent connect/disconnect/operate stress", "[zwo][camera][stress]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
+
+    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+        auto& camera = static_cast<alpacacore::CameraDriver&>(d);
+        static_cast<void>(camera.get_camera_state());
+        static_cast<void>(camera.get_ccd_temperature());
+        camera.set_gain(50);
+        static_cast<void>(camera.get_image_ready());
+        camera.stop_exposure();
+    });
+
+    static_cast<void>(driver->get_connected());
+    driver->set_connected(false);
+    CHECK(driver->get_connected() == false);
+}
+
+TEST_CASE("ZWO camera - destruction races an in-flight connect", "[zwo][camera][stress]") {
+    alpacacore::test::run_destruction_during_connect_stress(
+        []() { return alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0); });
 }

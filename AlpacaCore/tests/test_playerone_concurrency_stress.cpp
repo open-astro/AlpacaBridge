@@ -15,7 +15,9 @@
 // fake seam, so hardware-free hosts storm the failure path and the
 // AsyncConnectable machinery; hosts with a wheel exercise the full connect.
 
+#include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
 
 #include "catch2_compat.h"
@@ -42,4 +44,32 @@ TEST_CASE("Player One Phoenix - concurrent connect/disconnect/operate stress", "
 TEST_CASE("Player One Phoenix - destruction races an in-flight connect", "[playerone][filterwheel][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::playerone::create_playerone_filterwheel(0, 0); });
+}
+
+// Camera lifecycle storm (issue #116): the Player One camera's operational
+// calls were converted from snapshot-then-call (camera_id_copy) to the
+// held-mutex_ with_camera shape, and its disconnect now publishes
+// disconnected before the SDK close. Hardware-free hosts storm the
+// connect-failure and gate paths; with a camera attached the same test
+// exercises the full path.
+TEST_CASE("Player One camera - concurrent connect/disconnect/operate stress", "[playerone][camera][stress]") {
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0);
+
+    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+        auto& camera = static_cast<alpacacore::CameraDriver&>(d);
+        static_cast<void>(camera.get_camera_state());
+        static_cast<void>(camera.get_ccd_temperature());
+        static_cast<void>(camera.get_gain());
+        static_cast<void>(camera.get_cooler_on());
+        camera.stop_exposure();
+    });
+
+    static_cast<void>(driver->get_connected());
+    driver->set_connected(false);
+    CHECK(driver->get_connected() == false);
+}
+
+TEST_CASE("Player One camera - destruction races an in-flight connect", "[playerone][camera][stress]") {
+    alpacacore::test::run_destruction_during_connect_stress(
+        []() { return alpacacore::vendor::playerone::create_playerone_camera(0, 0); });
 }

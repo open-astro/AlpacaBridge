@@ -309,14 +309,13 @@ public:
             return;
         }
 
-        // Disconnecting
-        if (camera_id_ >= 0) {
-            try {
-                sdk.stop_video_capture(camera_id_);
-            } catch (const std::exception&) {
-            }
-            sdk.close_camera(camera_id_);
-        }
+        // Disconnecting. Clear driver state and publish disconnected BEFORE
+        // the SDK close so a racing operational call fails fast at its
+        // connection check instead of hitting a just-closed camera, and a
+        // throwing close can't trap the driver half-connected — same order as
+        // the switch/EFW siblings, per the AGENTS.md disconnect rule (#116).
+        // The exposure worker is already joined (lifecycle lock above).
+        const int close_id = camera_id_;
         camera_id_ = -1;
         camera_info_ = {};
         camera_info_valid_ = false;
@@ -327,6 +326,14 @@ public:
         }
         reset_exposure_state_locked();
         connected_.store(false);
+        if (close_id >= 0) {
+            try {
+                sdk.stop_video_capture(close_id);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("SVBONY", "stop_video_capture during disconnect failed: " + std::string(e.what()));
+            }
+            sdk.close_camera(close_id);
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -624,13 +631,12 @@ public:
         if (!pulse_guiding_.load()) {
             return false;
         }
-        auto now = std::chrono::steady_clock::now();
-        std::chrono::steady_clock::time_point end_time;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            end_time = pulse_guiding_end_;
-        }
-        if (now >= end_time) {
+        // Expiry check and clear under ONE mutex_ hold: an unlocked
+        // store(false) after the check could overwrite a concurrent
+        // pulse_guide's fresh flag/end-time write and falsely report
+        // "not guiding" mid-pulse (PR #119 round 4).
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (std::chrono::steady_clock::now() >= pulse_guiding_end_) {
             pulse_guiding_.store(false);
             return false;
         }
@@ -856,18 +862,33 @@ public:
             break;
         }
 
-        // SVBONY SVBPulseGuide takes direction and duration in one call (blocking on camera side)
-        SVBSDKWrapper::instance().pulse_guide(camera_id_value(), guide_direction, duration);
-        pulse_guiding_.store(true);
+        // Publish "guiding" BEFORE the blocking call: SVBPulseGuide returns
+        // only after the pulse completes, so setting the flag afterwards
+        // reported IsPulseGuiding=false during the guide and true for a
+        // spurious extra duration afterwards. The end timestamp is written
+        // first (under mutex_) so a reader that observes the flag can never
+        // read a stale epoch end time and self-clear early. No detached
+        // clear thread: the call is synchronous, so the flag is cleared
+        // right after it returns (and on throw), and the timestamp-based
+        // getter covers readers while the call is in flight.
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
+            pulse_guiding_.store(true);
         }
-
-        std::thread([this, duration]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
+        // SVBPulseGuide blocks on the camera side for the full pulse — it
+        // must NOT hold mutex_ (it would stall every status poll for the
+        // duration), so this keeps the bare id snapshot like the exposure
+        // worker. The disconnect path publishes disconnected before closing,
+        // so the worst case is an SDK error on a closed id, not a
+        // use-after-free (issue #116).
+        try {
+            SVBSDKWrapper::instance().pulse_guide(camera_id_value(), guide_direction, duration);
+        } catch (...) {
             pulse_guiding_.store(false);
-        }).detach();
+            throw;
+        }
+        pulse_guiding_.store(false);
     }
 
     void start_exposure(double duration, bool light) override {
@@ -895,9 +916,13 @@ public:
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
 
-        int active_camera_id = camera_id_value();
+        int active_camera_id = -1;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (camera_id_ < 0) {
+                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+            }
+            active_camera_id = camera_id_;
             if (roi_width_effective_ <= 0 || roi_height_effective_ <= 0) {
                 throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
             }
@@ -914,10 +939,11 @@ public:
                     throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
                 }
             }
+            // Fast register write under the same mutex_ hold as the id read
+            // (shape (a)); the lifecycle lock already excludes a racing
+            // disconnect for the rest of this function.
+            SVBSDKWrapper::instance().set_control_value(active_camera_id, SVBControlType::Exposure, exposure_us, false);
         }
-
-        auto& sdk = SVBSDKWrapper::instance();
-        sdk.set_control_value(active_camera_id, SVBControlType::Exposure, exposure_us, false);
 
         // Stop any previous exposure thread
         stop_exposure_thread();
@@ -1056,7 +1082,7 @@ public:
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         exposure_active_.store(false);
         try {
-            SVBSDKWrapper::instance().stop_video_capture(camera_id_value());
+            with_camera([](int id) { SVBSDKWrapper::instance().stop_video_capture(id); });
         } catch (const std::exception&) {
         }
         // Wait for exposure thread to finish so CameraState returns Idle
@@ -1135,6 +1161,10 @@ private:
     }
 
     void reset_exposure_state_locked() {
+        // A disconnect racing an in-flight pulse must not leave
+        // IsPulseGuiding=true for a freshly reconnected client.
+        pulse_guiding_.store(false);
+        pulse_guiding_end_ = {};
         image_ready_ = false;
         image_cached_ = false;
         last_exposure_duration_ = 0.0;
@@ -1318,8 +1348,8 @@ private:
         return control_caps_.find(type) != control_caps_.end();
     }
 
-    const SVBControlCaps& get_control_caps_or_throw(SVBControlType type) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+    // Requires mutex_ held. The reference is only valid while the lock is.
+    const SVBControlCaps& control_caps_or_throw_locked(SVBControlType type) const {
         auto it = control_caps_.find(type);
         if (it == control_caps_.end()) {
             throw AlpacaException("Control not supported", AlpacaError::NotImplemented);
@@ -1327,35 +1357,57 @@ private:
         return it->second;
     }
 
+    // By value: returning a reference out of the locked map was a dangling
+    // read once a reconnect reloaded control_caps_ (same audit as issue #116).
+    SVBControlCaps get_control_caps_or_throw(SVBControlType type) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return control_caps_or_throw_locked(type);
+    }
+
+    // Caps check, id read, and SDK call under ONE mutex_ hold (AGENTS.md
+    // shape (a)) — the previous shape snapshotted the id and called the SDK
+    // unlocked, racing a concurrent disconnect's close (issue #116).
     long get_control_value_or_throw(SVBControlType type) const {
-        get_control_caps_or_throw(type);
+        std::lock_guard<std::mutex> lock(mutex_);
+        control_caps_or_throw_locked(type);
+        if (camera_id_ < 0) {
+            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+        }
         bool is_auto = false;
         long value = 0;
-        if (!SVBSDKWrapper::instance().get_control_value(camera_id_value(), type, value, is_auto)) {
+        if (!SVBSDKWrapper::instance().get_control_value(camera_id_, type, value, is_auto)) {
             throw AlpacaException("Failed to get control value", AlpacaError::DriverException);
         }
         return value;
     }
 
     void disable_auto_if_needed(SVBControlType type) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (camera_id_ < 0) {
+            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+        }
         long cur_value = 0;
         bool is_auto = false;
-        if (SVBSDKWrapper::instance().get_control_value(camera_id_value(), type, cur_value, is_auto)) {
+        if (SVBSDKWrapper::instance().get_control_value(camera_id_, type, cur_value, is_auto)) {
             if (is_auto) {
-                SVBSDKWrapper::instance().set_control_value(camera_id_value(), type, cur_value, false);
+                SVBSDKWrapper::instance().set_control_value(camera_id_, type, cur_value, false);
             }
         }
     }
 
     void set_control_value_or_throw(SVBControlType type, long value) const {
-        const auto& caps = get_control_caps_or_throw(type);
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto& caps = control_caps_or_throw_locked(type);
         if (!caps.is_writable) {
             throw AlpacaException("Control is read-only", AlpacaError::InvalidOperation);
         }
         if (value < caps.min_value || value > caps.max_value) {
             throw AlpacaException("Control value out of range", AlpacaError::InvalidValue);
         }
-        SVBSDKWrapper::instance().set_control_value(camera_id_value(), type, value, false);
+        if (camera_id_ < 0) {
+            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+        }
+        SVBSDKWrapper::instance().set_control_value(camera_id_, type, value, false);
     }
 
     int camera_id_value() const {
@@ -1364,6 +1416,20 @@ private:
             throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
         }
         return camera_id_;
+    }
+
+    // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
+    // cannot close the camera underneath the SDK call (AGENTS.md shape (a)).
+    // Fast register/control calls only — the exposure worker and the
+    // duration-blocking pulse_guide keep their bare id snapshots. Must NOT
+    // be called with mutex_ already held (non-recursive mutex).
+    template <typename Fn>
+    auto with_camera(Fn&& fn) const -> decltype(fn(0)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (camera_id_ < 0) {
+            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+        }
+        return fn(camera_id_);
     }
 
     void set_bin_locked(int bin_x, int bin_y) {
