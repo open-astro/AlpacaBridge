@@ -1051,11 +1051,25 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!camera_id_.has_value()) {
-                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+                // A disconnect completed between the caller's connected_
+                // check and this snapshot — report Idle like the guarded
+                // status read below, instead of throwing NotConnected out
+                // of a state getter (PR #121 round 1).
+                return ZWOExposureStatus::Idle;
             }
             id = camera_id_.value();
         }
-        auto status = ZWOSDKWrapper::instance().get_exposure_status(id);
+        ZWOExposureStatus status = ZWOExposureStatus::Idle;
+        try {
+            status = ZWOSDKWrapper::instance().get_exposure_status(id);
+        } catch (const std::exception& e) {
+            // A disconnect can close the camera between the id snapshot and
+            // this read; surface Idle to the poller instead of letting a raw
+            // SDK exception escape through a state getter (issue #120) —
+            // the same guard the retry burst below already carries.
+            ALPACA_LOG_DEBUG("ZWO", "exposure status read failed: " + std::string(e.what()));
+            return ZWOExposureStatus::Idle;
+        }
         if (status != ZWOExposureStatus::Failed) {
             return status;
         }
