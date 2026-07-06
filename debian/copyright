@@ -13,7 +13,7 @@ License: Expat
 Comment: ZWO ASI/EAF/CAA SDKs — license.txt in each SDK tree.
 
 Files: AlpacaCore/external/ZWO/AM/*
-Copyright: ZWO Inc.
+Copyright: ZWO Company
 License: ZWO-mount-docs
  Vendor mount serial-protocol documentation and community-collected
  protocol notes (converted to Markdown), redistributed as a
