@@ -84,7 +84,7 @@ public:
           last_exposure_duration_(0.0),
           last_exposure_start_(),
           last_exposure_valid_(false),
-          pulse_guiding_(false),
+          pulse_guiding_(std::make_shared<std::atomic<bool>>(false)),
           pulse_guiding_end_(std::chrono::steady_clock::time_point{}) {
         preload_camera_info_locked();
     }
@@ -594,7 +594,7 @@ public:
     }
 
     bool get_is_pulse_guiding() const override {
-        if (!pulse_guiding_.load()) {
+        if (!pulse_guiding_->load()) {
             return false;
         }
         // Expiry check and clear under ONE mutex_ hold: an unlocked
@@ -603,7 +603,7 @@ public:
         // "not guiding" mid-pulse (PR #119 round 4).
         std::lock_guard<std::mutex> lock(mutex_);
         if (std::chrono::steady_clock::now() >= pulse_guiding_end_) {
-            pulse_guiding_.store(false);
+            pulse_guiding_->store(false);
             return false;
         }
         return true;
@@ -839,7 +839,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
-            pulse_guiding_.store(true);
+            pulse_guiding_->store(true);
         }
 
         // The detached turn-off thread captures NO object state — only the id
@@ -848,12 +848,16 @@ public:
         // the sleep costs at most a rejected pulse_guide_off on a closed id.
         // IsPulseGuiding self-clears from pulse_guiding_end_ in the getter,
         // so the thread does not need to touch the flag either.
-        std::thread([pulse_camera_id, guide_direction, duration]() {
+        std::thread([pulse_camera_id, guide_direction, duration, flag = pulse_guiding_]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(duration));
             try {
                 ZWOSDKWrapper::instance().pulse_guide_off(pulse_camera_id, guide_direction);
             } catch (const std::exception&) {
             }
+            // Unconditional clear for fire-and-forget clients that never
+            // poll IsPulseGuiding; the shared_ptr keeps the flag alive even
+            // if the driver is destroyed mid-pulse (round 9).
+            flag->store(false);
         }).detach();
     }
 
@@ -991,7 +995,12 @@ private:
     mutable bool exposure_failed_{false};
     mutable std::chrono::steady_clock::time_point last_exposure_retry_{};
 
-    mutable std::atomic<bool> pulse_guiding_;
+    // shared_ptr so the detached pulse-off thread can co-own the flag and
+    // clear it unconditionally after the pulse WITHOUT capturing `this`
+    // (destructor-safe): a fire-and-forget client that never polls
+    // IsPulseGuiding must not leave the flag latched true (round 9). The
+    // timestamp getter still self-clears for readers in the interim.
+    std::shared_ptr<std::atomic<bool>> pulse_guiding_;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
 
     void ensure_connected() const {
@@ -1014,7 +1023,7 @@ private:
         last_exposure_retry_ = {};
         // A disconnect racing an in-flight pulse must not leave
         // IsPulseGuiding=true for a freshly reconnected client.
-        pulse_guiding_.store(false);
+        pulse_guiding_->store(false);
         pulse_guiding_end_ = {};
     }
 
@@ -1099,10 +1108,19 @@ private:
         // is not guaranteed to retain it across the failure (the INDI
         // ASI driver re-sets controls before each retry for the same
         // reason).
-        ZWOSDKWrapper::instance().set_control_value(id, ZWOControlType::Exposure, reg_us, false);
-        ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " + std::to_string(retries_left) +
-                                   " retries left");
-        ZWOSDKWrapper::instance().start_exposure(id, is_dark);
+        // Both calls guarded: a disconnect closing the camera in this
+        // unlocked window makes them throw, and that must surface as a
+        // Failed status to the poller, not as a raw exception through a
+        // state getter (round 9).
+        try {
+            ZWOSDKWrapper::instance().set_control_value(id, ZWOControlType::Exposure, reg_us, false);
+            ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " +
+                                       std::to_string(retries_left) + " retries left");
+            ZWOSDKWrapper::instance().start_exposure(id, is_dark);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ZWO", "exposure retry re-trigger failed: " + std::string(e.what()));
+            return ZWOExposureStatus::Failed;
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (exposure_seq_ == retry_seq) {

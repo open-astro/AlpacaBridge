@@ -591,7 +591,7 @@ public:
     }
 
     bool get_is_pulse_guiding() const override {
-        if (!pulse_guiding_.load()) {
+        if (!pulse_guiding_->load()) {
             return false;
         }
         // Expiry check and clear under ONE mutex_ hold: an unlocked
@@ -600,7 +600,7 @@ public:
         // "not guiding" mid-pulse (PR #119 round 4).
         std::lock_guard<std::mutex> lock(mutex_);
         if (std::chrono::steady_clock::now() >= pulse_guiding_end_) {
-            pulse_guiding_.store(false);
+            pulse_guiding_->store(false);
             return false;
         }
         return true;
@@ -818,7 +818,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
-            pulse_guiding_.store(true);
+            pulse_guiding_->store(true);
         }
         // The detached turn-off thread captures NO object state — only the id
         // snapshot — so it cannot dereference a destroyed driver if the
@@ -827,7 +827,7 @@ public:
         // self-clears from pulse_guiding_end_ in the getter instead — the
         // ZWO shape). A disconnect racing the sleep costs at most a rejected
         // pulse_guide_off on a closed id.
-        std::thread([pulse_camera_id, dir, duration]() {
+        std::thread([pulse_camera_id, dir, duration, flag = pulse_guiding_]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(duration));
             try {
                 PlayerOneSDKWrapper::instance().pulse_guide_off(pulse_camera_id, dir);
@@ -835,6 +835,10 @@ public:
                 ALPACA_LOG_WARN("PlayerOne",
                     "pulse_guide_off failed: " + std::string(e.what()));
             }
+            // Unconditional clear for fire-and-forget clients that never
+            // poll IsPulseGuiding; the shared_ptr keeps the flag alive even
+            // if the driver is destroyed mid-pulse (round 9).
+            flag->store(false);
         }).detach();
     }
 
@@ -1102,10 +1106,12 @@ private:
     mutable std::chrono::steady_clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 
-    // mutable: get_is_pulse_guiding self-clears the flag once
-    // pulse_guiding_end_ has passed (the ZWO shape) — no detached thread
-    // holding `this` is needed to clear it.
-    mutable std::atomic<bool> pulse_guiding_{false};
+    // shared_ptr so the detached pulse-off thread can co-own the flag and
+    // clear it unconditionally after the pulse WITHOUT capturing `this`
+    // (destructor-safe): a fire-and-forget client that never polls
+    // IsPulseGuiding must not leave the flag latched true (round 9). The
+    // timestamp getter still self-clears for readers in the interim.
+    std::shared_ptr<std::atomic<bool>> pulse_guiding_{std::make_shared<std::atomic<bool>>(false)};
     std::chrono::steady_clock::time_point pulse_guiding_end_{};
 
     void ensure_connected() const {
@@ -1174,7 +1180,7 @@ private:
     void reset_exposure_state_locked() {
         // A disconnect racing an in-flight pulse must not leave
         // IsPulseGuiding=true for a freshly reconnected client.
-        pulse_guiding_.store(false);
+        pulse_guiding_->store(false);
         pulse_guiding_end_ = {};
         image_ready_ = false;
         image_cached_ = false;
