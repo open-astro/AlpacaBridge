@@ -665,24 +665,29 @@ For more information on this, and how to apply and follow the GNU AGPL, see
 ADDITIONAL PERMISSION UNDER GNU AGPL VERSION 3 SECTION 7
 (Vendor Device SDK Linking Exception)
 
-As a special exception to the terms of the GNU Affero General Public
-License, version 3 or (at your option) any later version ("the AGPL"),
-the copyright holders of AlpacaBridge grant you additional permission to combine or link AlpacaBridge with
-proprietary device-vendor software development kits — including but not
-limited to the camera, filter-wheel, focuser, rotator, mount, and
-switch SDKs distributed by ZWO, QHY, Player One Astronomy, SVBONY,
-ToupTek, Celestron, iOptron, Sky-Watcher/SynScan, Software Bisque,
-Losmandy, and WandererAstro ("Vendor SDKs"), and to convey the
-resulting combined work, without requiring the Vendor SDKs themselves
-to be licensed under the AGPL and without their corresponding
-source being part of the "Corresponding Source" you must convey.
+The following additional permission is granted by the copyright
+holders of AlpacaBridge under section 7 of the GNU Affero General
+Public License, version 3 or (at your option) any later version
+("the AGPL").
 
-This permission is limited to Vendor SDKs whose sole purpose in the
-combined work is enabling AlpacaBridge to operate the vendor's device
-hardware. Every other obligation of the AGPL — including the
-source obligations for AlpacaBridge itself and for any modified
-version — remains in full force. The Vendor SDKs remain subject to
-their own license terms.
+A "Vendor SDK" means a proprietary software development kit —
+including its libraries, header files, and device firmware —
+distributed by an astronomy device vendor (for example ZWO, QHY,
+Player One Astronomy, SVBONY, or ToupTek), whose sole purpose in a
+combined work is enabling AlpacaBridge to operate that vendor's
+device hardware.
+
+Notwithstanding any other provision of the AGPL, and in particular
+notwithstanding sections 5(c) and 6, you have permission to combine
+or link AlpacaBridge with one or more Vendor SDKs and to convey the
+resulting combined work, without licensing the Vendor SDKs under the
+AGPL, without applying the AGPL to those portions of the combined
+work that consist of Vendor SDKs, and without including the Vendor
+SDKs or their source code in the Corresponding Source you must
+convey. Every other obligation of the AGPL — including the source
+obligations for AlpacaBridge itself and for any modified version of
+it — remains in full force. The Vendor SDKs remain subject to their
+own license terms.
 
 If you modify AlpacaBridge, you may extend this exception to your
 version, but you are not obligated to do so; if you do not, remove

@@ -8,36 +8,50 @@ Copyright: 2024-2026 OpenAstro Contributors
 License: AGPL-3.0-or-later with vendor-SDK linking exception
 
 Files: AlpacaCore/external/ZWO/*
-Copyright: ZWO Inc.
+Copyright: 2015 ZWO Company
 License: Expat
- ZWO ASI/EAF SDKs — MIT license text distributed with the SDK
- (license.txt in the SDK tree).
+Comment: ZWO ASI/EAF/CAA SDKs — license.txt in each SDK tree.
 
 Files: AlpacaCore/external/PlayerOne/*
 Copyright: Player One Astronomy Co., Ltd.
 License: PlayerOne-SDK
- Player One camera and filter-wheel SDKs — vendor license permits
- developing and distributing products using the SDK without restriction,
- provided the license notice is retained (license.txt in the SDK tree).
+Comment: Player One camera and filter-wheel SDKs — license.txt in each
+ SDK tree.
 
 Files: AlpacaCore/external/QHY/*
 Copyright: QHY CCD Technology Co., Ltd.
-License: Proprietary
- QHY SDK — proprietary binaries redistributed unmodified for device
- support. The bundled Cypress fxload firmware loader is GPL-2 (see the
- COPYING file shipped with the SDK).
+License: QHY-SDK
+ Proprietary binaries redistributed unmodified, as downloaded from QHY's
+ official SDK distribution, for turnkey device support. No written
+ redistribution grant accompanies the SDK; it will be removed on request
+ by the vendor.
+
+Files: AlpacaCore/external/QHY/*/sbin/fxload
+       AlpacaCore/external/QHY/*/usr/local/fx3load/*
+Copyright: 1999-2002 David Brownell and fxload contributors
+           Cypress Semiconductor Corporation (FX3 adaptation)
+License: GPL-2
+Comment: The Cypress fxload firmware loader bundled inside the QHY SDK is
+ GPL-2 (see the COPYING file shipped alongside it in the SDK tree).
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 2 can be found in "/usr/share/common-licenses/GPL-2".
 
 Files: AlpacaCore/external/ToupTek/*
 Copyright: ToupTek Photonics Co., Ltd.
-License: Proprietary
- ToupTek SDK — proprietary binaries redistributed unmodified for device
- support.
+License: ToupTek-SDK
+ Proprietary binaries redistributed unmodified, as downloaded from
+ ToupTek's official SDK distribution, for turnkey device support. No
+ written redistribution grant accompanies the SDK; it will be removed on
+ request by the vendor.
 
 Files: AlpacaCore/external/SVBONY/*
 Copyright: SVBONY (Hong Kong SVBONY Technology Co., Ltd.)
-License: Proprietary
- SVBONY camera SDK — proprietary binaries redistributed unmodified for
- device support.
+License: SVBONY-SDK
+ Proprietary binaries redistributed unmodified, as downloaded from
+ SVBONY's official SDK distribution, for turnkey device support. No
+ written redistribution grant accompanies the SDK; it will be removed on
+ request by the vendor.
 
 Files: AlpacaCore/external/libgpiod/*
 Copyright: 2017-2025 Bartosz Golaszewski and libgpiod contributors
@@ -54,9 +68,11 @@ License: LGPL-2.1-or-later
 
 Files: AlpacaCore/external/WandererAstro/*
 Copyright: WandererAstro
-License: Proprietary
+License: WandererAstro-docs
  Vendor-authored user manual and serial-protocol documentation,
- redistributed unmodified as a driver-development reference.
+ redistributed unmodified as a driver-development reference. No SDK
+ binaries; the AlpacaBridge WandererAstro driver speaks the documented
+ serial protocol directly.
 
 License: AGPL-3.0-or-later with vendor-SDK linking exception
  This program is free software: you can redistribute it and/or modify it
@@ -64,15 +80,40 @@ License: AGPL-3.0-or-later with vendor-SDK linking exception
  the Free Software Foundation, either version 3 of the License, or (at
  your option) any later version.
  .
- As an additional permission under GNU AGPL version 3 section 7, the
- copyright holders grant you permission to combine or link this program
- with proprietary device-vendor SDKs required to operate astronomy device
- hardware, and to convey the resulting combined work, without those SDKs
- being subject to the AGPL. The full exception text is appended to the
- LICENSE file in the source tree.
+ The complete text of the additional permission granted under section 7
+ follows, and after it the complete text of the GNU Affero General Public
+ License version 3 (Debian does not ship the AGPL in
+ /usr/share/common-licenses).
  .
- Debian does not ship the AGPL in /usr/share/common-licenses, so the
- complete license text follows.
+ (Vendor Device SDK Linking Exception)
+ .
+ The following additional permission is granted by the copyright
+ holders of AlpacaBridge under section 7 of the GNU Affero General
+ Public License, version 3 or (at your option) any later version
+ ("the AGPL").
+ .
+ A "Vendor SDK" means a proprietary software development kit —
+ including its libraries, header files, and device firmware —
+ distributed by an astronomy device vendor (for example ZWO, QHY,
+ Player One Astronomy, SVBONY, or ToupTek), whose sole purpose in a
+ combined work is enabling AlpacaBridge to operate that vendor's
+ device hardware.
+ .
+ Notwithstanding any other provision of the AGPL, and in particular
+ notwithstanding sections 5(c) and 6, you have permission to combine
+ or link AlpacaBridge with one or more Vendor SDKs and to convey the
+ resulting combined work, without licensing the Vendor SDKs under the
+ AGPL, without applying the AGPL to those portions of the combined
+ work that consist of Vendor SDKs, and without including the Vendor
+ SDKs or their source code in the Corresponding Source you must
+ convey. Every other obligation of the AGPL — including the source
+ obligations for AlpacaBridge itself and for any modified version of
+ it — remains in full force. The Vendor SDKs remain subject to their
+ own license terms.
+ .
+ If you modify AlpacaBridge, you may extend this exception to your
+ version, but you are not obligated to do so; if you do not, remove
+ this exception statement from your version.
  .
                      GNU AFFERO GENERAL PUBLIC LICENSE
                         Version 3, 19 November 2007
@@ -735,3 +776,48 @@ License: AGPL-3.0-or-later with vendor-SDK linking exception
  if any, to sign a "copyright disclaimer" for the program, if necessary.
  For more information on this, and how to apply and follow the GNU AGPL, see
  <https://www.gnu.org/licenses/>.
+
+License: Expat
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
+
+License: PlayerOne-SDK
+ This software is the secondary software development kit (SDK) for
+ the astronomy cameras made by Player One Astronomy Co., Ltd.
+ Player One Astronomy Co., Ltd (hereinafter referred to as "the company")
+ owns its copyright. This SDK is only used for the secondary development
+ of our company's cameras or other equipment. You can use our company's
+ products and this SDK to develop any products without any restrictions.
+ This software may use third-party software or technology (including open
+ source code and public domain code that this software may use), and such
+ use complies with their open source license or has obtained legal
+ authorization. If you have any questions, please contact us:
+ support@player-one-astronomy.com
+ .
+ Copyright (C) Player One Astronomy Co., Ltd. All rights reserved.
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
