@@ -4,13 +4,21 @@ Upstream-Contact: OpenAstro <support@openastro.net>
 Source: https://github.com/open-astro/AlpacaBridge
 
 Files: *
-Copyright: 2024-2026 OpenAstro Contributors
+Copyright: 2025-2026 OpenAstro Contributors
 License: AGPL-3.0-or-later with vendor-SDK linking exception
 
 Files: AlpacaCore/external/ZWO/*
 Copyright: 2015 ZWO Company
 License: Expat
 Comment: ZWO ASI/EAF/CAA SDKs — license.txt in each SDK tree.
+
+Files: AlpacaCore/external/ZWO/AM/*
+Copyright: ZWO Inc.
+License: ZWO-mount-docs
+ Vendor mount serial-protocol documentation and community-collected
+ protocol notes (converted to Markdown), redistributed as a
+ driver-development reference. Not covered by the SDK license.txt
+ grants.
 
 Files: AlpacaCore/external/PlayerOne/*
 Copyright: Player One Astronomy Co., Ltd.
@@ -65,6 +73,45 @@ License: LGPL-2.1-or-later
  On Debian systems, the complete text of the GNU Lesser General Public
  License version 2.1 can be found in
  "/usr/share/common-licenses/LGPL-2.1".
+
+Files: AlpacaCore/external/Bisque/*
+Copyright: Software Bisque, Inc.
+License: Bisque-docs
+ Vendor-authored TheSky scripting API reference documentation
+ (converted to Markdown), redistributed as a driver-development
+ reference. No SDK binaries; the driver scripts TheSky over TCP.
+
+Files: AlpacaCore/external/Celestron/*
+Copyright: Celestron, LLC
+License: Celestron-docs
+ Vendor-authored NexStar serial-protocol reference documentation
+ (converted to Markdown), redistributed as a driver-development
+ reference. No SDK binaries; the driver speaks the documented
+ serial protocol directly.
+
+Files: AlpacaCore/external/SynScan/*
+Copyright: Sky-Watcher (Suzhou Synta Optical Technology Co., Ltd.)
+License: SynScan-docs
+ Vendor-authored SynScan serial-protocol and motor-controller command
+ documentation (converted to Markdown), redistributed as a
+ driver-development reference. No SDK binaries; the driver speaks the
+ documented serial protocol directly.
+
+Files: AlpacaCore/external/iOptron/*
+Copyright: iOptron Corporation
+License: iOptron-docs
+ Vendor-authored RS-232 command-language reference documentation
+ (converted to Markdown), redistributed as a driver-development
+ reference. No SDK binaries; the driver speaks the documented
+ serial protocol directly.
+
+Files: AlpacaCore/external/Losmandy/*
+Copyright: Losmandy Astronomical Products / Gemini Telescope Design
+License: Losmandy-docs
+ Vendor-authored Gemini command-set reference documentation
+ (converted to Markdown), redistributed as a driver-development
+ reference. No SDK binaries; the driver speaks the documented
+ serial protocol directly.
 
 Files: AlpacaCore/external/WandererAstro/*
 Copyright: WandererAstro
