@@ -528,10 +528,9 @@ public:
 
     int get_gain() const override {
         ensure_connected();
-        return static_cast<int>(
-            with_camera([](int id) {
-                return PlayerOneSDKWrapper::instance().get_config_int(id, /*config_id=*/1);  // 1 = POA_GAIN
-            }));
+        return static_cast<int>(with_camera([](int id) {
+            return PlayerOneSDKWrapper::instance().get_config_int(id, /*config_id=*/1);  // 1 = POA_GAIN
+        }));
     }
     void set_gain(int gain) override {
         ensure_connected();

@@ -317,20 +317,20 @@ public:
         }
         auto status = poll_exposure_status_locked(camera_id_.value());
         switch (status) {
-        case ZWOExposureStatus::Working:
-            return CameraState::Exposing;
-        case ZWOExposureStatus::Idle:
-        case ZWOExposureStatus::Success:
-        case ZWOExposureStatus::Failed:
-            // Failed included deliberately: a failed (retries-exhausted)
-            // exposure leaves the camera fully ready for the next one — the
-            // failure surfaces through ImageReady staying false and
-            // ImageArray throwing. Reporting a sticky Error here poisoned
-            // every subsequent operation: one transient ASI_EXP_FAILED
-            // cascaded into 18 ConformU issues.
-            return CameraState::Idle;
-        default:
-            return CameraState::Error;
+            case ZWOExposureStatus::Working:
+                return CameraState::Exposing;
+            case ZWOExposureStatus::Idle:
+            case ZWOExposureStatus::Success:
+            case ZWOExposureStatus::Failed:
+                // Failed included deliberately: a failed (retries-exhausted)
+                // exposure leaves the camera fully ready for the next one — the
+                // failure surfaces through ImageReady staying false and
+                // ImageArray throwing. Reporting a sticky Error here poisoned
+                // every subsequent operation: one transient ASI_EXP_FAILED
+                // cascaded into 18 ConformU issues.
+                return CameraState::Idle;
+            default:
+                return CameraState::Error;
         }
     }
 
