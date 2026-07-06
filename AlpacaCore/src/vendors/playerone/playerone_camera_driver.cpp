@@ -812,11 +812,14 @@ public:
             PlayerOneSDKWrapper::instance().pulse_guide_on(id, dir);
             return id;
         });
-        pulse_guiding_.store(true);
+        // End timestamp BEFORE the flag: a reader that observes the flag as
+        // true must never see a stale (epoch) end time, or the self-clearing
+        // getter would clear the pulse immediately.
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
         }
+        pulse_guiding_.store(true);
         // The detached turn-off thread captures NO object state — only the id
         // snapshot — so it cannot dereference a destroyed driver if the
         // object is torn down mid-pulse (the previous flag-clear thread

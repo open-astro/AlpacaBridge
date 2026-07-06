@@ -808,11 +808,16 @@ public:
             ZWOSDKWrapper::instance().pulse_guide_on(id, guide_direction);
             return id;
         });
-        pulse_guiding_.store(true);
+        // End timestamp BEFORE the flag: a reader that observes the flag as
+        // true must never see a stale end time from the previous pulse (or
+        // epoch), or the self-clearing getter would clear this pulse
+        // immediately. Pre-existing ordering, swept in the PR #119 round-2
+        // fix alongside the Player One instance.
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
         }
+        pulse_guiding_.store(true);
 
         // The detached turn-off thread captures NO object state — only the id
         // snapshot — so it cannot dereference a destroyed driver if the

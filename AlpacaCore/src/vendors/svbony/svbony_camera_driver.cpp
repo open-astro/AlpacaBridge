@@ -863,23 +863,33 @@ public:
             break;
         }
 
-        // SVBONY SVBPulseGuide takes direction and duration in one call and
-        // blocks on the camera side for the full pulse — it must NOT hold
-        // mutex_ (it would stall every status poll for the duration), so this
-        // keeps the bare id snapshot like the exposure worker. The disconnect
-        // path publishes disconnected before closing, so the worst case is an
-        // SDK error on a closed id, not a use-after-free (issue #116).
-        SVBSDKWrapper::instance().pulse_guide(camera_id_value(), guide_direction, duration);
-        pulse_guiding_.store(true);
+        // Publish "guiding" BEFORE the blocking call: SVBPulseGuide returns
+        // only after the pulse completes, so setting the flag afterwards
+        // reported IsPulseGuiding=false during the guide and true for a
+        // spurious extra duration afterwards. The end timestamp is written
+        // first (under mutex_) so a reader that observes the flag can never
+        // read a stale epoch end time and self-clear early. No detached
+        // clear thread: the call is synchronous, so the flag is cleared
+        // right after it returns (and on throw), and the timestamp-based
+        // getter covers readers while the call is in flight.
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
         }
-
-        std::thread([this, duration]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
+        pulse_guiding_.store(true);
+        // SVBPulseGuide blocks on the camera side for the full pulse — it
+        // must NOT hold mutex_ (it would stall every status poll for the
+        // duration), so this keeps the bare id snapshot like the exposure
+        // worker. The disconnect path publishes disconnected before closing,
+        // so the worst case is an SDK error on a closed id, not a
+        // use-after-free (issue #116).
+        try {
+            SVBSDKWrapper::instance().pulse_guide(camera_id_value(), guide_direction, duration);
+        } catch (...) {
             pulse_guiding_.store(false);
-        }).detach();
+            throw;
+        }
+        pulse_guiding_.store(false);
     }
 
     void start_exposure(double duration, bool light) override {
