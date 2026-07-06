@@ -666,20 +666,20 @@ ADDITIONAL PERMISSION UNDER GNU AGPL VERSION 3 SECTION 7
 (Vendor Device SDK Linking Exception)
 
 As a special exception to the terms of the GNU Affero General Public
-License version 3 ("AGPL-3.0"), the copyright holders of AlpacaBridge
-grant you additional permission to combine or link AlpacaBridge with
+License, version 3 or (at your option) any later version ("the AGPL"),
+the copyright holders of AlpacaBridge grant you additional permission to combine or link AlpacaBridge with
 proprietary device-vendor software development kits — including but not
 limited to the camera, filter-wheel, focuser, rotator, mount, and
 switch SDKs distributed by ZWO, QHY, Player One Astronomy, SVBONY,
 ToupTek, Celestron, iOptron, Sky-Watcher/SynScan, Software Bisque,
 Losmandy, and WandererAstro ("Vendor SDKs"), and to convey the
 resulting combined work, without requiring the Vendor SDKs themselves
-to be licensed under the AGPL-3.0 and without their corresponding
+to be licensed under the AGPL and without their corresponding
 source being part of the "Corresponding Source" you must convey.
 
 This permission is limited to Vendor SDKs whose sole purpose in the
 combined work is enabling AlpacaBridge to operate the vendor's device
-hardware. Every other obligation of the AGPL-3.0 — including the
+hardware. Every other obligation of the AGPL — including the
 source obligations for AlpacaBridge itself and for any modified
 version — remains in full force. The Vendor SDKs remain subject to
 their own license terms.

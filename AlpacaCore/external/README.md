@@ -87,6 +87,7 @@ own redistribution terms still apply to the SDK files themselves.
 | QHY | None for `libqhyccd` itself; bundled Cypress `fxload` loader is GPL-2 (`COPYING` in the SDK) | Redistributed unmodified, as downloaded from QHY's official SDK page, for turnkey device support |
 | ToupTek | None in the vendored subset | Redistributed unmodified, as downloaded from ToupTek's official SDK page, for turnkey device support |
 | SVBONY | None (`readme.txt` is a changelog) | Redistributed unmodified, as downloaded from SVBONY's official SDK page, for turnkey device support |
+| libgpiod (source tarball) | LGPL-2.1-or-later library, GPL-2.0-or-later tools (`LICENSES/` in the tarball) | Unmodified upstream source tarball, built at package build time for the GPIO switch drivers |
 
 The QHY/ToupTek/SVBONY subsets carry no written redistribution grant from the
 vendor; they are vendored unmodified from the vendors' public SDK downloads so
