@@ -488,36 +488,54 @@ public:
 
     ImageArray get_image_array() const override {
         ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
-        }
-        if (image_cached_) {
-            return last_image_;
-        }
-        if (!camera_id_.has_value()) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
-        }
-        const int active_camera_id = camera_id_.value();
-        if (!image_ready_) {
-            auto status = poll_exposure_status_locked(active_camera_id);
-            if (status == ZWOExposureStatus::Failed) {
-                throw AlpacaException("Exposure failed", AlpacaError::DriverException);
-            }
-            if (status != ZWOExposureStatus::Success) {
+        int active_camera_id = -1;
+        std::size_t bytes = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!last_exposure_valid_) {
                 throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
             }
-            image_ready_ = true;
+            if (image_cached_) {
+                return last_image_;
+            }
+            if (!camera_id_.has_value()) {
+                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+            }
+            active_camera_id = camera_id_.value();
+            if (!image_ready_) {
+                auto status = poll_exposure_status_locked(active_camera_id);
+                if (status == ZWOExposureStatus::Failed) {
+                    throw AlpacaException("Exposure failed", AlpacaError::DriverException);
+                }
+                if (status != ZWOExposureStatus::Success) {
+                    throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+                }
+                image_ready_ = true;
+            }
+            bytes = image_buffer_size_locked();
+            if (bytes == 0) {
+                throw AlpacaException("Image buffer size is invalid", AlpacaError::InvalidOperation);
+            }
         }
 
-        const auto bytes = image_buffer_size_locked();
-        if (bytes == 0) {
-            throw AlpacaException("Image buffer size is invalid", AlpacaError::InvalidOperation);
-        }
+        // The USB bulk transfer runs OUTSIDE mutex_ (bare snapshot, like the
+        // exposure workers): holding the lock across the download would block
+        // stop_exposure/abort_exposure for the whole transfer. Disconnect
+        // publishes disconnected before closing, so the worst case for a
+        // racing disconnect is an SDK error on a closed id — not a hang.
         std::vector<std::uint8_t> buffer(bytes);
         ZWOSDKWrapper::instance().get_data_after_exposure(active_camera_id, buffer.data(),
                                                           static_cast<long>(buffer.size()));
 
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (image_cached_) {
+            return last_image_;
+        }
+        if (image_buffer_size_locked() != bytes) {
+            // ROI/bin changed while the lock was released for the download —
+            // the buffer no longer matches the geometry build would use.
+            throw AlpacaException("ROI changed during image download", AlpacaError::InvalidOperation);
+        }
         last_image_ = build_image_array_locked(buffer);
         image_cached_ = true;
         image_ready_ = true;
@@ -786,25 +804,28 @@ public:
             break;
         }
 
-        with_camera([&](int id) { ZWOSDKWrapper::instance().pulse_guide_on(id, guide_direction); });
+        const int pulse_camera_id = with_camera([&](int id) {
+            ZWOSDKWrapper::instance().pulse_guide_on(id, guide_direction);
+            return id;
+        });
         pulse_guiding_.store(true);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
         }
 
-        std::thread([this, guide_direction, duration]() {
+        // The detached turn-off thread captures NO object state — only the id
+        // snapshot — so it cannot dereference a destroyed driver if the
+        // object is torn down mid-pulse. A disconnect (or destruction) racing
+        // the sleep costs at most a rejected pulse_guide_off on a closed id.
+        // IsPulseGuiding self-clears from pulse_guiding_end_ in the getter,
+        // so the thread does not need to touch the flag either.
+        std::thread([pulse_camera_id, guide_direction, duration]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(duration));
             try {
-                if (connected_.load()) {
-                    // with_camera re-checks the id under mutex_, so a
-                    // disconnect that raced the sleep fails here cleanly
-                    // instead of poking a just-closed camera.
-                    with_camera([&](int id) { ZWOSDKWrapper::instance().pulse_guide_off(id, guide_direction); });
-                }
+                ZWOSDKWrapper::instance().pulse_guide_off(pulse_camera_id, guide_direction);
             } catch (const std::exception&) {
             }
-            pulse_guiding_.store(false);
         }).detach();
     }
 

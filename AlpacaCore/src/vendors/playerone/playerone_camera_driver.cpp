@@ -590,7 +590,21 @@ public:
         return last_exposure_valid_ && image_ready_ && image_cached_;
     }
 
-    bool get_is_pulse_guiding() const override { return pulse_guiding_.load(); }
+    bool get_is_pulse_guiding() const override {
+        if (!pulse_guiding_.load()) {
+            return false;
+        }
+        std::chrono::steady_clock::time_point end_time;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            end_time = pulse_guiding_end_;
+        }
+        if (std::chrono::steady_clock::now() >= end_time) {
+            pulse_guiding_.store(false);
+            return false;
+        }
+        return true;
+    }
 
     double get_last_exposure_duration() const override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -794,26 +808,30 @@ public:
         case 3: dir = PlayerOneGuideDirection::West;  break;
         }
 
-        with_camera([&](int id) { PlayerOneSDKWrapper::instance().pulse_guide_on(id, dir); });
+        const int pulse_camera_id = with_camera([&](int id) {
+            PlayerOneSDKWrapper::instance().pulse_guide_on(id, dir);
+            return id;
+        });
         pulse_guiding_.store(true);
-        std::thread([this, dir, duration]() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
+        }
+        // The detached turn-off thread captures NO object state — only the id
+        // snapshot — so it cannot dereference a destroyed driver if the
+        // object is torn down mid-pulse (the previous flag-clear thread
+        // captured `this` for exactly that hazard; IsPulseGuiding now
+        // self-clears from pulse_guiding_end_ in the getter instead — the
+        // ZWO shape). A disconnect racing the sleep costs at most a rejected
+        // pulse_guide_off on a closed id.
+        std::thread([pulse_camera_id, dir, duration]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(duration));
             try {
-                if (connected_.load()) {
-                    // with_camera re-checks the id under mutex_, so a
-                    // disconnect that raced the sleep fails here cleanly
-                    // instead of poking a just-closed camera.
-                    with_camera([&](int id) { PlayerOneSDKWrapper::instance().pulse_guide_off(id, dir); });
-                }
+                PlayerOneSDKWrapper::instance().pulse_guide_off(pulse_camera_id, dir);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("PlayerOne",
                     "pulse_guide_off failed: " + std::string(e.what()));
             }
-        }).detach();
-        // Clear the "guiding" flag on the same schedule the SDK was told to stop.
-        std::thread([this, duration]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
-            pulse_guiding_.store(false);
         }).detach();
     }
 
@@ -1081,7 +1099,11 @@ private:
     mutable std::chrono::steady_clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 
-    std::atomic<bool> pulse_guiding_{false};
+    // mutable: get_is_pulse_guiding self-clears the flag once
+    // pulse_guiding_end_ has passed (the ZWO shape) — no detached thread
+    // holding `this` is needed to clear it.
+    mutable std::atomic<bool> pulse_guiding_{false};
+    std::chrono::steady_clock::time_point pulse_guiding_end_{};
 
     void ensure_connected() const {
         if (!connected_.load()) {
