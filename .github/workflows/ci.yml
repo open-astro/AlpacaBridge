@@ -298,11 +298,11 @@ jobs:
           # A tag filter matching ZERO tests exits 0 ("No tests ran") — if an
           # environment change ever drops the vendor targets that register the
           # [stress] cases, the job must fail rather than green-light with no
-          # concurrency coverage. Require at least one matching test up front.
-          listed=$(./AlpacaCore/build-tsan/tests/alpacacore_tests --list-tests --verbosity quiet "[stress]" | wc -l)
-          echo "[stress] tests discovered: ${listed}"
-          test "${listed}" -ge 1
-          ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]"
+          # concurrency coverage. Assert on the run summary, which reflects
+          # what actually executed and works on any Catch2 version, unlike
+          # --list-tests output counting (issue #117).
+          ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" | tee stress-run.log
+          grep -qE '^test cases: *[1-9]' stress-run.log
 
   format:
     name: clang-format (changed lines)

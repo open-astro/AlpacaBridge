@@ -115,9 +115,14 @@ vendor-agnostic; do them in the driver from the start.
   sdk.foo(h); })`-style helper that holds `mutex_` **across** the SDK call (shape
   (a)) for every fast option read/write, so there's no window at all. Reviewers
   will flag these one method at a time; convert the whole class at once. The
-  ToupTek camera driver is the reference (`with_handle`). Only the exposure worker
-  keeps a bare snapshot — it must not hold `mutex_` across `WaitImageV4`, and its
-  close is stop-and-joined first.
+  ToupTek camera driver is the reference (`with_handle`); the ZWO, Player One,
+  and SVBONY cameras use the same shape as `with_camera` (issue #116). Only the
+  exposure worker keeps a bare snapshot — it must not hold `mutex_` across a
+  blocking image wait (`WaitImageV4`, `SVBGetVideoData`, `POAGetImageData`),
+  and its close is stop-and-joined first. Same exemption for a call that
+  blocks for its whole duration on the device (SVBONY `SVBPulseGuide`).
+  A helper returning a **reference** into a locked container (`control_caps_`)
+  is the same trap one level up — return by value.
 - `set_connected(false)` clears driver state (`connected_`, handle, cached info,
   element/name containers) **before** the SDK close, so a throwing close can't trap
   the driver half-connected. A getter that checks `connected_` and then re-locks to

@@ -66,6 +66,9 @@ if(TARGET alpacacore_wandererastro)
 endif()
 if(TARGET alpacacore_svbony)
     list(APPEND TEST_SOURCES test_svbony_camera.cpp)
+    # Camera lifecycle storm for the issue-#116 close-order/held-mutex fixes;
+    # run under the sanitizers-tsan CI job (issue #101).
+    list(APPEND TEST_SOURCES test_svbony_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_telescope.cpp)

@@ -308,17 +308,26 @@ public:
             return;
         }
 
-        // Disconnecting.
+        // Disconnecting. Clear driver state and publish disconnected BEFORE
+        // the SDK close so a racing operational call fails fast at its
+        // connection check instead of hitting a just-closed camera, and a
+        // throwing close can't trap the driver half-connected — same order as
+        // the switch/EFW siblings, per the AGENTS.md disconnect rule (#116).
+        // The exposure worker is already joined (lifecycle lock above).
         exposure_active_.store(false);
-        if (camera_info_valid_ && camera_info_.camera_id >= 0) {
-            try { sdk.stop_exposure(camera_info_.camera_id); } catch (...) {}
-            sdk.close_camera(camera_info_.camera_id);
-        }
+        const int close_id = (camera_info_valid_ && camera_info_.camera_id >= 0) ? camera_info_.camera_id : -1;
         camera_info_ = {};
         camera_info_valid_ = false;
         caps_ = {};
         reset_exposure_state_locked();
         connected_.store(false);
+        if (close_id >= 0) {
+            try {
+                sdk.stop_exposure(close_id);
+            } catch (...) {
+            }
+            sdk.close_camera(close_id);
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -331,27 +340,29 @@ public:
         if (name == "getheaterpower") {
             ensure_connected();
             ensure_heater_supported();
-            return std::to_string(PlayerOneSDKWrapper::instance().get_heater_power_percent(camera_id_copy()));
+            return std::to_string(
+                with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_heater_power_percent(id); }));
         }
         if (name == "setheaterpower") {
             ensure_connected();
             ensure_heater_supported();
             int percent = parse_power_percent(parameters, "SetHeaterPower");
             validate_heater_range(percent);
-            PlayerOneSDKWrapper::instance().set_heater_power_percent(camera_id_copy(), percent);
+            with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_heater_power_percent(id, percent); });
             return "";
         }
         if (name == "getfanpower") {
             ensure_connected();
             ensure_fan_supported();
-            return std::to_string(PlayerOneSDKWrapper::instance().get_fan_power_percent(camera_id_copy()));
+            return std::to_string(
+                with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_fan_power_percent(id); }));
         }
         if (name == "setfanpower") {
             ensure_connected();
             ensure_fan_supported();
             int percent = parse_power_percent(parameters, "SetFanPower");
             validate_fan_range(percent);
-            PlayerOneSDKWrapper::instance().set_fan_power_percent(camera_id_copy(), percent);
+            with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_fan_power_percent(id, percent); });
             return "";
         }
         throw AlpacaException("Action not supported: " + std::string(action_name),
@@ -441,15 +452,13 @@ public:
 
     double get_ccd_temperature() const override {
         ensure_connected();
-        int id = camera_id_copy();
-        auto& sdk = PlayerOneSDKWrapper::instance();
-        return sdk.get_temperature_c(id);
+        return with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_temperature_c(id); });
     }
 
     bool get_cooler_on() const override {
         ensure_connected();
         if (!cooler_available_copy()) return false;
-        return PlayerOneSDKWrapper::instance().get_cooler_on(camera_id_copy());
+        return with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_cooler_on(id); });
     }
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
@@ -459,14 +468,13 @@ public:
             }
             return;
         }
-        PlayerOneSDKWrapper::instance().set_cooler_on(camera_id_copy(), cooler_on);
+        with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_cooler_on(id, cooler_on); });
     }
     double get_cooler_power() const override {
         ensure_connected();
         if (!cooler_available_copy()) return 0.0;
         try {
-            int pct = PlayerOneSDKWrapper::instance()
-                          .get_cooler_power_percent(camera_id_copy());
+            int pct = with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_cooler_power_percent(id); });
             if (pct < 0) pct = 0;
             if (pct > 100) pct = 100;
             return static_cast<double>(pct);
@@ -520,7 +528,7 @@ public:
     int get_gain() const override {
         ensure_connected();
         return static_cast<int>(
-            PlayerOneSDKWrapper::instance().get_config_int(camera_id_copy(), /*POA_GAIN=*/1));
+            with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_config_int(id, /*POA_GAIN=*/1); }));
     }
     void set_gain(int gain) override {
         ensure_connected();
@@ -724,7 +732,7 @@ public:
                                   AlpacaError::NotImplemented);
         }
         return static_cast<double>(
-            PlayerOneSDKWrapper::instance().get_target_temp_c(camera_id_copy()));
+            with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_target_temp_c(id); }));
     }
     void set_set_ccd_temperature(double temperature) override {
         ensure_connected();
@@ -740,7 +748,7 @@ public:
                                       AlpacaError::InvalidValue);
             }
         }
-        PlayerOneSDKWrapper::instance().set_target_temp_c(camera_id_copy(), target_c);
+        with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_target_temp_c(id, target_c); });
     }
 
     int get_start_x() const override {
@@ -784,14 +792,17 @@ public:
         case 3: dir = PlayerOneGuideDirection::West;  break;
         }
 
-        int id = camera_id_copy();
-        auto& sdk = PlayerOneSDKWrapper::instance();
-        sdk.pulse_guide_on(id, dir);
+        with_camera([&](int id) { PlayerOneSDKWrapper::instance().pulse_guide_on(id, dir); });
         pulse_guiding_.store(true);
-        std::thread([id, dir, duration]() {
+        std::thread([this, dir, duration]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(duration));
             try {
-                PlayerOneSDKWrapper::instance().pulse_guide_off(id, dir);
+                if (connected_.load()) {
+                    // with_camera re-checks the id under mutex_, so a
+                    // disconnect that raced the sleep fails here cleanly
+                    // instead of poking a just-closed camera.
+                    with_camera([&](int id) { PlayerOneSDKWrapper::instance().pulse_guide_off(id, dir); });
+                }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("PlayerOne",
                     "pulse_guide_off failed: " + std::string(e.what()));
@@ -1022,7 +1033,7 @@ public:
         exposure_active_.store(false);
         if (exposure_thread_.joinable()) exposure_thread_.join();
         try {
-            PlayerOneSDKWrapper::instance().stop_exposure(camera_id_copy());
+            with_camera([](int id) { PlayerOneSDKWrapper::instance().stop_exposure(id); });
         } catch (const std::exception&) {}
         std::lock_guard<std::mutex> lock(mutex_);
         image_ready_ = false;
@@ -1076,12 +1087,18 @@ private:
         }
     }
 
-    int camera_id_copy() const {
+    // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
+    // cannot close the camera underneath the SDK call (AGENTS.md shape (a)).
+    // Fast register/control calls only — the exposure worker keeps its bare
+    // id snapshot because it must not hold mutex_ across the blocking image
+    // wait. Must NOT be called with mutex_ already held (non-recursive).
+    template <typename Fn>
+    auto with_camera(Fn&& fn) const -> decltype(fn(0)) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || camera_info_.camera_id < 0) {
             throw AlpacaException("Camera ID not available", AlpacaError::NotConnected);
         }
-        return camera_info_.camera_id;
+        return fn(camera_info_.camera_id);
     }
 
     bool cooler_available_copy() const {
