@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.0.0] - UNRELEASED
+## [3.0.0] - 2026-07-06
 
 ### Added
 - **ThreadSanitizer CI job + per-driver concurrency stress harness** (#101): a new `sanitizers-tsan` CI job builds the all-vendors AlpacaCore tests with `-fsanitize=thread` and runs a new `[stress]` suite — the first automated coverage for the #1 driver-review bug class (use-after-close, dropped racing disconnects, destructor vs connection-thread races), which the single-threaded ASan job and ConformU cannot see. The reusable harness (`AlpacaCore/tests/concurrency_stress.h`) provides three scenarios per driver: a lifecycle storm (async connect/disconnect + sync `set_connected` + status reads + operational calls from N threads), destruction racing an in-flight connect (the issue-#100 `std::terminate` class), and a deterministic racing-disconnect-never-dropped settle check. Registered for the drivers with the deepest race history — ToupTek camera, AFW filter wheel, and thermal switch run hardware-free over the fake SDK seam (issue #104), wrapped in a new thread-safe `LockedToupTekSDK` decorator so TSan findings point at driver code rather than the deliberately unhardened test fake; ZWO EFW and Player One Phoenix storm the failure path on hardware-free hosts (full path with a wheel attached). Wired into `scripts/ci_preflight.sh` behind `RUN_TSAN=1` (mirroring `RUN_SANITIZERS=1`) with a suppressions file that mutes only the uninstrumented proprietary vendor blobs. The CI job fails loudly if Catch2 is missing instead of green-lighting an empty suite.
