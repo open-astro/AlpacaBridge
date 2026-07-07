@@ -4,7 +4,7 @@
 
 AlpacaBridge is a growing suite of native ASCOM Alpaca drivers for Linux, every one ConformU-verified, that turns any single-board computer into a gear-control server. There's no ASCOM Platform to install and no vendor COM drivers to chase down. Just flash it onto a Raspberry Pi, iOptron iMate, ToupTek StellaVita, or ZWO ASIAIR, connect your equipment once, and control gear like cameras, mounts, focusers, filter wheels, rotators, cover calibrators, switches, and weather stations over the network from any Alpaca-compatible app, including N.I.N.A., Sequence Generator Pro, and SharpCap.
 
-#### [2.2.0] - 2026-07-01 &middot; [Changelog](CHANGELOG.md)
+#### [3.0.0] - 2026-07-06 &middot; [Changelog](CHANGELOG.md)
 
 ## Features
 
