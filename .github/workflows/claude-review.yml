@@ -60,8 +60,13 @@ jobs:
               "✅ Approved" if no significant issues, or
               "⚠️ Issues found" if there are things to address.
 
-            Post your review as a SINGLE top-level comment using `gh pr comment`.
+            Post your review as a SINGLE top-level comment. To post it: first
+            write the full review text to /tmp/review.md with the Write tool,
+            then run exactly `gh pr comment <PR NUMBER> --body-file /tmp/review.md`.
+            Do NOT use --body with command substitution ($(...)/backticks/heredocs)
+            — the permission rules reject any command containing substitution, and
+            the review will silently fail to post.
             Do not submit the review text as a chat message.
           claude_args: |
             --model sonnet
-            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
