@@ -113,7 +113,7 @@ private:
     bool register_device_from_config(const nlohmann::json& config, std::string& error_message);
     nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
     void add_or_replace_persisted_device(const nlohmann::json& config);
-    void remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);
+    bool remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);
     void save_persisted_devices() const;
     void load_persisted_devices();
 
@@ -200,6 +200,9 @@ private:
         std::uint32_t server_tx_id
     );
 
+    // Guards persisted_devices_ and persisted_devices_loaded_. Never held
+    // together with server_info_mutex_ or across driver-registry calls.
+    mutable std::mutex persisted_devices_mutex_;
     std::vector<nlohmann::json> persisted_devices_;
     bool persisted_devices_loaded_ = false;
 

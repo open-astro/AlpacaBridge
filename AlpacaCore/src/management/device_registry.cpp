@@ -124,12 +124,22 @@ std::vector<std::shared_ptr<AlpacaDriver>> DeviceRegistry::get_all_devices() con
 }
 
 std::vector<DeviceCapabilities> DeviceRegistry::get_all_device_capabilities() const {
-    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    // Snapshot the entries under the registry mutex, then release it BEFORE
+    // invoking the virtual driver getters: a getter may take the driver's own
+    // mutex (registry -> driver lock order). Holding g_registry_mutex across a
+    // getter blocked behind a slow connect would stall every registry call
+    // (management API, register/unregister), and any driver path that later
+    // touched the registry would complete an ABBA deadlock.
+    std::vector<DeviceEntry> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(g_registry_mutex);
+        snapshot = devices_;
+    }
 
     std::vector<DeviceCapabilities> capabilities;
-    capabilities.reserve(devices_.size());
+    capabilities.reserve(snapshot.size());
 
-    for (const auto& entry : devices_) {
+    for (const auto& entry : snapshot) {
         DeviceCapabilities cap;
         cap.type = entry.type;
         cap.device_number = entry.number;

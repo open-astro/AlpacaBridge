@@ -1241,6 +1241,58 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9503);
     }
 
+    // Security: path traversal via the static-file handler must be rejected
+    // (404) without leaking file contents (audit finding C1).
+    {
+        const char* traversal_paths[] = {"/web/../../../../etc/passwd", "/web/../secret",
+                                         "/web/../../AlpacaHTTP/CMakeLists.txt", "/web/subdir/../../secret"};
+        for (const char* path : traversal_paths) {
+            const auto resp = route_request(router, "GET", path);
+            EXPECT(resp.status_code() == 404 || resp.status_code() == 403 || resp.status_code() == 400);
+            EXPECT(resp.body().find("root:") == std::string::npos);
+            EXPECT(resp.body().find("cmake_minimum_required") == std::string::npos);
+        }
+    }
+
+    // Security: Content-Length must be bounded and validated (audit finding
+    // M1). An absurd or malformed value must fail parsing rather than drive a
+    // multi-gigabyte body_.resize().
+    {
+        alpacahttp::Request bad_request;
+
+        // Hostile size (about 4 GB) — over the kMaxBodyBytes cap.
+        std::string oversize =
+            "POST /management/v1/configuredevice HTTP/1.1\r\n"
+            "Content-Length: 4294967295\r\n\r\n{}";
+        EXPECT(!bad_request.parse(oversize));
+
+        // Just over the cap.
+        std::string over_cap =
+            "POST /management/v1/configuredevice HTTP/1.1\r\n"
+            "Content-Length: " +
+            std::to_string(alpacahttp::Request::kMaxBodyBytes + 1) + "\r\n\r\n{}";
+        EXPECT(!bad_request.parse(over_cap));
+
+        // Non-numeric and overflowing values must be rejected, not ignored.
+        std::string non_numeric =
+            "POST /management/v1/configuredevice HTTP/1.1\r\n"
+            "Content-Length: banana\r\n\r\n{}";
+        EXPECT(!bad_request.parse(non_numeric));
+
+        std::string overflow =
+            "POST /management/v1/configuredevice HTTP/1.1\r\n"
+            "Content-Length: 99999999999999999999999999\r\n\r\n{}";
+        EXPECT(!bad_request.parse(overflow));
+
+        // A well-formed request within the cap still parses.
+        alpacahttp::Request good_request;
+        std::string good =
+            "POST /management/v1/configuredevice HTTP/1.1\r\n"
+            "Content-Length: 2\r\n\r\n{}";
+        EXPECT(good_request.parse(good));
+        EXPECT(good_request.body() == "{}");
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }

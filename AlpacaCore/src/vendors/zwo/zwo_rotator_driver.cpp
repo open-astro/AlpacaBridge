@@ -242,6 +242,9 @@ public:
     double get_position() const override {
         ensure_connected();
         double mechanical = ZWOCAASDKWrapper::instance().get_degree(rotator_id_value());
+        // sync_offset_ is mutex_-guarded (written by sync()/connect); an
+        // unlocked read here is torn against a concurrent sync (M12).
+        std::lock_guard<std::mutex> lock(mutex_);
         return normalize_angle(mechanical + sync_offset_);
     }
 
@@ -310,8 +313,10 @@ public:
         validate_angle(position);
         double mechanical = ZWOCAASDKWrapper::instance().get_degree(rotator_id_value());
         double target = normalize_angle(position);
-        sync_offset_ = normalize_angle(target - mechanical);
+        // Write sync_offset_ under the same mutex_ that every reader takes —
+        // the pre-lock write raced get_position()/to_mechanical_angle (M12).
         std::lock_guard<std::mutex> lock(mutex_);
+        sync_offset_ = normalize_angle(target - mechanical);
         target_position_ = target;
         has_target_position_ = true;
     }
@@ -395,7 +400,9 @@ private:
         return normalized;
     }
 
+    // Callers do NOT hold mutex_ (called before their SDK move + lock).
     double to_mechanical_angle(double logical_angle) const {
+        std::lock_guard<std::mutex> lock(mutex_);
         return normalize_angle(logical_angle - sync_offset_);
     }
 

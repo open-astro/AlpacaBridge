@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
@@ -347,7 +348,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (connected_) {
-            disconnect_locked();  // already holding mutex_ — must not re-lock
+            // The protocol wrapper is a per-vendor singleton: a second device
+            // connecting through it would silently steal/tear down the first
+            // device's connection. Refuse instead.
+            throw AlpacaException(
+                "Only one Celestron mount per bridge: the shared Celestron "
+                "protocol wrapper is already connected");
         }
 
         connection_type_ = info.type;
@@ -458,7 +464,10 @@ public:
             return false;
         }
         unsigned char ch = static_cast<unsigned char>(response[0]);
-        bool aligned = (ch == '1') || (ch != 0);
+        // Aligned is chr(1) on most firmware, ASCII '1' on some. Anything else
+        // (chr(0), ASCII '0', garbage) means NOT aligned — treating ASCII '0'
+        // (0x30) as "non-zero → aligned" would bypass the slew-safety gate.
+        bool aligned = (ch == 1) || (ch == '1');
         {
             char buf[96];
             std::snprintf(buf, sizeof(buf),
@@ -1396,6 +1405,7 @@ private:
     }
 
     bool connect_network(const std::string& host, int port) {
+        constexpr int kConnectTimeoutMs = 7000;
         socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (socket_fd_ < 0) {
             return false;
@@ -1404,15 +1414,50 @@ private:
         addr.sin_family = AF_INET;
         addr.sin_port = htons(static_cast<unsigned short>(port));
         if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0) {
-            hostent* host_entry = gethostbyname(host.c_str());
-            if (!host_entry) {
+            // getaddrinfo is the reentrant replacement for gethostbyname.
+            addrinfo hints{};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            addrinfo* result = nullptr;
+            if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result) {
                 close(socket_fd_);
                 socket_fd_ = -1;
                 return false;
             }
-            addr.sin_addr = *reinterpret_cast<in_addr*>(host_entry->h_addr);
+            addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
+            freeaddrinfo(result);
         }
-        if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        // Non-blocking connect with a bounded poll timeout: this runs under the
+        // driver mutex, and a bare blocking connect() to an unreachable host
+        // would stall every GET (and disconnect) for the full OS TCP timeout
+        // (~127 s). Same pattern as the iOptron network prober.
+        if (!util::set_nonblocking(socket_fd_)) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+            return false;
+        }
+        int rc = ::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        if (rc < 0 && errno != EINPROGRESS) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+            return false;
+        }
+        if (rc < 0) {
+            struct pollfd pfd {};
+            pfd.fd = socket_fd_;
+            pfd.events = POLLOUT;
+            int poll_rc = poll(&pfd, 1, kConnectTimeoutMs);
+            int sock_err = 0;
+            socklen_t len = sizeof(sock_err);
+            if (poll_rc <= 0 || getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &sock_err, &len) != 0 || sock_err != 0) {
+                close(socket_fd_);
+                socket_fd_ = -1;
+                return false;
+            }
+        }
+        // Restore blocking mode for the synchronous request/response I/O below;
+        // a stuck-non-blocking fd would make every recv spin with EAGAIN.
+        if (!util::clear_nonblocking(socket_fd_)) {
             close(socket_fd_);
             socket_fd_ = -1;
             return false;

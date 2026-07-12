@@ -590,6 +590,8 @@ public:
             lock.unlock();
             std::this_thread::sleep_for(std::chrono::seconds(1));
             lock.lock();
+            // The mount may have been disconnected while the lock was released.
+            check_connected();
         }
         parked_ = true;
         equatorial_cache_valid_ = false;
@@ -901,14 +903,22 @@ private:
                         lock.unlock();
                         std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
                         lock.lock();
+                        check_connected();
                     }
                     return;
                 }
+            } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+                // Includes NotConnected from a racing disconnect — keep polling
+                // only while still connected (re-checked below).
             } catch (...) {
+                // Non-Alpaca exception from a status poll — same policy: keep
+                // polling while still connected (re-checked below).
             }
             lock.unlock();
             std::this_thread::sleep_for(std::chrono::seconds(1));
             lock.lock();
+            // The mount may have been disconnected while the lock was released.
+            check_connected();
         }
     }
 

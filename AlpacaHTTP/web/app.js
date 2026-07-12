@@ -1,3 +1,15 @@
+// AlpacaHTTP
+// Copyright (c) 2025-2026 Joey Troy and contributors
+//
+// This file is part of AlpacaHTTP.
+//
+// AlpacaHTTP is licensed under the GNU Affero General Public License,
+// version 3 or (at your option) any later version (AGPL-3.0-or-later),
+// with an additional permission allowing combination with proprietary
+// device-vendor SDKs. See the LICENSE file in this repository for the full
+// license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
+
 // AlpacaHTTP Web UI
 const API_BASE = '';
 const LOGGING_ENDPOINT = '/management/v1/loglevel';
@@ -534,7 +546,7 @@ async function loadDevices() {
                 ${settingsHtml}
                 <div class="device-actions">
                     <button class="btn btn-secondary btn-small btn-edit-device" data-device-index="${index}" type="button">Edit</button>
-                    <button class="btn btn-danger btn-small" onclick="deleteDevice('${escapeHtml(device.DeviceType)}', ${device.DeviceNumber})">Delete</button>
+                    <button class="btn btn-danger btn-small btn-delete-device" data-device-index="${index}" type="button">Delete</button>
                 </div>
             </div>
         `;
@@ -542,6 +554,9 @@ async function loadDevices() {
 
         document.querySelectorAll('.btn-edit-device').forEach(button => {
             button.addEventListener('click', handleEditDeviceClick);
+        });
+        document.querySelectorAll('.btn-delete-device').forEach(button => {
+            button.addEventListener('click', handleDeleteDeviceClick);
         });
         document.querySelectorAll('.device-toggle').forEach(button => {
             button.addEventListener('click', () => {
@@ -580,6 +595,16 @@ function handleEditDeviceClick(event) {
         return;
     }
     startEditDevice(device);
+}
+
+function handleDeleteDeviceClick(event) {
+    const button = event.currentTarget;
+    const index = Number.parseInt(button.dataset.deviceIndex, 10);
+    const device = currentDevices[index];
+    if (!device) {
+        return;
+    }
+    deleteDevice(device.DeviceType, device.DeviceNumber);
 }
 
 function normalizeDeviceType(value) {
@@ -2926,10 +2951,17 @@ function humanizeSettingKey(key) {
         .replace(/^\w/, match => match.toUpperCase());
 }
 
+// Escapes for BOTH element content and (quoted) attribute values: quotes are
+// escaped too, so interpolating into a "..."/'...' HTML attribute cannot break
+// out of it. Never interpolate untrusted text into an UNQUOTED attribute or an
+// inline event handler regardless.
 function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 // Initialize on page load

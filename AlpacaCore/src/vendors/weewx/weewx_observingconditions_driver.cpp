@@ -127,6 +127,33 @@ std::optional<double> parse_current_value(std::string_view current_block, std::s
     return parse_numeric_value(current_block, colon_pos + 1);
 }
 
+// Parse a Unix-epoch timestamp field (either a bare number after the key, or a
+// nested {"value": n} object like the sensor fields). Values that look like
+// milliseconds are converted to seconds.
+std::optional<double> parse_epoch_seconds(std::string_view block, std::string_view key) {
+    std::optional<double> value = parse_current_value(block, key);
+    if (!value.has_value()) {
+        const std::string target = "\"" + std::string(key) + "\"";
+        std::size_t key_pos = block.find(target);
+        if (key_pos == std::string_view::npos) {
+            return std::nullopt;
+        }
+        std::size_t colon_pos = block.find(':', key_pos + target.size());
+        if (colon_pos == std::string_view::npos) {
+            return std::nullopt;
+        }
+        value = parse_numeric_value(block, colon_pos + 1);
+    }
+    if (!value.has_value() || value.value() <= 0.0) {
+        return std::nullopt;
+    }
+    double epoch = value.value();
+    if (epoch > 1e12) {
+        epoch /= 1000.0;  // milliseconds → seconds
+    }
+    return epoch;
+}
+
 WeeWxCurrentValues to_values(const SensorSnapshot& snapshot) {
     return WeeWxCurrentValues{
         snapshot.temperature_c,
@@ -185,7 +212,23 @@ SensorSnapshot parse_snapshot(std::string_view payload) {
         snapshot.sky_temperature_c = (sky_temp_f.value() - kFahrenheitOffset) * kFahrenheitToCelsiusScale;
     }
 
-    snapshot.timestamp = std::chrono::system_clock::now();
+    // Stamp with the OBSERVATION time reported by WeeWX, not the fetch time:
+    // stamping at fetch would make a dead station (serving a stale payload)
+    // report TimeSinceLastUpdate ≈ 0 forever. Fall back to fetch time only if
+    // the payload carries no usable epoch.
+    std::optional<double> epoch = parse_epoch_seconds(*current_block, "dateTime");
+    if (!epoch.has_value()) {
+        epoch = parse_epoch_seconds(*lcd_block, "dateTime");
+    }
+    if (!epoch.has_value()) {
+        epoch = parse_epoch_seconds(payload, "generation_time");
+    }
+    if (epoch.has_value()) {
+        snapshot.timestamp =
+            std::chrono::system_clock::time_point(std::chrono::seconds(static_cast<long long>(epoch.value())));
+    } else {
+        snapshot.timestamp = std::chrono::system_clock::now();
+    }
     return snapshot;
 }
 
@@ -431,10 +474,12 @@ public:
         if (key.empty()) {
             return -1.0;
         }
+        // supported_properties_ is mutated by the poll thread under data_mutex_;
+        // every read must hold the same lock.
+        std::lock_guard<std::mutex> lock(data_mutex_);
         if (!supported_properties_.count(key)) {
             throw AlpacaException("Sensor not implemented", AlpacaError::PropertyNotImplemented);
         }
-        std::lock_guard<std::mutex> lock(data_mutex_);
         auto it = property_last_update_.find(key);
         if (it == property_last_update_.end()) {
             return -1.0;
@@ -446,6 +491,9 @@ public:
 
     std::string get_sensor_description(std::string_view property_name) const override {
         const std::string key = normalize_property_name(property_name);
+        // supported_properties_ is mutated by the poll thread under data_mutex_;
+        // every read must hold the same lock.
+        std::lock_guard<std::mutex> lock(data_mutex_);
         if (!supported_properties_.count(key)) {
             throw AlpacaException("Sensor not implemented", AlpacaError::PropertyNotImplemented);
         }

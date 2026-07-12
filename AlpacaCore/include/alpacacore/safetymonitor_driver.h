@@ -27,6 +27,20 @@ class SafetyMonitorDriver : public AlpacaDriver {
 public:
     virtual ~SafetyMonitorDriver() = default;
 
+    // Platform 7 operational state (ISafetyMonitorV3): IsSafe plus a TimeStamp.
+    // Inline so the vtable stays weak; values come from the same getters as the
+    // GET endpoints.
+    std::vector<DeviceState> get_device_state() const override final {
+        std::vector<DeviceState> state;
+        try {
+            state.push_back({"IsSafe", DeviceStateValue{get_is_safe()}});
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
+        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
+    }
+
     // SafetyMonitor-specific properties
 
     /**

@@ -104,6 +104,9 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
+        // Join the async slew dispatch thread before any member it touches is
+        // destroyed. Must run WITHOUT mutex_ held (the thread takes mutex_).
+        reap_slew_dispatch();
         if (connected_) {
             // Destructors are implicitly noexcept; a throw from set_connected()
             // would call std::terminate(). Swallow any error during teardown.
@@ -221,6 +224,7 @@ public:
                 guide_rate_valid_ = false;
                 last_utc_valid_ = false;
                 device_faulted_ = false;
+                device_fault_count_ = 0;
                 last_device_error_.clear();
                 dec_guide_calibration_attempted_ = false;
                 dec_guide_calibrated_ = false;
@@ -291,6 +295,7 @@ public:
             guide_rate_valid_ = false;
             last_utc_valid_ = false;
             device_faulted_ = false;
+            device_fault_count_ = 0;
             last_device_error_.clear();
             dec_guide_calibration_attempted_ = false;
             dec_guide_calibrated_ = false;
@@ -342,6 +347,10 @@ public:
         }
         if (disconnect_protocol) {
             stop_clock_sync_thread();
+            // Join the async slew dispatch thread before tearing down the
+            // protocol connection (runs after lock.unlock() — the thread
+            // takes mutex_, so joining under the lock would deadlock).
+            reap_slew_dispatch();
             auto& protocol = iOptronProtocolWrapper::instance();
             protocol.disconnect();
             ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
@@ -680,28 +689,11 @@ public:
     }
 
     double get_right_ascension_rate() const override {
-        if (!get_can_set_right_ascension_rate()) {
-            return 0.0;
-        }
-        // iOptron doesn't support getting RA rate directly
-        // Calculate from tracking rate
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        refresh_status_cache_locked();
-        auto& protocol = iOptronProtocolWrapper::instance();
-        
-        // Sidereal rate is 15.041 arcsec/sec
-        double sidereal_rate = 15.041;
-        
-        if (cached_status_.tracking_rate == 4) {
-            // Custom tracking rate
-            double multiplier = protocol.get_custom_tracking_rate();
-            return sidereal_rate * multiplier;
-        } else {
-            // Standard rates: 0=sidereal, 1=lunar, 2=solar, 3=King
-            // For now, return sidereal rate
-            return sidereal_rate;
-        }
+        // ASCOM RightAscensionRate is an OFFSET from sidereal tracking, in
+        // seconds of RA per sidereal second — NOT the absolute tracking rate in
+        // arcsec/sec. The driver never applies an RA-rate offset, so this is
+        // always 0.0 (matches the SynScan/Celestron/Bisque drivers).
+        return 0.0;
     }
     
     void set_right_ascension_rate(double rate) override {
@@ -1133,6 +1125,7 @@ public:
             if (!protocol.park()) {
                 throw AlpacaException("Failed to park mount");
             }
+            clear_device_fault_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("Park", e.what());
             throw AlpacaException(std::string("Failed to park mount: ") + e.what(),
@@ -1159,6 +1152,7 @@ public:
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
             protocol.stop_slewing();
+            clear_device_fault_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("AbortSlew", e.what());
             throw AlpacaException(std::string("AbortSlew failed: ") + e.what(),
@@ -1309,15 +1303,37 @@ public:
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
         }
         try {
-            std::thread([this, phys_ra, phys_dec]() {
+            // Joinable member thread (never detached), joined in the
+            // destructor and on disconnect. Join any previous dispatch first
+            // (must run without mutex_ held — the thread takes mutex_).
+            reap_slew_dispatch();
+            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
+            if (slew_dispatch_thread_.joinable()) {
+                // A racing async-slew caller spawned between our reap and this
+                // lock — cancel and join it INSIDE the same critical section as
+                // the assignment, so a joinable thread can never be overwritten
+                // (std::terminate) or joined from two threads (UB). Matches the
+                // Celestron/SynScan spawn-site recheck.
+                slew_dispatch_cancel_.store(true);
+                slew_dispatch_thread_.join();
+                slew_dispatch_cancel_.store(false);
+            }
+            slew_dispatch_thread_ = std::thread([this, phys_ra, phys_dec]() {
                 std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_ || slew_dispatch_cancel_.load()) {
+                    slew_in_progress_ = false;
+                    return;
+                }
                 try {
                     dispatch_slew_command_locked(phys_ra, phys_dec, true, "SlewToCoordinatesAsync");
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
                     ALPACA_LOG_WARN("iOptron", std::string("Async slew failed: ") + e.what());
+                } catch (...) {
+                    slew_in_progress_ = false;
+                    ALPACA_LOG_WARN("iOptron", "Async slew failed with unknown exception");
                 }
-            }).detach();
+            });
         } catch (const std::exception& e) {
             std::lock_guard<std::mutex> lock(mutex_);
             slew_in_progress_ = false;
@@ -1408,8 +1424,24 @@ public:
         }
 
         try {
-            std::thread([this, altitude, azimuth]() {
+            // Joinable member thread (never detached), joined in the
+            // destructor and on disconnect. Join any previous dispatch first
+            // (must run without mutex_ held — the thread takes mutex_).
+            reap_slew_dispatch();
+            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
+            if (slew_dispatch_thread_.joinable()) {
+                // Racing async-slew between reap_slew_dispatch() and this lock —
+                // see the RA/Dec spawn above; join under the same critical section.
+                slew_dispatch_cancel_.store(true);
+                slew_dispatch_thread_.join();
+                slew_dispatch_cancel_.store(false);
+            }
+            slew_dispatch_thread_ = std::thread([this, altitude, azimuth]() {
                 std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_ || slew_dispatch_cancel_.load()) {
+                    slew_in_progress_ = false;
+                    return;
+                }
                 try {
                     auto converted = alt_az_to_ra_dec(
                         altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
@@ -1420,8 +1452,11 @@ public:
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
                     ALPACA_LOG_WARN("iOptron", std::string("Async AltAz slew failed: ") + e.what());
+                } catch (...) {
+                    slew_in_progress_ = false;
+                    ALPACA_LOG_WARN("iOptron", "Async AltAz slew failed with unknown exception");
                 }
-            }).detach();
+            });
         } catch (const std::exception& e) {
             std::lock_guard<std::mutex> lock(mutex_);
             slew_in_progress_ = false;
@@ -1467,6 +1502,7 @@ public:
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
             protocol.unpark();
+            clear_device_fault_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("Unpark", e.what());
             throw AlpacaException(std::string("Failed to unpark mount: ") + e.what(),
@@ -1541,10 +1577,29 @@ private:
         }
     }
 
+    // A single transient timeout must not brick the whole session: only latch
+    // device_faulted_ (which makes every subsequent call throw) after several
+    // CONSECUTIVE failures. Any subsequent successful command clears the count
+    // via clear_device_fault_locked().
+    static constexpr int kDeviceFaultThreshold = 3;
+
     void record_device_fault_locked(const char* context, const std::string& detail) const {
-        device_faulted_ = true;
+        ++device_fault_count_;
         last_device_error_ = std::string(context) + ": " + detail;
-        ALPACA_LOG_ERROR("iOptron", "Device fault - " + last_device_error_);
+        if (device_fault_count_ >= kDeviceFaultThreshold) {
+            device_faulted_ = true;
+            ALPACA_LOG_ERROR("iOptron", "Device fault (latched after " + std::to_string(device_fault_count_) +
+                                            " consecutive failures) - " + last_device_error_);
+        } else {
+            ALPACA_LOG_WARN("iOptron", "Device fault (transient, " + std::to_string(device_fault_count_) + "/" +
+                                           std::to_string(kDeviceFaultThreshold) + ") - " + last_device_error_);
+        }
+    }
+
+    void clear_device_fault_locked() const {
+        device_fault_count_ = 0;
+        device_faulted_ = false;
+        last_device_error_.clear();
     }
 
     void prefetch_mount_state_locked() {
@@ -2183,7 +2238,15 @@ private:
     }
     
     void start_clock_sync_thread() {
-        stop_clock_sync_thread();
+        // clock_sync_mutex_ serializes start/stop from overlapping
+        // set_connected bodies (sync PUT vs async connect task) — both run
+        // after mutex_ is released, so without this guard two callers can
+        // join and assign clock_sync_thread_ concurrently (UB), or a second
+        // start can overwrite a still-joinable thread (std::terminate).
+        // The clock-sync body never takes clock_sync_mutex_, so joining
+        // under it cannot deadlock. Same shape as reap_slew_dispatch().
+        std::lock_guard<std::mutex> tlock(clock_sync_mutex_);
+        stop_clock_sync_thread_locked();
         clock_sync_cancel_.store(false);
         clock_sync_thread_ = std::thread([this]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -2258,11 +2321,33 @@ private:
     }
 
     void stop_clock_sync_thread() {
+        std::lock_guard<std::mutex> tlock(clock_sync_mutex_);
+        stop_clock_sync_thread_locked();
+    }
+
+    void stop_clock_sync_thread_locked() {
         clock_sync_cancel_.store(true);
         if (clock_sync_thread_.joinable()) {
             clock_sync_thread_.join();
         }
         clock_sync_cancel_.store(false);
+    }
+
+    // Join the async slew dispatch thread (if any) and reset its cancel flag.
+    // Must be called WITHOUT mutex_ held — the dispatch thread takes mutex_,
+    // so joining under the lock would deadlock. The thread only dispatches a
+    // single command (no long sleeps), so the join is quick.
+    void reap_slew_dispatch() {
+        slew_dispatch_cancel_.store(true);
+        std::thread prev;
+        {
+            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
+            prev = std::move(slew_dispatch_thread_);
+        }
+        if (prev.joinable()) {
+            prev.join();
+        }
+        slew_dispatch_cancel_.store(false);
     }
 
     std::chrono::system_clock::time_point current_utc_time_locked() const {
@@ -2479,6 +2564,7 @@ private:
     mutable int meridian_restore_behavior_ = 0;
     mutable int meridian_restore_degrees_ = 0;
     mutable bool device_faulted_ = false;
+    mutable int device_fault_count_ = 0;
     mutable std::string last_device_error_;
     mutable bool utc_query_supported_;
     mutable std::chrono::steady_clock::time_point fast_cache_until_{};
@@ -2487,6 +2573,14 @@ private:
     mutable std::chrono::steady_clock::time_point slew_override_until_{};
     std::thread clock_sync_thread_;
     std::atomic<bool> clock_sync_cancel_;
+    // Guards clock_sync_thread_ join/assign across overlapping set_connected
+    // bodies — see start_clock_sync_thread(). Never taken by the body.
+    std::mutex clock_sync_mutex_;
+    // Async slew dispatch thread (never detached) — see reap_slew_dispatch().
+    // slew_dispatch_mutex_ only guards the thread handle.
+    std::mutex slew_dispatch_mutex_;
+    std::thread slew_dispatch_thread_;
+    std::atomic<bool> slew_dispatch_cancel_{false};
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;

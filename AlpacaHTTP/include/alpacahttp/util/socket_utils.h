@@ -12,17 +12,19 @@
 
 #pragma once
 
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstddef>
+#include <cstring>
 #include <mutex>
 #include <string>
-
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <cerrno>
-#include <cstring>
 
 namespace alpacahttp::util {
 
@@ -58,6 +60,43 @@ inline int socket_recv(SocketHandle handle, char* buffer, int length) {
 
 inline int socket_send(SocketHandle handle, const char* buffer, int length) {
     return static_cast<int>(send(handle, buffer, static_cast<size_t>(length), 0));
+}
+
+// Set receive and send timeouts on an accepted client socket so a slow or
+// stalled peer (slowloris) cannot pin a worker thread indefinitely. Returns
+// false if either setsockopt fails.
+inline bool socket_set_timeouts(SocketHandle handle, int seconds) {
+    struct timeval tv {};
+    tv.tv_sec = seconds;
+    tv.tv_usec = 0;
+    bool ok = setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
+    ok = setsockopt(handle, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 && ok;
+    return ok;
+}
+
+// Send the whole payload, looping over short sends and retrying EINTR.
+// MSG_NOSIGNAL is always passed so a peer drop mid-send returns an error
+// instead of delivering SIGPIPE (which would kill the server). Mirrors
+// util::send_all in AlpacaCore's serial_io.h (AlpacaHTTP cannot depend on
+// AlpacaCore, so the loop is implemented locally). Returns false on any
+// unrecoverable error, timeout (EAGAIN/EWOULDBLOCK from SO_SNDTIMEO), or a
+// 0 return (no infinite spin).
+inline bool socket_send_all(SocketHandle handle, const char* buffer, std::size_t length) {
+    std::size_t total_sent = 0;
+    while (total_sent < length) {
+        ssize_t n = send(handle, buffer + total_sent, length - total_sent, MSG_NOSIGNAL);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (n == 0) {
+            return false;
+        }
+        total_sent += static_cast<std::size_t>(n);
+    }
+    return true;
 }
 
 inline bool socket_interrupted(int err) {

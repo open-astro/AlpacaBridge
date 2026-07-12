@@ -544,6 +544,7 @@ public:
         if (gain < caps_.gain_min || gain > caps_.gain_max) {
             throw AlpacaException("Gain out of range", AlpacaError::InvalidValue);
         }
+        ensure_not_exposing_locked();  // M15 — sensor register, rejected mid-exposure
         PlayerOneSDKWrapper::instance().set_config_int(camera_info_.camera_id, /*POA_GAIN=*/1,
                                                        static_cast<long>(gain), false);
     }
@@ -669,6 +670,7 @@ public:
         if (offset < caps_.offset_min || offset > caps_.offset_max) {
             throw AlpacaException("Offset out of range", AlpacaError::InvalidValue);
         }
+        ensure_not_exposing_locked();  // M15 — sensor register, rejected mid-exposure
         PlayerOneSDKWrapper::instance().set_config_int(camera_info_.camera_id, /*POA_OFFSET=*/7,
                                                        static_cast<long>(offset), false);
     }
@@ -808,18 +810,33 @@ public:
         case 3: dir = PlayerOneGuideDirection::West;  break;
         }
 
-        const int pulse_camera_id = with_camera([&](int id) {
-            PlayerOneSDKWrapper::instance().pulse_guide_on(id, dir);
-            return id;
-        });
-        // End timestamp BEFORE the flag: a reader that observes the flag as
-        // true must never see a stale (epoch) end time, or the self-clearing
-        // getter would clear the pulse immediately.
-        {
+        // Overlap check, ST4 on-write, and flag/end-time publish under ONE
+        // mutex_ hold (M18): overlapping pulses each spawn a detached
+        // turn-off thread, so a second pulse racing the first would have the
+        // first pulse's off-write drop the ST4 line mid-pulse (truncated
+        // guide) and its unconditional flag clear misreport IsPulseGuiding.
+        // Reject the overlap with InvalidOperation instead — the flag stays
+        // latched until the off-thread completes the hardware off, so a pulse
+        // accepted here can no longer be cut short by a predecessor. The
+        // on-write is a fast register write, safe under mutex_ (shape (a),
+        // same as with_camera).
+        const int pulse_camera_id = [&] {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!camera_info_valid_ || camera_info_.camera_id < 0) {
+                throw AlpacaException("Camera ID not available", AlpacaError::NotConnected);
+            }
+            if (pulse_guiding_->load()) {
+                throw AlpacaException("A pulse guide is already in progress", AlpacaError::InvalidOperation);
+            }
+            const int id = camera_info_.camera_id;
+            PlayerOneSDKWrapper::instance().pulse_guide_on(id, dir);
+            // End timestamp BEFORE the flag: a reader that observes the flag
+            // as true must never see a stale (epoch) end time, or the
+            // self-clearing getter would clear the pulse immediately.
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
             pulse_guiding_->store(true);
-        }
+            return id;
+        }();
         // The detached turn-off thread captures NO object state — only the id
         // snapshot — so it cannot dereference a destroyed driver if the
         // object is torn down mid-pulse (the previous flag-clear thread
@@ -923,9 +940,15 @@ public:
                 std::chrono::microseconds(exposure_us) +
                 std::chrono::seconds(15);
             exposure_deadline_valid_ = true;
+            // Publish exposure_active_ under mutex_ — the same lock the
+            // setters hold for ensure_not_exposing_locked() — so a
+            // gain/offset/geometry write can never interleave between the
+            // setter's check and this publish (M15 TOCTOU close). The
+            // false-transitions (worker exit, stop, watchdog) stay lock-free:
+            // a stale-true read there only delays a settings write until
+            // after the frame, which is the safe direction.
+            exposure_active_.store(true);
         }
-
-        exposure_active_.store(true);
 
         exposure_thread_ = std::thread([this, id, exposure_us,
                                         active_bin, active_start_x, active_start_y,
@@ -1120,6 +1143,18 @@ private:
         }
     }
 
+    // Reject runtime sensor-register / geometry writes while a frame is
+    // integrating: the exposure worker polls/downloads holding no lock, so a
+    // mid-exposure write would race the live integration. Requires mutex_
+    // held — the same lock start_exposure publishes exposure_active_=true
+    // under, closing the check/publish TOCTOU (M15; AGENTS.md rule, matching
+    // the ToupTek driver's ensure_not_exposing).
+    void ensure_not_exposing_locked() const {
+        if (exposure_active_.load()) {
+            throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
+        }
+    }
+
     // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
     // cannot close the camera underneath the SDK call (AGENTS.md shape (a)).
     // Fast register/control calls only — the exposure worker keeps its bare
@@ -1237,6 +1272,9 @@ private:
                       bin_x) == camera_info_.supported_bins.end()) {
             throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
         }
+        // Geometry write: rejected mid-exposure, checked under the same
+        // mutex_ hold that start_exposure publishes exposure_active_ (M15).
+        ensure_not_exposing_locked();
         if (bin_ == bin_x) return;
         bin_ = bin_x;
         // Binning in the Player One SDK resets size/start — mirror that in
@@ -1269,6 +1307,7 @@ private:
         if (width <= 0 || height <= 0) {
             throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
         }
+        ensure_not_exposing_locked();  // M15 — see set_bin_common
         if (num_x_ == width && num_y_ == height) return;
         num_x_ = width;
         num_y_ = height;
@@ -1286,6 +1325,7 @@ private:
             throw AlpacaException("Start position must be non-negative",
                                   AlpacaError::InvalidValue);
         }
+        ensure_not_exposing_locked();  // M15 — see set_bin_common
         if (start_x_ == sx && start_y_ == sy) return;
         start_x_ = sx;
         start_y_ = sy;

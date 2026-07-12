@@ -22,6 +22,8 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
          libudev1,
          libgpiod3,
          adduser
+Conflicts: fxload
+Replaces: fxload
 Description: ASCOM Alpaca HTTP server for astronomical devices
  AlpacaBridge provides an ASCOM Alpaca-compatible HTTP server supporting
  cameras (ZWO ASI, QHY), mounts (iOptron, SynScan/Celestron), focusers,
@@ -31,5 +33,5 @@ Description: ASCOM Alpaca HTTP server for astronomical devices
  plug-and-play USB device access. Runs as the alpacabridge system user
  and starts automatically via systemd on each boot.
  .
- Open the Alpaca management interface at http://localhost:11111/management/
- and the device API at http://localhost:11111/ after installation.
+ Open the Alpaca management interface at http://localhost:6800/management/
+ and the device API at http://localhost:6800/ after installation.
