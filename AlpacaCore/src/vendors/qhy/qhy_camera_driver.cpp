@@ -606,9 +606,23 @@ public:
         // It is joined again in disconnect and the destructor.
         std::lock_guard<std::mutex> cooler_lock(cooler_off_lifecycle_mutex_);
         if (cooler_off_thread_.joinable()) {
-            cooler_off_thread_.join();
+            if (cooler_off_running_.load()) {
+                // A turn-off worker is already in flight (it can block for
+                // seconds joining the temp thread mid-PID-call). Joining it
+                // here would stall this HTTP thread for that whole duration —
+                // the exact ConformU-timeout stall the background worker
+                // exists to avoid. Turn-off is idempotent: just return.
+                return;
+            }
+            cooler_off_thread_.join();  // finished worker — instant reap
         }
+        cooler_off_running_.store(true);
         cooler_off_thread_ = std::thread([this]() {
+            // Clear the in-flight flag on every exit path, including throws.
+            struct RunningGuard {
+                std::atomic<bool>& flag;
+                ~RunningGuard() { flag.store(false); }
+            } running_guard{cooler_off_running_};
             std::thread temp_to_join;
             std::string cam_id_for_pwm;
             {
@@ -1357,6 +1371,9 @@ private:
     // disconnect and the destructor.
     std::thread cooler_off_thread_;
     std::mutex cooler_off_lifecycle_mutex_;
+    // True while a cooler-off worker is in flight; lets a second CoolerOn=false
+    // return immediately instead of blocking on the join (see set_cooler_on).
+    std::atomic<bool> cooler_off_running_{false};
 
     // Serialises temp/telemetry thread starts: two concurrent starters could
     // both pass the joinable() pre-check and the loser would destroy a

@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <limits>
@@ -281,6 +282,11 @@ namespace {
 // or mid-response is disconnected after this many seconds of inactivity.
 constexpr int kSocketTimeoutSeconds = 30;
 
+// Upper bound on how long a whole request may take to arrive (headers +
+// body). Complements SO_RCVTIMEO, which only bounds the gap between bytes —
+// large ImageArray responses are unaffected (this bounds the read side only).
+constexpr int kRequestDeadlineSeconds = 120;
+
 // Upper bound on the request line + headers; larger header blocks are
 // rejected before any body is read.
 constexpr std::size_t kMaxHeaderBytes = std::size_t{64} * 1024;
@@ -301,11 +307,20 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
     char buffer[8192];
     std::size_t header_end = std::string::npos;
 
+    // Total-request wall-clock deadline. SO_RCVTIMEO bounds each individual
+    // recv, but a peer trickling one byte per just-under-timeout interval
+    // would pass every per-recv check and pin this worker indefinitely.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kRequestDeadlineSeconds);
+
     // Read until \r\n\r\n (end of headers); SO_RCVTIMEO bounds each recv
     while (true) {
         int bytes_read = util::socket_recv(socket_fd, buffer, static_cast<int>(sizeof(buffer)));
         if (bytes_read <= 0) {
             // Peer closed, error, or receive timeout — drop the connection
+            return false;
+        }
+        if (std::chrono::steady_clock::now() > deadline) {
+            send_error(socket_fd, 408, "Request Timeout", "Request took too long to arrive");
             return false;
         }
         raw_request.append(buffer, static_cast<std::size_t>(bytes_read));
@@ -363,6 +378,10 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
         int chunk = static_cast<int>(std::min(remaining, sizeof(buffer)));
         int bytes_read = util::socket_recv(socket_fd, buffer, chunk);
         if (bytes_read <= 0) {
+            return false;
+        }
+        if (std::chrono::steady_clock::now() > deadline) {
+            send_error(socket_fd, 408, "Request Timeout", "Request took too long to arrive");
             return false;
         }
         raw_request.append(buffer, static_cast<std::size_t>(bytes_read));

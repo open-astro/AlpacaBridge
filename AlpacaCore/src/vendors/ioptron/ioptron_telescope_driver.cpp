@@ -1308,6 +1308,16 @@ public:
             // (must run without mutex_ held — the thread takes mutex_).
             reap_slew_dispatch();
             std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
+            if (slew_dispatch_thread_.joinable()) {
+                // A racing async-slew caller spawned between our reap and this
+                // lock — cancel and join it INSIDE the same critical section as
+                // the assignment, so a joinable thread can never be overwritten
+                // (std::terminate) or joined from two threads (UB). Matches the
+                // Celestron/SynScan spawn-site recheck.
+                slew_dispatch_cancel_.store(true);
+                slew_dispatch_thread_.join();
+                slew_dispatch_cancel_.store(false);
+            }
             slew_dispatch_thread_ = std::thread([this, phys_ra, phys_dec]() {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_ || slew_dispatch_cancel_.load()) {
@@ -1419,6 +1429,13 @@ public:
             // (must run without mutex_ held — the thread takes mutex_).
             reap_slew_dispatch();
             std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
+            if (slew_dispatch_thread_.joinable()) {
+                // Racing async-slew between reap_slew_dispatch() and this lock —
+                // see the RA/Dec spawn above; join under the same critical section.
+                slew_dispatch_cancel_.store(true);
+                slew_dispatch_thread_.join();
+                slew_dispatch_cancel_.store(false);
+            }
             slew_dispatch_thread_ = std::thread([this, altitude, azimuth]() {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_ || slew_dispatch_cancel_.load()) {
