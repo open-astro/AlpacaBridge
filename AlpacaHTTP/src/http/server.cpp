@@ -325,12 +325,18 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
         }
         raw_request.append(buffer, static_cast<std::size_t>(bytes_read));
         header_end = raw_request.find("\r\n\r\n");
-        if (header_end != std::string::npos) {
-            break;
-        }
-        if (raw_request.size() > kMaxHeaderBytes) {
+        // Enforce the header-size cap on every iteration, including the one that
+        // finds the terminator — otherwise the terminating chunk could push the
+        // header block up to one recv buffer past the cap unchecked. When the
+        // terminator is found, only the bytes up to it count as headers (the
+        // rest is body); before that, the whole buffer is header so far.
+        const std::size_t header_bytes = (header_end != std::string::npos) ? header_end : raw_request.size();
+        if (header_bytes > kMaxHeaderBytes) {
             send_error(socket_fd, 431, "Request Header Fields Too Large", "Request headers too large");
             return false;
+        }
+        if (header_end != std::string::npos) {
+            break;
         }
     }
 
