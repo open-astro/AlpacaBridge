@@ -64,4 +64,4 @@ jobs:
             Do not submit the review text as a chat message.
           claude_args: |
             --model sonnet
-            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
