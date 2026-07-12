@@ -51,9 +51,17 @@ namespace alpacacore {
  * - conn_task_ only transitions to Idle inside the task's tail UNDER
  *   connection_mutex_ — the same lock every start_connection_task holds — so
  *   a recorder can never misjudge the in-flight state (the double-read race).
- *   Idle is published BEFORE the tail's deferred disconnect runs, so the
- *   deferred call can't be mistaken for another racing disconnect
- *   (self-block: device stays Connected, stale flag no-ops the next connect).
+ *   When the tail has a deferred disconnect to run, it publishes
+ *   kConnDisconnect (NOT Idle) before running it, and Idle only after it
+ *   completes: Connecting stays true for the whole teardown, so a client can
+ *   never observe Connecting==false && Connected==true mid-teardown. The
+ *   non-kConnConnect publish still keeps the deferred set_connected(false)
+ *   from being mistaken for another racing disconnect by the sync gate
+ *   (self-block: device stays Connected, stale flag no-ops the next connect),
+ *   and a recorder that loses the pending lock to the tail's consume observes
+ *   the new state (published under pending_mutex_ before the lock released)
+ *   and falls through to disconnecting synchronously itself — idempotent
+ *   alongside the deferred teardown, so the racing disconnect is never lost.
  *   COST: the deferred disconnect runs while connection_mutex_ is held, so a
  *   concurrent connect()/disconnect() blocks for the full hardware teardown.
  *   Deliberate — correctness over latency; it only bites on the rare
@@ -248,15 +256,19 @@ private:
         // (the sync setter never held both locks at once), and a stale value
         // is benign: the deferred disconnect below is idempotent.
         const bool connected_now = connect && get_connected();
-        // Publish Idle BEFORE the pending-consume. Paired with the recorder
+        // Consume the pending flag and publish the next conn_task_ state in
+        // the SAME pending_mutex_ critical section. Paired with the recorder
         // re-reading conn_task_ under pending_mutex_, this closes the
         // stale-flag TOCTOU: a recorder that wins pending_mutex_ first is
         // guaranteed this consume sees its flag; a recorder that loses
-        // observes Idle (published before this lock was released) and falls
-        // back to disconnecting synchronously itself. Idle-before-deferred
-        // also keeps the deferred set_connected(false) below from being
-        // mistaken for another racing disconnect by the sync gate.
-        conn_task_.store(kConnIdle);
+        // observes the published state (no longer kConnConnect) and falls
+        // back to disconnecting synchronously itself (idempotent alongside
+        // the deferred teardown below). When a deferred disconnect must run,
+        // publish kConnDisconnect — NOT Idle — so Connecting stays true for
+        // the whole teardown (a client must never see Connecting==false &&
+        // Connected==true mid-teardown), while the sync gate (which records
+        // only against kConnConnect) still can't mistake the deferred
+        // set_connected(false) for another racing disconnect.
         bool need_disconnect = false;
         {
             std::lock_guard<std::mutex> pending_lock(pending_mutex_);
@@ -264,6 +276,7 @@ private:
                 pending_disconnect_ = false;
                 need_disconnect = connected_now;
             }
+            conn_task_.store(need_disconnect ? kConnDisconnect : kConnIdle);
         }
         if (need_disconnect) {
             try {
@@ -273,6 +286,9 @@ private:
             } catch (...) {
                 ALPACA_LOG_ERROR(log_tag_, "Deferred disconnect failed: non-std exception");
             }
+            // Idle only after the deferred teardown completes, still under
+            // connection_mutex_ (the only place Idle is ever published).
+            conn_task_.store(kConnIdle);
         }
     }
 

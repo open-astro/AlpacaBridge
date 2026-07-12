@@ -14,12 +14,16 @@
 #include <alpacahttp/util/logging_adapter.h>
 #include <alpacahttp/util/socket_utils.h>
 #include <alpacahttp/version.h>
-#include <cstring>
+
 #include <algorithm>
-#include <queue>
 #include <atomic>
-#include <utility>
+#include <cctype>
+#include <cstddef>
+#include <cstring>
 #include <limits>
+#include <queue>
+#include <stdexcept>
+#include <utility>
 
 namespace alpacahttp {
 
@@ -271,22 +275,115 @@ void Server::run_server() {
     util::log_info("Server stopped");
 }
 
+namespace {
+
+// Per-connection socket timeout: a peer that stalls mid-request (slowloris)
+// or mid-response is disconnected after this many seconds of inactivity.
+constexpr int kSocketTimeoutSeconds = 30;
+
+// Upper bound on the request line + headers; larger header blocks are
+// rejected before any body is read.
+constexpr std::size_t kMaxHeaderBytes = std::size_t{64} * 1024;
+
+void send_error(util::SocketHandle socket_fd, int status, const char* reason, const char* body) {
+    Response error_response;
+    error_response.set_status(status, reason);
+    error_response.set_body(body);
+    std::string response_str = error_response.to_string();
+    util::socket_send_all(socket_fd, response_str.c_str(), response_str.size());
+}
+
+// Read the full HTTP request: loop until the end-of-headers marker, then read
+// exactly Content-Length body bytes (bounded by Request::kMaxBodyBytes).
+// Returns false after sending an error response where possible (on a dead or
+// timed-out socket nothing can be sent); the caller closes the connection.
+bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
+    char buffer[8192];
+    std::size_t header_end = std::string::npos;
+
+    // Read until \r\n\r\n (end of headers); SO_RCVTIMEO bounds each recv
+    while (true) {
+        int bytes_read = util::socket_recv(socket_fd, buffer, static_cast<int>(sizeof(buffer)));
+        if (bytes_read <= 0) {
+            // Peer closed, error, or receive timeout — drop the connection
+            return false;
+        }
+        raw_request.append(buffer, static_cast<std::size_t>(bytes_read));
+        header_end = raw_request.find("\r\n\r\n");
+        if (header_end != std::string::npos) {
+            break;
+        }
+        if (raw_request.size() > kMaxHeaderBytes) {
+            send_error(socket_fd, 431, "Request Header Fields Too Large", "Request headers too large");
+            return false;
+        }
+    }
+
+    // Parse Content-Length (case-insensitive) out of the header block
+    std::size_t content_length = 0;
+    {
+        std::string headers = raw_request.substr(0, header_end + 2);
+        std::transform(headers.begin(), headers.end(), headers.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        auto pos = headers.find("\r\ncontent-length:");
+        if (pos != std::string::npos) {
+            pos += std::strlen("\r\ncontent-length:");
+            auto eol = headers.find("\r\n", pos);
+            std::string value = headers.substr(pos, eol - pos);
+            // Trim surrounding whitespace
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+            try {
+                std::size_t consumed = 0;
+                content_length = std::stoul(value, &consumed);
+                if (consumed != value.size()) {
+                    throw std::invalid_argument("trailing garbage");
+                }
+            } catch (...) {
+                send_error(socket_fd, 400, "Bad Request", "Invalid Content-Length");
+                return false;
+            }
+            if (content_length > Request::kMaxBodyBytes) {
+                send_error(socket_fd, 413, "Payload Too Large", "Request body too large");
+                return false;
+            }
+        }
+    }
+
+    // Read exactly Content-Length body bytes
+    const std::size_t expected_total = header_end + 4 + content_length;
+    while (raw_request.size() < expected_total) {
+        std::size_t remaining = expected_total - raw_request.size();
+        int chunk = static_cast<int>(std::min(remaining, sizeof(buffer)));
+        int bytes_read = util::socket_recv(socket_fd, buffer, chunk);
+        if (bytes_read <= 0) {
+            return false;
+        }
+        raw_request.append(buffer, static_cast<std::size_t>(bytes_read));
+    }
+
+    return true;
+}
+
+}  // namespace
+
 void Server::handle_connection(util::SocketHandle socket_fd) {
-    // Read request
-    char buffer[8192] = {0};
-    int bytes_read = util::socket_recv(socket_fd, buffer, static_cast<int>(sizeof(buffer) - 1));
-    if (bytes_read <= 0) {
+    // Bound how long a slow or stalled peer can hold this worker (slowloris)
+    if (!util::socket_set_timeouts(socket_fd, kSocketTimeoutSeconds)) {
+        util::log_warning("Failed to set socket timeouts: " +
+                          util::socket_error_message(util::socket_get_last_error()));
+    }
+
+    // Read request (headers, then exactly Content-Length body bytes)
+    std::string raw_request;
+    if (!read_request(socket_fd, raw_request)) {
         return;
     }
 
     // Parse request
     Request request;
-    if (!request.parse(std::string_view(buffer, bytes_read))) {
-        Response error_response;
-        error_response.set_status(400, "Bad Request");
-        error_response.set_body("Invalid request");
-        std::string response_str = error_response.to_string();
-        util::socket_send(socket_fd, response_str.c_str(), static_cast<int>(response_str.size()));
+    if (!request.parse(raw_request)) {
+        send_error(socket_fd, 400, "Bad Request", "Invalid request");
         return;
     }
 
@@ -297,9 +394,11 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
     // Route request
     Response response = router_.route(request, server_tx_id);
 
-    // Send response
+    // Send response (loop until fully sent; MSG_NOSIGNAL prevents SIGPIPE)
     std::string response_str = response.to_string();
-    util::socket_send(socket_fd, response_str.c_str(), static_cast<int>(response_str.size()));
+    if (!util::socket_send_all(socket_fd, response_str.c_str(), response_str.size())) {
+        util::log_warning("Failed to send full response: " + util::socket_error_message(util::socket_get_last_error()));
+    }
 }
 
 void Server::worker_thread() {

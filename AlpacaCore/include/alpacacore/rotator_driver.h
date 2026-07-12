@@ -101,23 +101,23 @@ public:
     virtual void halt() = 0;
 
     /**
-     * @brief Move the rotator to an absolute position.
+     * @brief Move the rotator RELATIVE to its current Position.
      *
-     * @param position Target position in degrees
+     * @param position Relative offset from the current Position in degrees
      */
     virtual void move(double position) = 0;
 
     /**
-     * @brief Move the rotator to an absolute position asynchronously.
+     * @brief Move the rotator to a new absolute position (Position coordinate).
      *
-     * @param position Target position in degrees
+     * @param position Absolute target position in degrees
      */
     virtual void move_absolute(double position) = 0;
 
     /**
-     * @brief Move the rotator by a relative amount.
+     * @brief Move the rotator to a new absolute raw mechanical position.
      *
-     * @param position Relative position in degrees
+     * @param position Absolute mechanical position in degrees
      */
     virtual void move_mechanical(double position) = 0;
 

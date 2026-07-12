@@ -23,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <ctime>
 #include <limits>
 #include <mutex>
@@ -178,6 +179,10 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
+        // Cancel + join the background slew/pulse task threads before any
+        // member they touch is destroyed. Must run WITHOUT mutex_ held (the
+        // task threads take mutex_).
+        cancel_async_tasks();
         if (connected_) {
             try {
                 set_connected(false);
@@ -245,6 +250,13 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        if (!connected) {
+            // Cancel + join the background slew/pulse task threads BEFORE
+            // taking mutex_: the task threads take mutex_, so joining under
+            // the lock would deadlock, and leaving them running across the
+            // protocol disconnect would race the shared wrapper.
+            cancel_async_tasks();
+        }
         std::unique_lock<std::mutex> lock(mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
@@ -826,6 +838,14 @@ public:
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        set_utc_date_locked(utc);
+    }
+
+private:
+    // Body of set_utc_date with mutex_ already held — called from the connect
+    // path (sync_mount_time_locked), which holds mutex_; calling the public
+    // locking method there would self-deadlock on the non-recursive mutex.
+    void set_utc_date_locked(std::chrono::system_clock::time_point utc) {
         check_connected();
         std::time_t utc_time_t = std::chrono::system_clock::to_time_t(utc);
         LocalTimeInfo tz_info = compute_local_timezone_info(utc_time_t);
@@ -856,12 +876,13 @@ public:
         last_utc_valid_ = true;
     }
 
+public:
     void find_home() override {
         throw AlpacaException("FindHome not supported", AlpacaError::MethodNotImplemented);
     }
 
     void park() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         if (!park_position_set_) {
             refresh_equatorial_cache_locked();
@@ -870,7 +891,7 @@ public:
             park_position_set_ = true;
         }
         do_slew_to_coordinates_locked(park_ra_hours_, park_dec_degrees_);
-        wait_for_slew_complete_locked();
+        wait_for_slew_complete(lock);
         SynScanProtocolWrapper::instance().set_tracking_mode(0);
         tracking_mode_cached_ = 0;
         tracking_mode_valid_ = true;
@@ -878,82 +899,158 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("PulseGuide");
-
-        if (duration < 0) {
-            throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
-        }
-
-        auto& protocol = SynScanProtocolWrapper::instance();
-
         int axis = -1;
-        double slew_rate_deg_per_sec = 0.0;
+        int tracking_mode = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("PulseGuide");
 
-        switch (direction) {
-            case 0: axis = 1; slew_rate_deg_per_sec = guide_rate_.dec; break;
-            case 1: axis = 1; slew_rate_deg_per_sec = -guide_rate_.dec; break;
-            case 2: axis = 0; slew_rate_deg_per_sec = -guide_rate_.ra; break;
-            case 3: axis = 0; slew_rate_deg_per_sec = guide_rate_.ra; break;
-            default:
-                throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-        }
-
-        if (axis == 1) {
-            char pier = protocol.get_pointing_state();
-            if (pier == 'W') {
-                slew_rate_deg_per_sec = -slew_rate_deg_per_sec;
+            if (duration < 0) {
+                throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
             }
-        }
 
-        const double duration_sec = duration / 1000.0;
-        const auto now = std::chrono::steady_clock::now();
+            auto& protocol = SynScanProtocolWrapper::instance();
 
-        // Initialize target coords from mount if position override isn't active
-        if (!target_set_ || now >= position_override_until_) {
-            refresh_equatorial_cache_locked();
-            target_ra_hours_ = cached_ra_hours_;
-            target_dec_degrees_ = cached_dec_degrees_;
-            target_set_ = true;
-        }
+            double slew_rate_deg_per_sec = 0.0;
 
-        // Accumulate expected pulse delta directly into target coordinates
-        if (direction == 0 || direction == 1) {
-            double delta_deg = guide_rate_.dec * duration_sec;
-            if (direction == 1) delta_deg = -delta_deg;
-            target_dec_degrees_ = std::clamp(target_dec_degrees_ + delta_deg, -90.0, 90.0);
-        } else {
-            double delta_hours = (guide_rate_.ra * duration_sec) / 15.0;
-            if (direction == 3) delta_hours = -delta_hours;
-            target_ra_hours_ = std::fmod(target_ra_hours_ + delta_hours, 24.0);
-            if (target_ra_hours_ < 0.0) target_ra_hours_ += 24.0;
-        }
+            switch (direction) {
+                case 0:
+                    axis = 1;
+                    slew_rate_deg_per_sec = guide_rate_.dec;
+                    break;
+                case 1:
+                    axis = 1;
+                    slew_rate_deg_per_sec = -guide_rate_.dec;
+                    break;
+                case 2:
+                    axis = 0;
+                    slew_rate_deg_per_sec = -guide_rate_.ra;
+                    break;
+                case 3:
+                    axis = 0;
+                    slew_rate_deg_per_sec = guide_rate_.ra;
+                    break;
+                default:
+                    throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
+            }
 
-        // Keep position override active so get_ra/get_dec return target coords
-        position_override_until_ = now + std::chrono::milliseconds(duration) +
-                                   kPulseGuideCompletionDelay + kPulseGuidePositionGrace;
-
-        protocol.move_axis_variable_rate(axis, slew_rate_deg_per_sec);
-
-        pulse_guiding_active_ = true;
-        pulse_guide_end_time_ = now + std::chrono::milliseconds(duration) +
-                                kPulseGuideCompletionDelay;
-        equatorial_cache_valid_ = false;
-        altaz_cache_valid_ = false;
-
-        int tracking_mode = tracking_mode_cached_;
-        std::thread([axis, duration, tracking_mode]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
-            try {
-                auto& proto = SynScanProtocolWrapper::instance();
-                proto.move_axis_variable_rate(axis, 0.0);
-                if (axis == 0 && tracking_mode > 0) {
-                    proto.set_tracking_mode(tracking_mode);
+            if (axis == 1) {
+                char pier = protocol.get_pointing_state();
+                if (pier == 'W') {
+                    slew_rate_deg_per_sec = -slew_rate_deg_per_sec;
                 }
-            } catch (...) {
             }
-        }).detach();
+
+            const double duration_sec = duration / 1000.0;
+            const auto now = std::chrono::steady_clock::now();
+
+            // Initialize target coords from mount if position override isn't active
+            if (!target_set_ || now >= position_override_until_) {
+                refresh_equatorial_cache_locked();
+                target_ra_hours_ = cached_ra_hours_;
+                target_dec_degrees_ = cached_dec_degrees_;
+                target_set_ = true;
+            }
+
+            // Accumulate expected pulse delta directly into target coordinates
+            if (direction == 0 || direction == 1) {
+                double delta_deg = guide_rate_.dec * duration_sec;
+                if (direction == 1) delta_deg = -delta_deg;
+                target_dec_degrees_ = std::clamp(target_dec_degrees_ + delta_deg, -90.0, 90.0);
+            } else {
+                double delta_hours = (guide_rate_.ra * duration_sec) / 15.0;
+                if (direction == 3) delta_hours = -delta_hours;
+                target_ra_hours_ = std::fmod(target_ra_hours_ + delta_hours, 24.0);
+                if (target_ra_hours_ < 0.0) target_ra_hours_ += 24.0;
+            }
+
+            // Keep position override active so get_ra/get_dec return target coords
+            position_override_until_ =
+                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuidePositionGrace;
+
+            protocol.move_axis_variable_rate(axis, slew_rate_deg_per_sec);
+
+            pulse_guiding_active_ = true;
+            pulse_guide_end_time_ = now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
+            equatorial_cache_valid_ = false;
+            altaz_cache_valid_ = false;
+
+            tracking_mode = tracking_mode_cached_;
+        }
+
+        // Stop-the-pulse timer: a joinable member thread (never detached),
+        // cancelled + joined on disconnect and in the destructor. Spawned
+        // OUTSIDE mutex_ because its failure path takes mutex_.
+        reap_pulse_task();
+        std::lock_guard<std::mutex> tlock(task_mutex_);
+        if (pulse_task_thread_.joinable()) {
+            // A racing caller spawned between our reap and this lock — cancel
+            // and join it INSIDE the same critical section as the assignment,
+            // so a joinable thread can never be overwritten (std::terminate)
+            // or joined from two threads (UB). [stress] telescope finding.
+            pulse_task_cancel_.store(true);
+            task_cv_.notify_all();
+            pulse_task_thread_.join();
+            pulse_task_cancel_.store(false);
+        }
+        pulse_task_thread_ = std::thread([this, axis, duration, tracking_mode]() {
+            if (!task_wait_for(std::chrono::milliseconds(duration), pulse_task_cancel_)) {
+                // Cancelled by disconnect/destruction. Still make a best-effort
+                // attempt to stop the axis before exiting — the mount would
+                // otherwise keep slewing.
+                try {
+                    SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0);
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    // Cancellation path (disconnect/destruction) — the caller
+                    // is tearing the connection down; nothing more to do.
+                }
+                return;
+            }
+            // The stop command MUST land: silently swallowing a failure leaves
+            // the axis slewing at guide rate indefinitely (mount runaway).
+            // Retry a few times; on final failure log loudly and flag the axis
+            // as still moving so Slewing reports the true state.
+            constexpr int kStopAttempts = 3;
+            bool stopped = false;
+            std::string last_error;
+            auto& proto = SynScanProtocolWrapper::instance();
+            for (int attempt = 0; attempt < kStopAttempts && !stopped; ++attempt) {
+                try {
+                    proto.move_axis_variable_rate(axis, 0.0);
+                    stopped = true;
+                } catch (const std::exception& e) {
+                    last_error = e.what();
+                } catch (...) {
+                    last_error = "unknown error";
+                }
+                if (!stopped && !task_wait_for(std::chrono::milliseconds(100), pulse_task_cancel_)) {
+                    break;
+                }
+            }
+            if (stopped) {
+                if (axis == 0 && tracking_mode > 0) {
+                    try {
+                        proto.set_tracking_mode(tracking_mode);
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_WARN("SynScan", std::string("PulseGuide: failed to restore tracking: ") + e.what());
+                    } catch (...) {
+                        ALPACA_LOG_WARN("SynScan", "PulseGuide: failed to restore tracking");
+                    }
+                }
+            } else {
+                ALPACA_LOG_ERROR("SynScan", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
+                                                " attempts on axis " + std::to_string(axis) +
+                                                " — axis may still be moving (mount runaway risk): " + last_error);
+                std::lock_guard<std::mutex> lock(mutex_);
+                pulse_guiding_active_ = false;
+                // Surface the error state: report the axis as slewing until an
+                // AbortSlew/MoveAxis(0) or disconnect clears it.
+                if (connected_) {
+                    manual_axis_slewing_[axis] = true;
+                }
+            }
+        });
     }
 
     void set_park() override {
@@ -966,17 +1063,20 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
-        wait_for_slew_complete_locked();
+        wait_for_slew_complete(lock);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
         bool precise = false;
+        // Cancel + join any previous slew dispatch task first. Must run
+        // without mutex_ held: the task takes mutex_.
+        reap_slew_task();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1002,9 +1102,20 @@ public:
             at_home_ = false;
         }
 
-        std::thread([this, ra_raw, dec_raw, precise]() {
+        // Dispatch in a joinable member thread (never detached), cancelled +
+        // joined on disconnect and in the destructor.
+        std::lock_guard<std::mutex> tlock(task_mutex_);
+        if (slew_task_thread_.joinable()) {
+            // Racing SlewAsync between reap and this lock — see the pulse
+            // spawn above; join under the same critical section.
+            slew_task_cancel_.store(true);
+            task_cv_.notify_all();
+            slew_task_thread_.join();
+            slew_task_cancel_.store(false);
+        }
+        slew_task_thread_ = std::thread([this, ra_raw, dec_raw, precise]() {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_) {
+            if (!connected_ || slew_task_cancel_.load()) {
                 return;
             }
             try {
@@ -1020,7 +1131,7 @@ public:
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
                 ALPACA_LOG_WARN("SynScan", "Async slew dispatch failed with unknown exception");
             }
-        }).detach();
+        });
     }
 
     void slew_to_target() override {
@@ -1165,6 +1276,71 @@ private:
         }
     }
 
+    // ── Background task threads (async slew dispatch, pulse-guide stop) ──
+    // Never detached: each is a joinable member thread with a cancel flag +
+    // condition_variable, cancelled and joined in the destructor and on
+    // disconnect so a wakeup can never touch a destroyed/disconnected driver.
+
+    // Interruptible sleep for a task thread. Returns false if cancelled.
+    bool task_wait_for(std::chrono::milliseconds d, std::atomic<bool>& cancel) const {
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        task_cv_.wait_for(tlock, d, [&] { return cancel.load(); });
+        return !cancel.load();
+    }
+
+    // Cancel and join both task threads. Must be called WITHOUT mutex_ held
+    // (both task threads take mutex_).
+    void cancel_async_tasks() {
+        slew_task_cancel_.store(true);
+        pulse_task_cancel_.store(true);
+        task_cv_.notify_all();
+        std::thread slew_thread;
+        std::thread pulse_thread;
+        {
+            std::lock_guard<std::mutex> tlock(task_mutex_);
+            slew_thread = std::move(slew_task_thread_);
+            pulse_thread = std::move(pulse_task_thread_);
+        }
+        if (slew_thread.joinable()) {
+            slew_thread.join();
+        }
+        if (pulse_thread.joinable()) {
+            pulse_thread.join();
+        }
+    }
+
+    // Join the previous slew task (if any) and reset its cancel flag so a new
+    // one can start. Must be called WITHOUT mutex_ held (see above).
+    void reap_slew_task() {
+        slew_task_cancel_.store(true);
+        task_cv_.notify_all();
+        std::thread prev;
+        {
+            std::lock_guard<std::mutex> tlock(task_mutex_);
+            prev = std::move(slew_task_thread_);
+        }
+        if (prev.joinable()) {
+            prev.join();
+        }
+        slew_task_cancel_.store(false);
+    }
+
+    // Join the previous pulse-stop task (if any) and reset its cancel flag.
+    // Must be called WITHOUT mutex_ held (its failure path takes mutex_).
+    void reap_pulse_task() {
+        pulse_task_cancel_.store(true);
+        task_cv_.notify_all();
+        std::thread prev;
+        {
+            std::lock_guard<std::mutex> tlock(task_mutex_);
+            prev = std::move(pulse_task_thread_);
+        }
+        if (prev.joinable()) {
+            prev.join();
+        }
+        pulse_task_cancel_.store(false);
+    }
+
     void check_not_parked_locked(const char* operation) const {
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
@@ -1303,11 +1479,23 @@ private:
         at_home_ = false;
     }
 
-    void wait_for_slew_complete_locked() const {
+    // Poll for slew completion, RELEASING the driver mutex around every sleep
+    // so a sync slew/park doesn't block all GETs and disconnect for up to
+    // 120 s (Bisque's unlock/sleep/relock loop is the reference pattern).
+    // `lock` must be held on entry; it is held again on return/throw. The
+    // connection state is re-checked after each relock.
+    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = std::chrono::steady_clock::now();
         const auto start_grace = std::chrono::seconds(2);
         bool saw_slewing = false;
+        auto sleep_unlocked = [&](std::chrono::milliseconds d) {
+            lock.unlock();
+            std::this_thread::sleep_for(d);
+            lock.lock();
+            // The mount may have been disconnected while the lock was released.
+            check_connected();
+        };
         while (true) {
             bool slewing = get_slewing_locked();
             if (slewing) {
@@ -1315,7 +1503,7 @@ private:
             }
             if (!slewing) {
                 if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    sleep_unlocked(std::chrono::milliseconds(200));
                     continue;
                 }
                 break;
@@ -1323,7 +1511,7 @@ private:
             if (std::chrono::steady_clock::now() - start > timeout) {
                 throw AlpacaException("Slew timed out");
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            sleep_unlocked(std::chrono::milliseconds(250));
         }
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
@@ -1331,13 +1519,15 @@ private:
         altaz_cache_valid_ = false;
         position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         if (slew_settle_time_seconds_ > 0) {
-            std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
+            sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
     }
 
     void sync_mount_time_locked() {
         auto now_utc = std::chrono::system_clock::now();
-        set_utc_date(now_utc);
+        // mutex_ is already held here — call the _locked body, not the public
+        // locking method (non-recursive mutex would self-deadlock).
+        set_utc_date_locked(now_utc);
     }
 
     std::chrono::system_clock::time_point current_utc_time_locked() const {
@@ -1449,6 +1639,15 @@ private:
     bool park_position_set_ = false;
     double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
+
+    // Background task threads — see the helpers above. task_mutex_ only guards
+    // thread handles and the cv; it is never held across protocol I/O.
+    mutable std::mutex task_mutex_;
+    mutable std::condition_variable task_cv_;
+    std::thread slew_task_thread_;
+    std::thread pulse_task_thread_;
+    mutable std::atomic<bool> slew_task_cancel_{false};
+    mutable std::atomic<bool> pulse_task_cancel_{false};
 };
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope(

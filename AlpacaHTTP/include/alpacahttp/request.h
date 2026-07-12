@@ -12,10 +12,11 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <cstdint>
 
 namespace alpacahttp {
 
@@ -29,6 +30,11 @@ enum class HttpMethod {
 
 class Request {
 public:
+    // Maximum accepted request body size (bounds Content-Length so a hostile
+    // header can neither over-allocate nor exhaust the read loop). Shared by
+    // Request::parse and the server's recv path.
+    static constexpr std::size_t kMaxBodyBytes = std::size_t{10} * 1024 * 1024;
+
     Request() = default;
     ~Request() = default;
 

@@ -15,8 +15,10 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -49,9 +51,15 @@ public:
     }
 
     bool connect(const ConnectionInfo& info) {
+        constexpr int kConnectTimeoutMs = 7000;
         std::lock_guard<std::mutex> lock(mutex_);
         if (connected_) {
-            disconnect_locked();
+            // The protocol wrapper is a per-vendor singleton: a second device
+            // connecting through it would silently steal/tear down the first
+            // device's connection. Refuse instead.
+            throw AlpacaException(
+                "Only one Bisque/TheSkyX mount per bridge: the shared Bisque "
+                "protocol wrapper is already connected");
         }
         connection_info_ = info;
 
@@ -66,17 +74,47 @@ public:
         addr.sin_port = htons(static_cast<unsigned short>(info.tcp_port));
 
         if (inet_pton(AF_INET, info.host.c_str(), &addr.sin_addr) <= 0) {
-            hostent* host_entry = gethostbyname(info.host.c_str());
-            if (!host_entry) {
+            // getaddrinfo is the reentrant replacement for gethostbyname.
+            addrinfo hints{};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            addrinfo* result = nullptr;
+            if (getaddrinfo(info.host.c_str(), nullptr, &hints, &result) != 0 || !result) {
                 ALPACA_LOG_ERROR("Bisque", "Failed to resolve host: " + info.host);
                 close(socket_fd_);
                 socket_fd_ = -1;
                 return false;
             }
-            addr.sin_addr = *reinterpret_cast<in_addr*>(host_entry->h_addr);
+            addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
+            freeaddrinfo(result);
         }
 
-        if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        // Non-blocking connect with a bounded poll timeout: this runs under the
+        // driver mutex, and a bare blocking connect() to an unreachable host
+        // would stall every GET (and disconnect) for the full OS TCP timeout
+        // (~127 s). Same pattern as the iOptron network prober.
+        bool conn_ok = util::set_nonblocking(socket_fd_);
+        if (conn_ok) {
+            int rc = ::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+            if (rc < 0 && errno != EINPROGRESS) {
+                conn_ok = false;
+            } else if (rc < 0) {
+                struct pollfd pfd {};
+                pfd.fd = socket_fd_;
+                pfd.events = POLLOUT;
+                int poll_rc = poll(&pfd, 1, kConnectTimeoutMs);
+                int sock_err = 0;
+                socklen_t len = sizeof(sock_err);
+                conn_ok =
+                    poll_rc > 0 && getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &sock_err, &len) == 0 && sock_err == 0;
+            }
+        }
+        // Restore blocking mode for the synchronous request/response I/O below;
+        // a stuck-non-blocking fd would make every recv spin with EAGAIN.
+        if (conn_ok) {
+            conn_ok = util::clear_nonblocking(socket_fd_);
+        }
+        if (!conn_ok) {
             ALPACA_LOG_ERROR("Bisque", "Failed to connect to " + info.host +
                              ":" + std::to_string(info.tcp_port));
             close(socket_fd_);

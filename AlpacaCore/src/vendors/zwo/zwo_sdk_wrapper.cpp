@@ -450,7 +450,13 @@ ZWOExposureStatus ZWOSDKWrapper::get_exposure_status(int camera_id) {
 }
 
 void ZWOSDKWrapper::get_data_after_exposure(int camera_id, std::uint8_t* buffer, long buffer_size) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    // Do NOT hold the wrapper mutex — ASIGetDataAfterExp is a blocking USB
+    // bulk download that can take seconds on large sensors, and holding the
+    // global lock across it would stall every other SDK call (stop_exposure,
+    // status polls, other cameras). Same exemption as the Player One /
+    // ToupTek blocking image waits: the driver publishes disconnected and
+    // stops the exposure before closing, so the worst case for a racing
+    // disconnect is an SDK error on a closed id — not a hang.
     throw_on_error(ASIGetDataAfterExp(camera_id, buffer, buffer_size), "ASIGetDataAfterExp");
 }
 

@@ -46,9 +46,15 @@ if(TARGET alpacacore_qhy)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)
+    # Telescope lifecycle storm over the FakeMountServer seam (audit 3.0.1
+    # follow-up): async slew / pulse-guide threads racing disconnect and
+    # destruction; run under the sanitizers-tsan CI job (issue #101).
+    list(APPEND TEST_SOURCES test_synscan_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope.cpp)
+    # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
+    list(APPEND TEST_SOURCES test_ioptron_concurrency_stress.cpp)
     # The PowerBox Switch test only builds when its driver was compiled in
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_IOPTRON_POWERBOX)
@@ -72,6 +78,8 @@ if(TARGET alpacacore_svbony)
 endif()
 if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_telescope.cpp)
+    # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
+    list(APPEND TEST_SOURCES test_celestron_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)

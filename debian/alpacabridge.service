@@ -8,13 +8,32 @@ Wants=network-online.target
 Type=simple
 User=alpacabridge
 Group=alpacabridge
-WorkingDirectory=/etc/alpacabridge
+# Runtime state (config/registered_devices.json) lives in /var/lib/alpacabridge.
+# StateDirectory= creates and owns it; the server resolves its state file
+# relative to the working directory.
+StateDirectory=alpacabridge
+WorkingDirectory=/var/lib/alpacabridge
 ExecStart=/usr/bin/alpacabridge
 Environment=LD_LIBRARY_PATH=/usr/lib/alpacabridge
 LogsDirectory=AlpacaBridge
 LogsDirectoryMode=0755
 Restart=on-failure
 RestartSec=3
+
+# --- Sandboxing ---
+# The service needs read-write access only to its state dir and log dir
+# (StateDirectory=/LogsDirectory= are implicitly writable under
+# ProtectSystem=strict). Device access (USB cameras/serial mounts/GPIO
+# chips under /dev) is preserved: PrivateDevices is deliberately NOT set,
+# and udev rules + dialout/plugdev/gpio group membership grant the nodes.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/alpacabridge
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

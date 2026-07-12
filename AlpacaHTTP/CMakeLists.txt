@@ -219,6 +219,14 @@ if(ALPACAHTTP_BUILD_TESTS)
     add_executable(test_routing tests/test_routing.cpp)
     target_link_libraries(test_routing alpacahttp)
     add_test(NAME test_routing COMMAND test_routing)
+
+    # Threaded storm over the router's persisted_devices_ store (audit 3.0.1
+    # follow-up): configure/remove/configureddevices from concurrent threads,
+    # mirroring the per-request server threads. Most valuable under TSan, but
+    # a pre-mutex router crashes/corrupts here even without it.
+    add_executable(test_persisted_devices_concurrency tests/test_persisted_devices_concurrency.cpp)
+    target_link_libraries(test_persisted_devices_concurrency alpacahttp)
+    add_test(NAME test_persisted_devices_concurrency COMMAND test_persisted_devices_concurrency)
     
     add_executable(test_json tests/test_json.cpp)
     target_link_libraries(test_json alpacahttp)

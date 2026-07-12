@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
@@ -355,7 +356,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (connected_) {
-            disconnect_locked();  // already holding mutex_ — must not re-lock
+            // The protocol wrapper is a per-vendor singleton: a second device
+            // connecting through it would silently steal/tear down the first
+            // device's connection. Refuse instead.
+            throw AlpacaException(
+                "Only one SynScan mount per bridge: the shared SynScan "
+                "protocol wrapper is already connected");
         }
 
         connection_type_ = info.type;
@@ -396,9 +402,8 @@ public:
         return connected_;
     }
 
-    std::string send_command(const std::string& command,
-                             bool require_hash_terminator,
-                             int timeout_ms_override) {
+    std::string send_command(const std::string& command, bool require_hash_terminator, int timeout_ms_override,
+                             int binary_bytes = 0) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!connected_) {
             throw AlpacaException("Not connected to mount");
@@ -412,7 +417,7 @@ public:
         if (timeout_ms <= 0) {
             timeout_ms = connection_info_.response_timeout_ms;
         }
-        return read_response(require_hash_terminator, timeout_ms);
+        return read_response(require_hash_terminator, timeout_ms, binary_bytes);
     }
 
     void send_command_blind(const std::string& command) {
@@ -444,7 +449,8 @@ public:
     }
 
     int get_model_id() {
-        std::string response = send_command("m", true, 0);
+        // "m" returns chr(model) & "#" — a single binary byte.
+        std::string response = send_command("m", true, 0, 1);
         if (response.empty()) {
             return -1;
         }
@@ -452,15 +458,16 @@ public:
     }
 
     bool is_aligned() {
-        std::string response = send_command("J", true, 0);
+        // "J" returns chr(1)/chr(0) (ASCII '1'/'0' on some firmware) & "#".
+        std::string response = send_command("J", true, 0, 1);
         if (response.empty()) {
             return false;
         }
         unsigned char ch = static_cast<unsigned char>(response[0]);
-        if (ch == '1') {
-            return true;
-        }
-        return ch != 0;
+        // Aligned is chr(1) or ASCII '1'. Anything else (chr(0), ASCII '0',
+        // garbage) means NOT aligned — treating ASCII '0' (0x30) as
+        // "non-zero → aligned" would bypass the slew-safety gate.
+        return (ch == 1) || (ch == '1');
     }
 
     bool is_goto_in_progress() {
@@ -477,7 +484,8 @@ public:
     }
 
     char get_pointing_state() {
-        std::string response = send_command("p", true, 0);
+        // "p" returns a single byte & "#".
+        std::string response = send_command("p", true, 0, 1);
         if (response.empty()) {
             return 'U';
         }
@@ -485,7 +493,8 @@ public:
     }
 
     int get_tracking_mode() {
-        std::string response = send_command("t", true, 0);
+        // "t" returns chr(mode) & "#" — a single binary byte.
+        std::string response = send_command("t", true, 0, 1);
         return parse_mode_byte(response);
     }
 
@@ -634,7 +643,10 @@ public:
     }
 
     LocationInfo get_location() {
-        std::string response = send_command("w", true, 0);
+        // "w" returns 8 binary bytes & "#" — degree/minute/second/sign values of
+        // 10, 13 or 35 would otherwise be eaten by the text framing (CR/LF strip
+        // and '#' terminator detection) and corrupt the parsed coordinates.
+        std::string response = send_command("w", true, 0, 8);
         if (response.size() < 8) {
             throw AlpacaException("Invalid SynScan location response");
         }
@@ -695,7 +707,9 @@ public:
     }
 
     TimeInfo get_time() {
-        std::string response = send_command("h", true, 0);
+        // "h" returns 8 binary bytes & "#" — hour/minute/second/day values of
+        // 10, 13 or 35 would otherwise be eaten by the text framing.
+        std::string response = send_command("h", true, 0, 8);
         if (response.size() < 8) {
             throw AlpacaException("Invalid SynScan time response");
         }
@@ -847,13 +861,18 @@ private:
         addr.sin_port = htons(static_cast<unsigned short>(port));
         addr.sin_addr.s_addr = inet_addr(host.c_str());
         if (addr.sin_addr.s_addr == INADDR_NONE) {
-            hostent* host_entry = gethostbyname(host.c_str());
-            if (!host_entry) {
+            // getaddrinfo is the reentrant replacement for gethostbyname.
+            addrinfo hints{};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            addrinfo* result = nullptr;
+            if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result) {
                 closesocket(socket_handle_);
                 socket_handle_ = INVALID_SOCKET;
                 return false;
             }
-            addr.sin_addr = *reinterpret_cast<in_addr*>(host_entry->h_addr);
+            addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
+            freeaddrinfo(result);
         }
         if (::connect(socket_handle_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
             closesocket(socket_handle_);
@@ -863,6 +882,7 @@ private:
         configure_network_timeouts();
         return true;
 #else
+        constexpr int kConnectTimeoutMs = 7000;
         socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (socket_fd_ < 0) {
             return false;
@@ -871,15 +891,50 @@ private:
         addr.sin_family = AF_INET;
         addr.sin_port = htons(static_cast<unsigned short>(port));
         if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0) {
-            hostent* host_entry = gethostbyname(host.c_str());
-            if (!host_entry) {
+            // getaddrinfo is the reentrant replacement for gethostbyname.
+            addrinfo hints{};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            addrinfo* result = nullptr;
+            if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result) {
                 close(socket_fd_);
                 socket_fd_ = -1;
                 return false;
             }
-            addr.sin_addr = *reinterpret_cast<in_addr*>(host_entry->h_addr);
+            addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
+            freeaddrinfo(result);
         }
-        if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        // Non-blocking connect with a bounded poll timeout: this runs under the
+        // driver mutex, and a bare blocking connect() to an unreachable host
+        // would stall every GET (and disconnect) for the full OS TCP timeout
+        // (~127 s). Same pattern as the iOptron network prober.
+        if (!util::set_nonblocking(socket_fd_)) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+            return false;
+        }
+        int rc = ::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        if (rc < 0 && errno != EINPROGRESS) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+            return false;
+        }
+        if (rc < 0) {
+            struct pollfd pfd {};
+            pfd.fd = socket_fd_;
+            pfd.events = POLLOUT;
+            int poll_rc = poll(&pfd, 1, kConnectTimeoutMs);
+            int sock_err = 0;
+            socklen_t len = sizeof(sock_err);
+            if (poll_rc <= 0 || getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &sock_err, &len) != 0 || sock_err != 0) {
+                close(socket_fd_);
+                socket_fd_ = -1;
+                return false;
+            }
+        }
+        // Restore blocking mode for the synchronous request/response I/O below;
+        // a stuck-non-blocking fd would make every recv spin with EAGAIN.
+        if (!util::clear_nonblocking(socket_fd_)) {
             close(socket_fd_);
             socket_fd_ = -1;
             return false;
@@ -973,11 +1028,16 @@ private:
 #endif
     }
 
-    std::string read_response(bool require_hash_terminator, int timeout_ms) {
+    std::string read_response(bool require_hash_terminator, int timeout_ms, int binary_bytes = 0) {
         std::string response;
         auto start = std::chrono::steady_clock::now();
         auto last_char_time = start;
         const int idle_break_ms = 100;
+        // When binary_bytes > 0, read exactly that many raw bytes first
+        // (no CR/LF filtering, no '#' detection) then drain the '#' terminator.
+        // This prevents binary values like 0x23 ('#') or 0x0A/0x0D from being
+        // misinterpreted as protocol framing characters (same fix as Celestron).
+        int remaining_binary = binary_bytes;
 
         while (true) {
             char ch;
@@ -989,6 +1049,19 @@ private:
             }
             if (got_char) {
                 last_char_time = std::chrono::steady_clock::now();
+                if (remaining_binary > 0) {
+                    // Binary phase: accept every byte as data
+                    response.push_back(ch);
+                    --remaining_binary;
+                    if (remaining_binary == 0 && require_hash_terminator) {
+                        // All binary bytes received; now drain the '#' terminator
+                        drain_hash_terminator(timeout_ms, start);
+                    }
+                    if (remaining_binary == 0) {
+                        break;
+                    }
+                    continue;
+                }
                 if (ch == '#') {
                     break;
                 }
@@ -1016,6 +1089,30 @@ private:
         return response;
     }
 
+    void drain_hash_terminator(int timeout_ms, std::chrono::steady_clock::time_point start) {
+        // Read and discard the '#' terminator after a binary payload.
+        while (true) {
+            char ch;
+            bool got_char = false;
+            if (connection_type_ == ConnectionType::Serial) {
+                got_char = read_serial_char(ch);
+            } else {
+                got_char = read_network_char(ch);
+            }
+            if (got_char) {
+                // Accept '#' or anything else — just drain one byte.
+                return;
+            }
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
+            if (elapsed.count() > timeout_ms) {
+                // Terminator didn't arrive; the payload is still valid.
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+
     bool read_serial_char(char& ch) {
 #ifdef _WIN32
         DWORD bytes_read = 0;
@@ -1024,7 +1121,9 @@ private:
         }
         return false;
 #else
-        ssize_t bytes_read = read(serial_fd_, &ch, 1);
+        // Bounded read (VMIN/VTIME) held under the wrapper mutex by design —
+        // the mutex provides transaction atomicity for command/response pairs.
+        ssize_t bytes_read = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
         return bytes_read == 1;
 #endif
     }
@@ -1034,7 +1133,9 @@ private:
         int bytes_received = recv(socket_handle_, &ch, 1, 0);
         return bytes_received == 1;
 #else
-        ssize_t bytes_received = recv(socket_fd_, &ch, 1, 0);
+        // Bounded recv (SO_RCVTIMEO) held under the wrapper mutex by design —
+        // the mutex provides transaction atomicity for command/response pairs.
+        ssize_t bytes_received = recv(socket_fd_, &ch, 1, 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
         return bytes_received == 1;
 #endif
     }

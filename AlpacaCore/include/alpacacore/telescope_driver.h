@@ -268,12 +268,14 @@ public:
     virtual double get_right_ascension() const = 0;
 
     /**
-     * @brief Get the telescope's right ascension rate in arcseconds per second.
+     * @brief Get the telescope's right ascension rate offset in seconds of RA per
+     *        sidereal second (NOT arcseconds per second; 1 s of RA = 15 arcsec).
      */
     virtual double get_right_ascension_rate() const = 0;
 
     /**
-     * @brief Set the telescope's right ascension rate in arcseconds per second.
+     * @brief Set the telescope's right ascension rate offset in seconds of RA per
+     *        sidereal second (NOT arcseconds per second; 1 s of RA = 15 arcsec).
      */
     virtual void set_right_ascension_rate(double rate) = 0;
 

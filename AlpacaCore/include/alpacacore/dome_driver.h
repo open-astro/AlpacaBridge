@@ -27,6 +27,28 @@ class DomeDriver : public AlpacaDriver {
 public:
     virtual ~DomeDriver() = default;
 
+    // Platform 7 operational state (IDomeV3): Altitude, AtHome, AtPark, Azimuth,
+    // ShutterStatus, Slewing plus a TimeStamp. Inline so the vtable stays weak;
+    // values come from the same getters as the GET endpoints.
+    std::vector<DeviceState> get_device_state() const override final {
+        std::vector<DeviceState> state;
+        auto add = [&state](const char* name, auto getter) {
+            try {
+                state.push_back({name, DeviceStateValue{getter()}});
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
+            }
+        };
+        add("Altitude", [this] { return get_altitude(); });
+        add("AtHome", [this] { return get_at_home(); });
+        add("AtPark", [this] { return get_at_park(); });
+        add("Azimuth", [this] { return get_azimuth(); });
+        add("ShutterStatus", [this] { return get_shutter_status(); });
+        add("Slewing", [this] { return get_slewing(); });
+        state.push_back({"TimeStamp", device_state_timestamp()});
+        return state;
+    }
+
     // Dome-specific properties
 
     /**

@@ -3,6 +3,8 @@ set -e
 
 case "$1" in
     purge)
+        # Remove runtime state (postinst-created, not owned by dpkg)
+        rm -rf /var/lib/alpacabridge
         # Remove the system user created during install
         if getent passwd alpacabridge > /dev/null 2>&1; then
             deluser --system alpacabridge || true

@@ -111,7 +111,14 @@ std::optional<int> extract_mount_error_code(const std::string& response) {
         }
     }
 
-    return std::stoi(digits);
+    try {
+        return std::stoi(digits);
+    } catch (const std::exception&) {
+        // A pathological digit run overflows std::stoi (std::out_of_range);
+        // treat it as "no recognizable error code" rather than letting a raw
+        // std exception escape the protocol layer.
+        return std::nullopt;
+    }
 }
 
 void throw_if_mount_error(const std::string& response, const std::string& context) {
@@ -1201,7 +1208,14 @@ double ZWOMountProtocolWrapper::get_guide_rate() {
     if (response.empty()) {
         throw AlpacaException("Invalid guide rate response", AlpacaError::DriverException);
     }
-    double value = std::stod(response);
+    double value = 0.0;
+    try {
+        value = std::stod(response);
+    } catch (const std::exception&) {
+        // Non-numeric device response must surface as AlpacaException, not a
+        // raw std::invalid_argument/std::out_of_range from std::stod.
+        throw AlpacaException("Invalid guide rate response: '" + response + "'", AlpacaError::DriverException);
+    }
     // Some firmware revisions return the 0.1-0.9 rate, others return a value scaled by 15.
     if (value > 1.0 && value <= 15.0) {
         value /= 15.0;

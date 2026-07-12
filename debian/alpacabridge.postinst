@@ -7,7 +7,7 @@ case "$1" in
         if ! getent passwd alpacabridge > /dev/null 2>&1; then
             adduser --system --group \
                 --no-create-home \
-                --home /etc/alpacabridge \
+                --home /var/lib/alpacabridge \
                 --gecos "AlpacaBridge Server" \
                 alpacabridge
         fi
@@ -22,10 +22,10 @@ case "$1" in
             usermod -aG dialout alpacabridge || true
         fi
 
-        # Grant input membership for USB HID device access (ZWO focusers, filter wheels)
-        if getent group input > /dev/null 2>&1; then
-            usermod -aG input alpacabridge || true
-        fi
+        # NOTE: the service user is deliberately NOT enrolled in the `input`
+        # group (it grants read access to keyboards/mice — a keylogging
+        # surface). USB HID astronomy devices (ZWO focusers, filter wheels)
+        # get their access from the packaged vendor udev rules instead.
 
         # Grant gpio membership for GPIO access. The Switch drivers that drive
         # on-board 12V power ports (iOptron iMate, ToupTek StellaVita, ZWO
@@ -39,11 +39,39 @@ case "$1" in
         groupadd -f --system gpio || true
         usermod -aG gpio alpacabridge || true
 
-        # Create and set ownership of the working / config directory
-        if [ ! -d /etc/alpacabridge ]; then
-            mkdir -p /etc/alpacabridge
+        # Runtime state lives in /var/lib/alpacabridge (the systemd unit's
+        # StateDirectory/WorkingDirectory). Create it and the state file.
+        mkdir -p /var/lib/alpacabridge/config
+
+        # Migrate pre-3.0.1 state from /etc/alpacabridge (the old working
+        # directory). Move, don't copy, so there is a single source of truth;
+        # never overwrite state that already exists at the new location.
+        if [ -f /etc/alpacabridge/config/registered_devices.json ] && \
+           [ ! -f /var/lib/alpacabridge/config/registered_devices.json ]; then
+            mv /etc/alpacabridge/config/registered_devices.json \
+               /var/lib/alpacabridge/config/registered_devices.json
         fi
-        chown -R alpacabridge:alpacabridge /etc/alpacabridge
+        # Very old layout shipped the file at the directory top level.
+        if [ -f /etc/alpacabridge/registered_devices.json ] && \
+           [ ! -f /var/lib/alpacabridge/config/registered_devices.json ]; then
+            mv /etc/alpacabridge/registered_devices.json \
+               /var/lib/alpacabridge/config/registered_devices.json
+        fi
+        # Tidy the old location (only if now empty apart from the packaged
+        # web symlink); leave anything user-added alone.
+        rm -f /etc/alpacabridge/web
+        rmdir /etc/alpacabridge/config 2>/dev/null || true
+        rmdir /etc/alpacabridge 2>/dev/null || true
+
+        if [ ! -f /var/lib/alpacabridge/config/registered_devices.json ]; then
+            echo '[]' > /var/lib/alpacabridge/config/registered_devices.json
+            chmod 644 /var/lib/alpacabridge/config/registered_devices.json
+        fi
+
+        # -h/--no-dereference: /var/lib/alpacabridge/web is a symlink into
+        # dpkg-owned /usr/share/alpacabridge — a plain chown -R would follow
+        # it and re-chown packaged files.
+        chown -R -h alpacabridge:alpacabridge /var/lib/alpacabridge
 
         # Create log directory. systemd LogsDirectory= handles this when the
         # service starts, but having it pre-created lets the binary write logs

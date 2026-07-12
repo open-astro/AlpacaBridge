@@ -76,6 +76,8 @@ public:
           num_y_(0),
           roi_width_effective_(0),
           roi_height_effective_(0),
+          roi_crop_x_(0),
+          roi_crop_y_(0),
           start_x_(0),
           start_y_(0),
           image_ready_(false),
@@ -192,33 +194,52 @@ public:
         if (connected) {
             int resolved_id = resolve_camera_id_locked();
             sdk.open_camera(resolved_id);
-            sdk.init_camera(resolved_id);
+            // Guard the ENTIRE remaining init: the ZWO open is ref-counted, so
+            // an unclosed open on a throw is a permanent leak (the next connect
+            // bumps the count and Close never balances) — AGENTS.md connect
+            // rule, same shape as the EAF/EFW/CAA siblings.
+            try {
+                sdk.init_camera(resolved_id);
 
-            refresh_camera_info_locked(resolved_id);
-            load_control_caps_locked(resolved_id);
-            select_default_image_type_locked();
+                refresh_camera_info_locked(resolved_id);
+                load_control_caps_locked(resolved_id);
+                select_default_image_type_locked();
 
-            bin_x_ = 1;
-            bin_y_ = 1;
-            start_x_ = 0;
-            start_y_ = 0;
-            int max_width = camera_info_valid_ ? camera_info_.max_width : 0;
-            int max_height = camera_info_valid_ ? camera_info_.max_height : 0;
-            num_x_ = max_width;
-            num_y_ = max_height;
-            roi_width_effective_ = align_roi_dimension(max_width, 8);
-            roi_height_effective_ = align_roi_dimension(max_height, 2);
+                bin_x_ = 1;
+                bin_y_ = 1;
+                start_x_ = 0;
+                start_y_ = 0;
+                int max_width = camera_info_valid_ ? camera_info_.max_width : 0;
+                int max_height = camera_info_valid_ ? camera_info_.max_height : 0;
+                num_x_ = max_width;
+                num_y_ = max_height;
+                roi_width_effective_ = max_width - (max_width % 8);
+                roi_height_effective_ = max_height - (max_height % 2);
+                roi_crop_x_ = 0;
+                roi_crop_y_ = 0;
 
-            if (roi_width_effective_ > 0 && roi_height_effective_ > 0) {
-                sdk.set_roi_format(resolved_id,
-                                   roi_width_effective_,
-                                   roi_height_effective_,
-                                   bin_x_,
-                                   image_type_);
-                sdk.set_start_pos(resolved_id, start_x_, start_y_);
+                if (roi_width_effective_ > 0 && roi_height_effective_ > 0) {
+                    sdk.set_roi_format(resolved_id, roi_width_effective_, roi_height_effective_, bin_x_, image_type_);
+                    sdk.set_start_pos(resolved_id, start_x_, start_y_);
+                }
+
+                // Some cameras have no serial number and ASIGetSerialNumber
+                // returns an error — non-fatal, connect with an empty serial
+                // (same policy as the EAF/EFW/CAA siblings).
+                try {
+                    serial_number_ = sdk.get_serial_number(resolved_id);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("ZWO", "Camera serial number unavailable: " + std::string(e.what()));
+                    serial_number_.clear();
+                }
+            } catch (...) {
+                try {
+                    sdk.close_camera(resolved_id);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("ZWO", "close_camera after failed connect: " + std::string(e.what()));
+                }
+                throw;
             }
-
-            serial_number_ = sdk.get_serial_number(resolved_id);
             reset_exposure_state_locked();
             connected_.store(true);
             return;
@@ -446,7 +467,9 @@ public:
             return 0.0;
         }
         double max_adu = static_cast<double>((1ULL << camera_info_.bit_depth) - 1ULL);
-        return camera_info_.electrons_per_adu * 1000.0 * max_adu;
+        // ASIGetCameraProperty's ElecPerADU is already in electrons per ADU;
+        // full well (e-) = e-/ADU * max ADU. No unit scaling.
+        return camera_info_.electrons_per_adu * max_adu;
     }
 
     int get_gain() const override {
@@ -968,6 +991,11 @@ private:
     int num_y_;
     int roi_width_effective_;
     int roi_height_effective_;
+    // Offset of the client-requested start inside the padded SDK ROI (the
+    // applied start is shifted left/up when the pad would overflow the
+    // sensor); build_image_array_locked crops at this offset.
+    int roi_crop_x_;
+    int roi_crop_y_;
     int start_x_;
     int start_y_;
 
@@ -1186,11 +1214,17 @@ private:
         return true;
     }
 
+    // Align UP to the SDK divisor (pad), per the AGENTS.md "Camera ROI
+    // alignment" rule: keep the client-requested geometry for the interface,
+    // pad the SDK ROI so it fully COVERS the request, and stride-crop the
+    // delivered frame back to the requested size (ToupTek reference
+    // approach) — never align down and fabricate black edge columns.
     int align_roi_dimension(int value, int multiple) const {
         if (multiple <= 1) {
             return value;
         }
-        return value - (value % multiple);
+        const int rem = value % multiple;
+        return rem == 0 ? value : value + (multiple - rem);
     }
 
     bool adjust_roi_size_locked(int requested_width,
@@ -1212,6 +1246,15 @@ private:
 
         int candidate_width = align_roi_dimension(requested_width, 8);
         int candidate_height = align_roi_dimension(requested_height, 2);
+        // Defensive: ZWO sensors have %8/%2 binned dimensions, so the padded
+        // ROI normally still fits. If a pathological sensor size makes the
+        // pad overflow, fall back to the largest aligned size that fits.
+        if (candidate_width > max_width) {
+            candidate_width = max_width - (max_width % 8);
+        }
+        if (candidate_height > max_height) {
+            candidate_height = max_height - (max_height % 2);
+        }
         if (candidate_width <= 0 || candidate_height <= 0) {
             return false;
         }
@@ -1219,6 +1262,23 @@ private:
         adjusted_width = candidate_width;
         adjusted_height = candidate_height;
         return true;
+    }
+
+    // The padded ROI can push start+width past the sensor when the client
+    // requests an edge-touching sub-frame; shift the applied start left/up so
+    // the SDK window stays on-sensor while still covering the requested
+    // region, and record the crop offset so build_image_array_locked reads
+    // the requested pixels out of the padded buffer (ToupTek approach).
+    void apply_start_pos_locked(int active_camera_id) {
+        int max_width = camera_info_.max_width / bin_x_;
+        int max_height = camera_info_.max_height / bin_y_;
+        int applied_x = std::min(start_x_, std::max(0, max_width - roi_width_effective_));
+        int applied_y = std::min(start_y_, std::max(0, max_height - roi_height_effective_));
+        applied_x = std::max(0, applied_x);
+        applied_y = std::max(0, applied_y);
+        roi_crop_x_ = start_x_ - applied_x;
+        roi_crop_y_ = start_y_ - applied_y;
+        ZWOSDKWrapper::instance().set_start_pos(active_camera_id, applied_x, applied_y);
     }
 
     int resolve_camera_id_locked() {
@@ -1459,6 +1519,8 @@ private:
         num_y_ = max_height;
         roi_width_effective_ = width;
         roi_height_effective_ = height;
+        roi_crop_x_ = 0;
+        roi_crop_y_ = 0;
         start_x_ = 0;
         start_y_ = 0;
         image_cached_ = false;
@@ -1493,6 +1555,10 @@ private:
                                                      adjusted_height,
                                                      bin_x_,
                                                      image_type_);
+            // The padded size may change how far the applied start must be
+            // shifted to keep the SDK window on-sensor — re-apply it so the
+            // crop offset stays consistent with the new effective size.
+            apply_start_pos_locked(active_camera_id);
         }
         image_cached_ = false;
     }
@@ -1513,7 +1579,7 @@ private:
         start_x_ = start_x;
         start_y_ = start_y;
         if (valid) {
-            ZWOSDKWrapper::instance().set_start_pos(active_camera_id, start_x, start_y);
+            apply_start_pos_locked(active_camera_id);
         }
     }
 
@@ -1558,15 +1624,28 @@ private:
             image.data.resize(static_cast<std::size_t>(out_width) *
                               static_cast<std::size_t>(out_height) * 3);
             std::size_t buffer_stride = static_cast<std::size_t>(eff_width) * 3;
-            std::size_t output_stride = static_cast<std::size_t>(out_width) * 3;
             for (int row = 0; row < out_height; ++row) {
-                std::size_t output_row = static_cast<std::size_t>(row) * output_stride;
-                if (row < eff_height) {
-                    std::size_t buffer_row = static_cast<std::size_t>(row) * buffer_stride;
-                    std::size_t copy_bytes = std::min(buffer_stride, output_stride);
-                    for (std::size_t i = 0; i < copy_bytes && buffer_row + i < buffer.size(); ++i) {
-                        image.data[output_row + i] = buffer[buffer_row + i];
+                const int src_row = row + roi_crop_y_;
+                for (int col = 0; col < out_width; ++col) {
+                    const int src_col = col + roi_crop_x_;
+                    std::size_t out_base = (static_cast<std::size_t>(row) * static_cast<std::size_t>(out_width) +
+                                            static_cast<std::size_t>(col)) *
+                                           3;
+                    if (src_row < eff_height && src_col < eff_width) {
+                        std::size_t src_base =
+                            static_cast<std::size_t>(src_row) * buffer_stride + static_cast<std::size_t>(src_col) * 3;
+                        if (src_base + 2 < buffer.size()) {
+                            // ASI RGB24 frames are delivered in BGR byte
+                            // order; ImageArray channels are R,G,B — reorder.
+                            image.data[out_base + 0] = buffer[src_base + 2];
+                            image.data[out_base + 1] = buffer[src_base + 1];
+                            image.data[out_base + 2] = buffer[src_base + 0];
+                            continue;
+                        }
                     }
+                    image.data[out_base + 0] = 0;
+                    image.data[out_base + 1] = 0;
+                    image.data[out_base + 2] = 0;
                 }
             }
             return image;
@@ -1582,10 +1661,12 @@ private:
                     std::size_t out_index = static_cast<std::size_t>(row) *
                                             static_cast<std::size_t>(out_width) +
                                             static_cast<std::size_t>(col);
-                    if (row < eff_height && col < eff_width) {
-                        std::size_t offset = (static_cast<std::size_t>(row) *
-                                              static_cast<std::size_t>(eff_width) +
-                                              static_cast<std::size_t>(col)) * 2;
+                    const int src_row = row + roi_crop_y_;
+                    const int src_col = col + roi_crop_x_;
+                    if (src_row < eff_height && src_col < eff_width) {
+                        std::size_t offset = (static_cast<std::size_t>(src_row) * static_cast<std::size_t>(eff_width) +
+                                              static_cast<std::size_t>(src_col)) *
+                                             2;
                         if (offset + 1 < buffer.size()) {
                             std::uint16_t value = static_cast<std::uint16_t>(buffer[offset]) |
                                                   static_cast<std::uint16_t>(buffer[offset + 1] << 8);
@@ -1604,10 +1685,11 @@ private:
                 std::size_t out_index = static_cast<std::size_t>(row) *
                                         static_cast<std::size_t>(out_width) +
                                         static_cast<std::size_t>(col);
-                if (row < eff_height && col < eff_width) {
-                    std::size_t buffer_index = static_cast<std::size_t>(row) *
-                                               static_cast<std::size_t>(eff_width) +
-                                               static_cast<std::size_t>(col);
+                const int src_row = row + roi_crop_y_;
+                const int src_col = col + roi_crop_x_;
+                if (src_row < eff_height && src_col < eff_width) {
+                    std::size_t buffer_index = static_cast<std::size_t>(src_row) * static_cast<std::size_t>(eff_width) +
+                                               static_cast<std::size_t>(src_col);
                     if (buffer_index < buffer.size()) {
                         image.data[out_index] = buffer[buffer_index];
                         continue;

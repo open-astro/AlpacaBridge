@@ -881,6 +881,14 @@ public:
         case 3: dir = ToupGuideDirection::West;  break;
         }
         auto& sdk = sdk_;
+        // Serialise pulse guides against each other (M18): two concurrent
+        // calls would otherwise both run stop_pulse_guide_thread's join and
+        // race the thread-assignment below (double-join / join-vs-operator= is
+        // UB on std::thread). Held across the SDK write + timer restart so a
+        // superseding pulse replaces the previous one atomically. Lock order:
+        // pulse_guide_lifecycle_mutex_ -> mutex_ (via with_handle); the timer
+        // thread never takes it, so the join below can't deadlock.
+        std::lock_guard<std::mutex> pg_lifecycle_lock(pulse_guide_lifecycle_mutex_);
         with_handle([&](HToupcam h) { sdk.pulse_guide(h, dir, static_cast<unsigned>(duration)); });
         // Cancel + join any prior timer (fast — the cancel wakes it), then start a
         // fresh joinable one. On cancel the old timer leaves pulse_guiding_ alone so
@@ -964,11 +972,18 @@ public:
         unsigned roi_h = 0;
         bool dirty_format = false;
         bool dirty_roi = false;
+        bool active_16bit = true;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!camera_info_valid_) {
                 throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
             }
+            // Pull at the sensor's actual bit depth (M14): connect only enables
+            // the 16-bit BITDEPTH option when bit_depth_max > 8, so a RAW8-only
+            // camera streams 1 byte/pixel — pulling it as 16-bit with a 2-byte
+            // row pitch garbles every frame. Snapshot the mode with the rest of
+            // the geometry so the worker's bits/pitch/buffer stay consistent.
+            active_16bit = camera_info_.bit_depth_max > 8;
             active_bin = bin_;
             active_start_x = start_x_;
             active_start_y = start_y_;
@@ -1023,7 +1038,7 @@ public:
             // (active_num_x+1)-pixel row, so each row's extra trailing pixel is
             // written at the start of the next row's stride slot and is then
             // overwritten by that row's first pixel; columns 0..active_num_x-1 of
-            // every row stay intact. build_image_array_16bit reads exactly
+            // every row stay intact. build_image_array reads exactly
             // active_num_x columns per row at the same stride, and the +2-row
             // buffer margin absorbs the final row's unreclaimed extra pixel.
             // Reported NumX/NumY stay = active_num_x/y.
@@ -1075,7 +1090,7 @@ public:
         }
 
         exposure_thread_ = std::thread([this, handle, exposure_us, active_bin, active_num_x, active_num_y, roi_x, roi_y,
-                                        roi_w, roi_h, dirty_format, dirty_roi]() {
+                                        roi_w, roi_h, dirty_format, dirty_roi, active_16bit]() {
             auto& sdk_local = sdk_;
             // Track which reconfigure stages actually completed, so the catch
             // re-marks ONLY the stage that failed — re-marking an
@@ -1108,29 +1123,32 @@ public:
                 sdk_local.trigger(handle, 1);
 
                 unsigned timeout_ms = (exposure_us / 1000) + 10000;
-                // Buffer is num_x * num_y; the even-up ROI floor-bins to exactly
-                // that. Add a two-row margin as crash-insurance in case a model
-                // ever delivers one extra padded row from the rounded ROI span.
-                std::vector<std::uint16_t> pixel_buffer(static_cast<std::size_t>(active_num_x) *
-                                                        static_cast<std::size_t>(active_num_y + 2));
+                // Buffer is num_x * num_y pixels at the sensor's byte depth
+                // (RAW8 = 1 byte/pixel, >8-bit = 16-bit little-endian; M14);
+                // the even-up ROI floor-bins to exactly that. Add a two-row
+                // margin as crash-insurance in case a model ever delivers one
+                // extra padded row from the rounded ROI span.
+                const std::size_t bytes_per_pixel = active_16bit ? 2 : 1;
+                std::vector<std::uint8_t> pixel_buffer(static_cast<std::size_t>(active_num_x) * bytes_per_pixel *
+                                                       static_cast<std::size_t>(active_num_y + 2));
 
                 unsigned got_w = 0;
                 unsigned got_h = 0;
-                // rowPitch = active_num_x * 2 bytes: this is the SDK contract for
-                // Toupcam_WaitImageV4's nRowPitch arg — the destination row stride
-                // in OUR buffer (not the ROI width). We deliberately set it to the
-                // requested (unpadded) width so the image is laid out at active_num_x
-                // stride regardless of the even-padded ROI (see the odd-NumX/bin-1
-                // note at the ROI computation above). got_w/got_h are the SDK's
-                // delivered dimensions and MAY exceed active_num_x/y by one at bin 1;
-                // build_image_array_16bit reads exactly active_num_x columns per row
-                // at this same stride. If a future SDK ignores nRowPitch and packs at
-                // got_w, this assumption breaks — revalidate against the SDK docs.
-                bool got = sdk_local.wait_image(handle, timeout_ms,
-                                                 pixel_buffer.data(),
-                                                 16,
-                                                 static_cast<int>(active_num_x * 2),
-                                                 got_w, got_h);
+                // rowPitch = active_num_x * bytes_per_pixel: this is the SDK
+                // contract for Toupcam_WaitImageV4's nRowPitch arg — the
+                // destination row stride in OUR buffer (not the ROI width). We
+                // deliberately set it to the requested (unpadded) width so the
+                // image is laid out at active_num_x stride regardless of the
+                // even-padded ROI (see the odd-NumX/bin-1 note at the ROI
+                // computation above). got_w/got_h are the SDK's delivered
+                // dimensions and MAY exceed active_num_x/y by one at bin 1;
+                // build_image_array reads exactly active_num_x columns per row
+                // at this same stride. If a future SDK ignores nRowPitch and
+                // packs at got_w, this assumption breaks — revalidate against
+                // the SDK docs.
+                bool got = sdk_local.wait_image(handle, timeout_ms, pixel_buffer.data(), active_16bit ? 16 : 8,
+                                                static_cast<int>(active_num_x * static_cast<int>(bytes_per_pixel)),
+                                                got_w, got_h);
 
                 if (!got || !exposure_active_.load()) {
                     ALPACA_LOG_WARN("ToupTek",
@@ -1149,10 +1167,8 @@ public:
 
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    last_image_ = build_image_array_16bit(pixel_buffer,
-                                                          active_num_x, active_num_y,
-                                                          static_cast<int>(got_w),
-                                                          static_cast<int>(got_h));
+                    last_image_ = build_image_array(pixel_buffer, active_16bit, active_num_x, active_num_y,
+                                                    static_cast<int>(got_w), static_cast<int>(got_h));
                     image_cached_ = true;
                     // image_ready_ is intentionally NOT set here — it is published
                     // AFTER exposure_active_ is cleared below, so a poller never
@@ -1283,6 +1299,12 @@ private:
     std::mutex pulse_guide_mutex_;
     std::condition_variable pulse_guide_cv_;
     bool pulse_guide_cancel_{false};
+    // Serialises the pulse-guide timer's lifecycle: concurrent pulse_guide
+    // calls would double-join pulse_guide_thread_ / race its assignment (UB
+    // on std::thread; M18). The destructor's stop_pulse_guide_thread runs
+    // after shutdown, when no client call can be in flight, so it does not
+    // take it (same exemption as exposure_lifecycle_mutex_).
+    std::mutex pulse_guide_lifecycle_mutex_;
 
     static void on_event_static(unsigned /*event*/, void* /*ctx*/) {
         // Pull-mode callbacks fire on an SDK-owned thread. Do not touch the
@@ -1562,9 +1584,11 @@ private:
         roi_dirty_ = true;
     }
 
-    ImageArray build_image_array_16bit(const std::vector<std::uint16_t>& buffer,
-                                        int out_width, int out_height,
-                                        int actual_width, int actual_height) const {
+    // Buffer holds out_width-stride rows at 1 (RAW8) or 2 (16-bit, little-
+    // endian native) bytes per pixel — the same stride passed as WaitImageV4's
+    // nRowPitch (M14).
+    ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, bool is_16bit, int out_width, int out_height,
+                                 int actual_width, int actual_height) const {
         ImageArray image;
         image.width = out_width;
         image.height = out_height;
@@ -1575,6 +1599,7 @@ private:
         }
         const int copy_w = std::min(out_width, actual_width > 0 ? actual_width : out_width);
         const int copy_h = std::min(out_height, actual_height > 0 ? actual_height : out_height);
+        const std::size_t bpp = is_16bit ? 2 : 1;
         image.data.assign(static_cast<std::size_t>(out_width) *
                           static_cast<std::size_t>(out_height), 0);
         for (int row = 0; row < copy_h; ++row) {
@@ -1582,8 +1607,12 @@ private:
                 std::size_t src_idx = static_cast<std::size_t>(row) *
                                       static_cast<std::size_t>(out_width) +
                                       static_cast<std::size_t>(col);
-                if (src_idx < buffer.size()) {
-                    image.data[src_idx] = static_cast<std::int32_t>(buffer[src_idx]);
+                std::size_t byte_idx = src_idx * bpp;
+                if (byte_idx + bpp <= buffer.size()) {
+                    image.data[src_idx] =
+                        is_16bit ? static_cast<std::int32_t>(static_cast<std::uint16_t>(buffer[byte_idx]) |
+                                                             (static_cast<std::uint16_t>(buffer[byte_idx + 1]) << 8))
+                                 : static_cast<std::int32_t>(buffer[byte_idx]);
                 }
             }
         }

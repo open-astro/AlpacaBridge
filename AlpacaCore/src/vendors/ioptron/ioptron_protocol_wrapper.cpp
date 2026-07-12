@@ -28,6 +28,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -783,6 +784,23 @@ std::string strip_status_prefix(const std::string& response) {
     return response.substr(sign_pos);
 }
 
+// Parse a decimal integer field from a device response. A raw std::stoll/stoi
+// on a garbled response throws std::invalid_argument/std::out_of_range, which
+// escapes the Alpaca error mapping — convert to AlpacaException instead.
+int64_t parse_int64_field(const std::string& text, const char* context) {
+    try {
+        std::size_t consumed = 0;
+        int64_t value = std::stoll(text, &consumed);
+        if (consumed == 0) {
+            throw std::invalid_argument("empty");
+        }
+        return value;
+    } catch (const std::exception&) {
+        throw AlpacaException(std::string("Invalid numeric field in mount response (") + context + "): \"" + text +
+                              "\"");
+    }
+}
+
 } // namespace
 
 // PIMPL implementation class
@@ -819,8 +837,12 @@ public:
         ALPACA_LOG_INFO("iOptron", "Got mutex lock");
         
         if (connected_) {
-            ALPACA_LOG_INFO("iOptron", "Already connected, disconnecting first");
-            disconnect_locked();  // already holding mutex_ — must not re-lock
+            // The protocol wrapper is a per-vendor singleton: a second device
+            // connecting through it would silently steal/tear down the first
+            // device's connection. Refuse instead.
+            throw AlpacaException(
+                "Only one iOptron mount per bridge: the shared iOptron "
+                "protocol wrapper is already connected");
         }
         
         ALPACA_LOG_INFO("iOptron", "Connection type: " + std::string(info.type == ConnectionType::Serial ? "Serial" : "Network"));
@@ -1226,34 +1248,70 @@ private:
         
         return true;
 #else
+        constexpr int kConnectTimeoutMs = 7000;
         socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (socket_fd_ < 0) {
             return false;
         }
-        
+
         sockaddr_in addr{};
         std::memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
-        
-        // Resolve hostname
-        struct hostent* host_entry = gethostbyname(host.c_str());
-        if (host_entry == nullptr) {
+
+        // Resolve hostname — getaddrinfo is the reentrant replacement for
+        // gethostbyname (mirrors the Windows branch above).
+        addrinfo hints{};
+        std::memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        addrinfo* result = nullptr;
+        if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || !result) {
             close(socket_fd_);
             socket_fd_ = -1;
             return false;
         }
-        
-        addr.sin_addr = *((struct in_addr*)host_entry->h_addr);
-        
-        if (::connect(socket_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
+        freeaddrinfo(result);
+
+        // Non-blocking connect with a bounded poll timeout: this runs under the
+        // driver mutex, and a bare blocking connect() to an unreachable host
+        // would stall every GET (and disconnect) for the full OS TCP timeout
+        // (~127 s). Same pattern as the network prober above.
+        if (!util::set_nonblocking(socket_fd_)) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+            return false;
+        }
+        int rc = ::connect(socket_fd_, (struct sockaddr*)&addr, sizeof(addr));
+        if (rc < 0 && errno != EINPROGRESS) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+            return false;
+        }
+        if (rc < 0) {
+            struct pollfd pfd {};
+            pfd.fd = socket_fd_;
+            pfd.events = POLLOUT;
+            int poll_rc = poll(&pfd, 1, kConnectTimeoutMs);
+            int sock_err = 0;
+            socklen_t len = sizeof(sock_err);
+            if (poll_rc <= 0 || getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &sock_err, &len) != 0 || sock_err != 0) {
+                close(socket_fd_);
+                socket_fd_ = -1;
+                return false;
+            }
+        }
+        // Restore blocking mode for the synchronous request/response I/O below;
+        // a stuck-non-blocking fd would make every recv spin with EAGAIN.
+        if (!util::clear_nonblocking(socket_fd_)) {
             close(socket_fd_);
             socket_fd_ = -1;
             return false;
         }
 
         configure_network_timeouts();
-        
+
         return true;
 #endif
     }
@@ -1464,7 +1522,7 @@ public:
         if (str.empty()) return 0;
         bool negative = (str[0] == '-');
         size_t start = (str[0] == '-' || str[0] == '+') ? 1 : 0;
-        return (negative ? -1 : 1) * std::stoll(str.substr(start));
+        return (negative ? -1 : 1) * parse_int64_field(str.substr(start), "signed field");
     }
     
     // Helper: Format signed integer to string with sign
@@ -1578,8 +1636,8 @@ Position iOptronProtocolWrapper::get_position() {
     std::string ra_str = response.substr(9, 9);   // 9 digits
     
     int64_t dec_value = pimpl_->parse_signed_int(dec_str);
-    int64_t ra_value = std::stoll(ra_str);
-    
+    int64_t ra_value = parse_int64_field(ra_str, ":GEP RA");
+
     Position pos;
     pos.dec_degrees = pimpl_->ioptron_format_to_dec(dec_value);
     pos.ra_hours = pimpl_->ioptron_format_to_ra(ra_value);
@@ -1606,8 +1664,8 @@ AltAz iOptronProtocolWrapper::get_alt_az() {
     std::string az_str = response.substr(9, 9);   // 9 digits
     
     int64_t alt_value = pimpl_->parse_signed_int(alt_str);
-    int64_t az_value = std::stoll(az_str);
-    
+    int64_t az_value = parse_int64_field(az_str, ":GAC azimuth");
+
     AltAz altaz;
     altaz.altitude_degrees = pimpl_->ioptron_format_to_dec(alt_value);
     altaz.azimuth_degrees = pimpl_->ioptron_format_to_dec(az_value);
@@ -1661,7 +1719,7 @@ SiteInfo iOptronProtocolWrapper::get_site_info() {
     
     // Parse latitude (next 8 digits, but stored as lat + 90 degrees)
     std::string lat_str = gls_response.substr(9, 8);
-    int64_t lat_offset = std::stoll(lat_str);
+    int64_t lat_offset = parse_int64_field(lat_str, ":GLS latitude");
     // Convert back: stored value = lat + 90 degrees
     double lat_arcsec = (lat_offset / 100.0) - (90.0 * 3600.0);
     site.latitude_degrees = lat_arcsec / 3600.0;
@@ -1690,10 +1748,10 @@ AltAz iOptronProtocolWrapper::get_park_position() {
     
     std::string alt_str = response.substr(0, 8);
     std::string az_str = response.substr(8, 9);
-    
-    int64_t alt_value = std::stoll(alt_str);
-    int64_t az_value = std::stoll(az_str);
-    
+
+    int64_t alt_value = parse_int64_field(alt_str, ":GPC altitude");
+    int64_t az_value = parse_int64_field(az_str, ":GPC azimuth");
+
     AltAz park;
     park.altitude_degrees = pimpl_->ioptron_format_to_dec(alt_value);
     park.azimuth_degrees = pimpl_->ioptron_format_to_dec(az_value);
@@ -1730,7 +1788,7 @@ MeridianTreatment iOptronProtocolWrapper::get_meridian_treatment() {
     }
     MeridianTreatment treatment;
     treatment.behavior = response[0] - '0';
-    treatment.degrees_past = std::stoi(response.substr(1, 2));
+    treatment.degrees_past = static_cast<int>(parse_int64_field(response.substr(1, 2), ":GMT degrees"));
     return treatment;
 }
 
@@ -1853,12 +1911,21 @@ void iOptronProtocolWrapper::unpark() {
 void iOptronProtocolWrapper::set_park_position(double alt_degrees, double az_degrees) {
     int64_t alt_value = pimpl_->dec_to_ioptron_format(alt_degrees);
     int64_t az_value = pimpl_->dec_to_ioptron_format(az_degrees);
-    
-    std::string alt_cmd = ":SPH" + std::to_string(alt_value) + "#";
-    std::string az_cmd = ":SPA" + std::to_string(az_value) + "#";
-    
-    send_command(alt_cmd, false);
-    send_command(az_cmd, false);
+
+    // Protocol expects fixed-width zero-padded fields (matching :GPC's layout):
+    // :SPH takes 8 digits (park altitude, 0..90° in 0.01"), :SPA takes 9 digits
+    // (park azimuth, 0..360° in 0.01"). An unpadded to_string() produces a
+    // malformed command the mount rejects or misparses.
+    alt_value = std::clamp<int64_t>(alt_value, 0, 32400000);
+    az_value = std::clamp<int64_t>(az_value, 0, 129600000);
+
+    std::ostringstream alt_cmd;
+    alt_cmd << ":SPH" << std::setfill('0') << std::setw(8) << alt_value << "#";
+    std::ostringstream az_cmd;
+    az_cmd << ":SPA" << std::setfill('0') << std::setw(9) << az_value << "#";
+
+    send_command(alt_cmd.str(), false);
+    send_command(az_cmd.str(), false);
 }
 
 // Home position commands
@@ -1940,8 +2007,8 @@ std::chrono::system_clock::time_point iOptronProtocolWrapper::get_utc_time() {
     int tz_offset_minutes = static_cast<int>(pimpl_->parse_signed_int(tz_str));
     bool dst_observed = (response[4] == '1');
     std::string time_digits = response.substr(5);
-    int64_t ms_since_j2000 = std::stoll(time_digits);
-    
+    int64_t ms_since_j2000 = parse_int64_field(time_digits, ":GUT time");
+
     auto j2000 = std::chrono::system_clock::time_point(
         std::chrono::seconds(946728000));  // 2000-01-01 12:00:00 UTC
     auto raw_time = j2000 + std::chrono::milliseconds(ms_since_j2000);
@@ -2032,7 +2099,7 @@ double iOptronProtocolWrapper::get_custom_tracking_rate() {
     
     // Response is nnnnn# representing n.nnnn × sidereal
     // e.g., "10000" = 1.0000, "12000" = 1.2000
-    int value = std::stoi(response);
+    int value = static_cast<int>(parse_int64_field(response, ":GTR rate"));
     return value / 10000.0;
 }
 
@@ -2059,10 +2126,10 @@ std::pair<double, double> iOptronProtocolWrapper::get_guide_rates() {
     // Response is nnnn#: first 2 digits = RA rate (0.nn), last 2 = Dec rate (0.nn)
     std::string ra_str = response.substr(0, 2);
     std::string dec_str = response.substr(2, 2);
-    
-    double ra_rate = std::stod("0." + ra_str);
-    double dec_rate = std::stod("0." + dec_str);
-    
+
+    double ra_rate = static_cast<double>(parse_int64_field(ra_str, ":AG RA rate")) / 100.0;
+    double dec_rate = static_cast<double>(parse_int64_field(dec_str, ":AG Dec rate")) / 100.0;
+
     // Suppress ABI change warning for std::pair return (C++14 vs C++17)
     #if defined(__GNUC__) && !defined(_MSC_VER)
     #pragma GCC diagnostic push

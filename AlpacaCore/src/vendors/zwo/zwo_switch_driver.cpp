@@ -189,7 +189,7 @@ public:
     bool get_can_write(int id) const override {
         validate_switch_id(id);
         ensure_connected();
-        const auto& caps = dew_caps_or_throw();
+        const auto caps = dew_caps_or_throw();
         return caps.is_writable;
     }
 
@@ -234,7 +234,7 @@ public:
     void set_switch_value(int id, double value) override {
         validate_switch_id(id);
         ensure_connected();
-        const auto& caps = dew_caps_or_throw();
+        const auto caps = dew_caps_or_throw();
         if (!caps.is_writable) {
             throw AlpacaException("Dew heater is read-only", AlpacaError::InvalidOperation);
         }
@@ -314,7 +314,10 @@ private:
         }
     }
 
-    const ZWOControlCaps& dew_caps_or_throw() const {
+    // Return by VALUE: a reference into the mutex-guarded optional dangles as
+    // soon as the lock releases if a concurrent disconnect .reset()s it —
+    // same fix as the camera's control-caps accessor (issue #116).
+    ZWOControlCaps dew_caps_or_throw() const {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!dew_caps_.has_value()) {
             throw AlpacaException("Dew heater not supported", AlpacaError::NotImplemented);

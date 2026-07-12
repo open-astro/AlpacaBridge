@@ -74,40 +74,40 @@ override_dh_auto_install:
 	echo '/usr/lib/alpacabridge' > $(STAGING)/etc/ld.so.conf.d/alpacabridge.conf
 	chmod 644 $(STAGING)/etc/ld.so.conf.d/alpacabridge.conf
 
-	# --- QHY firmware files ---
-	install -d $(STAGING)/lib/firmware/qhy
-	cp -a $(QHY_SDK_DIR)/lib/firmware/qhy/. $(STAGING)/lib/firmware/qhy/
+	# --- QHY firmware files (usr-merge: /usr/lib, never aliased /lib) ---
+	install -d $(STAGING)/usr/lib/firmware/qhy
+	cp -a $(QHY_SDK_DIR)/lib/firmware/qhy/. $(STAGING)/usr/lib/firmware/qhy/
 
 	# --- QHY fxload (FX3-capable, replaces system fxload) ---
 	install -D -m 755 $(QHY_SDK_DIR)/sbin/fxload \
 	  $(STAGING)/usr/sbin/fxload
 
-	# --- Udev rules (one copy per vendor) ---
-	install -d $(STAGING)/lib/udev/rules.d
+	# --- Udev rules (one copy per vendor; usr-merge: /usr/lib, never aliased /lib) ---
+	install -d $(STAGING)/usr/lib/udev/rules.d
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/asi.rules \
-	  $(STAGING)/lib/udev/rules.d/
+	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/ZWO/CAA/lib/caa.rules \
-	  $(STAGING)/lib/udev/rules.d/
+	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/eaf.rules \
-	  $(STAGING)/lib/udev/rules.d/
+	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/ZWO/EFW/lib/efw.rules \
-	  $(STAGING)/lib/udev/rules.d/
+	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
 	  $(QHY_SDK_DIR)/lib/udev/rules.d/85-qhyccd.rules \
-	  $(STAGING)/lib/udev/rules.d/
+	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/SVBONY/90-ckusb.rules \
-	  $(STAGING)/lib/udev/rules.d/
+	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk.20260128/linux/udev/99-toupcam.rules \
-	  $(STAGING)/lib/udev/rules.d/
+	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/udev/99-player_one_astronomy.rules \
-	  $(STAGING)/lib/udev/rules.d/
+	  $(STAGING)/usr/lib/udev/rules.d/
 	# ASIAIR Plus (RK3568): /dev/pwm-gpio-misc is created root-only by ZWO's
 	# pwm_gpio.ko; this rule opens it to the gpio group (postinst guarantees
 	# the group exists and enrolls the service user). The shell installers
@@ -115,18 +115,21 @@ override_dh_auto_install:
 	# missed it, leaving the RK3568 switch EACCES-dead on a stock-kernel box.
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/ZWO/asiair-plus/99-zwo-asiair-plus.rules \
-	  $(STAGING)/lib/udev/rules.d/
+	  $(STAGING)/usr/lib/udev/rules.d/
 
 	# --- Web UI assets ---
 	install -d $(STAGING)/usr/share/alpacabridge/web
 	cp -a $(CURDIR)/AlpacaHTTP/web/. $(STAGING)/usr/share/alpacabridge/web/
 
-	# --- Default device configuration (empty registry — populated at runtime) ---
-	install -d $(STAGING)/etc/alpacabridge
-	echo '[]' > $(STAGING)/etc/alpacabridge/registered_devices.json
-	chmod 644 $(STAGING)/etc/alpacabridge/registered_devices.json
-	# Symlink web UI into working directory so the server can find it
-	ln -sf /usr/share/alpacabridge/web $(STAGING)/etc/alpacabridge/web
+	# --- Runtime state directory (/var/lib, NOT /etc) ---
+	# The state file (config/registered_devices.json) is deliberately NOT
+	# shipped in the package: files under /var/lib are not conffiles, so a
+	# shipped copy would clobber user state on every upgrade. postinst creates
+	# it (and migrates any pre-3.0.1 /etc/alpacabridge state) instead.
+	install -d $(STAGING)/var/lib/alpacabridge
+	# Symlink web UI into the working directory for the server's CWD-relative
+	# lookup (it also falls back to /usr/share/alpacabridge/web directly).
+	ln -sf /usr/share/alpacabridge/web $(STAGING)/var/lib/alpacabridge/web
 
 override_dh_auto_clean:
 	rm -rf $(BUILD_DIR)

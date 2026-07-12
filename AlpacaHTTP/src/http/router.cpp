@@ -1552,11 +1552,20 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
     try {
         load_persisted_devices();
 
-        auto find_config = [this](const std::string& device_type, int device_number) -> const nlohmann::json* {
+        // Snapshot under the mutex so the iteration below (which calls into
+        // the device registry) never races configure/remove handlers.
+        std::vector<nlohmann::json> persisted_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            persisted_snapshot = persisted_devices_;
+        }
+
+        auto find_config = [&persisted_snapshot](const std::string& device_type,
+                                                 int device_number) -> const nlohmann::json* {
             std::string target_type = device_type;
             std::transform(target_type.begin(), target_type.end(), target_type.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            for (const auto& entry : persisted_devices_) {
+            for (const auto& entry : persisted_snapshot) {
                 std::string entry_type = entry.value("deviceType", "");
                 std::transform(entry_type.begin(), entry_type.end(), entry_type.begin(),
                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1611,7 +1620,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
             devices.push_back(device);
         }
 
-        for (const auto& entry : persisted_devices_) {
+        for (const auto& entry : persisted_snapshot) {
             std::string ptype = entry.value("deviceType", "");
             int pnum = entry.value("deviceNumber", -1);
             bool already_listed = false;
@@ -5294,42 +5303,74 @@ Response Router::handle_static_file(const Request& request) {
         return response;
     }
 
-    // Extract filename from path (e.g., web/index.html -> index.html)
-    std::string filename = file_path;
-    size_t web_pos = file_path.find("web/");
-    if (web_pos != std::string::npos) {
-        filename = file_path.substr(web_pos + 4); // Skip "web/" (4 characters)
+    // Security: reject any path containing a ".." segment (path traversal).
+    // Checked on the raw request path so "web/../../etc/passwd" never reaches
+    // the filesystem lookups below.
+    {
+        const std::filesystem::path requested(file_path);
+        for (const auto& segment : requested) {
+            if (segment == "..") {
+                response.set_status(404, "Not Found");
+                response.set_body("File not found");
+                return response;
+            }
+        }
     }
-    
+
+    // Extract filename from path (e.g., web/index.html -> index.html)
+    std::string filename = file_path.substr(4);  // Skip leading "web/" (4 characters)
+
     // Try multiple possible locations for web files
-    std::vector<std::string> possible_paths = {
-        "web/" + filename,                    // Current directory
-        "../web/" + filename,                 // Parent directory (if running from build/)
-        "../../web/" + filename,              // Two levels up
-        "../AlpacaHTTP/web/" + filename,     // From build directory
-        "AlpacaHTTP/web/" + filename         // Alternative location
+    std::vector<std::string> possible_roots = {
+        "web",                         // Current directory
+        "../web",                      // Parent directory (if running from build/)
+        "../../web",                   // Two levels up
+        "../AlpacaHTTP/web",           // From build directory
+        "AlpacaHTTP/web",              // Alternative location
+        "/usr/share/alpacabridge/web"  // Packaged install (.deb)
     };
-    
+
     std::ifstream file;
     std::string full_path;
     bool found = false;
-    
-    for (const auto& path : possible_paths) {
-        file.open(path, std::ios::binary);
+
+    for (const auto& root : possible_roots) {
+        // Security: canonicalize and confine the resolved path under the web
+        // root; symlinks or residual traversal escaping the root are rejected.
+        std::error_code ec;
+        const auto canonical_root = std::filesystem::weakly_canonical(root, ec);
+        if (ec) {
+            continue;
+        }
+        const auto canonical_path = std::filesystem::weakly_canonical(std::filesystem::path(root) / filename, ec);
+        if (ec) {
+            continue;
+        }
+        const auto root_str = canonical_root.string();
+        const auto path_str = canonical_path.string();
+        if (path_str.size() <= root_str.size() || !path_str.starts_with(root_str) ||
+            path_str[root_str.size()] != std::filesystem::path::preferred_separator) {
+            continue;
+        }
+        file.open(canonical_path, std::ios::binary);
         if (file.is_open()) {
-            full_path = path;
+            full_path = path_str;
             found = true;
             break;
         }
         file.close();
     }
-    
+
     if (!found) {
         response.set_status(404, "Not Found");
         std::string error_msg = "File not found: " + file_path + "\n";
         error_msg += "Searched in:\n";
-        for (const auto& path : possible_paths) {
-            error_msg += "  - " + path + "\n";
+        for (const auto& root : possible_roots) {
+            error_msg += "  - ";
+            error_msg += root;
+            error_msg += "/";
+            error_msg += filename;
+            error_msg += "\n";
         }
         response.set_body(error_msg);
         return response;
@@ -5554,9 +5595,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         
         bool was_registered = registry.unregister_device(device_type, device_number);
 
-        std::size_t before = persisted_devices_.size();
-        remove_persisted_device(vendor, device_type_str, device_number);
-        bool was_persisted = persisted_devices_.size() < before;
+        bool was_persisted = remove_persisted_device(vendor, device_type_str, device_number);
 
         if (was_registered || was_persisted) {
             if (was_persisted) {
@@ -7360,6 +7399,7 @@ void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
         return;
     }
 
+    std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
     for (auto& existing : persisted_devices_) {
         if (existing.value("vendor", "") == config.value("vendor", "") &&
             existing.value("deviceType", "") == config.value("deviceType", "") &&
@@ -7372,11 +7412,13 @@ void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
     persisted_devices_.push_back(config);
 }
 
-void Router::remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number) {
+bool Router::remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number) {
     if (device_type.empty() || device_number < 0) {
-        return;
+        return false;
     }
 
+    std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+    std::size_t before = persisted_devices_.size();
     persisted_devices_.erase(
         std::remove_if(
             persisted_devices_.begin(),
@@ -7393,6 +7435,7 @@ void Router::remove_persisted_device(const std::string& vendor, const std::strin
             }),
         persisted_devices_.end()
     );
+    return persisted_devices_.size() < before;
 }
 
 void Router::save_persisted_devices() const {
@@ -7406,7 +7449,11 @@ void Router::save_persisted_devices() const {
             throw std::runtime_error("Unable to open " + kPersistedDevicesFile.string() + " for writing");
         }
 
-        nlohmann::json payload = persisted_devices_;
+        nlohmann::json payload;
+        {
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            payload = persisted_devices_;
+        }
         out << payload.dump(4);
         out.flush();
     } catch (const std::exception& e) {
@@ -7415,45 +7462,54 @@ void Router::save_persisted_devices() const {
 }
 
 void Router::load_persisted_devices() {
-    if (persisted_devices_loaded_) {
-        return;
-    }
-
-    persisted_devices_loaded_ = true;
-
-    try {
-        if (!std::filesystem::exists(kPersistedDevicesFile)) {
-            persisted_devices_.clear();
+    // Read the file and populate persisted_devices_ under the mutex; register
+    // the loaded devices afterwards so the lock is never held across
+    // driver-registry calls (which may block on hardware).
+    nlohmann::json payload = nlohmann::json::array();
+    {
+        std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+        if (persisted_devices_loaded_) {
             return;
         }
 
-        std::ifstream in(kPersistedDevicesFile);
-        if (!in) {
-            throw std::runtime_error("Unable to open " + kPersistedDevicesFile.string() + " for reading");
-        }
+        persisted_devices_loaded_ = true;
 
-        nlohmann::json payload;
-        in >> payload;
-
-        if (!payload.is_array()) {
-            throw std::runtime_error("Persisted device file must contain a JSON array");
-        }
-
-        persisted_devices_.clear();
-        for (const auto& entry : payload) {
-            auto sanitized = sanitize_device_config(entry);
-            persisted_devices_.push_back(sanitized);
-            std::string error_message;
-            try {
-                if (!register_device_from_config(entry, error_message)) {
-                    util::log_warning("Skipping persisted device: " + error_message);
-                }
-            } catch (const std::exception& e) {
-                util::log_error("Failed to load persisted device: " + std::string(e.what()));
+        try {
+            if (!std::filesystem::exists(kPersistedDevicesFile)) {
+                persisted_devices_.clear();
+                return;
             }
+
+            std::ifstream in(kPersistedDevicesFile);
+            if (!in) {
+                throw std::runtime_error("Unable to open " + kPersistedDevicesFile.string() + " for reading");
+            }
+
+            in >> payload;
+
+            if (!payload.is_array()) {
+                throw std::runtime_error("Persisted device file must contain a JSON array");
+            }
+
+            persisted_devices_.clear();
+            for (const auto& entry : payload) {
+                persisted_devices_.push_back(sanitize_device_config(entry));
+            }
+        } catch (const std::exception& e) {
+            util::log_error("Failed to load registered devices: " + std::string(e.what()));
+            return;
         }
-    } catch (const std::exception& e) {
-        util::log_error("Failed to load registered devices: " + std::string(e.what()));
+    }
+
+    for (const auto& entry : payload) {
+        std::string error_message;
+        try {
+            if (!register_device_from_config(entry, error_message)) {
+                util::log_warning("Skipping persisted device: " + error_message);
+            }
+        } catch (const std::exception& e) {
+            util::log_error("Failed to load persisted device: " + std::string(e.what()));
+        }
     }
 }
 

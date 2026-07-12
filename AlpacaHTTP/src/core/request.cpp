@@ -106,13 +106,25 @@ bool Request::parse(std::string_view raw_request) {
     // Parse body (if present)
     if (has_header("content-length")) {
         auto content_length_str = get_header("content-length");
+        unsigned long content_length = 0;
         try {
-            auto content_length = std::stoul(content_length_str);
-            body_.resize(content_length);
-            iss.read(&body_[0], static_cast<std::streamsize>(content_length));
+            std::size_t consumed = 0;
+            content_length = std::stoul(content_length_str, &consumed);
+            if (consumed != content_length_str.size()) {
+                return false;  // Trailing garbage in Content-Length
+            }
         } catch (...) {
-            // Invalid content-length
+            return false;  // Invalid or out-of-range Content-Length
         }
+        // Never trust the header for the allocation size: cap at the maximum
+        // body size (see kMaxBodyBytes) so a hostile Content-Length cannot
+        // force a multi-gigabyte resize.
+        if (content_length > kMaxBodyBytes) {
+            return false;
+        }
+        body_.resize(content_length);
+        iss.read(&body_[0], static_cast<std::streamsize>(content_length));
+        body_.resize(static_cast<std::size_t>(std::max<std::streamsize>(iss.gcount(), 0)));
     }
 
     return true;
