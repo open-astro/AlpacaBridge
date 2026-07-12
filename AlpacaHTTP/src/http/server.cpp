@@ -327,6 +327,12 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         auto pos = headers.find("\r\ncontent-length:");
         if (pos != std::string::npos) {
+            // Reject duplicate Content-Length headers outright (RFC 7230 §3.3.2)
+            // instead of one layer using the first and another the last.
+            if (headers.find("\r\ncontent-length:", pos + 1) != std::string::npos) {
+                send_error(socket_fd, 400, "Bad Request", "Duplicate Content-Length");
+                return false;
+            }
             pos += std::strlen("\r\ncontent-length:");
             auto eol = headers.find("\r\n", pos);
             std::string value = headers.substr(pos, eol - pos);
@@ -370,8 +376,11 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
 void Server::handle_connection(util::SocketHandle socket_fd) {
     // Bound how long a slow or stalled peer can hold this worker (slowloris)
     if (!util::socket_set_timeouts(socket_fd, kSocketTimeoutSeconds)) {
-        util::log_warning("Failed to set socket timeouts: " +
+        // Fail closed: without recv/send timeouts this connection could pin a
+        // worker thread forever (the slowloris hole the timeouts exist to plug).
+        util::log_warning("Dropping connection, failed to set socket timeouts: " +
                           util::socket_error_message(util::socket_get_last_error()));
+        return;
     }
 
     // Read request (headers, then exactly Content-Length body bytes)

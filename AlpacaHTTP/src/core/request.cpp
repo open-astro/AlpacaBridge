@@ -97,6 +97,11 @@ bool Request::parse(std::string_view raw_request) {
                 } else {
                     headers_[key] = value;
                 }
+            } else if (key == "content-length" && headers_.count(key) != 0) {
+                // Duplicate Content-Length: reject outright (RFC 7230 §3.3.2)
+                // so this layer can never disagree with the server's socket
+                // read loop about which value governs the body length.
+                return false;
             } else {
                 headers_[key] = value;
             }

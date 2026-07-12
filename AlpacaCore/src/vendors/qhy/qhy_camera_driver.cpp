@@ -703,13 +703,19 @@ public:
                                 gain > static_cast<int>(range.max))) {
             throw AlpacaException("Gain value out of range", AlpacaError::InvalidValue);
         }
-        {
-            // After the InvalidValue range check (validation precedes state checks).
-            std::lock_guard<std::mutex> lock(mutex_);
-            ensure_not_exposing_locked();
+        // After the InvalidValue range check (validation precedes state checks).
+        // Hold mutex_ across the register write itself: releasing it between
+        // ensure_not_exposing_locked() and set_param would let a racing
+        // start_exposure begin integration in the gap and land this write
+        // mid-frame — the exact race the guard exists to close. The id is
+        // read inline (camera_id_value() would re-lock and self-deadlock).
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_not_exposing_locked();
+        const std::string id = camera_id_.value_or("");
+        if (id.empty()) {
+            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
-        QHYSDKWrapper::instance().set_param(camera_id_value(), control::GAIN,
-                                            static_cast<double>(gain));
+        QHYSDKWrapper::instance().set_param(id, control::GAIN, static_cast<double>(gain));
     }
 
     int get_gain_max() const override {
@@ -874,12 +880,14 @@ public:
                                 offset > static_cast<int>(range.max))) {
             throw AlpacaException("Offset value out of range", AlpacaError::InvalidValue);
         }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ensure_not_exposing_locked();
+        // Hold mutex_ across the register write (see set_gain for rationale).
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_not_exposing_locked();
+        const std::string id = camera_id_.value_or("");
+        if (id.empty()) {
+            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
-        QHYSDKWrapper::instance().set_param(camera_id_value(), control::OFFSET,
-                                            static_cast<double>(offset));
+        QHYSDKWrapper::instance().set_param(id, control::OFFSET, static_cast<double>(offset));
     }
 
     int get_offset_max() const override {
@@ -946,16 +954,19 @@ public:
 
     void set_readout_mode(int mode) override {
         ensure_connected();
-        std::string id;
-        int modes_size = 0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            id = camera_id_.value_or("");
-            modes_size = static_cast<int>(readout_modes_.size());
-            if (mode < 0 || mode >= modes_size) {
-                throw AlpacaException("Invalid readout mode index", AlpacaError::InvalidValue);
-            }
-            ensure_not_exposing_locked();
+        // Hold mutex_ across the whole apply + geometry refresh (all fast
+        // metadata/register calls, no blocking image wait): releasing it
+        // after ensure_not_exposing_locked() would let a racing
+        // start_exposure begin integration against half-applied readout
+        // geometry (see set_gain for the rationale on the inline id read).
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (mode < 0 || mode >= static_cast<int>(readout_modes_.size())) {
+            throw AlpacaException("Invalid readout mode index", AlpacaError::InvalidValue);
+        }
+        ensure_not_exposing_locked();
+        const std::string id = camera_id_.value_or("");
+        if (id.empty()) {
+            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
         QHYSDKWrapper::instance().set_readout_mode(id, static_cast<uint32_t>(mode));
 
@@ -971,7 +982,6 @@ public:
                 ALPACA_LOG_WARN("QHY", "Failed to reset ROI after readout mode change: " +
                                 std::string(e.what()));
             }
-            std::lock_guard<std::mutex> lock(mutex_);
             readout_mode_ = mode;
             camera_info_ = updated_info;
             num_x_ = new_max_w;
@@ -979,7 +989,6 @@ public:
             start_x_ = 0;
             start_y_ = 0;
         } else {
-            std::lock_guard<std::mutex> lock(mutex_);
             readout_mode_ = mode;
         }
     }
@@ -1646,24 +1655,22 @@ private:
         if (bin_x <= 0 || bin_y <= 0) {
             throw AlpacaException("Bin value must be positive", AlpacaError::InvalidValue);
         }
-        std::string id;
-        int max_w;
-        int max_h;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ensure_not_exposing_locked();
-            id = camera_id_.value_or("");
-            max_w = static_cast<int>(camera_info_.max_width)  / bin_x;
-            max_h = static_cast<int>(camera_info_.max_height) / bin_y;
-        }
-        // bin_is_supported calls SDK; do not call it while holding mutex_ since
-        // the temp thread can hold the SDK mutex ~10s in control_temp().
+        // Hold mutex_ across the whole check + SDK apply, like every other
+        // setter (see set_gain): a check/release/write gap would let a racing
+        // start_exposure begin integration against half-applied binning. The
+        // old "don't hold mutex_ across SDK calls, control_temp holds the SDK
+        // mutex ~10s" rationale is stale — control_temp snapshots the handle
+        // and releases the wrapper mutex before its blocking PID call, so
+        // these are all fast register writes with brief wrapper-mutex holds.
+        std::lock_guard<std::mutex> lock(mutex_);
+        const std::string id = camera_id_.value_or("");
+        const int max_w = static_cast<int>(camera_info_.max_width) / bin_x;
+        const int max_h = static_cast<int>(camera_info_.max_height) / bin_y;
         if (!bin_is_supported(id, bin_x)) {
             throw AlpacaException("Bin value not supported: " + std::to_string(bin_x),
                                   AlpacaError::InvalidValue);
         }
-        // Do not hold mutex_ across SDK calls: SDK uses a single internal mutex
-        // and temp thread can hold it ~10s in control_temp(), stalling all other requests.
+        ensure_not_exposing_locked();
         try {
             QHYSDKWrapper::instance().set_bin_mode(id, static_cast<uint32_t>(bin_x),
                                                    static_cast<uint32_t>(bin_y));
@@ -1673,7 +1680,6 @@ private:
             ALPACA_LOG_WARN("QHY", "Failed to apply binning: " + std::string(e.what()));
             return;
         }
-        std::lock_guard<std::mutex> lock(mutex_);
         bin_x_ = bin_x;
         bin_y_ = bin_y;
         num_x_ = max_w;
