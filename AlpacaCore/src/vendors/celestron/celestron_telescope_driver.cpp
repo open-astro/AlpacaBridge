@@ -1538,7 +1538,7 @@ private:
     void check_not_parked_locked(const char* operation) const {
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
-                                  AlpacaError::InvalidOperation);
+                                  AlpacaError::InvalidWhileParked);
         }
     }
 

@@ -575,6 +575,9 @@ public:
     void set_tracking(bool tracking) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        if (tracking) {
+            check_not_parked_locked("Tracking");
+        }
         auto& protocol = SynScanProtocolWrapper::instance();
         if (tracking) {
             // TODO: Confirm correct SynScan tracking mode for specific mount types.
@@ -1344,7 +1347,7 @@ private:
     void check_not_parked_locked(const char* operation) const {
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
-                                  AlpacaError::InvalidOperation);
+                                  AlpacaError::InvalidWhileParked);
         }
     }
 
