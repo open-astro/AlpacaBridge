@@ -1500,7 +1500,10 @@ private:
         }
         return false;
 #else
-        ssize_t bytes_read = read(serial_fd_, &ch, 1);
+        // Bounded blocking read (VMIN=0/VTIME=1 -> <=100 ms) intentionally
+        // under the wrapper mutex for transaction atomicity — the documented
+        // protocol-wrapper pattern (see ci_preflight scan-build note).
+        ssize_t bytes_read = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
         return bytes_read == 1;
 #endif
     }
@@ -1962,7 +1965,7 @@ bool iOptronProtocolWrapper::park(bool zero_distance_workaround) {
             constexpr double kEpsDeg = 0.01;  // 36 arcsec; GAC/GPC agree to 0.01"
             zero_distance = std::fabs(current.altitude_degrees - park_pos.altitude_degrees) < kEpsDeg &&
                             std::fabs(current.azimuth_degrees - park_pos.azimuth_degrees) < kEpsDeg;
-        } catch (const std::exception&) {
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
             // Position unavailable — proceed with a plain park attempt.
         }
 

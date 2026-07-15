@@ -1010,7 +1010,8 @@ public:
                     double guide_fraction = kDefaultGuideRateFraction;
                     try {
                         guide_fraction = protocol.get_guide_rates().first;
-                    } catch (const std::exception&) {
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                        // Unreadable guide rate — fall back to the default fraction.
                     }
                     if (guide_fraction < 0.1 || guide_fraction > 1.0) {
                         guide_fraction = kDefaultGuideRateFraction;
@@ -1033,7 +1034,7 @@ public:
                     position_cache_valid_ = false;
                     return true;
                 }
-            } catch (const std::exception&) {
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
                 // Best-effort trim; fall through and report slew complete.
             }
         }
@@ -2031,7 +2032,7 @@ private:
             if (cached_status_.is_parked) {
                 park_finalize_pending_ = false;
             }
-        } catch (const std::exception&) {
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
             // Best-effort — leave the flag armed and retry on the next refresh.
         }
     }
