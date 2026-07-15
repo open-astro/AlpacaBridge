@@ -228,6 +228,12 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_persisted_devices_concurrency alpacahttp)
     add_test(NAME test_persisted_devices_concurrency COMMAND test_persisted_devices_concurrency)
     
+    # Socket-level tests for the Server request-read path (read_request), which
+    # test_routing.cpp bypasses. Covers the header-size (431) boundary (#129).
+    add_executable(test_server_socket tests/test_server_socket.cpp)
+    target_link_libraries(test_server_socket alpacahttp)
+    add_test(NAME test_server_socket COMMAND test_server_socket)
+
     add_executable(test_json tests/test_json.cpp)
     target_link_libraries(test_json alpacahttp)
     add_test(NAME test_json COMMAND test_json)

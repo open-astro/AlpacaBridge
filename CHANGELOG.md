@@ -41,7 +41,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
 
 ### Changed
 - **debian packaging** (audit): udev rules and firmware move to `/usr/lib/...` (Debian 13 usr-merge); `Conflicts/Replaces: fxload` declared for the bundled `fxload`; postinst `chown` no longer follows the packaged web symlink onto dpkg-owned `/usr/share` files; `debian/control` description fixed from `localhost:11111` to port 6800; AGPL headers added to the web UI assets (`app.js`, `style.css`, `index.html`); dead `vcpkg.json` removed.
-- **Tests**: router-level path-traversal and `Content-Length`-bound regression tests; concurrency test for `persisted_devices_`; TSan `[stress]` coverage extended to the telescope drivers where the worst detached-thread bugs lived.
+- **Tests**: router-level path-traversal and `Content-Length`-bound regression tests; concurrency test for `persisted_devices_`; TSan `[stress]` coverage extended to the telescope drivers where the worst detached-thread bugs lived; socket-level regression test for the HTTP header-size (431) boundary (#129) — `test_server_socket.cpp` drives a real `Server` over TCP with the `\r\n\r\n` terminator split across writes (the exact path #128 fixed), which `test_routing.cpp` cannot reach because it feeds `Router::route` directly.
 
 ## [3.0.0] - 2026-07-06
 
