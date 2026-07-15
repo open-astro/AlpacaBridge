@@ -18,7 +18,6 @@
 
 #include <alpacahttp/config.h>
 #include <alpacahttp/server.h>
-
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
