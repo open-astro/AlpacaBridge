@@ -922,7 +922,24 @@ public:
         if (full_command.empty() || full_command.back() != '#') {
             full_command += "#";
         }
-        
+
+        // Discard any stale bytes (e.g. a blind-command ack that arrived
+        // after its drain window closed on a busy mount) before sending —
+        // anything in the receive buffer before our write is by definition
+        // not this command's response, and a leaked byte prepended to the
+        // response garbles fixed-offset parsing (:GPC/:GLS field slicing).
+        if (connection_type_ == ConnectionType::Serial) {
+#ifndef _WIN32
+            if (serial_fd_ >= 0) {
+                tcflush(serial_fd_, TCIFLUSH);
+            }
+#else
+            if (serial_handle_ != INVALID_HANDLE_VALUE) {
+                PurgeComm(serial_handle_, PURGE_RXCLEAR);
+            }
+#endif
+        }
+
         // Send command
         if (!write_data(full_command)) {
             throw AlpacaException("Failed to send command to mount");
@@ -964,12 +981,38 @@ public:
             throw AlpacaException("Failed to send command to mount");
         }
 
-        // Over TCP, "blind" commands still produce acknowledgment bytes.
-        // Drain them to prevent stale data from accumulating in the receive
-        // buffer, which overwhelms the mount's WiFi module on rapid-fire
-        // command sequences.
+        // "Blind" commands are not blind on most firmware: :SG/:SDS/:SUT/:Q/
+        // :ST/:MP/:MH all answer with a '1' acknowledgment byte (verified on
+        // HAE29C fw). Drain and discard it on BOTH transports — unread acks
+        // accumulate in the receive buffer and desync the next command's
+        // response, and closing the serial port mid-acknowledgment (ConformU's
+        // rapid connect/disconnect cycling lands ~250 ms after the clock-sync
+        // trio) can wedge the mount's serial protocol handler until the port
+        // is reopened with a flush. Firmware that genuinely does not respond
+        // (the reason these are sent blind) just costs the short wait.
         if (connection_type_ == ConnectionType::Network) {
             drain_network_stale(50);
+        } else {
+            drain_serial_stale(300);
+        }
+    }
+
+    // Wait up to wait_ms for acknowledgment bytes and discard them; once any
+    // byte has arrived, return as soon as the line goes idle (read_serial_char
+    // blocks <=100 ms per attempt via VTIME/COMMTIMEOUTS). Never throws: a
+    // silent mount is the expected case for a blind command.
+    void drain_serial_stale(int wait_ms) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+        bool got_any = false;
+        while (true) {
+            char ch;
+            if (read_serial_char(ch)) {
+                got_any = true;
+                continue;
+            }
+            if (got_any || std::chrono::steady_clock::now() >= deadline) {
+                return;
+            }
         }
     }
 
@@ -1194,6 +1237,11 @@ private:
         }
 #else
         if (serial_fd_ >= 0) {
+            // Let any queued TX bytes reach the mount and discard unread RX
+            // before closing — slamming the port shut mid-exchange is what
+            // wedges the mount under rapid connect/disconnect cycling.
+            tcdrain(serial_fd_);
+            tcflush(serial_fd_, TCIFLUSH);
             close(serial_fd_);
             serial_fd_ = -1;
         }
@@ -1452,7 +1500,10 @@ private:
         }
         return false;
 #else
-        ssize_t bytes_read = read(serial_fd_, &ch, 1);
+        // Bounded blocking read (VMIN=0/VTIME=1 -> <=100 ms) intentionally
+        // under the wrapper mutex for transaction atomicity — the documented
+        // protocol-wrapper pattern (see ci_preflight scan-build note).
+        ssize_t bytes_read = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
         return bytes_read == 1;
 #endif
     }
@@ -1897,9 +1948,35 @@ void iOptronProtocolWrapper::sync_to_coordinates() {
 }
 
 // Parking commands
-bool iOptronProtocolWrapper::park() {
+bool iOptronProtocolWrapper::park(bool zero_distance_workaround) {
+    // HAE29C firmware quirk (hardware-verified 2026-07-14): a zero-distance
+    // park — the mount already sitting exactly at its park position, e.g.
+    // freshly homed with the factory-default park position (alt = latitude,
+    // az = 0 = the zero position) — wedges the motion controller in
+    // system-status 2 ("slewing") forever. The mount is internally parked
+    // (:MP0# unparks it) but never reports status 6 and never moves. An
+    // explicit :ST0# (tracking off) after :MP1# completes the transition to
+    // status 6. Detect the case up front and finalize; a real park slew is
+    // left alone.
+    bool zero_distance = false;
+    if (zero_distance_workaround) try {
+            AltAz current = get_alt_az();
+            AltAz park_pos = get_park_position();
+            constexpr double kEpsDeg = 0.01;  // 36 arcsec; GAC/GPC agree to 0.01"
+            zero_distance = std::fabs(current.altitude_degrees - park_pos.altitude_degrees) < kEpsDeg &&
+                            std::fabs(current.azimuth_degrees - park_pos.azimuth_degrees) < kEpsDeg;
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // Position unavailable — proceed with a plain park attempt.
+        }
+
     // Some iOptron mounts go quiet while parking and never return a response.
     send_command_blind(":MP1#");
+    if (zero_distance) {
+        ALPACA_LOG_INFO("iOptron",
+                        "Park requested at the current position; sending tracking-off to finalize "
+                        "(zero-distance park firmware quirk)");
+        send_command_blind(":ST0#");
+    }
     return true;
 }
 

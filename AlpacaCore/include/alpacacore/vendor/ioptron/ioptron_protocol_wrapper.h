@@ -316,8 +316,11 @@ public:
      *
      * @return true if park accepted, false if park failed
      */
-    bool park();
-    
+    /// zero_distance_workaround: HAE29C-only — see park() impl. When true and
+    /// the mount is already at its park position, follows :MP1# with :ST0# to
+    /// finalize the otherwise-wedged park state.
+    bool park(bool zero_distance_workaround = false);
+
     /**
      * @brief Unpark the mount.
      *
