@@ -2377,7 +2377,7 @@ private:
             if (park_state_cached_.has_value() && (now - park_state_at_) <= kFastParkTtl) {
                 if (park_state_cached_.value()) {
                     throw AlpacaException(std::string(operation) + " is not allowed while parked",
-                                          AlpacaError::InvalidOperation);
+                                          AlpacaError::InvalidWhileParked);
                 }
                 return;
             }
@@ -2385,7 +2385,7 @@ private:
             // in sync by park(), unpark(), and evaluate_park_state().
             if (parked_cached_) {
                 throw AlpacaException(std::string(operation) + " is not allowed while parked",
-                                      AlpacaError::InvalidOperation);
+                                      AlpacaError::InvalidWhileParked);
             }
         }
     }
