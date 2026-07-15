@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [UNRELEASED] - 3.0.1
+## [3.0.1] - 2026-07-14
 
 Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findings and the tractable Low findings resolved. Network-authentication items were out of scope by design — ASCOM Alpaca has no auth model.
 
