@@ -118,17 +118,32 @@ protected:
         }
         const auto inflight = conn_task_.load();
         if (inflight != kConnIdle) {
-            // A request racing an in-flight task of the OPPOSITE direction
-            // must not be dropped — the newer request wins. Record the intent;
-            // it is consumed at connect entry (disconnect case) or run by the
-            // task's tail. Same-direction races are idempotent no-ops.
+            // A request racing an in-flight task must reconcile against BOTH
+            // the in-flight direction and any already-queued flag, or a third
+            // alternating request is silently dropped (review finding on the
+            // pending_connect_ mirror): disconnect running, connect queued,
+            // second disconnect arrives -> the queued connect must be
+            // cancelled, else the tail reconnects against the caller's
+            // newest instruction. Rules:
+            // - A disconnect always cancels a queued connect. It queues
+            //   itself only against an in-flight CONNECT; a running
+            //   disconnect already ends in the requested state.
+            // - A connect queues itself against an in-flight disconnect,
+            //   but never cancels a queued disconnect: a dropped disconnect
+            //   leaves hardware energized unattended (invisible, unsafe),
+            //   while a dropped connect is visible to the client
+            //   (Connected stays false) and retryable — the class's
+            //   deliberate asymmetry.
             // Holding connection_mutex_ here excludes the task tail (which
             // takes it for its whole consume/publish sequence), so a flag
             // recorded against a non-Idle state is guaranteed to be seen.
             std::lock_guard<std::mutex> pending_lock(pending_mutex_);
-            if (!connect && inflight == kConnConnect) {
-                pending_disconnect_ = true;
-            } else if (connect && inflight == kConnDisconnect) {
+            if (!connect) {
+                pending_connect_ = false;
+                if (inflight == kConnConnect) {
+                    pending_disconnect_ = true;
+                }
+            } else if (inflight == kConnDisconnect && !pending_disconnect_) {
                 pending_connect_ = true;
             }
             return;
