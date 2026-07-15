@@ -297,9 +297,7 @@ private:
                     pending_connect_ = false;
                     need_connect = !connected_now;
                 }
-                conn_task_.store(need_disconnect ? kConnDisconnect
-                                 : need_connect  ? kConnConnect
-                                                 : kConnIdle);
+                conn_task_.store(need_disconnect ? kConnDisconnect : need_connect ? kConnConnect : kConnIdle);
             }
             if (!need_disconnect && !need_connect) {
                 return;
@@ -307,12 +305,10 @@ private:
             try {
                 set_connected(need_connect);
             } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") +
-                                               (need_connect ? "connect" : "disconnect") +
+                ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") + (need_connect ? "connect" : "disconnect") +
                                                " failed: " + e.what());
             } catch (...) {
-                ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") +
-                                               (need_connect ? "connect" : "disconnect") +
+                ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") + (need_connect ? "connect" : "disconnect") +
                                                " failed: non-std exception");
             }
             last_was_connect = need_connect;

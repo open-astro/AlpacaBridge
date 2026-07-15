@@ -922,7 +922,7 @@ public:
         if (full_command.empty() || full_command.back() != '#') {
             full_command += "#";
         }
-        
+
         // Discard any stale bytes (e.g. a blind-command ack that arrived
         // after its drain window closed on a busy mount) before sending —
         // anything in the receive buffer before our write is by definition
@@ -1957,14 +1957,14 @@ bool iOptronProtocolWrapper::park(bool zero_distance_workaround) {
     // left alone.
     bool zero_distance = false;
     if (zero_distance_workaround) try {
-        AltAz current = get_alt_az();
-        AltAz park_pos = get_park_position();
-        constexpr double kEpsDeg = 0.01;  // 36 arcsec; GAC/GPC agree to 0.01"
-        zero_distance = std::fabs(current.altitude_degrees - park_pos.altitude_degrees) < kEpsDeg &&
-                        std::fabs(current.azimuth_degrees - park_pos.azimuth_degrees) < kEpsDeg;
-    } catch (const std::exception&) {
-        // Position unavailable — proceed with a plain park attempt.
-    }
+            AltAz current = get_alt_az();
+            AltAz park_pos = get_park_position();
+            constexpr double kEpsDeg = 0.01;  // 36 arcsec; GAC/GPC agree to 0.01"
+            zero_distance = std::fabs(current.altitude_degrees - park_pos.altitude_degrees) < kEpsDeg &&
+                            std::fabs(current.azimuth_degrees - park_pos.azimuth_degrees) < kEpsDeg;
+        } catch (const std::exception&) {
+            // Position unavailable — proceed with a plain park attempt.
+        }
 
     // Some iOptron mounts go quiet while parking and never return a response.
     send_command_blind(":MP1#");

@@ -1006,8 +1006,7 @@ public:
                 const double ra_err_arcsec = ra_err_hours * 15.0 * 3600.0;
                 constexpr double kTrimMinArcsec = 5.0;    // below this: on target
                 constexpr double kTrimMaxArcsec = 120.0;  // above this: not a settle error
-                if (std::fabs(ra_err_arcsec) > kTrimMinArcsec &&
-                    std::fabs(ra_err_arcsec) < kTrimMaxArcsec) {
+                if (std::fabs(ra_err_arcsec) > kTrimMinArcsec && std::fabs(ra_err_arcsec) < kTrimMaxArcsec) {
                     double guide_fraction = kDefaultGuideRateFraction;
                     try {
                         guide_fraction = protocol.get_guide_rates().first;
@@ -1017,22 +1016,19 @@ public:
                         guide_fraction = kDefaultGuideRateFraction;
                     }
                     const double trim_rate_arcsec_per_s = guide_fraction * 15.041;
-                    int duration_ms = static_cast<int>(
-                        std::fabs(ra_err_arcsec) / trim_rate_arcsec_per_s * 1000.0);
+                    int duration_ms = static_cast<int>(std::fabs(ra_err_arcsec) / trim_rate_arcsec_per_s * 1000.0);
                     duration_ms = std::clamp(duration_ms, 100, 8000);
                     // Reported RA too large -> mount is east of target -> pulse
                     // west (RA-, direction 3); too small -> east (RA+, 2).
                     const int direction = ra_err_arcsec > 0 ? 3 : 2;
-                    ALPACA_LOG_INFO("iOptron",
-                                    "GOTO settled " + std::to_string(ra_err_arcsec) +
-                                        " arcsec from RA target; pulse-guide trim " +
-                                        std::to_string(slew_refine_count_) + "/" +
-                                        std::to_string(kMaxSlewRefines) + " (" +
-                                        std::to_string(duration_ms) +
-                                        " ms, final-approach firmware quirk)");
+                    ALPACA_LOG_INFO("iOptron", "GOTO settled " + std::to_string(ra_err_arcsec) +
+                                                   " arcsec from RA target; pulse-guide trim " +
+                                                   std::to_string(slew_refine_count_) + "/" +
+                                                   std::to_string(kMaxSlewRefines) + " (" +
+                                                   std::to_string(duration_ms) + " ms, final-approach firmware quirk)");
                     protocol.pulse_guide(direction, duration_ms);
-                    slew_override_until_ = std::chrono::steady_clock::now() +
-                                           std::chrono::milliseconds(duration_ms + 500);
+                    slew_override_until_ =
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms + 500);
                     status_cache_valid_ = false;
                     position_cache_valid_ = false;
                     return true;
@@ -1615,14 +1611,12 @@ private:
     static constexpr double kSiderealSeconds = 86164.0905;
     static constexpr double kSiderealRateDegPerSec = 360.0 / kSiderealSeconds;
     static constexpr double kDefaultGuideRateFraction = 0.5;
-    
+
     // All three HAE29C firmware-quirk workarounds (wedged-park finalizer,
     // zero-distance park finalizer, GOTO refinement) are gated on the exact
     // model code so other iOptron mounts (HAE43, HEM27, ...) keep the
     // original, hardware-validated behavior.
-    bool hae29c_quirks_active() const {
-        return mount_info_.model_code == "0036";
-    }
+    bool hae29c_quirks_active() const { return mount_info_.model_code == "0036"; }
 
     void check_connected() const {
         if (!connected_) {
@@ -2041,7 +2035,7 @@ private:
             // Best-effort — leave the flag armed and retry on the next refresh.
         }
     }
-    
+
     void ensure_site_info_cached_locked(bool force_refresh = false) const {
         auto now = std::chrono::steady_clock::now();
         if (!force_refresh && site_info_valid_ && now < fast_cache_until_) {
@@ -2686,7 +2680,7 @@ private:
     mutable bool park_finalize_pending_ = false;
     mutable bool park_target_valid_ = false;
     mutable AltAz park_target_{};
-    
+
     mutable std::chrono::system_clock::time_point last_utc_set_;
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
