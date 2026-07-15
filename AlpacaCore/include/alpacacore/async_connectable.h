@@ -41,13 +41,17 @@ namespace alpacacore {
  * - A disconnect racing an in-flight connect is NEVER dropped: it is recorded
  *   (pending_disconnect_) and either consumed by the connect at entry (newer
  *   request wins, camera stays disconnected) or run by the task's tail.
- *   DELIBERATELY ASYMMETRIC: a connect racing an in-flight DISCONNECT is
- *   dropped (early return, no recording). A dropped disconnect leaves
- *   hardware energized unattended — a safety problem the user cannot see;
- *   a dropped connect leaves the device visibly disconnected, which the
- *   client observes immediately (Connected stays false) and simply retries.
- *   Mirroring the flag for connects would double the tail/entry protocol
- *   surface for a case with a trivial user-side recovery.
+ * - A connect racing an in-flight DISCONNECT is likewise never dropped: it is
+ *   recorded (pending_connect_) and run by the disconnect task's tail, with
+ *   Connecting staying true across the whole teardown+reconnect. This mirror
+ *   was originally omitted ("the client observes Connected stays false and
+ *   simply retries") — but a client that issues Connected=false, receives the
+ *   success reply, then calls Connect() is following the Alpaca spec to the
+ *   letter, and ConformU 4.4 does exactly that: the dropped connect fails its
+ *   ConnectToDevice phase ("connected without error but Connected Get
+ *   returned False"). Newer request wins in both directions.
+ *   When both flags are somehow pending, disconnect wins (hardware left
+ *   energized unattended is a safety problem; a missed connect is visible).
  * - conn_task_ only transitions to Idle inside the task's tail UNDER
  *   connection_mutex_ — the same lock every start_connection_task holds — so
  *   a recorder can never misjudge the in-flight state (the double-read race).
@@ -114,13 +118,18 @@ protected:
         }
         const auto inflight = conn_task_.load();
         if (inflight != kConnIdle) {
-            // An async disconnect racing an in-flight CONNECT must not be
-            // dropped (the device would come up Connected despite the explicit
-            // request). Record the intent; the connect consumes it at entry or
-            // the task tail runs the disconnect.
+            // A request racing an in-flight task of the OPPOSITE direction
+            // must not be dropped — the newer request wins. Record the intent;
+            // it is consumed at connect entry (disconnect case) or run by the
+            // task's tail. Same-direction races are idempotent no-ops.
+            // Holding connection_mutex_ here excludes the task tail (which
+            // takes it for its whole consume/publish sequence), so a flag
+            // recorded against a non-Idle state is guaranteed to be seen.
+            std::lock_guard<std::mutex> pending_lock(pending_mutex_);
             if (!connect && inflight == kConnConnect) {
-                std::lock_guard<std::mutex> pending_lock(pending_mutex_);
                 pending_disconnect_ = true;
+            } else if (connect && inflight == kConnDisconnect) {
+                pending_connect_ = true;
             }
             return;
         }
@@ -245,50 +254,68 @@ private:
             ALPACA_LOG_ERROR(log_tag_, "Connection task failed: non-std exception");
         }
         // Tail under connection_mutex_: see the class comment for why the
-        // Idle publish and the deferred-disconnect handoff must both
-        // happen under this lock, in this order.
+        // Idle publish and the deferred-transition handoff must both
+        // happen under this lock, in this order. The loop drains chained
+        // pending flags (a connect recorded against this disconnect task can
+        // itself be raced by another sync disconnect, and so on): each
+        // iteration consumes at most one flag, runs the deferred transition,
+        // and re-checks. Connecting stays true for the whole chain — a client
+        // can never observe Connecting==false with a transition still queued.
         std::lock_guard<std::mutex> conn_lock(connection_mutex_);
-        // Read connected-now BEFORE taking pending_mutex_: get_connected() may
-        // take the driver state mutex (Bisque/Celestron/SynScan/iOptron
-        // telescopes), and the sync set_connected path takes driver mutex ->
-        // pending_mutex_ (obligations 4/5) — calling it under pending_mutex_
-        // is an ABBA deadlock. The read is a momentary snapshot either way
-        // (the sync setter never held both locks at once), and a stale value
-        // is benign: the deferred disconnect below is idempotent.
-        const bool connected_now = connect && get_connected();
-        // Consume the pending flag and publish the next conn_task_ state in
-        // the SAME pending_mutex_ critical section. Paired with the recorder
-        // re-reading conn_task_ under pending_mutex_, this closes the
-        // stale-flag TOCTOU: a recorder that wins pending_mutex_ first is
-        // guaranteed this consume sees its flag; a recorder that loses
-        // observes the published state (no longer kConnConnect) and falls
-        // back to disconnecting synchronously itself (idempotent alongside
-        // the deferred teardown below). When a deferred disconnect must run,
-        // publish kConnDisconnect — NOT Idle — so Connecting stays true for
-        // the whole teardown (a client must never see Connecting==false &&
-        // Connected==true mid-teardown), while the sync gate (which records
-        // only against kConnConnect) still can't mistake the deferred
-        // set_connected(false) for another racing disconnect.
-        bool need_disconnect = false;
-        {
-            std::lock_guard<std::mutex> pending_lock(pending_mutex_);
-            if (pending_disconnect_) {
-                pending_disconnect_ = false;
-                need_disconnect = connected_now;
+        bool last_was_connect = connect;
+        while (true) {
+            // Read connected-now BEFORE taking pending_mutex_: get_connected()
+            // may take the driver state mutex (Bisque/Celestron/SynScan/
+            // iOptron telescopes), and the sync set_connected path takes
+            // driver mutex -> pending_mutex_ (obligations 4/5) — calling it
+            // under pending_mutex_ is an ABBA deadlock. The read is a
+            // momentary snapshot either way (the sync setter never held both
+            // locks at once), and a stale value is benign: the deferred
+            // transitions below are idempotent.
+            const bool connected_now = last_was_connect && get_connected();
+            // Consume a pending flag and publish the next conn_task_ state in
+            // the SAME pending_mutex_ critical section. Paired with the
+            // sync-path recorder re-reading conn_task_ under pending_mutex_,
+            // this closes the stale-flag TOCTOU: a recorder that wins
+            // pending_mutex_ first is guaranteed this consume sees its flag;
+            // a recorder that loses observes the published state (no longer
+            // kConnConnect) and falls back to disconnecting synchronously
+            // itself (idempotent alongside the deferred teardown below).
+            // Publish the deferred direction — NOT Idle — before running it;
+            // Idle is only ever published here once no flag remains.
+            // Disconnect outranks connect when both are pending (hardware
+            // left energized unattended is the unrecoverable case).
+            bool need_disconnect = false;
+            bool need_connect = false;
+            {
+                std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+                if (pending_disconnect_) {
+                    pending_disconnect_ = false;
+                    pending_connect_ = false;
+                    need_disconnect = connected_now;
+                } else if (pending_connect_) {
+                    pending_connect_ = false;
+                    need_connect = !connected_now;
+                }
+                conn_task_.store(need_disconnect ? kConnDisconnect
+                                 : need_connect  ? kConnConnect
+                                                 : kConnIdle);
             }
-            conn_task_.store(need_disconnect ? kConnDisconnect : kConnIdle);
-        }
-        if (need_disconnect) {
+            if (!need_disconnect && !need_connect) {
+                return;
+            }
             try {
-                set_connected(false);
+                set_connected(need_connect);
             } catch (const std::exception& e) {
-                ALPACA_LOG_ERROR(log_tag_, std::string("Deferred disconnect failed: ") + e.what());
+                ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") +
+                                               (need_connect ? "connect" : "disconnect") +
+                                               " failed: " + e.what());
             } catch (...) {
-                ALPACA_LOG_ERROR(log_tag_, "Deferred disconnect failed: non-std exception");
+                ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") +
+                                               (need_connect ? "connect" : "disconnect") +
+                                               " failed: non-std exception");
             }
-            // Idle only after the deferred teardown completes, still under
-            // connection_mutex_ (the only place Idle is ever published).
-            conn_task_.store(kConnIdle);
+            last_was_connect = need_connect;
         }
     }
 
@@ -299,6 +326,7 @@ private:
     std::mutex connection_mutex_;  // guards shutting_down_, thread spawn, Idle publish
     std::mutex pending_mutex_;     // leaf lock for pending_disconnect_ only
     bool pending_disconnect_ = false;
+    bool pending_connect_ = false;  // under pending_mutex_, mirror of the above
     bool shutting_down_ = false;  // under connection_mutex_
     std::thread connection_thread_;
 };
