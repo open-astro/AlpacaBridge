@@ -298,13 +298,21 @@ one arrives (do NOT foreground-sleep; run this with `run_in_background`):
 ```bash
 PR=<number>
 BASE=$(gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login=="claude")] | length')
-while :; do
+DEADLINE=$(( $(date +%s) + 1800 ))   # 30-min bailout: don't poll forever on a broken workflow
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 60
   N=$(gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login=="claude")] | length')
-  [ "$N" -gt "$BASE" ] && break
+  if [ "$N" -gt "$BASE" ]; then
+    gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login=="claude")] | last | .body'
+    exit 0
+  fi
 done
-gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login=="claude")] | last | .body'
+echo "TIMEOUT: no review-bot comment within 30 minutes — check the claude-review workflow run" >&2
+exit 1
 ```
+
+If the poll times out, surface the stall to the user and check the workflow
+(`gh run list --workflow=claude-review.yml --limit 3`) instead of restarting the loop blindly.
 
 While waiting, also keep an eye on CI: `gh pr checks <number>`. A red CI check should be fixed
 (and pushed) without waiting for the review verdict.
