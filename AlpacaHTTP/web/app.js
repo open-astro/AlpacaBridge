@@ -1962,6 +1962,10 @@ function applyOpticsMm(formData, deviceData, apertureField, focalField) {
         if (mm === null) {
             continue;
         }
+        if (mm < 0) {
+            alert(`${label} cannot be negative.`);
+            return false;
+        }
         if (mm > 0 && mm < minMm) {
             alert(`${label} of ${mm} mm looks too small — this field is in millimetres ` +
                 `(e.g. a 480 mm focal length is entered as 480). Please re-enter the value in mm.`);
