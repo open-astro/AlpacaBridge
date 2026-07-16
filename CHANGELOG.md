@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.0.2] - UNRELEASED
+## [3.0.2] - 2026-07-16
 
 ### Changed
 - **`/submit-pr` skill: post-submission review loop** (.claude/commands): the release-version ask is now mandatory on every run; after PR creation the skill polls the PR once a minute for the `claude` review bot's verdict comment, fixes in-scope findings batched into a single push per review round (every push restarts a full fresh review), hard-stops pushing on `✅ Approved` (then asks to merge), and turns out-of-scope / approved-non-blocking findings into follow-up GitHub issues in the established "From the PR #N review" format. The bot flow is maintainer-only (@joeytroy): external/fork contributors instead post a PR comment tagging the maintainer, who kicks off a local agent review — outside contributors never execute against the review bot.
