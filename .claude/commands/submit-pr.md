@@ -137,10 +137,11 @@ undershoots (e.g. it says `2.0.1` but the branch adds a driver, so it should be 
 it and recommend running `/commit` to correct the heading before opening the PR — don't open a
 PR with a version that misrepresents the change.
 
-### Release version bump (ask the user)
+### Release version bump (ask the user — MANDATORY, every run)
 
-Most PRs leave the version as `UNRELEASED` and the actual release is cut separately. Before
-pushing, ask the user whether this PR is cutting the release:
+Most PRs leave the version as `UNRELEASED` and the actual release is cut separately. On **every**
+run of this skill, before pushing, ask the user whether this PR is cutting the release — never
+skip or assume the answer:
 
 > "Is this PR cutting the `<UNRELEASED version>` release? If so I can update the `VERSION` file
 > and the `README.md` version badge to `<UNRELEASED version>` (and date the CHANGELOG entry) so
@@ -267,11 +268,88 @@ EOF
 
 After submission, display the PR URL to the user.
 
-## Step 8 — Post-submission
+## Step 8 — Watch for the review bot (poll every minute) — MAINTAINER ONLY
 
-After the PR is created:
-- Display the PR URL
-- Remind the user: "Watch for CI checks and reviewer feedback on the PR."
+**The automated review bot only runs for the maintainer (@joeytroy).** External/fork contributors
+must not execute against the bot. Determine which flow applies from the Step 2 repo detection and
+the authenticated user (`gh api user --jq .login`):
+
+- **Maintainer** (direct contributor, login `joeytroy`): follow this step and Step 9 as written.
+- **External/fork contributor** (anyone else): do NOT poll for a bot review — none will come.
+  Instead, after creating the PR, post a comment tagging the maintainer so they can kick off a
+  local agent review:
+
+  ```bash
+  gh pr comment <number> --body "@joeytroy this PR is ready for review — please kick off a local agent review when you have a chance."
+  ```
+
+  Then skip Step 9 entirely (verdicts, fixes-per-round, merging, and follow-up issues are the
+  maintainer's side) and go to Step 10. Remind the user the maintainer will review and respond
+  on the PR.
+
+Every PR gets an automated review from the `claude` bot (`.github/workflows/claude-review.yml`).
+It posts a PR comment ending in a verdict line: `✅ Approved` or `⚠️ Issues found`. After creating
+the PR (and after **every** push, which restarts a full fresh review), watch for the next bot
+comment.
+
+Record the baseline count of bot comments, then start a background poll that exits when a new
+one arrives (do NOT foreground-sleep; run this with `run_in_background`):
+
+```bash
+PR=<number>
+BASE=$(gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login=="claude")] | length')
+while :; do
+  sleep 60
+  N=$(gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login=="claude")] | length')
+  [ "$N" -gt "$BASE" ] && break
+done
+gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login=="claude")] | last | .body'
+```
+
+While waiting, also keep an eye on CI: `gh pr checks <number>`. A red CI check should be fixed
+(and pushed) without waiting for the review verdict.
+
+## Step 9 — Act on the review verdict
+
+Read the bot's newest review comment in full and classify every finding as **in-scope** (a real
+defect in this PR's changes) or **out-of-scope** (pre-existing, non-blocking, or beyond this PR's
+purpose). Findings under a "Notes (no action needed)" heading need no action unless clearly wrong.
+
+### Verdict: `⚠️ Issues found`
+
+1. Fix each **in-scope** finding on the branch. Batch ALL fixes into ONE commit/push — every push
+   restarts a full fresh review (PR #99 took 46 rounds; don't trickle pushes).
+2. For each **out-of-scope** finding, open a follow-up issue instead (format below).
+3. Show the user the fixes and the planned push for approval, push once, then return to Step 8
+   and poll for the fresh review.
+
+### Verdict: `✅ Approved`
+
+**Do NOT push anything further to this branch — approval is the stopping point.** Any remaining
+or newly-noticed items (including "approved, non-blocking" findings in the review itself) become
+follow-up issues, not commits. Then ask the user for approval to merge; on yes:
+
+```bash
+gh pr merge <number> --merge
+```
+
+### Follow-up issue format
+
+Match the established pattern (e.g. issues #135–#137 from PR #134). One issue per finding:
+
+```bash
+gh issue create --title "<component>: <concise defect summary>" --body "$(cat <<'EOF'
+From the PR #<N> review (approved, non-blocking): <full technical description of the finding,
+including file/function references and the suggested fix direction from the review comment>.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+EOF
+)"
+```
+
+Show the user each issue title/body for approval before creating.
+
+## Step 10 — Wrap-up
+
+- Display the PR URL, final verdict, and any follow-up issues opened
 - If AGENTS.md wasn't updated: "Consider updating AGENTS.md with any lessons learned from this work."
-
-Do NOT merge the PR automatically — that's up to the maintainers.
