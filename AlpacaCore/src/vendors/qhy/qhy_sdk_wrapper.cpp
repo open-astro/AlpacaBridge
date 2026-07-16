@@ -220,7 +220,9 @@ void QHYSDKWrapper::open_camera(const std::string& camera_id) {
         if (h != nullptr) {
             try {
                 CloseQHYCCD(h);
-            } catch (...) {}
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                // Best-effort close during teardown; nothing to recover here.
+            }
         }
     });
 }
@@ -332,10 +334,7 @@ void QHYSDKWrapper::set_param(const std::string& camera_id, int control_id, doub
         std::lock_guard<std::mutex> lock(pimpl_->mutex);
         handle = pimpl_->get_handle(camera_id);
     }
-    check_result(
-        SetQHYCCDParam(handle.get(), static_cast<CONTROL_ID>(control_id), value),
-        "SetQHYCCDParam"
-    );
+    check_result(SetQHYCCDParam(handle.get(), static_cast<CONTROL_ID>(control_id), value), "SetQHYCCDParam");
 }
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -95,7 +95,7 @@ void wait_until_idle(TestConnectable& d, std::chrono::milliseconds budget = 2s) 
     }
 }
 
-} // namespace
+}  // namespace
 
 TEST_CASE("AsyncConnectable - basic connect/disconnect cycle", "[async_connectable][unit]") {
     TestConnectable d;
@@ -112,8 +112,7 @@ TEST_CASE("AsyncConnectable - basic connect/disconnect cycle", "[async_connectab
     REQUIRE_FALSE(d.get_connecting());
 }
 
-TEST_CASE("AsyncConnectable - get_connected() is not a valid completion signal",
-          "[async_connectable][unit]") {
+TEST_CASE("AsyncConnectable - get_connected() is not a valid completion signal", "[async_connectable][unit]") {
     // Regression test for the 2026-07 router bug: a caller must not treat
     // get_connected()==false as "the disconnect task is done". This proves
     // the opposite window exists -- connected_ is false while connecting is
@@ -136,8 +135,7 @@ TEST_CASE("AsyncConnectable - get_connected() is not a valid completion signal",
     REQUIRE(d.disconnect_completions_.load() == 1);
 }
 
-TEST_CASE("AsyncConnectable - connect racing an in-flight disconnect is dropped",
-          "[async_connectable][unit]") {
+TEST_CASE("AsyncConnectable - connect racing an in-flight disconnect is dropped", "[async_connectable][unit]") {
     TestConnectable d;
     d.op_delay_ = 100ms;
     d.connect();
@@ -156,8 +154,7 @@ TEST_CASE("AsyncConnectable - connect racing an in-flight disconnect is dropped"
     CHECK(d.disconnect_completions_.load() == 1);
 }
 
-TEST_CASE("AsyncConnectable - disconnect racing an in-flight connect is never dropped",
-          "[async_connectable][unit]") {
+TEST_CASE("AsyncConnectable - disconnect racing an in-flight connect is never dropped", "[async_connectable][unit]") {
     TestConnectable d;
     d.op_delay_ = 100ms;
     d.connect();

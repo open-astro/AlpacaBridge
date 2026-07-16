@@ -274,10 +274,9 @@ private:
                 telemetry_to_join = std::move(telemetry_thread_);
             }
             try {
-                join_temp_thread(temp_to_join); // outside mutex_; bounded, may detach
+                join_temp_thread(temp_to_join);  // outside mutex_; bounded, may detach
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("QHY", "Temp thread join failed during disconnect: " +
-                    std::string(e.what()));
+                ALPACA_LOG_WARN("QHY", "Temp thread join failed during disconnect: " + std::string(e.what()));
             }
             if (telemetry_to_join.joinable()) {
                 try {
@@ -653,15 +652,17 @@ public:
                     QHYSDKWrapper::instance().set_param(cam_id_for_pwm,
                                                         control::MANULPWM, 0.0);
                     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - call_start).count();
-                    ALPACA_LOG_INFO("QHY", "SetQHYCCDParam(MANULPWM,0) returned OK after " +
-                        std::to_string(elapsed_ms) + "ms");
+                                                std::chrono::steady_clock::now() - call_start)
+                                                .count();
+                    ALPACA_LOG_INFO(
+                        "QHY", "SetQHYCCDParam(MANULPWM,0) returned OK after " + std::to_string(elapsed_ms) + "ms");
                 } catch (const std::exception& e) {
                     // MANULPWM may not be writable on all cameras — ignore
                     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - call_start).count();
-                    ALPACA_LOG_INFO("QHY", "SetQHYCCDParam(MANULPWM,0) threw after " +
-                        std::to_string(elapsed_ms) + "ms: " + e.what());
+                                                std::chrono::steady_clock::now() - call_start)
+                                                .count();
+                    ALPACA_LOG_INFO("QHY", "SetQHYCCDParam(MANULPWM,0) threw after " + std::to_string(elapsed_ms) +
+                                               "ms: " + e.what());
                 }
             }
         });
@@ -1582,8 +1583,7 @@ private:
         try {
             join_temp_thread(temp_to_join);  // bounded; may detach (see join_temp_thread)
         } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("QHY", "Temp thread join failed during shutdown: " +
-                std::string(e.what()));
+            ALPACA_LOG_WARN("QHY", "Temp thread join failed during shutdown: " + std::string(e.what()));
         }
         if (telemetry_to_join.joinable()) {
             try {

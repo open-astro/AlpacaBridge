@@ -124,12 +124,13 @@ protected:
                 ALPACA_LOG_TRACE(log_tag_, "start_connection_task: disconnect recorded against in-flight connect");
             } else {
                 ALPACA_LOG_TRACE(log_tag_, std::string("start_connection_task: dropped connect=") +
-                    (connect ? "true" : "false") + " while inflight=" + std::to_string(static_cast<int>(inflight)));
+                                               (connect ? "true" : "false") +
+                                               " while inflight=" + std::to_string(static_cast<int>(inflight)));
             }
             return;
         }
-        ALPACA_LOG_TRACE(log_tag_, std::string("start_connection_task: spawning connect=") +
-            (connect ? "true" : "false"));
+        ALPACA_LOG_TRACE(log_tag_,
+                         std::string("start_connection_task: spawning connect=") + (connect ? "true" : "false"));
         if (connection_thread_.joinable()) {
             connection_thread_.join();  // finished task; reap before reuse
         }
@@ -188,7 +189,7 @@ protected:
             return false;
         }
         ALPACA_LOG_TRACE(log_tag_, std::string("record_disconnect_if_connect_in_flight: recording, connected_now=") +
-            (connected_now ? "true" : "false"));
+                                       (connected_now ? "true" : "false"));
         // Record REGARDLESS of connected_now: with a connect task in flight,
         // even a sync disconnect that is about to run real hardware teardown
         // (connected_now = true -> return false, caller proceeds) must leave
@@ -242,8 +243,7 @@ protected:
 
 private:
     void run_connection_task(bool connect) {
-        ALPACA_LOG_TRACE(log_tag_, std::string("run_connection_task: entry connect=") +
-            (connect ? "true" : "false"));
+        ALPACA_LOG_TRACE(log_tag_, std::string("run_connection_task: entry connect=") + (connect ? "true" : "false"));
         try {
             set_connected(connect);
         } catch (const std::exception& e) {
@@ -290,7 +290,8 @@ private:
             conn_task_.store(need_disconnect ? kConnDisconnect : kConnIdle);
         }
         ALPACA_LOG_TRACE(log_tag_, std::string("run_connection_task: tail connected_now=") +
-            (connected_now ? "true" : "false") + " need_disconnect=" + (need_disconnect ? "true" : "false"));
+                                       (connected_now ? "true" : "false") +
+                                       " need_disconnect=" + (need_disconnect ? "true" : "false"));
         if (need_disconnect) {
             try {
                 set_connected(false);

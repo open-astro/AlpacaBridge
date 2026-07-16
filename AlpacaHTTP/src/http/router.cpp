@@ -1897,8 +1897,7 @@ Response Router::dispatch_device_method(
                     // finished, letting the next Connect() race the still-running
                     // task and get silently dropped by AsyncConnectable's
                     // connect-vs-in-flight-disconnect rule (QHY ConformU failure).
-                    while (device->get_connecting()
-                           && std::chrono::steady_clock::now() < deadline) {
+                    while (device->get_connecting() && std::chrono::steady_clock::now() < deadline) {
                         std::this_thread::sleep_for(
                             std::chrono::milliseconds(50));
                     }
