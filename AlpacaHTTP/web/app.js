@@ -663,13 +663,15 @@ function updateApertureAreaFromDiameter(diameterId, areaId) {
         return;
     }
 
-    const diameter = Number.parseFloat(diameterEl.value);
-    if (!Number.isFinite(diameter) || diameter <= 0) {
+    const diameterMm = Number.parseFloat(diameterEl.value);
+    if (!Number.isFinite(diameterMm) || diameterMm <= 0) {
         areaEl.value = '';
         return;
     }
 
-    const radius = diameter / 2;
+    // Diameter is entered in mm; the derived area is shown in m^2, the unit
+    // the Alpaca ApertureArea property reports.
+    const radius = diameterMm / MM_PER_METER / 2;
     const area = Math.PI * radius * radius;
     areaEl.value = area.toFixed(6);
 }
@@ -720,8 +722,8 @@ function startEditDevice(device) {
             setFormValue('ioptron-host', config.host);
             setFormValue('ioptron-tcp-port', config.tcpPort);
         }
-        setFormValue('aperture-diameter', config.apertureDiameter);
-        setFormValue('focal-length', config.focalLength);
+        setFormValue('aperture-diameter', opticsMetersToMm(config.apertureDiameter));
+        setFormValue('focal-length', opticsMetersToMm(config.focalLength));
         updateApertureAreaFromDiameter('aperture-diameter', 'aperture-area');
         const ioptronConnectionTypeEl = document.getElementById('ioptron-connection-type');
         if (ioptronConnectionTypeEl) {
@@ -738,8 +740,8 @@ function startEditDevice(device) {
             setFormValue('synscan-host', config.host);
             setFormValue('synscan-tcp-port', config.tcpPort);
         }
-        setFormValue('synscan-aperture-diameter', config.apertureDiameter);
-        setFormValue('synscan-focal-length', config.focalLength);
+        setFormValue('synscan-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
+        setFormValue('synscan-focal-length', opticsMetersToMm(config.focalLength));
         updateApertureAreaFromDiameter('synscan-aperture-diameter', 'synscan-aperture-area');
         const synscanConnectionTypeEl = document.getElementById('synscan-connection-type');
         if (synscanConnectionTypeEl) {
@@ -755,8 +757,8 @@ function startEditDevice(device) {
             setFormValue('celestron-host', config.host);
             setFormValue('celestron-tcp-port', config.tcpPort);
         }
-        setFormValue('celestron-aperture-diameter', config.apertureDiameter);
-        setFormValue('celestron-focal-length', config.focalLength);
+        setFormValue('celestron-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
+        setFormValue('celestron-focal-length', opticsMetersToMm(config.focalLength));
         const celestronConnectionTypeEl = document.getElementById('celestron-connection-type');
         if (celestronConnectionTypeEl) {
             celestronConnectionTypeEl.dispatchEvent(new Event('change'));
@@ -764,8 +766,8 @@ function startEditDevice(device) {
     } else if (vendor === 'bisque') {
         setFormValue('bisque-host', config.host || 'localhost');
         setFormValue('bisque-tcp-port', config.tcpPort || 3040);
-        setFormValue('bisque-aperture-diameter', config.apertureDiameter);
-        setFormValue('bisque-focal-length', config.focalLength);
+        setFormValue('bisque-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
+        setFormValue('bisque-focal-length', opticsMetersToMm(config.focalLength));
     } else if (vendor === 'zwo' && deviceType === 'telescope') {
         const zwoMountConnectionType = config.connectionType || 'serial';
         setFormValue('zwo-mount-connection-type', zwoMountConnectionType);
@@ -776,8 +778,8 @@ function startEditDevice(device) {
             setFormValue('zwo-mount-host', config.host);
             setFormValue('zwo-mount-tcp-port', config.tcpPort);
         }
-        setFormValue('zwo-mount-aperture-diameter', config.apertureDiameter);
-        setFormValue('zwo-mount-focal-length', config.focalLength);
+        setFormValue('zwo-mount-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
+        setFormValue('zwo-mount-focal-length', opticsMetersToMm(config.focalLength));
         setFormValue('zwo-mount-site-latitude', config.siteLatitude);
         setFormValue('zwo-mount-site-longitude', config.siteLongitude);
         setFormValue('zwo-mount-site-elevation', config.siteElevation);
@@ -1931,6 +1933,42 @@ function readOptionalNumber(formData, name) {
     return Number.isFinite(value) ? value : null;
 }
 
+// Telescope optics are entered and displayed in millimetres (what every scope
+// is sold in), but the config file and the Alpaca ITelescope API both use
+// metres per the ASCOM spec. The mm<->m conversion lives only here in the UI.
+const MM_PER_METER = 1000;
+
+function opticsMetersToMm(value) {
+    const meters = Number(value);
+    if (!Number.isFinite(meters) || meters <= 0) {
+        return null;
+    }
+    return Number((meters * MM_PER_METER).toFixed(3));
+}
+
+// Reads the optional optics form fields (in mm) and stores them on deviceData
+// in metres. Returns false, after alerting, when a value is small enough that
+// the user almost certainly typed metres into the mm field.
+function applyOpticsMm(formData, deviceData, apertureField, focalField) {
+    const fields = [
+        [apertureField, 'apertureDiameter', 'Aperture diameter'],
+        [focalField, 'focalLength', 'Focal length'],
+    ];
+    for (const [formName, configKey, label] of fields) {
+        const mm = readOptionalNumber(formData, formName);
+        if (mm === null) {
+            continue;
+        }
+        if (mm > 0 && mm < 20) {
+            alert(`${label} of ${mm} mm looks too small — this field is in millimetres ` +
+                `(e.g. a 480 mm focal length is entered as 480). Please re-enter the value in mm.`);
+            return false;
+        }
+        deviceData[configKey] = mm / MM_PER_METER;
+    }
+    return true;
+}
+
 function normalizeFilterName(name) {
     return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -2402,14 +2440,8 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
         // "auto" needs no connection fields — port is discovered at startup
 
-        const apertureDiameter = readOptionalNumber(formData, 'apertureDiameter');
-        if (apertureDiameter !== null) {
-            deviceData.apertureDiameter = apertureDiameter;
-        }
-
-        const focalLength = readOptionalNumber(formData, 'focalLength');
-        if (focalLength !== null) {
-            deviceData.focalLength = focalLength;
+        if (!applyOpticsMm(formData, deviceData, 'apertureDiameter', 'focalLength')) {
+            return;
         }
     } else if (deviceData.vendor === 'synscan') {
         deviceData.connectionType = formData.get('synscanConnectionType') || 'auto';
@@ -2423,14 +2455,8 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
         // "auto" needs no connection fields — port is discovered at startup
 
-        const apertureDiameter = readOptionalNumber(formData, 'synscanApertureDiameter');
-        if (apertureDiameter !== null) {
-            deviceData.apertureDiameter = apertureDiameter;
-        }
-
-        const focalLength = readOptionalNumber(formData, 'synscanFocalLength');
-        if (focalLength !== null) {
-            deviceData.focalLength = focalLength;
+        if (!applyOpticsMm(formData, deviceData, 'synscanApertureDiameter', 'synscanFocalLength')) {
+            return;
         }
     } else if (deviceData.vendor === 'celestron') {
         deviceData.connectionType = formData.get('celestronConnectionType') || 'auto';
@@ -2443,27 +2469,15 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
         // "auto" needs no connection fields — port is discovered at startup
 
-        const apertureDiameter = readOptionalNumber(formData, 'celestronApertureDiameter');
-        if (apertureDiameter !== null) {
-            deviceData.apertureDiameter = apertureDiameter;
-        }
-
-        const focalLength = readOptionalNumber(formData, 'celestronFocalLength');
-        if (focalLength !== null) {
-            deviceData.focalLength = focalLength;
+        if (!applyOpticsMm(formData, deviceData, 'celestronApertureDiameter', 'celestronFocalLength')) {
+            return;
         }
     } else if (deviceData.vendor === 'bisque') {
         deviceData.host = formData.get('bisqueHost') || 'localhost';
         deviceData.tcpPort = parseInt(formData.get('bisqueTcpPort')) || 3040;
 
-        const apertureDiameter = readOptionalNumber(formData, 'bisqueApertureDiameter');
-        if (apertureDiameter !== null) {
-            deviceData.apertureDiameter = apertureDiameter;
-        }
-
-        const focalLength = readOptionalNumber(formData, 'bisqueFocalLength');
-        if (focalLength !== null) {
-            deviceData.focalLength = focalLength;
+        if (!applyOpticsMm(formData, deviceData, 'bisqueApertureDiameter', 'bisqueFocalLength')) {
+            return;
         }
     } else if (deviceData.vendor === 'zwo') {
         const normalizedType = normalizeDeviceType(deviceData.deviceType);
@@ -2477,14 +2491,8 @@ document.getElementById('device-form').addEventListener('submit', async function
                 deviceData.tcpPort = parseInt(formData.get('zwoMountTcpPort')) || 4030;
             }
 
-            const apertureDiameter = readOptionalNumber(formData, 'zwoMountApertureDiameter');
-            if (apertureDiameter !== null) {
-                deviceData.apertureDiameter = apertureDiameter;
-            }
-
-            const focalLength = readOptionalNumber(formData, 'zwoMountFocalLength');
-            if (focalLength !== null) {
-                deviceData.focalLength = focalLength;
+            if (!applyOpticsMm(formData, deviceData, 'zwoMountApertureDiameter', 'zwoMountFocalLength')) {
+                return;
             }
 
             const siteLatitude = readOptionalNumber(formData, 'zwoMountSiteLatitude');
@@ -2867,8 +2875,6 @@ function renderDeviceSettings(config) {
         ['focuserId', 'Focuser ID'],
         ['rotatorIndex', 'Rotator Index'],
         ['rotatorId', 'Rotator ID'],
-        ['apertureDiameter', 'Aperture Diameter (m)'],
-        ['focalLength', 'Focal Length (m)'],
         ['responseTimeoutMs', 'Response Timeout (ms)'],
     ]);
 
@@ -2902,6 +2908,10 @@ function renderDeviceSettings(config) {
 
     labelMap.forEach((label, key) => addRow(key, label));
 
+    // Optics are stored in metres (Alpaca/ASCOM units) but always shown in mm.
+    addRowValue('Aperture Diameter (mm)', opticsMetersToMm(config.apertureDiameter));
+    addRowValue('Focal Length (mm)', opticsMetersToMm(config.focalLength));
+
     const apertureDiameter = Number(config.apertureDiameter);
     if (Number.isFinite(apertureDiameter) && apertureDiameter > 0) {
         const radius = apertureDiameter / 2;
@@ -2909,7 +2919,8 @@ function renderDeviceSettings(config) {
         addRowValue('Aperture Area (m^2)', area.toFixed(6));
     }
 
-    const hiddenKeys = new Set(['vendor', 'deviceType', 'deviceNumber']);
+    const hiddenKeys = new Set(['vendor', 'deviceType', 'deviceNumber',
+        'apertureDiameter', 'focalLength']);
 
     Object.keys(config)
         .filter(key => !labelMap.has(key) && !hiddenKeys.has(key))
