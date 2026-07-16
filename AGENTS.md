@@ -586,7 +586,10 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `connected_` flipped — well before the task actually finished — so the
   handler replied "done" early, and the client's very next `Connect()` raced
   the still-running disconnect and was silently dropped by
-  `AsyncConnectable`'s connect-vs-in-flight-disconnect rule. `get_connecting()`
+  `AsyncConnectable`'s then-current connect-vs-in-flight-disconnect rule
+  (a racing connect is now queued via `pending_connect_`, but the wait must
+  still poll the right flag — an early "done" reply is wrong either way).
+  `get_connecting()`
   alone is the one signal the base class guarantees stays true for a task's
   entire lifetime, across every driver that inherits it — see
   `test_async_connectable.cpp` for the regression test. This is a router bug,
@@ -908,7 +911,12 @@ Connection types: Serial (USB serial, 115200 baud default per v3.10 spec) and Ne
 - **Serial buffer flush**: Stale bytes from previous command responses can contaminate `:MS1#`/`:MS2#` slew responses (e.g., `"1111"` instead of `"1"`). The driver calls `flush_input()` (via `tcflush`/`PurgeComm`) before issuing slew commands.
 - **Pulse guiding**: Uses native iOptron pulse guide commands (`:ZS#`, `:ZQ#`, `:ZE#`, `:ZC#` for N/S/E/W with duration in ms). Hardware-timed by the mount.
 - **`:GEP#` response format**: sign + 8 RA digits + sign + 8 DEC digits + 1 side_of_pier digit + 1 pointing_state digit. No `#` terminator on some firmware versions — use idle-timeout read.
-- ConformU 4.3.0 validated for **iOptron HEM27** on Linux arm64 with 0 errors and 0 issues.
+- ConformU 4.3.0 validated for **iOptron HEM27** on Linux arm64 with 0 errors and 0 issues; ConformU 4.4.0 validated for **iOptron HAE29C EQ** (USB) with 0 errors, 0 issues, 0 timing violations.
+- **Blind commands are not blind** (HAE29C session, 2026-07-14): `:SG`/`:SDS`/`:SUT`/`:Q`/`:ST`/`:MP`/`:MH` all return a `1` ack on current firmware. `send_command_blind` drains it on BOTH transports (serial got its drain 2026-07-14; only Wi-Fi had one before) and `send_command` flushes stale input before every write — a busy mount can ack later than any fixed drain window, and one leaked byte shifts every fixed-offset field parse (`:GPC`/`:GLS`/`:GEP`). If a trace shows `RESP 11` or a `1-`-prefixed response, suspect a new blind command missing its drain.
+- **HAE29C (model code 0036) firmware quirks** — all workarounds live behind `hae29c_quirks_active()` (strict equality on `0036`; HEM27/HAE43/other codes get stock behavior). Verified on hardware: (1) `:MP1#` completes physically but never reports status 6 — `:ST0#` finalizes it (driver watches for slewing-but-stationary-at-park-target); (2) zero-distance park wedges identically; (3) GOTO settles ~11–16 arcsec east in RA (final-approach sidereal gap) and re-GOTOs under ~15" deadband — the driver closes the residual with a duration-computed pulse-guide trim (RA only; Dec is accurate and Dec pulse polarity flips with pier side). If the same symptoms show up on HAE29C-EC/AA (codes 0037–0039), extend the gate — one line.
+- **Stale status-cache traps**: `find_home()` must force-refresh before its already-home early-return, and `park()`/`unpark()` must invalidate cached `is_at_home` — a Park/Unpark cycle otherwise leaves a stale `is_at_home=true` that silently no-ops the next FindHome (ConformU: "AtHome reports false after FindHome").
+- **ConformU 4.4 tests `Connect()` immediately after `Connected=false`** — an async disconnect must not drop a racing connect (AsyncConnectable now queues it; see `pending_connect_`). ConformU 4.3 never exercised this, so a 4.3 pass does not imply a 4.4 pass on the connect phase.
+- **Debugging discipline from this session**: mount "wedges" that survive reconnects but clear on a fresh flushed port open are usually leaked-byte desync or firmware state, not dead hardware; a mount that answers probes but fails mid-motion points at the USB link (here: loose cable + VMware passthrough drop under motor load). Reproduce failing ConformU members individually with `curl` against the live server before burning full ConformU runs.
 
 #### iMate PowerBox (Switch)
 

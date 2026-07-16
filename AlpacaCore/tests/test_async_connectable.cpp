@@ -23,9 +23,10 @@
 //    get_connecting()` exited as soon as connected_ flipped, well before the
 //    task actually finished -- letting a client's next Connect() race the
 //    still-running disconnect and get silently dropped by the rule below.
-// 2. A connect() racing an in-flight disconnect is deliberately DROPPED
-//    (not queued); a disconnect() racing an in-flight connect is NEVER
-//    dropped (recorded and honored by the task tail).
+// 2. A connect() racing an in-flight disconnect is QUEUED (pending_connect_)
+//    and run by the task tail; a disconnect() racing an in-flight connect is
+//    NEVER dropped (recorded and honored by the task tail), and always
+//    outranks a queued connect.
 
 #include <alpacacore/async_connectable.h>
 
@@ -135,7 +136,7 @@ TEST_CASE("AsyncConnectable - get_connected() is not a valid completion signal",
     REQUIRE(d.disconnect_completions_.load() == 1);
 }
 
-TEST_CASE("AsyncConnectable - connect racing an in-flight disconnect is dropped", "[async_connectable][unit]") {
+TEST_CASE("AsyncConnectable - connect racing an in-flight disconnect is queued", "[async_connectable][unit]") {
     TestConnectable d;
     d.op_delay_ = 100ms;
     d.connect();
@@ -144,13 +145,13 @@ TEST_CASE("AsyncConnectable - connect racing an in-flight disconnect is dropped"
 
     d.disconnect();
     std::this_thread::sleep_for(10ms);  // disconnect is now in flight
-    d.connect();                        // deliberately dropped, not queued
+    d.connect();                        // queued; the task tail runs it
 
     wait_until_idle(d);
-    CHECK_FALSE(d.get_connected());
-    // Only the original disconnect ran to completion; the racing connect
-    // never spawned a task at all.
-    CHECK(d.connect_completions_.load() == 1);
+    // The caller's newest instruction wins: the queued connect runs after
+    // the disconnect finishes, so the device ends up connected again.
+    CHECK(d.get_connected());
+    CHECK(d.connect_completions_.load() == 2);
     CHECK(d.disconnect_completions_.load() == 1);
 }
 

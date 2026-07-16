@@ -239,6 +239,7 @@ public:
                 axis_move_active_secondary_ = false;
                 tracking_state_before_move_.reset();
                 park_override_until_ = std::chrono::steady_clock::time_point{};
+                park_finalize_pending_ = false;
                 tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
                 utc_query_supported_ = true;
                 pulse_guiding_active_.store(false, std::memory_order_release);
@@ -314,6 +315,7 @@ public:
             axis_move_active_secondary_ = false;
             tracking_state_before_move_.reset();
             park_override_until_ = std::chrono::steady_clock::time_point{};
+            park_finalize_pending_ = false;
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
             pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_ra_hours_ = 0.0;
@@ -980,6 +982,62 @@ public:
         if (slew_override_until_ > now) {
             return true;
         }
+        // HAE29C firmware quirk (hardware-verified 2026-07-14): GOTO stops
+        // compensating sidereal motion during its final ~1 s approach, so
+        // slews settle a consistent ~11-16 arcsec east of the RA target
+        // (ConformU tolerance is +/-10"). Re-issuing the GOTO does NOT fix it:
+        // the firmware deadbands slews shorter than ~15". Instead, close the
+        // residual with a duration-computed pulse-guide trim (guide rate is
+        // known, so err/rate gives the exact pulse length), re-measuring and
+        // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
+        // on this firmware and Dec pulse polarity flips with pier side.
+        // Slewing stays true while a trim pulse runs.
+        if (slew_in_progress_ && hae29c_quirks_active() && slew_refine_count_ < kMaxSlewRefines) {
+            ++slew_refine_count_;
+            try {
+                auto& protocol = iOptronProtocolWrapper::instance();
+                Position pos = protocol.get_position();
+                double ra_err_hours = pos.ra_hours - slew_target_ra_hours_;
+                if (ra_err_hours > 12.0) {
+                    ra_err_hours -= 24.0;
+                } else if (ra_err_hours < -12.0) {
+                    ra_err_hours += 24.0;
+                }
+                const double ra_err_arcsec = ra_err_hours * 15.0 * 3600.0;
+                constexpr double kTrimMinArcsec = 5.0;    // below this: on target
+                constexpr double kTrimMaxArcsec = 120.0;  // above this: not a settle error
+                if (std::fabs(ra_err_arcsec) > kTrimMinArcsec && std::fabs(ra_err_arcsec) < kTrimMaxArcsec) {
+                    double guide_fraction = kDefaultGuideRateFraction;
+                    try {
+                        guide_fraction = protocol.get_guide_rates().first;
+                    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                        // Unreadable guide rate — fall back to the default fraction.
+                    }
+                    if (guide_fraction < 0.1 || guide_fraction > 1.0) {
+                        guide_fraction = kDefaultGuideRateFraction;
+                    }
+                    const double trim_rate_arcsec_per_s = guide_fraction * 15.041;
+                    int duration_ms = static_cast<int>(std::fabs(ra_err_arcsec) / trim_rate_arcsec_per_s * 1000.0);
+                    duration_ms = std::clamp(duration_ms, 100, 8000);
+                    // Reported RA too large -> mount is east of target -> pulse
+                    // west (RA-, direction 3); too small -> east (RA+, 2).
+                    const int direction = ra_err_arcsec > 0 ? 3 : 2;
+                    ALPACA_LOG_INFO("iOptron", "GOTO settled " + std::to_string(ra_err_arcsec) +
+                                                   " arcsec from RA target; pulse-guide trim " +
+                                                   std::to_string(slew_refine_count_) + "/" +
+                                                   std::to_string(kMaxSlewRefines) + " (" +
+                                                   std::to_string(duration_ms) + " ms, final-approach firmware quirk)");
+                    protocol.pulse_guide(direction, duration_ms);
+                    slew_override_until_ =
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms + 500);
+                    status_cache_valid_ = false;
+                    position_cache_valid_ = false;
+                    return true;
+                }
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Best-effort trim; fall through and report slew complete.
+            }
+        }
         slew_in_progress_ = false;
         restore_altitude_limit_locked("Slewing");
         restore_meridian_treatment_locked("Slewing");
@@ -1099,6 +1157,10 @@ public:
         }
 
         ensure_not_parked_locked("FindHome");
+        // Force-refresh: a stale cached is_at_home (e.g. set before a park/
+        // unpark cycle, which never touches it) short-circuits the whole home
+        // operation and the client then sees AtHome == false.
+        refresh_status_cache_locked(true);
         if (cached_status_.is_at_home) {
             return;
         }
@@ -1122,7 +1184,7 @@ public:
 
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
-            if (!protocol.park()) {
+            if (!protocol.park(hae29c_quirks_active())) {
                 throw AlpacaException("Failed to park mount");
             }
             clear_device_fault_locked();
@@ -1134,10 +1196,27 @@ public:
         park_override_until_ = std::chrono::steady_clock::time_point{};
         cached_status_.is_parked = false;
         cached_status_.is_slewing = true;
+        cached_status_.is_at_home = false;
         status_cache_valid_ = true;
         last_status_update_ = std::chrono::steady_clock::now();
         slew_override_until_ = last_status_update_ + std::chrono::seconds(5);
         position_cache_valid_ = false;
+        // HAE29C firmware quirk (hardware-verified 2026-07-14): :MP1# park
+        // slews complete physically but the mount keeps reporting
+        // system-status 2 ("slewing") forever instead of 6 ("parked");
+        // tracking-off (:ST0#) finalizes the transition. Arm the finalizer —
+        // refresh_status_cache_locked() fires it once the mount is observed
+        // stationary at the park target while still claiming to slew.
+        park_finalize_pending_ = hae29c_quirks_active();
+        park_target_valid_ = false;
+        if (park_finalize_pending_) {
+            try {
+                park_target_ = protocol.get_park_position();
+                park_target_valid_ = true;
+            } catch (const std::exception&) {
+                park_target_valid_ = false;
+            }
+        }
     }
 
     void abort_slew() override {
@@ -1510,10 +1589,12 @@ public:
         }
         cached_status_.is_parked = false;
         cached_status_.is_slewing = true;
+        cached_status_.is_at_home = false;
         status_cache_valid_ = true;
         last_status_update_ = std::chrono::steady_clock::now();
         slew_override_until_ = last_status_update_ + std::chrono::seconds(2);
         park_override_until_ = last_status_update_ + kUnparkGrace;
+        park_finalize_pending_ = false;
     }
 
 private:
@@ -1531,7 +1612,13 @@ private:
     static constexpr double kSiderealSeconds = 86164.0905;
     static constexpr double kSiderealRateDegPerSec = 360.0 / kSiderealSeconds;
     static constexpr double kDefaultGuideRateFraction = 0.5;
-    
+
+    // All three HAE29C firmware-quirk workarounds (wedged-park finalizer,
+    // zero-distance park finalizer, GOTO refinement) are gated on the exact
+    // model code so other iOptron mounts (HAE43, HEM27, ...) keep the
+    // original, hardware-validated behavior.
+    bool hae29c_quirks_active() const { return mount_info_.model_code == "0036"; }
+
     void check_connected() const {
         if (!connected_) {
             throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
@@ -1730,6 +1817,7 @@ private:
         slew_in_progress_ = true;
         slew_target_ra_hours_ = phys_ra;
         slew_target_dec_degrees_ = phys_dec;
+        slew_refine_count_ = 0;
     }
 
     void dispatch_slew_command_locked(double ra, double dec, bool allow_soft_fail, const char* label) {
@@ -1909,8 +1997,46 @@ private:
             throw AlpacaException(std::string("Failed to refresh mount status: ") + e.what(),
                                   AlpacaError::DriverException);
         }
+        finalize_wedged_park_locked();
     }
-    
+
+    // See park(): once an :MP1# park has physically arrived, some firmware
+    // (HAE29C) stays wedged in "slewing" until tracking is explicitly turned
+    // off. Runs after every fresh status fetch; best-effort — a failure here
+    // just retries on the next refresh.
+    void finalize_wedged_park_locked() const {
+        if (!park_finalize_pending_) {
+            return;
+        }
+        if (cached_status_.is_parked) {
+            park_finalize_pending_ = false;
+            return;
+        }
+        if (!cached_status_.is_slewing || !park_target_valid_) {
+            return;
+        }
+        auto& protocol = iOptronProtocolWrapper::instance();
+        try {
+            AltAz current = protocol.get_alt_az();
+            constexpr double kEpsDeg = 0.01;  // 36 arcsec; GAC/GPC agree to 0.01"
+            if (std::fabs(current.altitude_degrees - park_target_.altitude_degrees) >= kEpsDeg ||
+                std::fabs(current.azimuth_degrees - park_target_.azimuth_degrees) >= kEpsDeg) {
+                return;  // still genuinely slewing toward the park position
+            }
+            ALPACA_LOG_INFO("iOptron",
+                            "Park slew arrived but mount still reports slewing; sending tracking-off "
+                            "to finalize (HAE firmware quirk)");
+            protocol.stop_tracking();
+            cached_status_ = protocol.get_status();
+            last_status_update_ = std::chrono::steady_clock::now();
+            if (cached_status_.is_parked) {
+                park_finalize_pending_ = false;
+            }
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // Best-effort — leave the flag armed and retry on the next refresh.
+        }
+    }
+
     void ensure_site_info_cached_locked(bool force_refresh = false) const {
         auto now = std::chrono::steady_clock::now();
         if (!force_refresh && site_info_valid_ && now < fast_cache_until_) {
@@ -2551,11 +2677,17 @@ private:
     mutable bool axis_move_active_secondary_ = false;
     mutable std::optional<bool> tracking_state_before_move_{};
     mutable std::chrono::steady_clock::time_point park_override_until_{};
-    
+    // HAE29C wedged-park finalizer state — see park()/finalize_wedged_park_locked().
+    mutable bool park_finalize_pending_ = false;
+    mutable bool park_target_valid_ = false;
+    mutable AltAz park_target_{};
+
     mutable std::chrono::system_clock::time_point last_utc_set_;
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
     mutable bool slew_in_progress_ = false;
+    static constexpr int kMaxSlewRefines = 3;
+    mutable int slew_refine_count_ = 0;
     mutable double slew_target_ra_hours_ = 0.0;
     mutable double slew_target_dec_degrees_ = 0.0;
     mutable bool altitude_limit_override_active_ = false;
