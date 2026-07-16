@@ -1950,12 +1950,14 @@ function opticsMetersToMm(value) {
 // in metres. Returns false, after alerting, when a value is small enough that
 // the user almost certainly typed metres into the mm field.
 function applyOpticsMm(formData, deviceData, apertureField, focalField) {
-    // Per-field "typed metres into the mm field" thresholds: no real focal
-    // length is under 20 mm, but tiny finder/guide apertures exist, so the
-    // aperture guard is looser (10 mm) to avoid rejecting legitimate values.
+    // Per-field "typed metres into the mm field" thresholds, set below any
+    // real optic but above any metres-typo: camera lenses on trackers go down
+    // to ~8 mm focal length (~3 mm aperture at f/2.8), while metre values top
+    // out around 3.9 (C14 focal length) and 0.5 (aperture). So <5 mm focal
+    // length and <1 mm aperture can only be metres typed into the mm field.
     const fields = [
-        [apertureField, 'apertureDiameter', 'Aperture diameter', 10],
-        [focalField, 'focalLength', 'Focal length', 20],
+        [apertureField, 'apertureDiameter', 'Aperture diameter', 1],
+        [focalField, 'focalLength', 'Focal length', 5],
     ];
     for (const [formName, configKey, label, minMm] of fields) {
         const mm = readOptionalNumber(formData, formName);
