@@ -143,6 +143,26 @@ vendor-agnostic; do them in the driver from the start.
   permanent: the next reconnect bumps the count to 2, hands back the same stale
   handle, and `Close` never balances. Don't leave post-open SDK calls
   (`put_trigger_mode`, `get_serial_number`, …) outside the cleanup try.
+- **A blocking SDK call with no timeout of its own can hang disconnect forever
+  — bound the wait, detach on timeout, and reference-count the handle** (QHY
+  ConformU session, 2026-07). Some vendor SDK calls (QHY `ControlQHYCCDTemp`,
+  a PID loop documented at ~10s but occasionally much longer; `SetQHYCCDParam`
+  on some control IDs) have no cancellation and no SDK-side timeout. If a
+  background worker (temp-control thread, cooler-off task) is stuck inside one
+  when disconnect wants to join it, an unbounded `join()` hangs disconnect —
+  and every ASCOM client (ConformU included) applies its own ~5s budget to the
+  bare `Disconnect()` method, so "just wait longer" is not an option. Fix
+  shape: (1) give the worker's own "is it still running" flag as a
+  `shared_ptr<std::atomic<bool>>` (same pattern as a detached timer's flag,
+  Threads & shutdown above); (2) bound the join with a short deadline (2s —
+  comfortably under the ~5s client budget) and `.detach()` instead of
+  `.join()` on timeout; (3) make that detach *safe* by reference-counting the
+  SDK handle itself (`shared_ptr<qhyccd_handle>` with a
+  `CloseQHYCCD`-on-last-reference deleter in the wrapper, not a raw pointer)
+  so a concurrent `close_camera()` can never invalidate a handle the detached
+  worker is still using — the physical close is deferred until every in-flight
+  call actually finishes, instead of racing it. Same shape applies to any
+  vendor SDK with a long, uncancellable, no-timeout call.
 
 **Long-op / exposure state machines (cameras)**
 - A runtime register write during a live exposure corrupts the frame. Guard it with
@@ -554,6 +574,24 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, and unregistered device number. A genuinely unroutable URL (no device/management match) stays 404.
   - `500` — unexpected internal error only.
 - **The Alpaca `Value` is structured JSON, never a re-parsed string.** `AlpacaResponse::value` is `std::optional<nlohmann::json>` and `to_json` emits it verbatim. Handlers assign the real type directly — scalar, string, array, or object (e.g. `alpaca_response.value = actions;` for `SupportedActions`, **not** `actions.dump()`; `make_success_response(..., gains)` where `gains` is a `nlohmann::json` array). Do NOT serialize a structured payload to a string and rely on it being re-parsed downstream. The old `to_json` ran `json::parse()` on every string `Value` and substituted the result if it parsed — which (a) corrupted scalar string properties whose text is valid JSON (`"12345"` → number, `"true"` → bool, wrong ASCOM type on the wire) and (b) forced every array/object endpoint to round-trip through `.dump()`. That heuristic bit `SupportedActions`/`DeviceState` (every device) plus camera `Gains`/`Offsets`/`ReadoutModes`, telescope `AxisRates`, and filter `Names`/`FocusOffsets` — ConformU rejected the stringified arrays ("could not be converted to IList`<String>`"). The web UI mirror (`web/app.js parseResponseValue`) only parses a string that begins with `{`/`[`, never a bare scalar. The large camera image payload uses its own `build_image_*_payload` path and never goes through `Value`.
+- **The router's `Connected=false` wait must poll `get_connecting()`, never
+  `get_connected()`** (QHY ConformU session, 2026-07). The `PUT /connected`
+  handler synchronously waits for an async disconnect to finish before
+  replying. `get_connected()` is not a valid completion signal for that wait:
+  per the Handles/locks rule above, `set_connected(false)` correctly clears
+  `connected_` at the *start* of teardown (so a throwing close can't leave
+  the driver looking half-connected), which means `get_connected()` can read
+  `false` while the disconnect task is still running. A wait that polled
+  `device->get_connected() && device->get_connecting()` exited the instant
+  `connected_` flipped — well before the task actually finished — so the
+  handler replied "done" early, and the client's very next `Connect()` raced
+  the still-running disconnect and was silently dropped by
+  `AsyncConnectable`'s connect-vs-in-flight-disconnect rule. `get_connecting()`
+  alone is the one signal the base class guarantees stays true for a task's
+  entire lifetime, across every driver that inherits it — see
+  `test_async_connectable.cpp` for the regression test. This is a router bug,
+  not a driver bug: no per-driver fix can work around a caller that trusts
+  the wrong flag.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging
@@ -761,6 +799,8 @@ SDK location: `AlpacaCore/external/QHY/sdk_Arm64_25.09.29/`.
 - Camera IDs are strings (`char[32]`), not integers — use `std::optional<std::string>` for camera_id and `std::optional<int>` for camera_index.
 - `GetQHYCCDSingleFrame()` blocks until the frame is ready; run it in a background thread and use an exposure status enum (Idle/Working/Success/Failed) to communicate results.
 - Temperature control requires `ControlQHYCCDTemp()` to be called approximately every second; use a dedicated background thread started/stopped with the cooler.
+- `ControlQHYCCDGuide()` blocks the calling thread for the full pulse duration (confirmed on real miniCam8M hardware: a 2000ms pulse blocked the caller for exactly 2000ms) — run it on a detached thread (only the shared_ptr guiding flag + a copied camera ID, never `this`) so `PulseGuide` returns immediately, matching ASCOM's async expectation.
+- `ControlQHYCCDTemp()` and `SetQHYCCDParam()` (at least for `MANULPWM`) have no SDK-side timeout and can occasionally run far past `ControlQHYCCDTemp`'s documented ~10s PID-loop figure. See the "blocking SDK call with no timeout" rule in Driver concurrency & lifecycle above — the temp-control and cooler-off worker joins in `qhy_camera_driver.cpp` are bounded (2s) and detach on timeout, and `qhy_sdk_wrapper.cpp`'s handle is reference-counted (`shared_ptr<qhyccd_handle>`) so that detach can never race a concurrent `close_camera()`.
 - Guide direction convention differs from Alpaca: QHY uses EAST=0, NORTH=1, SOUTH=2, WEST=3 vs Alpaca North=0, South=1, East=2, West=3 — map explicitly.
 - After changing readout mode, refresh chip info and reset ROI — sensor dimensions can change per mode.
 - SDK global lifecycle (`InitQHYCCDResource` / `ReleaseQHYCCDResource`) is managed as a singleton in the wrapper; include `#define __CPP_MODE__ 1` before `#include <qhyccd.h>` in the wrapper `.cpp` only.
