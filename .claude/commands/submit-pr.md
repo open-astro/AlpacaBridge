@@ -297,13 +297,16 @@ one arrives (do NOT foreground-sleep; run this with `run_in_background`):
 
 ```bash
 PR=<number>
-BASE=$(gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login=="claude")] | length')
+# Count only genuine review comments: the bot login AND a verdict line, so an
+# unrelated comment from a same-named account can't satisfy the poll.
+FILTER='[.comments[] | select(.author.login=="claude" and (.body | test("✅ Approved|⚠️ Issues found")))]'
+BASE=$(gh pr view "$PR" --json comments --jq "$FILTER | length")
 DEADLINE=$(( $(date +%s) + 1800 ))   # 30-min bailout: don't poll forever on a broken workflow
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 60
-  N=$(gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login=="claude")] | length')
+  N=$(gh pr view "$PR" --json comments --jq "$FILTER | length")
   if [ "$N" -gt "$BASE" ]; then
-    gh pr view "$PR" --json comments --jq '[.comments[] | select(.author.login=="claude")] | last | .body'
+    gh pr view "$PR" --json comments --jq "$FILTER | last | .body"
     exit 0
   fi
 done

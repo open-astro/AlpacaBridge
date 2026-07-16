@@ -1959,14 +1959,16 @@ function applyOpticsMm(formData, deviceData, apertureField, focalField) {
     ];
     for (const [formName, configKey, label, minMm] of fields) {
         const mm = readOptionalNumber(formData, formName);
-        if (mm === null) {
+        // null (empty field) and an explicit 0 both mean "unset" — the router
+        // only injects values > 0 into the drivers, so don't store a 0.
+        if (mm === null || mm === 0) {
             continue;
         }
         if (mm < 0) {
             alert(`${label} cannot be negative.`);
             return false;
         }
-        if (mm > 0 && mm < minMm) {
+        if (mm < minMm) {
             alert(`${label} of ${mm} mm looks too small — this field is in millimetres ` +
                 `(e.g. a 480 mm focal length is entered as 480). Please re-enter the value in mm.`);
             return false;
