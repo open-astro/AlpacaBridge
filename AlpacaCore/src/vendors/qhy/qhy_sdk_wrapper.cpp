@@ -44,7 +44,17 @@ void check_result(uint32_t ret, const char* context) {
 class QHYSDKWrapper::Impl {
 public:
     mutable std::mutex mutex;
-    std::unordered_map<std::string, qhyccd_handle*> handles;
+    // shared_ptr, not a raw pointer: a handful of calls (control_temp,
+    // set_param, get_single_frame) release `mutex` before making their
+    // blocking SDK call, so a concurrent close_camera() erasing the map
+    // entry must not invalidate a handle those calls are still using
+    // (ConformU finding: SetQHYCCDParam(MANULPWM) and ControlQHYCCDTemp can
+    // both run long enough on real hardware for a disconnect to legitimately
+    // give up waiting and move on). The deleter runs CloseQHYCCD only when
+    // the LAST reference drops -- ours in this map, or a copy still held by
+    // one of those in-flight blocking calls -- so the physical close is
+    // deferred rather than racing a call that's still using the handle.
+    std::unordered_map<std::string, std::shared_ptr<qhyccd_handle>> handles;
     mutable bool resource_initialized{false};
     mutable bool resource_init_attempted{false};
     mutable std::string sdk_version_cache;  // filled on successful init
@@ -66,14 +76,10 @@ public:
     }
 
     ~Impl() {
-        // Close all open handles
-        for (auto& [id, handle] : handles) {
-            if (handle != nullptr) {
-                try {
-                    CloseQHYCCD(handle);
-                } catch (...) {}
-            }
-        }
+        // Each shared_ptr's deleter calls CloseQHYCCD; clearing the map drops
+        // our reference on all of them (any still held by an in-flight
+        // blocking call keeps that specific handle alive a little longer,
+        // which is fine -- the process is tearing down either way).
         handles.clear();
 
         if (resource_initialized) {
@@ -81,9 +87,9 @@ public:
         }
     }
 
-    qhyccd_handle* get_handle(const std::string& camera_id) const {
+    std::shared_ptr<qhyccd_handle> get_handle(const std::string& camera_id) const {
         auto it = handles.find(camera_id);
-        if (it == handles.end() || it->second == nullptr) {
+        if (it == handles.end() || !it->second) {
             throw AlpacaException("QHY camera not open: " + camera_id, AlpacaError::NotConnected);
         }
         return it->second;
@@ -190,45 +196,51 @@ void QHYSDKWrapper::open_camera(const std::string& camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
     pimpl_->ensure_resource();
 
-    // Close existing handle if present
-    auto it = pimpl_->handles.find(camera_id);
-    if (it != pimpl_->handles.end() && it->second != nullptr) {
-        CloseQHYCCD(it->second);
-        pimpl_->handles.erase(it);
-    }
+    // Drop any existing handle for this id. Erase (not an explicit
+    // CloseQHYCCD) so a stale handle still in use by an in-flight blocking
+    // call elsewhere isn't closed out from under it -- see the Impl comment.
+    pimpl_->handles.erase(camera_id);
 
     char id_buf[64] = {};
     std::strncpy(id_buf, camera_id.c_str(), sizeof(id_buf) - 1);
 
-    qhyccd_handle* handle = OpenQHYCCD(id_buf);
-    if (handle == nullptr) {
+    qhyccd_handle* raw_handle = OpenQHYCCD(id_buf);
+    if (raw_handle == nullptr) {
         throw AlpacaException("Failed to open QHY camera: " + camera_id, AlpacaError::DriverException);
     }
 
     // Single frame mode
-    uint32_t ret = SetQHYCCDStreamMode(handle, 0);
+    uint32_t ret = SetQHYCCDStreamMode(raw_handle, 0);
     if (ret != QHYCCD_SUCCESS) {
-        CloseQHYCCD(handle);
+        CloseQHYCCD(raw_handle);
         throw AlpacaException("Failed to set QHY stream mode for: " + camera_id, AlpacaError::DriverException);
     }
 
-    pimpl_->handles[camera_id] = handle;
+    pimpl_->handles[camera_id] = std::shared_ptr<qhyccd_handle>(raw_handle, [](qhyccd_handle* h) {
+        if (h != nullptr) {
+            try {
+                CloseQHYCCD(h);
+            } catch (...) {}
+        }
+    });
 }
 
 void QHYSDKWrapper::init_camera(const std::string& camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     check_result(InitQHYCCD(handle), "InitQHYCCD");
 }
 
 void QHYSDKWrapper::close_camera(const std::string& camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    auto it = pimpl_->handles.find(camera_id);
-    if (it == pimpl_->handles.end() || it->second == nullptr) {
-        return;
-    }
-    CloseQHYCCD(it->second);
-    pimpl_->handles.erase(it);
+    // Erase, don't call CloseQHYCCD directly: the shared_ptr deleter runs it
+    // once the last reference drops. If control_temp()/set_param()/
+    // get_single_frame() are mid-call on this handle right now (they hold
+    // their own copy while pimpl_->mutex is released -- see those functions),
+    // this erase just drops OUR reference; the actual hardware close is
+    // deferred until that in-flight call returns and its copy goes out of
+    // scope, instead of racing it.
+    pimpl_->handles.erase(camera_id);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -237,7 +249,7 @@ void QHYSDKWrapper::close_camera(const std::string& camera_id) {
 
 bool QHYSDKWrapper::get_chip_info(const std::string& camera_id, QHYCameraInfo& info) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
 
     double chipw = 0.0, chiph = 0.0;
     uint32_t imagew = 0, imageh = 0;
@@ -285,19 +297,19 @@ bool QHYSDKWrapper::get_chip_info(const std::string& camera_id, QHYCameraInfo& i
 
 bool QHYSDKWrapper::is_control_available(const std::string& camera_id, int control_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     return IsQHYCCDControlAvailable(handle, static_cast<CONTROL_ID>(control_id)) == QHYCCD_SUCCESS;
 }
 
 double QHYSDKWrapper::get_param(const std::string& camera_id, int control_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     return GetQHYCCDParam(handle, static_cast<CONTROL_ID>(control_id));
 }
 
 QHYControlRange QHYSDKWrapper::get_param_range(const std::string& camera_id, int control_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
 
     QHYControlRange range{};
     uint32_t ret = GetQHYCCDParamMinMaxStep(handle, static_cast<CONTROL_ID>(control_id),
@@ -307,10 +319,21 @@ QHYControlRange QHYSDKWrapper::get_param_range(const std::string& camera_id, int
 }
 
 void QHYSDKWrapper::set_param(const std::string& camera_id, int control_id, double value) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    // Some params (e.g. MANULPWM) can block for an extended time on real
+    // hardware, same as ControlQHYCCDTemp below. Do not hold pimpl_->mutex
+    // for the duration -- every other SDK call takes the same mutex and
+    // would stall, including close_camera() during a concurrent disconnect.
+    // Keep the shared_ptr itself alive (not just a raw pointer) across the
+    // unlocked call: a concurrent close_camera() may erase the map entry
+    // while this call is still in flight, and this copy is what keeps the
+    // handle valid until SetQHYCCDParam returns (see the Impl comment).
+    std::shared_ptr<qhyccd_handle> handle;
+    {
+        std::lock_guard<std::mutex> lock(pimpl_->mutex);
+        handle = pimpl_->get_handle(camera_id);
+    }
     check_result(
-        SetQHYCCDParam(handle, static_cast<CONTROL_ID>(control_id), value),
+        SetQHYCCDParam(handle.get(), static_cast<CONTROL_ID>(control_id), value),
         "SetQHYCCDParam"
     );
 }
@@ -323,7 +346,7 @@ void QHYSDKWrapper::set_resolution(const std::string& camera_id,
                                    uint32_t start_x, uint32_t start_y,
                                    uint32_t width, uint32_t height) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     check_result(
         SetQHYCCDResolution(handle, start_x, start_y, width, height),
         "SetQHYCCDResolution"
@@ -333,7 +356,7 @@ void QHYSDKWrapper::set_resolution(const std::string& camera_id,
 void QHYSDKWrapper::set_bin_mode(const std::string& camera_id,
                                  uint32_t wbin, uint32_t hbin) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     check_result(
         SetQHYCCDBinMode(handle, wbin, hbin),
         "SetQHYCCDBinMode"
@@ -342,7 +365,7 @@ void QHYSDKWrapper::set_bin_mode(const std::string& camera_id,
 
 void QHYSDKWrapper::set_bits_mode(const std::string& camera_id, uint32_t bits) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     check_result(
         SetQHYCCDBitsMode(handle, bits),
         "SetQHYCCDBitsMode"
@@ -351,7 +374,7 @@ void QHYSDKWrapper::set_bits_mode(const std::string& camera_id, uint32_t bits) {
 
 uint32_t QHYSDKWrapper::get_mem_length(const std::string& camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     return GetQHYCCDMemLength(handle);
 }
 
@@ -361,7 +384,7 @@ uint32_t QHYSDKWrapper::get_mem_length(const std::string& camera_id) {
 
 bool QHYSDKWrapper::start_single_frame(const std::string& camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     uint32_t ret = ExpQHYCCDSingleFrame(handle);
     if (ret == QHYCCD_READ_DIRECTLY) {
         return true;
@@ -379,25 +402,27 @@ bool QHYSDKWrapper::get_single_frame(const std::string& camera_id,
                                      uint32_t& width, uint32_t& height,
                                      uint32_t& bpp, uint32_t& channels) {
     // NOTE: This is a blocking call — do not hold the mutex for the duration.
-    // We fetch the handle under the mutex and then release before the blocking call.
-    qhyccd_handle* handle = nullptr;
+    // We fetch the handle under the mutex and then release before the
+    // blocking call. Keep the shared_ptr itself (not just a raw pointer)
+    // alive across the call -- see the Impl comment and set_param() above.
+    std::shared_ptr<qhyccd_handle> handle;
     {
         std::lock_guard<std::mutex> lock(pimpl_->mutex);
         handle = pimpl_->get_handle(camera_id);
     }
 
-    uint32_t ret = GetQHYCCDSingleFrame(handle, &width, &height, &bpp, &channels, buffer);
+    uint32_t ret = GetQHYCCDSingleFrame(handle.get(), &width, &height, &bpp, &channels, buffer);
     return ret == QHYCCD_SUCCESS;
 }
 
 void QHYSDKWrapper::cancel_exposure(const std::string& camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
     auto it = pimpl_->handles.find(camera_id);
-    if (it == pimpl_->handles.end() || it->second == nullptr) {
+    if (it == pimpl_->handles.end() || !it->second) {
         return;
     }
     // CancelQHYCCDExposingAndReadout is supported by all cameras
-    CancelQHYCCDExposingAndReadout(it->second);
+    CancelQHYCCDExposingAndReadout(it->second.get());
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -406,8 +431,13 @@ void QHYSDKWrapper::cancel_exposure(const std::string& camera_id) {
 
 void QHYSDKWrapper::guide(const std::string& camera_id,
                           uint32_t qhy_direction, uint16_t duration_ms) {
+    // Holds pimpl_->mutex for the full ControlQHYCCDGuide call (up to the
+    // pulse duration, e.g. 2s) -- the caller (qhy_camera_driver's
+    // pulse_guide()) already runs this on its own detached thread so it never
+    // blocks the HTTP thread, but it still serializes against every other SDK
+    // call for that duration. Matches existing behavior; not changed here.
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     check_result(
         ControlQHYCCDGuide(handle, qhy_direction, duration_ms),
         "ControlQHYCCDGuide"
@@ -422,13 +452,15 @@ void QHYSDKWrapper::control_temp(const std::string& camera_id, double target_tem
     // NOTE: ControlQHYCCDTemp blocks for ~10s (PID loop). Do not hold pimpl_->mutex
     // for the duration — every other SDK call takes the same mutex and would stall.
     // Fetch the handle under the lock, release, then call the blocking function.
-    qhyccd_handle* handle = nullptr;
+    // Keep the shared_ptr itself alive across the call -- see the Impl
+    // comment and set_param() above.
+    std::shared_ptr<qhyccd_handle> handle;
     {
         std::lock_guard<std::mutex> lock(pimpl_->mutex);
         handle = pimpl_->get_handle(camera_id);
     }
     // ControlQHYCCDTemp implements PID cooler control — must be called ~every second
-    ControlQHYCCDTemp(handle, target_temp_c);
+    ControlQHYCCDTemp(handle.get(), target_temp_c);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -437,7 +469,7 @@ void QHYSDKWrapper::control_temp(const std::string& camera_id, double target_tem
 
 uint32_t QHYSDKWrapper::get_num_readout_modes(const std::string& camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     uint32_t num = 0;
     if (GetQHYCCDNumberOfReadModes(handle, &num) != QHYCCD_SUCCESS) {
         return 1; // Default: at least one mode
@@ -448,7 +480,7 @@ uint32_t QHYSDKWrapper::get_num_readout_modes(const std::string& camera_id) {
 std::string QHYSDKWrapper::get_readout_mode_name(const std::string& camera_id,
                                                   uint32_t mode_index) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     char name_buf[64] = {};
     if (GetQHYCCDReadModeName(handle, mode_index, name_buf) == QHYCCD_SUCCESS) {
         return std::string(name_buf);
@@ -458,7 +490,7 @@ std::string QHYSDKWrapper::get_readout_mode_name(const std::string& camera_id,
 
 void QHYSDKWrapper::set_readout_mode(const std::string& camera_id, uint32_t mode_index) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    qhyccd_handle* handle = pimpl_->get_handle(camera_id);
+    qhyccd_handle* handle = pimpl_->get_handle(camera_id).get();
     check_result(SetQHYCCDReadMode(handle, mode_index), "SetQHYCCDReadMode");
 }
 

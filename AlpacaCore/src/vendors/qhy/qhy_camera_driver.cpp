@@ -268,18 +268,16 @@ private:
                 if (!connected_.load()) {
                     return; // already disconnected
                 }
-                temp_thread_stop_.store(true);
+                temp_thread_stop_->store(true);
                 temp_to_join = std::move(temp_thread_);
                 telemetry_thread_stop_.store(true);
                 telemetry_to_join = std::move(telemetry_thread_);
             }
-            if (temp_to_join.joinable()) {
-                try {
-                    temp_to_join.join(); // outside mutex_
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("QHY", "Temp thread join failed during disconnect: " +
-                        std::string(e.what()));
-                }
+            try {
+                join_temp_thread(temp_to_join); // outside mutex_; bounded, may detach
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "Temp thread join failed during disconnect: " +
+                    std::string(e.what()));
             }
             if (telemetry_to_join.joinable()) {
                 try {
@@ -599,14 +597,14 @@ public:
         if (camera_info_valid_ && !camera_info_.has_cooler) {
             return;
         }
-        // Joinable member thread, NOT detached (AGENTS.md: never detach a
-        // thread that touches `this`). Serialise spawn vs join under
-        // cooler_off_lifecycle_mutex_; the previous worker (if any) has either
-        // finished or is finishing — joining it here bounds us to one worker.
-        // It is joined again in disconnect and the destructor.
+        // Serialise spawn vs join under cooler_off_lifecycle_mutex_; the
+        // previous worker (if any) has either finished or is finishing —
+        // joining it here bounds us to one worker. It is joined (or, on
+        // timeout, detached — see join_cooler_off_thread()) again in
+        // disconnect and the destructor.
         std::lock_guard<std::mutex> cooler_lock(cooler_off_lifecycle_mutex_);
         if (cooler_off_thread_.joinable()) {
-            if (cooler_off_running_.load()) {
+            if (cooler_off_running_->load()) {
                 // A turn-off worker is already in flight (it can block for
                 // seconds joining the temp thread mid-PID-call). Joining it
                 // here would stall this HTTP thread for that whole duration —
@@ -616,12 +614,17 @@ public:
             }
             cooler_off_thread_.join();  // finished worker — instant reap
         }
-        cooler_off_running_.store(true);
+        cooler_off_running_->store(true);
         cooler_off_thread_ = std::thread([this]() {
             // Clear the in-flight flag on every exit path, including throws.
+            // Captures the shared_ptr (not `this`): if join_cooler_off_thread()
+            // times out and detaches this thread while it's still stuck inside
+            // SetQHYCCDParam below, this is the ONLY thing that runs after the
+            // blocking call returns, and it must not touch a driver that may
+            // by then be destroyed.
             struct RunningGuard {
-                std::atomic<bool>& flag;
-                ~RunningGuard() { flag.store(false); }
+                std::shared_ptr<std::atomic<bool>> flag;
+                ~RunningGuard() { flag->store(false); }
             } running_guard{cooler_off_running_};
             std::thread temp_to_join;
             std::string cam_id_for_pwm;
@@ -634,19 +637,31 @@ public:
                 if (!connected_.load()) {
                     return;
                 }
-                temp_thread_stop_.store(true);
+                temp_thread_stop_->store(true);
                 temp_to_join = std::move(temp_thread_);
                 cam_id_for_pwm = camera_id_.value_or(""); // mutex_ already held; don't call camera_id_value()
             }
-            if (temp_to_join.joinable()) {
-                temp_to_join.join();
-            }
+            join_temp_thread(temp_to_join);  // bounded; may detach (see join_temp_thread)
             if (!cam_id_for_pwm.empty()) {
+                // Timing is logged because this call has no SDK-side timeout
+                // and can occasionally run long on real hardware (ConformU
+                // finding) -- worth being able to see how long after the fact.
+                // Safe to call after a detach: only touches local state.
+                const auto call_start = std::chrono::steady_clock::now();
+                ALPACA_LOG_INFO("QHY", "Calling SetQHYCCDParam(MANULPWM,0)...");
                 try {
                     QHYSDKWrapper::instance().set_param(cam_id_for_pwm,
                                                         control::MANULPWM, 0.0);
-                } catch (const std::exception&) {
+                    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - call_start).count();
+                    ALPACA_LOG_INFO("QHY", "SetQHYCCDParam(MANULPWM,0) returned OK after " +
+                        std::to_string(elapsed_ms) + "ms");
+                } catch (const std::exception& e) {
                     // MANULPWM may not be writable on all cameras — ignore
+                    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - call_start).count();
+                    ALPACA_LOG_INFO("QHY", "SetQHYCCDParam(MANULPWM,0) threw after " +
+                        std::to_string(elapsed_ms) + "ms: " + e.what());
                 }
             }
         });
@@ -1101,8 +1116,9 @@ public:
 
         uint32_t qhy_dir = alpaca_to_qhy_guide_direction(direction);
         uint16_t dur_ms = static_cast<uint16_t>(std::min(duration, 65535));
+        // Copy, not reference: the detached thread below must not touch `this`.
+        std::string cam_id = camera_id_value();
 
-        QHYSDKWrapper::instance().guide(camera_id_value(), qhy_dir, dur_ms);
         // End timestamp BEFORE the flag, both under one mutex_ hold: a reader
         // that observes the flag as true must never see a stale (epoch) end
         // time, or the self-clearing getter would clear the pulse immediately
@@ -1114,13 +1130,23 @@ public:
             pulse_guiding_->store(true);
         }
 
-        // Clear guiding flag after duration elapses. The detached thread
-        // captures NO object state — only the shared_ptr flag — so it cannot
-        // dereference a destroyed driver if the object is torn down mid-pulse
-        // (AGENTS.md: never detach a thread that touches `this`; the Player
-        // One camera fixed this exact bug with the same shared_ptr pattern).
-        std::thread([duration, flag = pulse_guiding_]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
+        // ControlQHYCCDGuide blocks the calling thread for the full pulse
+        // duration (confirmed on real miniCam8M hardware via ConformU: a
+        // 2000ms pulse blocked the HTTP handler for exactly 2000ms), which
+        // blows the ASCOM STANDARD (1.0s) response-time target for an
+        // initiator method. Run the SDK call on a detached thread so
+        // PulseGuide returns immediately, matching the async pattern ASCOM
+        // expects; the flag then clears exactly when the physical pulse
+        // completes rather than being tracked by a separate sleep timer that
+        // could drift out of sync with the SDK call.
+        //
+        // The thread captures NO object state — only the copied camera ID
+        // and the shared_ptr flag — so it cannot dereference a destroyed
+        // driver if the object is torn down mid-pulse (AGENTS.md: never
+        // detach a thread that touches `this`; the Player One camera fixed
+        // this exact bug with the same shared_ptr pattern).
+        std::thread([cam_id, qhy_dir, dur_ms, flag = pulse_guiding_]() {
+            QHYSDKWrapper::instance().guide(cam_id, qhy_dir, dur_ms);
             flag->store(false);
         }).detach();
     }
@@ -1362,18 +1388,34 @@ private:
     mutable std::chrono::steady_clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 
-    // Temperature control
+    // Temperature control. Both flags are shared_ptr, not plain members:
+    // ControlQHYCCDTemp (the per-iteration SDK call) has no timeout of its
+    // own and can occasionally run well past its documented ~10s PID-loop
+    // figure (ConformU finding), so join_temp_thread() below bounds the wait
+    // and detaches on timeout. A detached thread must never touch `this`
+    // (AGENTS.md) -- these shared_ptrs, plus the immediate stop-flag
+    // recheck in start_temp_control_thread() right after the blocking call,
+    // are what make that safe. Same pattern as pulse_guiding_/
+    // cooler_off_running_.
     std::thread temp_thread_;
-    std::atomic<bool> temp_thread_stop_{false};
+    std::shared_ptr<std::atomic<bool>> temp_thread_stop_{std::make_shared<std::atomic<bool>>(false)};
+    // True for the temp thread's entire lifetime (spawn to natural exit);
+    // lets join_temp_thread() know whether a detach is actually needed.
+    std::shared_ptr<std::atomic<bool>> temp_thread_running_{std::make_shared<std::atomic<bool>>(false)};
 
-    // Cooler-off worker (replaces a detached lambda that touched `this`).
-    // cooler_off_lifecycle_mutex_ serialises its spawn vs join; joined in
-    // disconnect and the destructor.
+    // Cooler-off worker. cooler_off_lifecycle_mutex_ serialises its spawn vs
+    // join; joined in disconnect and the destructor.
     std::thread cooler_off_thread_;
     std::mutex cooler_off_lifecycle_mutex_;
     // True while a cooler-off worker is in flight; lets a second CoolerOn=false
     // return immediately instead of blocking on the join (see set_cooler_on).
-    std::atomic<bool> cooler_off_running_{false};
+    // shared_ptr, not a plain member: SetQHYCCDParam(MANULPWM) can hang
+    // indefinitely on real hardware with no SDK-side timeout (ConformU
+    // finding), so join_cooler_off_thread() bounds its wait and detaches on
+    // timeout. A detached thread must never touch `this` once it might
+    // outlive the driver (AGENTS.md) — the shared_ptr keeps this flag alive
+    // independent of `this`, same pattern as pulse_guiding_ below.
+    std::shared_ptr<std::atomic<bool>> cooler_off_running_{std::make_shared<std::atomic<bool>>(false)};
 
     // Serialises temp/telemetry thread starts: two concurrent starters could
     // both pass the joinable() pre-check and the loser would destroy a
@@ -1491,8 +1533,34 @@ private:
 
     void join_cooler_off_thread() {
         std::lock_guard<std::mutex> cooler_lock(cooler_off_lifecycle_mutex_);
-        if (cooler_off_thread_.joinable()) {
-            cooler_off_thread_.join();
+        if (!cooler_off_thread_.joinable()) {
+            return;
+        }
+        // This worker joins temp_thread_ before touching the SDK, and
+        // ControlQHYCCDTemp (the temp thread's per-iteration SDK call) is
+        // documented elsewhere in this file as blocking ~10s (PID loop),
+        // occasionally longer (ConformU finding). SetQHYCCDParam itself also
+        // has no SDK-side timeout. ASCOM clients (ConformU included) apply
+        // their own ~5s budget to the bare Disconnect() call, so this can't
+        // simply wait out the documented worst case -- it must return well
+        // under that regardless of how long the underlying hardware call
+        // actually takes. Bound the wait short and detach on timeout; safe
+        // because the QHY SDK wrapper's handle is now reference-counted
+        // (shared_ptr, not a raw pointer -- see qhy_sdk_wrapper.cpp), so a
+        // still-running SetQHYCCDParam call can't be invalidated by a
+        // concurrent close_camera(), and everything this worker does after
+        // this point runs through cooler_off_running_ (a shared_ptr, not
+        // `this` -- see the RunningGuard in set_cooler_on), so detaching here
+        // can never touch a driver that outlives it.
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (cooler_off_running_->load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (cooler_off_running_->load()) {
+            ALPACA_LOG_WARN("QHY", "cooler-off worker exceeded 2s timeout; detaching");
+            cooler_off_thread_.detach();
+        } else {
+            cooler_off_thread_.join();  // finished worker — instant reap
         }
     }
 
@@ -1506,18 +1574,16 @@ private:
         std::thread telemetry_to_join;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            temp_thread_stop_.store(true);
+            temp_thread_stop_->store(true);
             temp_to_join = std::move(temp_thread_);
             telemetry_thread_stop_.store(true);
             telemetry_to_join = std::move(telemetry_thread_);
         }
-        if (temp_to_join.joinable()) {
-            try {
-                temp_to_join.join();
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("QHY", "Temp thread join failed during shutdown: " +
-                    std::string(e.what()));
-            }
+        try {
+            join_temp_thread(temp_to_join);  // bounded; may detach (see join_temp_thread)
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("QHY", "Temp thread join failed during shutdown: " +
+                std::string(e.what()));
         }
         if (telemetry_to_join.joinable()) {
             try {
@@ -1559,14 +1625,19 @@ private:
             if (temp_thread_.joinable()) {
                 return;
             }
-            temp_thread_stop_.store(false);
+            temp_thread_stop_->store(false);
             id = camera_id_.value_or("");
         }
         if (id.empty()) {
             return;
         }
-        std::thread t([this, id]() {
-            while (!temp_thread_stop_.load()) {
+        temp_thread_running_->store(true);
+        std::thread t([this, id, stop_flag = temp_thread_stop_, running_flag = temp_thread_running_]() {
+            struct RunningGuard {
+                std::shared_ptr<std::atomic<bool>> flag;
+                ~RunningGuard() { flag->store(false); }
+            } running_guard{running_flag};
+            while (!stop_flag->load()) {
                 double target = 0.0;
                 {
                     std::lock_guard<std::mutex> lk(mutex_);
@@ -1579,6 +1650,15 @@ private:
                         ALPACA_LOG_DEBUG("QHY", "Temp control error: " + std::string(e.what()));
                     }
                 }
+                // Recheck the stop flag immediately after the (possibly long,
+                // occasionally >10s -- ConformU finding) blocking SDK call,
+                // BEFORE touching `this` again: if join_temp_thread() timed
+                // out and detached this thread while it was inside
+                // control_temp(), `this` may already be destroyed by the
+                // time we get here.
+                if (stop_flag->load()) {
+                    break;
+                }
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         });
@@ -1588,17 +1668,33 @@ private:
         temp_thread_ = std::move(t);
     }
 
+    // Bounded wait + detach fallback for the temp-control thread, mirroring
+    // join_cooler_off_thread() -- see that function's comment for why 2s
+    // (well under ASCOM clients' ~5s Disconnect() budget) instead of the
+    // documented ~10s ControlQHYCCDTemp worst case. Safe to detach: see the
+    // comment on temp_thread_running_/temp_thread_stop_ and the recheck in
+    // start_temp_control_thread() above. Caller must have already set
+    // temp_thread_stop_ and moved the thread out of temp_thread_.
+    void join_temp_thread(std::thread& t) {
+        if (!t.joinable()) {
+            return;
+        }
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (temp_thread_running_->load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (temp_thread_running_->load()) {
+            ALPACA_LOG_WARN("QHY", "temp-control thread exceeded 2s timeout; detaching");
+            t.detach();
+        } else {
+            t.join();  // finished — instant reap
+        }
+    }
+
     // Called only from set_connected_impl while holding mutex_. Starts thread
     // without holding lock for thread construction to avoid blocking.
     void start_temp_control_thread_locked() {
         start_temp_control_thread();
-    }
-
-    void stop_temp_control_thread_locked() {
-        temp_thread_stop_.store(true);
-        if (temp_thread_.joinable()) {
-            temp_thread_.join();
-        }
     }
 
     // Start telemetry thread. Call without holding mutex_ to avoid blocking.
