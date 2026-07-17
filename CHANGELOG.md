@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.0.1] - 2026-07-14
+## [3.0.2] - 2026-07-16
+
+### Changed
+- **`/submit-pr` skill: post-submission review loop** (.claude/commands): the release-version ask is now mandatory on every run; after PR creation the skill polls the PR once a minute for the `claude` review bot's verdict comment, fixes in-scope findings batched into a single push per review round (every push restarts a full fresh review), hard-stops pushing on `✅ Approved` (then asks to merge), and turns out-of-scope / approved-non-blocking findings into follow-up GitHub issues in the established "From the PR #N review" format. The bot flow is maintainer-only (@joeytroy): external/fork contributors instead post a PR comment tagging the maintainer, who kicks off a local agent review — outside contributors never execute against the review bot.
+- **Telescope optics entered and shown in millimetres** (AlpacaHTTP web UI, all five mount vendors — iOptron, SynScan, Celestron, Bisque, ZWO): the Aperture Diameter and Focal Length setup fields are now labelled and entered in mm (how every telescope is sold) instead of metres, with matching placeholders and device-card display in mm. The mm↔m conversion lives only in `app.js`: the config file (`registered_devices.json`) and the Alpaca `FocalLength`/`ApertureDiameter`/`ApertureArea` properties keep metres per the ASCOM spec, so existing configs need no migration and ConformU behavior is unchanged. A save-time sanity guard rejects values that can only be metres typed into the mm field (focal length under 5 mm, aperture under 1 mm — small enough to accept 8 mm fisheye lenses and their ~3 mm apertures), catching the classic 0.48-vs-480 confusion, and negative values are rejected outright; the derived aperture-area preview still shows m² as reported over Alpaca.
+
+<details>
+<summary><strong>[3.0.1] - 2026-07-14</strong></summary>
 
 Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findings and the tractable Low findings resolved. Network-authentication items were out of scope by design — ASCOM Alpaca has no auth model.
 
@@ -50,7 +57,10 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
 ### Added
 - **iOptron HAE29C EQ validated** (ConformU 4.4.0, Linux arm64, USB): new `AlpacaCore/conformu/iOptron/HAE29C/` report; SUPPORTED-DRIVERS.md row and driver notes updated, including documentation of the model-gated firmware quirks.
 
-## [3.0.0] - 2026-07-06
+</details>
+
+<details>
+<summary><strong>[3.0.0] - 2026-07-06</strong></summary>
 
 ### Added
 - **ThreadSanitizer CI job + per-driver concurrency stress harness** (#101): a new `sanitizers-tsan` CI job builds the all-vendors AlpacaCore tests with `-fsanitize=thread` and runs a new `[stress]` suite — the first automated coverage for the #1 driver-review bug class (use-after-close, dropped racing disconnects, destructor vs connection-thread races), which the single-threaded ASan job and ConformU cannot see. The reusable harness (`AlpacaCore/tests/concurrency_stress.h`) provides three scenarios per driver: a lifecycle storm (async connect/disconnect + sync `set_connected` + status reads + operational calls from N threads), destruction racing an in-flight connect (the issue-#100 `std::terminate` class), and a deterministic racing-disconnect-never-dropped settle check. Registered for the drivers with the deepest race history — ToupTek camera, AFW filter wheel, and thermal switch run hardware-free over the fake SDK seam (issue #104), wrapped in a new thread-safe `LockedToupTekSDK` decorator so TSan findings point at driver code rather than the deliberately unhardened test fake; ZWO EFW and Player One Phoenix storm the failure path on hardware-free hosts (full path with a wheel attached). Wired into `scripts/ci_preflight.sh` behind `RUN_TSAN=1` (mirroring `RUN_SANITIZERS=1`) with a suppressions file that mutes only the uninstrumented proprietary vendor blobs. The CI job fails loudly if Catch2 is missing instead of green-lighting an empty suite.
@@ -169,6 +179,8 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
 - **Filter-name shorthand expansion is now stricter** (AlpacaCore + AlpacaHTTP): a single delimiter-less filter name whose length equals the slot count is expanded into per-slot single characters (`LRGB` → `L,R,G,B`) only when it contains no lowercase letters, so ordinary names like `Clear` or `Ha_NB` are no longer silently exploded. Applied consistently across the shared web-UI parser and the ZWO / ToupTek filter-wheel drivers (Player One never expanded), with a note added to the web-UI help text. Per the "fix shared patterns everywhere" rule.
 - **Filter-name help text calls out the all-uppercase edge case** (AlpacaHTTP): the ZWO and ToupTek filter-name tooltips now note that an all-caps word like `DARK` on a 4-slot wheel expands to `D, A, R, K` and that a trailing comma keeps it as one name; the Player One tooltip no longer claims expansion (that driver never expands shorthand).
 - **Auto-detect failure message is platform-aware** (#96): serial port enumeration is POSIX-only, so on Windows the `enumerate_*_ports()` helpers always return empty — which previously surfaced a misleading "No <device> detected on any serial port" at connect rather than indicating auto-detect is unavailable. A shared `alpacacore/util/auto_detect.h` helper now reports "Auto-detect is not supported on this platform — configure an explicit serial port" on platforms without enumeration, used by the WandererCover, Gemini, SynScan, Celestron and iOptron auto-detect drivers. AlpacaBridge still targets Linux arm64 only; this only clarifies the Windows scaffolding path.
+
+</details>
 
 <details>
 <summary><strong>[2.1.0] - 2026-06-23</strong></summary>
