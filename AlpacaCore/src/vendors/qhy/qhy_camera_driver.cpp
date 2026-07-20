@@ -255,6 +255,7 @@ private:
             join_cooler_off_thread();
             std::thread temp_to_join;
             std::thread telemetry_to_join;
+            std::shared_ptr<std::atomic<bool>> temp_running_to_join;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 // Base gate (obligation 4) BEFORE the idempotency check: a sync
@@ -269,12 +270,13 @@ private:
                     return; // already disconnected
                 }
                 temp_thread_stop_->store(true);
+                temp_running_to_join = temp_thread_running_;
                 temp_to_join = std::move(temp_thread_);
                 telemetry_thread_stop_.store(true);
                 telemetry_to_join = std::move(telemetry_thread_);
             }
             try {
-                join_temp_thread(temp_to_join);  // outside mutex_; bounded, may detach
+                join_temp_thread(temp_to_join, temp_running_to_join);  // outside mutex_; bounded, may detach
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Temp thread join failed during disconnect: " + std::string(e.what()));
             }
@@ -613,8 +615,16 @@ public:
             }
             cooler_off_thread_.join();  // finished worker — instant reap
         }
-        cooler_off_running_->store(true);
-        cooler_off_thread_ = std::thread([this]() {
+        // Fresh flag per generation, not a store(true) on the shared member: a
+        // prior generation's timed-out-and-detached zombie (join_cooler_off_thread)
+        // keeps its own captured copy of the OLD flag, so reusing the member
+        // would let this new worker's completion be masked by the zombie's
+        // later RunningGuard clearing the SAME flag out from under it (review
+        // finding). Also set the member only after the thread ctor succeeds:
+        // if it throws (e.g. thread limit), nothing was spawned to ever clear
+        // the flag, so publishing it early would wedge cooler-off forever.
+        auto running_flag = std::make_shared<std::atomic<bool>>(true);
+        cooler_off_thread_ = std::thread([this, running_flag]() {
             // Clear the in-flight flag on every exit path, including throws.
             // Captures the shared_ptr (not `this`): if join_cooler_off_thread()
             // times out and detaches this thread while it's still stuck inside
@@ -624,8 +634,9 @@ public:
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
-            } running_guard{cooler_off_running_};
+            } running_guard{running_flag};
             std::thread temp_to_join;
+            std::shared_ptr<std::atomic<bool>> temp_running_to_join;
             std::string cam_id_for_pwm;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -637,10 +648,11 @@ public:
                     return;
                 }
                 temp_thread_stop_->store(true);
+                temp_running_to_join = temp_thread_running_;
                 temp_to_join = std::move(temp_thread_);
                 cam_id_for_pwm = camera_id_.value_or(""); // mutex_ already held; don't call camera_id_value()
             }
-            join_temp_thread(temp_to_join);  // bounded; may detach (see join_temp_thread)
+            join_temp_thread(temp_to_join, temp_running_to_join);  // bounded; may detach
             if (!cam_id_for_pwm.empty()) {
                 // Timing is logged because this call has no SDK-side timeout
                 // and can occasionally run long on real hardware (ConformU
@@ -666,6 +678,11 @@ public:
                 }
             }
         });
+        // Publish only after the thread is actually running: if the ctor
+        // above throws, we never reach here, so cooler_off_running_ still
+        // reflects the previous (already-finished) generation instead of
+        // being wedged true with no worker left to clear it.
+        cooler_off_running_ = running_flag;
     }
 
     double get_cooler_power() const override {
@@ -1147,7 +1164,19 @@ public:
         // detach a thread that touches `this`; the Player One camera fixed
         // this exact bug with the same shared_ptr pattern).
         std::thread([cam_id, qhy_dir, dur_ms, flag = pulse_guiding_]() {
-            QHYSDKWrapper::instance().guide(cam_id, qhy_dir, dur_ms);
+            // guide() throws (NotConnected if a disconnect races this thread's
+            // start, or any SDK failure via check_result); an exception
+            // escaping a std::thread entry point calls std::terminate, so a
+            // disconnect racing a pulse would crash the whole server. The
+            // flag must clear on every exit path or IsPulseGuiding sticks
+            // true forever.
+            try {
+                QHYSDKWrapper::instance().guide(cam_id, qhy_dir, dur_ms);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "PulseGuide worker failed: " + std::string(e.what()));
+            } catch (...) {
+                ALPACA_LOG_WARN("QHY", "PulseGuide worker failed: non-std exception");
+            }
             flag->store(false);
         }).detach();
     }
@@ -1573,15 +1602,17 @@ private:
         join_cooler_off_thread();
         std::thread temp_to_join;
         std::thread telemetry_to_join;
+        std::shared_ptr<std::atomic<bool>> temp_running_to_join;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             temp_thread_stop_->store(true);
+            temp_running_to_join = temp_thread_running_;
             temp_to_join = std::move(temp_thread_);
             telemetry_thread_stop_.store(true);
             telemetry_to_join = std::move(telemetry_thread_);
         }
         try {
-            join_temp_thread(temp_to_join);  // bounded; may detach (see join_temp_thread)
+            join_temp_thread(temp_to_join, temp_running_to_join);  // bounded; may detach
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("QHY", "Temp thread join failed during shutdown: " + std::string(e.what()));
         }
@@ -1620,19 +1651,38 @@ private:
         // std::thread (std::terminate). Lock order: thread_start_mutex_ -> mutex_.
         std::lock_guard<std::mutex> start_lock(thread_start_mutex_);
         std::string id;
+        std::shared_ptr<std::atomic<bool>> stop_flag;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (temp_thread_.joinable()) {
                 return;
             }
-            temp_thread_stop_->store(false);
+            // Fresh flag per generation, not a store(false) reset of the
+            // shared member: a prior generation's timed-out-and-detached
+            // zombie (join_temp_thread) keeps its own captured copy of the
+            // OLD flag, so resetting the member here would let this
+            // reconnect un-stop the zombie via the SAME object -- it would
+            // recheck stop_flag, see false, and keep looping, driving the
+            // cooler alongside the new thread and touching `this` again
+            // (review finding). Captured into a local under the same lock
+            // that publishes it to the member, so the lambda below never
+            // has to re-read the (possibly concurrently reassigned) member.
+            stop_flag = std::make_shared<std::atomic<bool>>(false);
+            temp_thread_stop_ = stop_flag;
             id = camera_id_.value_or("");
         }
         if (id.empty()) {
             return;
         }
-        temp_thread_running_->store(true);
-        std::thread t([this, id, stop_flag = temp_thread_stop_, running_flag = temp_thread_running_]() {
+        // Same reasoning as temp_thread_stop_ above: a fresh object so a
+        // zombie's eventual RunningGuard destructor can never clear the new
+        // generation's in-flight flag out from under join_temp_thread().
+        auto running_flag = std::make_shared<std::atomic<bool>>(true);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            temp_thread_running_ = running_flag;
+        }
+        std::thread t([this, id, stop_flag, running_flag]() {
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
@@ -1675,15 +1725,22 @@ private:
     // comment on temp_thread_running_/temp_thread_stop_ and the recheck in
     // start_temp_control_thread() above. Caller must have already set
     // temp_thread_stop_ and moved the thread out of temp_thread_.
-    void join_temp_thread(std::thread& t) {
+    //
+    // running_flag must be the SAME generation's flag the caller captured
+    // under mutex_ alongside `t` (not a fresh read of the temp_thread_running_
+    // member here): start_temp_control_thread() may reassign that member to a
+    // new generation's flag concurrently with this call, and reading the
+    // member directly would race that reassignment / silently watch the
+    // wrong generation's flag (review finding).
+    void join_temp_thread(std::thread& t, const std::shared_ptr<std::atomic<bool>>& running_flag) {
         if (!t.joinable()) {
             return;
         }
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (temp_thread_running_->load() && std::chrono::steady_clock::now() < deadline) {
+        while (running_flag->load() && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        if (temp_thread_running_->load()) {
+        if (running_flag->load()) {
             ALPACA_LOG_WARN("QHY", "temp-control thread exceeded 2s timeout; detaching");
             t.detach();
         } else {

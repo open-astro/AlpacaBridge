@@ -9,7 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.0.1] - 2026-07-14
+## [3.0.2] - UNRELEASED
+
+### Fixed
+- **QHY: `PulseGuide`'s detached thread could `std::terminate` the whole server** (PR #139 review): `guide()` throws `NotConnected` if a disconnect races the thread's start, or any SDK failure via `check_result` — an exception escaping a `std::thread` entry point calls `std::terminate`. The SDK call is now wrapped in try/catch (log-and-continue), and the in-flight flag clears on every exit path instead of only the success path.
+- **QHY: temp-control and cooler-off stop/running flags were reused across thread generations**, undermining the timeout→detach safety story from the previous disconnect-hang fix: a detached zombie thread and its replacement could share the same `shared_ptr<std::atomic<bool>>`, letting the zombie's flag writes resurrect an unbounded `join()` or keep the zombie looping (touching `this`) after a reconnect reset the shared stop flag. Both `start_temp_control_thread()` and the cooler-off worker now allocate a fresh flag pair per spawn, so a detached generation's flags stay permanently stopped and can never be observed or cleared by the next generation.
+- **QHY: `cooler_off_running_` was published before the worker thread actually started**: if the `std::thread` constructor threw (e.g. thread limit), the flag stuck `true` with no worker left to clear it, wedging every later cooler-off call. The flag is now published only after the thread is confirmed running, mirroring the rollback-safe pattern already used by `AsyncConnectable`'s own spawn path.
+
+<details>
+<summary><strong>[3.0.1] - 2026-07-14</strong></summary>
 
 Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findings and the tractable Low findings resolved. Network-authentication items were out of scope by design — ASCOM Alpaca has no auth model.
 
@@ -53,6 +61,8 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
 
 ### Added
 - **iOptron HAE29C EQ validated** (ConformU 4.4.0, Linux arm64, USB): new `AlpacaCore/conformu/iOptron/HAE29C/` report; SUPPORTED-DRIVERS.md row and driver notes updated, including documentation of the model-gated firmware quirks.
+
+</details>
 
 ## [3.0.0] - 2026-07-06
 
