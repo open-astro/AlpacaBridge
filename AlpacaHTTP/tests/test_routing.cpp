@@ -738,6 +738,63 @@ int main() {
 #endif
     }
 
+    // --- QHY integrated CFW filter wheel routing/config persistence test ---
+    // Guards against sanitize_device_config dropping filterNames on save (the
+    // qhy branch only allowlisted cameraIndex/cameraId until this was added).
+#ifdef ALPACACORE_ENABLE_QHY
+    {
+        nlohmann::json remove_body = {{"vendor", "qhy"}, {"deviceType", "filterwheel"}, {"deviceNumber", 9204}};
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        const std::vector<std::string> filter_names = {"Lum", "Red", "Green", "Blue", "Ha"};
+        nlohmann::json configure_body = {{"vendor", "qhy"},
+                                         {"deviceType", "filterwheel"},
+                                         {"deviceNumber", 9204},
+                                         {"cameraIndex", 0},
+                                         {"filterNames", filter_names}};
+
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_QHY
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        EXPECT(configured_json.value("ErrorNumber", -1) == 0);
+        EXPECT(configured_json.contains("Value"));
+        EXPECT(configured_json["Value"].is_array());
+
+        bool found_qhy_wheel = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "FilterWheel" && entry.value("DeviceNumber", -1) == 9204) {
+                EXPECT(entry.value("Vendor", "") == "qhy");
+                EXPECT(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                EXPECT(cfg.value("vendor", "") == "qhy");
+                EXPECT(cfg.value("deviceType", "") == "filterwheel");
+                EXPECT(cfg.contains("cameraIndex"));
+                EXPECT(cfg.contains("filterNames"));
+                EXPECT(cfg["filterNames"] == filter_names);
+                found_qhy_wheel = true;
+                break;
+            }
+        }
+        EXPECT(found_qhy_wheel);
+
+        nlohmann::json remove_body = {{"vendor", "qhy"}, {"deviceType", "filterwheel"}, {"deviceNumber", 9204}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        EXPECT(remove_json.value("ErrorNumber", -1) == 0);
+#else
+        EXPECT(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
     // --- iOptron iMate PowerBox switch routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_IOPTRON
     {

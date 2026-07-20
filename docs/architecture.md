@@ -106,7 +106,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | Vendor | Device Types | Wrapper Type | Status |
 |--------|-------------|--------------|--------|
 | ZWO | Camera, Focuser (EAF), Rotator (CAA), FilterWheel (EFW), Switch (dew heater, ASIAIR power), Telescope (AM mount) | SDK + protocol wrapper | Production |
-| QHY | Camera | SDK wrapper | Production |
+| QHY | Camera, FilterWheel (integrated CFW, e.g. miniCam8M) | SDK wrapper | Production |
 | Player One | Camera, FilterWheel (Phoenix Wheel), Switch (dew heater + fan) | SDK wrapper | Production |
 | SVBONY | Camera | SDK wrapper | Production |
 | ToupTek | Camera (incl. cooled + High Full Well), Focuser (AAF), FilterWheel (AFW-M), Switch (camera thermal: dew heater + fan; StellaVita power) | SDK + protocol wrapper | Production |

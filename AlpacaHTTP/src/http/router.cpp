@@ -65,6 +65,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
+#include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WEEWX
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
@@ -6907,6 +6908,47 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "qhy" && device_type_str == "filterwheel") {
+#ifdef ALPACACORE_ENABLE_QHY
+        // Integrated CFW (e.g. miniCam8M): controlled through the SAME
+        // physical handle as its paired camera (QHYSDKWrapper ref-counts the
+        // shared open), so it is addressed by the same cameraId/cameraIndex
+        // as the camera device rather than a separate wheel enumeration.
+        std::string camera_id = config.value("cameraId", "");
+        int camera_index = config.value("cameraIndex", -1);
+
+        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
+        if (!camera_id.empty()) {
+            wheel = alpacacore::vendor::qhy::create_qhy_filterwheel(device_number, camera_id);
+        } else if (camera_index >= 0) {
+            wheel = alpacacore::vendor::qhy::create_qhy_filterwheel_by_index(device_number, camera_index);
+        } else {
+            error_message = "QHY filter wheel requires cameraIndex or cameraId";
+            return false;
+        }
+
+        if (config.contains("filterNames")) {
+            const auto& names_value = config.at("filterNames");
+            if (!names_value.is_array()) {
+                error_message = "QHY filter wheel filterNames must be an array";
+                return false;
+            }
+            wheel->set_names(names_value.get<std::vector<std::string>>());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
+            util::log_info("Registered QHY filter wheel");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "QHY support not enabled. Rebuild with -DALPACACORE_ENABLE_QHY=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "svbony" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_SVBONY
         int camera_index = config.value("cameraIndex", 0);
@@ -7315,6 +7357,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "qhy") {
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
+        // Integrated CFW (filter wheel device type): persist custom filter
+        // names too, or they silently revert to "Filter N" after a save
+        // (sanitize_device_config strips anything not allowlisted).
+        copy_if_present("filterNames");
     } else if (vendor == "svbony") {
         copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {

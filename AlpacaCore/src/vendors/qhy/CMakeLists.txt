@@ -28,6 +28,7 @@ if(ALPACACORE_ENABLE_QHY)
     set(QHY_SOURCES
         qhy_sdk_wrapper.cpp
         qhy_camera_driver.cpp
+        qhy_filterwheel_driver.cpp
     )
 
     add_library(alpacacore_qhy STATIC ${QHY_SOURCES})
