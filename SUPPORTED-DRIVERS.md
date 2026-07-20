@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-07-14
+## Updated 2026-07-16
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -62,13 +62,18 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | QHY268C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/QHY268C/) |
+| miniCam8M | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/miniCam8M/) |
 
 <details>
 <summary><strong>QHY Driver Notes</strong></summary>
 
-- **SDK**: QHY CCD SDK 25.09.29 (build target)
+- **SDK**: QHY CCD SDK 25.09.29.11 (build target)
 - **Connection**: USB (requires udev rules and firmware; see below)
 - **Cooler power**: `CanGetCoolerPower` returns false; cooler power reporting is not implemented to avoid SDK timeouts.
+- **PulseGuide**: runs the SDK guide call on a detached thread so the initiator returns immediately (ControlQHYCCDGuide blocks for the full pulse duration on real hardware).
+- **Cooler/temp SDK calls**: `ControlQHYCCDTemp` and `SetQHYCCDParam` have no SDK-side timeout and can occasionally run well past their typical duration on real hardware. The driver bounds how long disconnect waits on their background workers and detaches rather than blocking indefinitely; the QHY SDK handle is reference-counted so a detached worker can never use a handle after it's been closed.
+- **Tested model**: miniCam8M on Linux arm64
+- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues
 
 </details>
 

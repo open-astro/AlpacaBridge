@@ -1888,9 +1888,16 @@ Response Router::dispatch_device_method(
                     device->disconnect();
                     auto deadline = std::chrono::steady_clock::now()
                                   + std::chrono::seconds(8);
-                    while (device->get_connected()
-                           && device->get_connecting()
-                           && std::chrono::steady_clock::now() < deadline) {
+                    // Wait on get_connecting() alone, not get_connected(): some
+                    // drivers clear their connected flag at the START of teardown
+                    // (AGENTS.md: state must be cleared before a throwing SDK
+                    // call), so get_connected() can flip false while the
+                    // disconnect task is still in flight. Gating on it here let
+                    // this handler return "done" before the task actually
+                    // finished, letting the next Connect() race the still-running
+                    // task and get silently dropped by AsyncConnectable's
+                    // connect-vs-in-flight-disconnect rule (QHY ConformU failure).
+                    while (device->get_connecting() && std::chrono::steady_clock::now() < deadline) {
                         std::this_thread::sleep_for(
                             std::chrono::milliseconds(50));
                     }

@@ -142,12 +142,20 @@ protected:
                 pending_connect_ = false;
                 if (inflight == kConnConnect) {
                     pending_disconnect_ = true;
+                    ALPACA_LOG_TRACE(log_tag_, "start_connection_task: disconnect recorded against in-flight connect");
                 }
             } else if (inflight == kConnDisconnect && !pending_disconnect_) {
                 pending_connect_ = true;
+                ALPACA_LOG_TRACE(log_tag_, "start_connection_task: connect recorded against in-flight disconnect");
+            } else {
+                ALPACA_LOG_TRACE(log_tag_, std::string("start_connection_task: dropped connect=") +
+                                               (connect ? "true" : "false") +
+                                               " while inflight=" + std::to_string(static_cast<int>(inflight)));
             }
             return;
         }
+        ALPACA_LOG_TRACE(log_tag_,
+                         std::string("start_connection_task: spawning connect=") + (connect ? "true" : "false"));
         if (connection_thread_.joinable()) {
             connection_thread_.join();  // finished task; reap before reuse
         }
@@ -205,6 +213,8 @@ protected:
         if (conn_task_.load() != kConnConnect) {
             return false;
         }
+        ALPACA_LOG_TRACE(log_tag_, std::string("record_disconnect_if_connect_in_flight: recording, connected_now=") +
+                                       (connected_now ? "true" : "false"));
         // Record REGARDLESS of connected_now: with a connect task in flight,
         // even a sync disconnect that is about to run real hardware teardown
         // (connected_now = true -> return false, caller proceeds) must leave
@@ -250,6 +260,7 @@ protected:
         std::lock_guard<std::mutex> pending_lock(pending_mutex_);
         if (pending_disconnect_) {
             pending_disconnect_ = false;
+            ALPACA_LOG_TRACE(log_tag_, "consume_pending_disconnect: consumed, connect dropped");
             return true;
         }
         return false;
@@ -257,6 +268,7 @@ protected:
 
 private:
     void run_connection_task(bool connect) {
+        ALPACA_LOG_TRACE(log_tag_, std::string("run_connection_task: entry connect=") + (connect ? "true" : "false"));
         try {
             set_connected(connect);
         } catch (const std::exception& e) {
@@ -314,6 +326,10 @@ private:
                 }
                 conn_task_.store(need_disconnect ? kConnDisconnect : need_connect ? kConnConnect : kConnIdle);
             }
+            ALPACA_LOG_TRACE(log_tag_, std::string("run_connection_task: tail connected_now=") +
+                                           (connected_now ? "true" : "false") +
+                                           " need_disconnect=" + (need_disconnect ? "true" : "false") +
+                                           " need_connect=" + (need_connect ? "true" : "false"));
             if (!need_disconnect && !need_connect) {
                 return;
             }
@@ -338,7 +354,7 @@ private:
     std::mutex pending_mutex_;     // leaf lock for pending_disconnect_ only
     bool pending_disconnect_ = false;
     bool pending_connect_ = false;  // under pending_mutex_, mirror of the above
-    bool shutting_down_ = false;  // under connection_mutex_
+    bool shutting_down_ = false;    // under connection_mutex_
     std::thread connection_thread_;
 };
 
