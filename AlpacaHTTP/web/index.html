@@ -837,42 +837,90 @@
                     </div>
                 </div>
 
-                <!-- Gemini Focuser Configuration -->
+                <!-- Gemini Configuration: Focuser (Automatic Astro Focuser Pro) and
+                     CoverCalibrator (Flat Panel Cover Lite) share one vendor block,
+                     with the relevant sub-section shown based on Device Type
+                     (same pattern as the iOptron mount/switch config). -->
                 <div id="gemini-config" class="vendor-config" style="display: none;">
-                    <h3>Gemini Automatic Astro Focuser Pro</h3>
+                    <div id="gemini-focuser-fields">
+                        <h3>Gemini Automatic Astro Focuser Pro</h3>
 
-                    <div class="form-group">
-                        <label for="gemini-connection-type">Connection Type:</label>
-                        <select id="gemini-connection-type" name="connectionType">
-                            <option value="auto" selected>Auto-detect (recommended)</option>
-                            <option value="serial">Serial (USB) — manual port</option>
-                        </select>
-                        <small>Auto-detect scans USB serial ports and probes for the focuser automatically.</small>
-                    </div>
-
-                    <div id="gemini-auto-fields">
                         <div class="form-group">
-                            <label for="gemini-focuser-index">Focuser Index:</label>
-                            <input type="number" id="gemini-focuser-index" name="geminiFocuserIndex" value="0" min="0">
-                            <small>0-based index if multiple focusers are detected. Usually 0.</small>
-                        </div>
-                    </div>
-
-                    <div id="gemini-serial-fields" style="display: none;">
-                        <div class="form-group">
-                            <label for="gemini-port-path">Serial Port:</label>
-                            <input type="text" id="gemini-port-path" name="portPath" placeholder="/dev/ttyUSB0">
-                            <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
-                        </div>
-                        <div class="form-group">
-                            <label for="gemini-baud-rate">Baud Rate:</label>
-                            <select id="gemini-baud-rate" name="baudRate">
-                                <option value="9600" selected>9600</option>
-                                <option value="19200">19200</option>
-                                <option value="38400">38400</option>
-                                <option value="57600">57600</option>
-                                <option value="115200">115200</option>
+                            <label for="gemini-connection-type">Connection Type:</label>
+                            <select id="gemini-connection-type" name="connectionType">
+                                <option value="auto" selected>Auto-detect (recommended)</option>
+                                <option value="serial">Serial (USB) — manual port</option>
                             </select>
+                            <small>Auto-detect scans USB serial ports and probes for the focuser automatically.</small>
+                        </div>
+
+                        <div id="gemini-auto-fields">
+                            <div class="form-group">
+                                <label for="gemini-focuser-index">Focuser Index:</label>
+                                <input type="number" id="gemini-focuser-index" name="geminiFocuserIndex" value="0" min="0">
+                                <small>0-based index if multiple focusers are detected. Usually 0.</small>
+                            </div>
+                        </div>
+
+                        <div id="gemini-serial-fields" style="display: none;">
+                            <div class="form-group">
+                                <label for="gemini-port-path">Serial Port:</label>
+                                <input type="text" id="gemini-port-path" name="portPath" placeholder="/dev/ttyUSB0">
+                                <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="gemini-baud-rate">Baud Rate:</label>
+                                <select id="gemini-baud-rate" name="baudRate">
+                                    <option value="9600" selected>9600</option>
+                                    <option value="19200">19200</option>
+                                    <option value="38400">38400</option>
+                                    <option value="57600">57600</option>
+                                    <option value="115200">115200</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="gemini-flatpanel-fields" style="display: none;">
+                        <h3>Gemini Astro Flat Panel Cover Lite</h3>
+                        <p><small>Light-only flat panel (no motorized cover). USB serial only — no protocol
+                           documentation was published by the vendor; this driver was built from the vendor's
+                           Windows control app, so the exact response format may still need tuning against
+                           real hardware.</small></p>
+
+                        <div class="form-group">
+                            <label for="gemini-flatpanel-connection-type">Connection Type:</label>
+                            <select id="gemini-flatpanel-connection-type" name="geminiFlatPanelConnectionType">
+                                <option value="auto" selected>Auto-detect (recommended)</option>
+                                <option value="serial">Serial (USB) — manual port</option>
+                            </select>
+                            <small>Auto-detect scans USB serial ports and probes for the flat panel automatically.</small>
+                        </div>
+
+                        <div id="gemini-flatpanel-auto-fields">
+                            <div class="form-group">
+                                <label for="gemini-flatpanel-index">Panel Index:</label>
+                                <input type="number" id="gemini-flatpanel-index" name="geminiFlatPanelIndex" value="0" min="0">
+                                <small>0-based index if multiple flat panels are detected. Usually 0.</small>
+                            </div>
+                        </div>
+
+                        <div id="gemini-flatpanel-serial-fields" style="display: none;">
+                            <div class="form-group">
+                                <label for="gemini-flatpanel-port-path">Serial Port:</label>
+                                <input type="text" id="gemini-flatpanel-port-path" name="geminiFlatPanelPortPath" placeholder="/dev/ttyUSB0">
+                                <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="gemini-flatpanel-baud-rate">Baud Rate:</label>
+                                <select id="gemini-flatpanel-baud-rate" name="geminiFlatPanelBaudRate">
+                                    <option value="9600" selected>9600</option>
+                                    <option value="19200">19200</option>
+                                    <option value="38400">38400</option>
+                                    <option value="57600">57600</option>
+                                    <option value="115200">115200</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
                 </div>

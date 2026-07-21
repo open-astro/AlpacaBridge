@@ -71,6 +71,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
+#include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
@@ -7180,6 +7181,40 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "gemini" && device_type_str == "covercalibrator") {
+#ifdef ALPACACORE_ENABLE_GEMINI
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::CoverCalibratorDriver> panel;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // No port specified with serial mode — fall through to auto-detect
+                int panel_index = config.value("panelIndex", 0);
+                panel = alpacacore::vendor::gemini::create_gemini_flatpanel_by_index(device_number, panel_index);
+            } else {
+                int baud_rate = config.value("baudRate", 9600);
+                panel = alpacacore::vendor::gemini::create_gemini_flatpanel(device_number, port_path, baud_rate);
+            }
+        } else {
+            // "auto" or unset — auto-detect
+            int panel_index = config.value("panelIndex", 0);
+            panel = alpacacore::vendor::gemini::create_gemini_flatpanel_by_index(device_number, panel_index);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(panel)))) {
+            util::log_info("Registered Gemini Flat Panel");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "Gemini support not enabled. Rebuild with -DALPACACORE_ENABLE_GEMINI=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "wandererastro" && device_type_str == "covercalibrator") {
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
         std::string conn_type = config.value("connectionType", "auto");
@@ -7372,6 +7407,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "gemini") {
         copy_if_present("connectionType");
         copy_if_present("focuserIndex");
+        copy_if_present("panelIndex");
         std::string connection_type = config.value("connectionType", "auto");
         if (connection_type == "serial") {
             copy_if_present("portPath");
