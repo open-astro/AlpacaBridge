@@ -97,7 +97,7 @@ static bool probe_port(const std::string& port_path) {
         return false;
     }
 
-    struct termios tty{};
+    struct termios tty {};
     if (tcgetattr(fd, &tty) != 0) {
         close(fd);
         return false;
@@ -420,7 +420,7 @@ private:
                 AlpacaError::NotConnected);
         }
 
-        struct termios tty{};
+        struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
