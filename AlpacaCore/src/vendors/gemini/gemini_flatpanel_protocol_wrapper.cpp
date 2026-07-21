@@ -25,10 +25,10 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <errno.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
-#include <errno.h>
 #endif
 
 namespace alpacacore::vendor::gemini {
@@ -111,7 +111,7 @@ static bool probe_port(const std::string& port_path) {
     tty.c_cflag |= CS8;
     tty.c_cflag &= ~CRTSCTS;
     tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_cflag &= ~HUPCL;   // Keep DTR high on close -- prevents MCU reset on reopen
+    tty.c_cflag &= ~HUPCL;  // Keep DTR high on close -- prevents MCU reset on reopen
     tty.c_iflag &= ~(IXON | IXOFF | IXANY);
     tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
     tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
@@ -150,8 +150,8 @@ static bool probe_port(const std::string& port_path) {
         int total = 0;
         auto start = std::chrono::steady_clock::now();
         while (total < static_cast<int>(sizeof(resp)) - 1) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now() - start).count();
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
             if (elapsed > 5) {
                 break;
             }
@@ -177,7 +177,7 @@ static bool probe_port(const std::string& port_path) {
         }
 
         ALPACA_LOG_DEBUG("Gemini", "Flat panel probe attempt " + std::to_string(attempt + 1) +
-                         " got no valid response from " + port_path);
+                                       " got no valid response from " + port_path);
     }
 
     close(fd);
@@ -217,14 +217,17 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
         // generic USB_Serial patterns too in case a different panel revision
         // uses an external USB-serial chip instead.
         bool is_candidate = (name.find("USB_Serial") != std::string::npos) ||
-                            (name.find("CH340") != std::string::npos) ||
-                            (name.find("CH341") != std::string::npos) ||
-                            (name.find("1a86") != std::string::npos) ||
-                            (name.find("Espressif") != std::string::npos);
+                            (name.find("CH340") != std::string::npos) || (name.find("CH341") != std::string::npos) ||
+                            (name.find("1a86") != std::string::npos) || (name.find("Espressif") != std::string::npos);
         if (!is_candidate) continue;
 
         std::string resolved = std::filesystem::canonical(entry.path()).string();
-        ALPACA_LOG_INFO("Gemini", "Probing " + resolved + " (" + name + ") for a flat panel...");
+        std::string probe_msg = "Probing ";
+        probe_msg += resolved;
+        probe_msg += " (";
+        probe_msg += name;
+        probe_msg += ") for a flat panel...";
+        ALPACA_LOG_INFO("Gemini", probe_msg);
 
         if (probe_port(resolved)) {
             ALPACA_LOG_INFO("Gemini", "Found flat panel on " + resolved);
@@ -240,9 +243,7 @@ class GeminiFlatPanelProtocolWrapper::Impl {
 public:
     Impl() = default;
 
-    ~Impl() {
-        disconnect();
-    }
+    ~Impl() { disconnect(); }
 
     std::string connect(const FlatPanelConnectionConfig& config) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -280,8 +281,8 @@ public:
                 send_command_locked(">H#");
                 success = true;
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("Gemini", "Flat panel handshake attempt " + std::to_string(attempt + 1) +
-                                " failed: " + e.what());
+                ALPACA_LOG_WARN("Gemini",
+                                "Flat panel handshake attempt " + std::to_string(attempt + 1) + " failed: " + e.what());
             }
         }
 
@@ -289,9 +290,9 @@ public:
 
         if (!success) {
             disconnect_locked();
-            throw AlpacaException("Gemini flat panel handshake failed after " +
-                                  std::to_string(kHandshakeRetries) + " attempts",
-                                  AlpacaError::NotConnected);
+            throw AlpacaException(
+                "Gemini flat panel handshake failed after " + std::to_string(kHandshakeRetries) + " attempts",
+                AlpacaError::NotConnected);
         }
 
         std::string firmware;
@@ -306,8 +307,7 @@ public:
         }
 
         connected_ = true;
-        ALPACA_LOG_INFO("Gemini", "Flat panel connected" +
-                        (firmware.empty() ? "" : (", firmware: " + firmware)));
+        ALPACA_LOG_INFO("Gemini", "Flat panel connected" + (firmware.empty() ? "" : (", firmware: " + firmware)));
         return firmware;
     }
 
@@ -373,11 +373,10 @@ private:
     void connect_serial() {
 #ifdef _WIN32
         std::string port_name = "\\\\.\\" + config_.serial_port;
-        serial_handle_ = CreateFileA(port_name.c_str(), GENERIC_READ | GENERIC_WRITE,
-                                     0, nullptr, OPEN_EXISTING, 0, nullptr);
+        serial_handle_ =
+            CreateFileA(port_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (serial_handle_ == INVALID_HANDLE_VALUE) {
-            throw AlpacaException("Failed to open serial port: " + config_.serial_port,
-                                  AlpacaError::NotConnected);
+            throw AlpacaException("Failed to open serial port: " + config_.serial_port, AlpacaError::NotConnected);
         }
 
         DCB dcb = {};
@@ -416,9 +415,9 @@ private:
 #else
         serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
-            throw AlpacaException("Failed to open serial port: " + config_.serial_port +
-                                  " (" + std::strerror(errno) + ")",
-                                  AlpacaError::NotConnected);
+            throw AlpacaException(
+                "Failed to open serial port: " + config_.serial_port + " (" + std::strerror(errno) + ")",
+                AlpacaError::NotConnected);
         }
 
         struct termios tty{};
@@ -430,12 +429,24 @@ private:
 
         speed_t baud = B9600;
         switch (config_.baud_rate) {
-            case 9600:   baud = B9600;   break;
-            case 19200:  baud = B19200;  break;
-            case 38400:  baud = B38400;  break;
-            case 57600:  baud = B57600;  break;
-            case 115200: baud = B115200; break;
-            default:     baud = B9600;   break;
+            case 9600:
+                baud = B9600;
+                break;
+            case 19200:
+                baud = B19200;
+                break;
+            case 38400:
+                baud = B38400;
+                break;
+            case 57600:
+                baud = B57600;
+                break;
+            case 115200:
+                baud = B115200;
+                break;
+            default:
+                baud = B9600;
+                break;
         }
         cfsetospeed(&tty, baud);
         cfsetispeed(&tty, baud);
@@ -447,7 +458,7 @@ private:
         tty.c_cflag |= CS8;
         tty.c_cflag &= ~CRTSCTS;
         tty.c_cflag |= CREAD | CLOCAL;
-        tty.c_cflag &= ~HUPCL;   // Keep DTR high on close -- prevents MCU reset on reopen
+        tty.c_cflag &= ~HUPCL;  // Keep DTR high on close -- prevents MCU reset on reopen
 
         tty.c_iflag &= ~(IXON | IXOFF | IXANY);
         tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
@@ -509,8 +520,7 @@ private:
         }
 #else
         if (!util::write_all(serial_fd_, data.c_str(), data.length())) {
-            throw AlpacaException("Write failed: " + std::string(std::strerror(errno)),
-                                  AlpacaError::DriverException);
+            throw AlpacaException("Write failed: " + std::string(std::strerror(errno)), AlpacaError::DriverException);
         }
 #endif
     }
@@ -524,8 +534,8 @@ private:
         auto start = std::chrono::steady_clock::now();
 
         while (true) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
             if (elapsed > timeout_ms) {
                 throw AlpacaException("Read timeout", AlpacaError::DriverException);
             }
@@ -537,7 +547,7 @@ private:
                 got_char = true;
             }
 #else
-            ssize_t r = read(serial_fd_, &ch, 1);
+            ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
             if (r == 1) {
                 got_char = true;
             }
@@ -583,8 +593,7 @@ private:
 
 // --- GeminiFlatPanelProtocolWrapper public interface forwarding ---
 
-GeminiFlatPanelProtocolWrapper::GeminiFlatPanelProtocolWrapper()
-    : impl_(std::make_unique<Impl>()) {}
+GeminiFlatPanelProtocolWrapper::GeminiFlatPanelProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
 
 GeminiFlatPanelProtocolWrapper::~GeminiFlatPanelProtocolWrapper() = default;
 
@@ -592,32 +601,18 @@ std::string GeminiFlatPanelProtocolWrapper::connect(const FlatPanelConnectionCon
     return impl_->connect(config);
 }
 
-void GeminiFlatPanelProtocolWrapper::disconnect() {
-    impl_->disconnect();
-}
+void GeminiFlatPanelProtocolWrapper::disconnect() { impl_->disconnect(); }
 
-bool GeminiFlatPanelProtocolWrapper::is_connected() const {
-    return impl_->is_connected();
-}
+bool GeminiFlatPanelProtocolWrapper::is_connected() const { return impl_->is_connected(); }
 
-bool GeminiFlatPanelProtocolWrapper::get_light_on() {
-    return impl_->get_light_on();
-}
+bool GeminiFlatPanelProtocolWrapper::get_light_on() { return impl_->get_light_on(); }
 
-int GeminiFlatPanelProtocolWrapper::get_brightness() {
-    return impl_->get_brightness();
-}
+int GeminiFlatPanelProtocolWrapper::get_brightness() { return impl_->get_brightness(); }
 
-void GeminiFlatPanelProtocolWrapper::light_on() {
-    impl_->light_on();
-}
+void GeminiFlatPanelProtocolWrapper::light_on() { impl_->light_on(); }
 
-void GeminiFlatPanelProtocolWrapper::light_off() {
-    impl_->light_off();
-}
+void GeminiFlatPanelProtocolWrapper::light_off() { impl_->light_off(); }
 
-void GeminiFlatPanelProtocolWrapper::set_brightness(int value) {
-    impl_->set_brightness(value);
-}
+void GeminiFlatPanelProtocolWrapper::set_brightness(int value) { impl_->set_brightness(value); }
 
-} // namespace alpacacore::vendor::gemini
+}  // namespace alpacacore::vendor::gemini

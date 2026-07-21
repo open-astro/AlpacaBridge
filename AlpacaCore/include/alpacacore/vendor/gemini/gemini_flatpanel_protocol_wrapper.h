@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -22,8 +23,8 @@ namespace alpacacore::vendor::gemini {
 /**
  * @brief Connection type for the Gemini Flat Panel Cover Lite.
  */
-enum class FlatPanelConnectionType {
-    Serial   // USB serial port
+enum class FlatPanelConnectionType : std::uint8_t {
+    Serial  // USB serial port
 };
 
 /**
@@ -41,8 +42,8 @@ struct FlatPanelConnectionConfig {
  * @brief Information about a detected serial port that may host a Gemini flat panel.
  */
 struct GeminiFlatPanelPortInfo {
-    std::string port_path;      // e.g., "/dev/ttyUSB0"
-    std::string device_id;      // e.g., "usb-1a86_USB_Serial-if00-port0"
+    std::string port_path;  // e.g., "/dev/ttyUSB0"
+    std::string device_id;  // e.g., "usb-1a86_USB_Serial-if00-port0"
 };
 
 /**
@@ -125,4 +126,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace alpacacore::vendor::gemini
+}  // namespace alpacacore::vendor::gemini

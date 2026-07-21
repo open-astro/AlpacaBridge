@@ -70,8 +70,8 @@
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
-#include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
+#include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>

@@ -31,9 +31,8 @@ namespace alpacacore::vendor::gemini {
  * @param baud_rate Serial baud rate (default 9600)
  * @return Unique pointer to CoverCalibrator driver
  */
-std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel(int device_number,
-                                                                const std::string& serial_port,
-                                                                int baud_rate = 9600);
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel(int device_number, const std::string& serial_port,
+                                                               int baud_rate = 9600);
 
 /**
  * @brief Create a Gemini Flat Panel driver by auto-detecting the serial port.
@@ -45,7 +44,6 @@ std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel(int device_number
  * @param panel_index 0-based index into the list of detected panels
  * @return Unique pointer to CoverCalibrator driver
  */
-std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_by_index(int device_number,
-                                                                         int panel_index = 0);
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_by_index(int device_number, int panel_index = 0);
 
 }  // namespace alpacacore::vendor::gemini

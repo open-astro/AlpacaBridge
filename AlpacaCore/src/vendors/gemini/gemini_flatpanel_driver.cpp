@@ -330,9 +330,8 @@ private:
     std::mutex transition_mutex_;  // serializes set_connected() connect/disconnect transitions
 };
 
-std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel(int device_number,
-                                                                const std::string& serial_port,
-                                                                int baud_rate) {
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel(int device_number, const std::string& serial_port,
+                                                               int baud_rate) {
     FlatPanelConnectionConfig config;
     config.type = FlatPanelConnectionType::Serial;
     config.serial_port = serial_port;
