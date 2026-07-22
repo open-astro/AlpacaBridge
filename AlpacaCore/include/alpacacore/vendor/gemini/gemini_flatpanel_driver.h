@@ -37,8 +37,11 @@ std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel(int device_number
 /**
  * @brief Create a Gemini Flat Panel driver by auto-detecting the serial port.
  *
- * Scans CH340/CH341 USB-serial adapters and probes with the identity
- * handshake. panel_index selects which detected panel to use (0-based).
+ * Scans Espressif native USB-serial/JTAG devices (the panel's actual tested
+ * controller) plus CH340/CH341/generic USB-serial adapters (in case a
+ * different panel revision uses an external USB-serial chip instead), and
+ * probes each candidate with the identity handshake. panel_index selects
+ * which detected panel to use (0-based).
  *
  * @param device_number Alpaca device number
  * @param panel_index 0-based index into the list of detected panels

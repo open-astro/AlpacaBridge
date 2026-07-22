@@ -1814,6 +1814,12 @@ function updateGeminiConfigFields() {
     const isCoverCalibrator = deviceType === 'covercalibrator';
     focuserSection.style.display = isCoverCalibrator ? 'none' : 'block';
     flatPanelSection.style.display = isCoverCalibrator ? 'block' : 'none';
+    // Disable the hidden section's inputs too (not just display:none) so
+    // stale portPath/baudRate/connectionType values can't leak into the
+    // other device type's config if form serialization ever changes
+    // (matches the QHY camera/filterwheel split from PR #142).
+    setFieldGroupEnabled(focuserSection, !isCoverCalibrator);
+    setFieldGroupEnabled(flatPanelSection, isCoverCalibrator);
 }
 
 // iOptron covers two device types from one vendor config block: the mount

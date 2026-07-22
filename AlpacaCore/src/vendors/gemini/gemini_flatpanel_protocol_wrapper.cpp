@@ -37,6 +37,7 @@ namespace {
 constexpr int kCommandDelayMs = 50;
 constexpr int kReadCharDelayMs = 10;
 constexpr int kMaxResponseLen = 32;
+constexpr int kMaxCommandLen = 32;  // ">Bnnn#" + nul fits comfortably
 constexpr int kHandshakeRetries = 3;
 constexpr int kHandshakeRetryDelayS = 1;
 constexpr int kHandshakeReadTimeoutS = 2;  // Shorter timeout during handshake
@@ -168,10 +169,19 @@ static bool probe_port(const std::string& port_path) {
             }
         }
 
-        if (total > 0 && resp[total - 1] == '#') {
-            tcgetattr(fd, &tty);
-            tty.c_cflag &= ~HUPCL;
-            tcsetattr(fd, TCSANOW, &tty);
+        // Require the "*H" prefix, not just a well-formed '#'-terminated
+        // reply: the candidate port patterns below (CH340/CH341/USB_Serial/
+        // 1a86) are exactly what the Gemini focuser also enumerates as, and
+        // its MyFocuserPro2 firmware answers unrelated queries with its own
+        // '#'-terminated replies. Accepting any '#'-terminated response would
+        // let probe_port() misidentify the focuser's port as the flat panel
+        // when both devices are plugged in. The real handshake reply is known
+        // exactly ("*HGeminiFlatPanelLite#"), so anchoring on its "*H" prefix
+        // is enough to discriminate without over-fitting to a specific
+        // firmware version's exact string.
+        if (total >= 2 && resp[0] == '*' && resp[1] == 'H') {
+            // HUPCL was already cleared in the tty config above; no need to
+            // re-fetch/re-clear/re-set it here.
             close(fd);
             return true;
         }
@@ -358,7 +368,7 @@ public:
     void set_brightness(int value) {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
-        char cmd[kMaxResponseLen];
+        char cmd[kMaxCommandLen];
         std::snprintf(cmd, sizeof(cmd), ">B%d#", value);
         send_command_locked(cmd);
     }
