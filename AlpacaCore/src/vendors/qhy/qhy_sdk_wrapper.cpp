@@ -214,6 +214,15 @@ void QHYSDKWrapper::open_camera(const std::string& camera_id) {
     // of erasing and re-opening -- a second OpenQHYCCD on an id that's
     // already open would either fail or hand back an independent handle the
     // SDK doesn't expect two live owners for.
+    //
+    // Accepted trade-off (matches ToupTek's open_shared_by_id): this means a
+    // reconnect no longer self-heals a stale handle left by an unplug/replug
+    // while a second owner is still connected -- e.g. camera + CFW both
+    // connected, USB drops and re-enumerates, user reconnects only the
+    // camera; the reused handle is dead until *every* owner disconnects and
+    // reconnects. No liveness check on reuse today; if this bites in
+    // practice, the fix is a cheap probe (e.g. IsQHYCCDControlAvailable) on
+    // reuse that re-opens on failure.
     auto it = pimpl_->handles.find(camera_id);
     if (it != pimpl_->handles.end() && it->second.open_count > 0) {
         ++it->second.open_count;
@@ -504,6 +513,14 @@ void QHYSDKWrapper::move_cfw(const std::string& camera_id, int position) {
     // get_cfw_position()'s much longer hold below. Keep the shared_ptr itself
     // alive across the call so a concurrent close_camera() can't invalidate
     // the handle mid-call (see the Impl comment).
+    // The single-ASCII-digit protocol below only has room for slots 0-9;
+    // QHY's current lineup tops out at 9 slots, but the web UI accepts a
+    // custom slot count up to 16, so make the protocol's real ceiling
+    // explicit rather than silently sending a bogus byte for position 10+.
+    if (position > 9) {
+        throw AlpacaException("Filter position out of range for QHY CFW protocol (max 9)", AlpacaError::InvalidValue);
+    }
+
     std::shared_ptr<qhyccd_handle> handle;
     {
         std::lock_guard<std::mutex> lock(pimpl_->mutex);

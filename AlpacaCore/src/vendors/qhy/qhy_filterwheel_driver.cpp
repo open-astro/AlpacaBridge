@@ -147,8 +147,8 @@ public:
                 if (initial_pos >= 0) {
                     cached_position_ = initial_pos;
                 } else {
-                    cached_position_
-                        .reset();  // mid-move at connect time -- rare; get_position() falls back to a live read
+                    // mid-move at connect time -- rare; get_position() falls back to a live read
+                    cached_position_.reset();
                 }
             } catch (...) {
                 sdk.close_camera(id);
