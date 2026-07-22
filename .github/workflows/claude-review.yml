@@ -70,3 +70,38 @@ jobs:
           claude_args: |
             --model sonnet
             --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+
+      # Ported from openastro-ara #862/#863: the action exits 0 even when the
+      # agent never manages to post its comment, so a green check could exist
+      # with no review anywhere. The review BODY is the artifact — a run that
+      # produced no fresh bot comment must fail the check.
+      - name: Assert the review comment posted
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The action refuses to run on a PR that modifies this very workflow
+          # (it requires the file to match the default branch). That skip is
+          # loud in the log and only possible on a workflow-editing PR, which
+          # the maintainer reviews by eye — exempt it so such PRs aren't
+          # permanently red, while every normal PR still requires a comment.
+          if gh pr diff "${{ github.event.pull_request.number }}" \
+              --repo "${{ github.repository }}" --name-only \
+              | grep -qx ".github/workflows/claude-review.yml"; then
+            echo "::warning::This PR modifies the review workflow — the action skips itself on such PRs; passing without a review comment. Review it by eye."
+            exit 0
+          fi
+          # Only the BOT's comments count, and only ones touched during THIS
+          # run — a human writing "Approved" in discussion, or a sticky
+          # comment left over from a previous commit's review, must not
+          # satisfy the gate.
+          started="$(gh run view "$GITHUB_RUN_ID" --repo "${{ github.repository }}" --json createdAt --jq .createdAt)"
+          if gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+              --paginate \
+              | jq -r --arg since "$started" \
+              '.[] | select(.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) | select(.updated_at >= $since) | .body' \
+              | grep -qE "Approved|Issues found"; then
+            echo "Review comment found."
+          else
+            echo "::error::The review agent finished without posting its comment — failing rather than green-lighting a review that does not exist."
+            exit 1
+          fi

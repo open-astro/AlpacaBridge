@@ -1,0 +1,49 @@
+# CodeQL security scanning for the C/C++ AlpacaBridge sources.
+#
+# Runs on x86_64 (ubuntu-latest) — the lone exception to this repo's
+# arm64-only fleet (see ci.yml's header): the CodeQL CLI has no arm64 build.
+# That works because `build-mode: none` extracts directly from source without
+# configuring or compiling the project, so the CMake arm64 hard-fail never
+# triggers. Results land in Security → Code scanning; this workflow does not
+# gate merges.
+#
+# Actions are pinned to immutable commit SHAs per the repo's zizmor policy.
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    # Weekly catch-all so advisories published after a quiet period still surface.
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (c-cpp)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload results to code scanning
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        with:
+          languages: c-cpp
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
+        with:
+          category: "/language:c-cpp"
