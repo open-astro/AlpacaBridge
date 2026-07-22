@@ -58,6 +58,25 @@ struct GeminiFlatPanelPortInfo {
 std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports();
 
 /**
+ * @brief Check whether a probe reply matches the flat panel's >H# handshake.
+ *
+ * Requires the "*H" prefix (the confirmed hardware reply is
+ * "*HGeminiFlatPanelLite#") rather than accepting any well-formed,
+ * '#'-terminated reply. Auto-detect's candidate by-id patterns
+ * (CH340/CH341/USB_Serial/1a86) are exactly what the Gemini focuser also
+ * enumerates as, and its MyFocuserPro2 firmware answers unrelated queries
+ * with its own '#'-terminated replies -- accepting any such reply let
+ * probe_port() misidentify the focuser's port as the flat panel when both
+ * devices were plugged in (PR #143 review). Exposed here (rather than kept
+ * file-local) so the discrimination logic itself is unit-testable without
+ * real hardware.
+ *
+ * @param reply Bytes read from the port in response to ">H#" (line endings stripped)
+ * @return true if reply is a well-formed flat panel handshake reply
+ */
+bool is_flatpanel_handshake_reply(const std::string& reply);
+
+/**
  * @brief Protocol wrapper for the Gemini Astro Flat Panel Cover Lite (V2 / USB).
  *
  * Reverse-engineered from the vendor's Windows control app (decompiled .NET

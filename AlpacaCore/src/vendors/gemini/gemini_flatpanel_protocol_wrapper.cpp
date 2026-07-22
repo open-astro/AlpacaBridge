@@ -84,6 +84,10 @@ bool parse_light_flag(const std::string& resp, bool& out) {
 }
 }  // namespace
 
+bool is_flatpanel_handshake_reply(const std::string& reply) {
+    return reply.size() >= 2 && reply[0] == '*' && reply[1] == 'H';
+}
+
 // Probe a serial port with the flat panel's identity handshake (>H#).
 // Returns true if a well-formed ('#'-terminated) response was received.
 //
@@ -169,17 +173,11 @@ static bool probe_port(const std::string& port_path) {
             }
         }
 
-        // Require the "*H" prefix, not just a well-formed '#'-terminated
-        // reply: the candidate port patterns below (CH340/CH341/USB_Serial/
-        // 1a86) are exactly what the Gemini focuser also enumerates as, and
-        // its MyFocuserPro2 firmware answers unrelated queries with its own
-        // '#'-terminated replies. Accepting any '#'-terminated response would
-        // let probe_port() misidentify the focuser's port as the flat panel
-        // when both devices are plugged in. The real handshake reply is known
-        // exactly ("*HGeminiFlatPanelLite#"), so anchoring on its "*H" prefix
-        // is enough to discriminate without over-fitting to a specific
-        // firmware version's exact string.
-        if (total >= 2 && resp[0] == '*' && resp[1] == 'H') {
+        // See is_flatpanel_handshake_reply()'s doc comment: requiring the
+        // "*H" prefix (rather than any well-formed '#'-terminated reply) is
+        // what lets auto-detect discriminate the flat panel from the Gemini
+        // focuser when both share the same USB-serial by-id patterns.
+        if (is_flatpanel_handshake_reply(std::string(resp, static_cast<std::size_t>(total)))) {
             // HUPCL was already cleared in the tty config above; no need to
             // re-fetch/re-clear/re-set it here.
             close(fd);

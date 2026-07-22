@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
+#include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
 #include <functional>
@@ -31,6 +32,39 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
 }
 
 }  // namespace
+
+// Guards the PR #143 auto-detect fix: probe_port() must require the "*H"
+// reply prefix instead of accepting any well-formed '#'-terminated reply, or
+// it can misidentify the Gemini focuser's port as the flat panel when both
+// devices are plugged in (both enumerate under the same CH340/CH341/
+// USB_Serial/1a86 by-id patterns).
+TEST_CASE("Gemini Flat Panel - handshake reply discrimination", "[gemini][flatpanel][unit]") {
+    using alpacacore::vendor::gemini::is_flatpanel_handshake_reply;
+
+    SECTION("accepts the confirmed real-hardware reply") {
+        REQUIRE(is_flatpanel_handshake_reply("*HGeminiFlatPanelLite#") == true);
+    }
+    SECTION("accepts a bare *H prefix (future firmware/model string)") {
+        REQUIRE(is_flatpanel_handshake_reply("*H#") == true);
+    }
+    SECTION("rejects a well-formed but wrong-letter reply (e.g. this driver's own >V#/>S#)") {
+        REQUIRE(is_flatpanel_handshake_reply("*V206#") == false);
+        REQUIRE(is_flatpanel_handshake_reply("*S011#") == false);
+    }
+    SECTION(
+        "rejects a plausible non-flat-panel '#'-terminated reply, e.g. from the Gemini "
+        "focuser's MyFocuserPro2 firmware answering an unrelated query on a shared-looking port") {
+        REQUIRE(is_flatpanel_handshake_reply(":FD0000500#") == false);
+    }
+    SECTION("rejects short/empty responses") {
+        REQUIRE(is_flatpanel_handshake_reply("") == false);
+        REQUIRE(is_flatpanel_handshake_reply("*") == false);
+        REQUIRE(is_flatpanel_handshake_reply("H") == false);
+    }
+    SECTION("requires the '*' before 'H', not just an 'H' anywhere") {
+        REQUIRE(is_flatpanel_handshake_reply("H*#") == false);
+    }
+}
 
 TEST_CASE("Gemini Flat Panel Driver - Defaults", "[gemini][flatpanel][unit]") {
     auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, "/dev/ttyUSB0");
