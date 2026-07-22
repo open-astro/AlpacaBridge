@@ -89,6 +89,7 @@ own redistribution terms still apply to the SDK files themselves.
 | SVBONY | None (`readme.txt` is a changelog) | Redistributed unmodified, as downloaded from SVBONY's official SDK page, for turnkey device support |
 | libgpiod (source tarball) | LGPL-2.1-or-later library, GPL-2.0-or-later tools (`LICENSES/` in the tarball) | Unmodified upstream source tarball, built at package build time for the GPIO switch drivers |
 | WandererAstro (docs only) | None — vendor-authored serial-protocol doc + user manual | Redistributed unmodified as a driver-development reference; no SDK binaries |
+| Astroasis (docs only) | None found in the installer | `external/oasisastro/README.md` is a protocol reference reverse-engineered (decompilation/disassembly) from the vendor's public ASCOM installer. The installer itself is not committed (`*.exe` is gitignored) — it was only an analysis input. The driver speaks the USB HID protocol directly via `hidapi`; no vendor SDK binary is extracted, redistributed, or linked. |
 | Protocol docs: Bisque, Celestron, iOptron, Losmandy, SynScan, ZWO mounts (docs only) | None — vendor-authored protocol references, converted to Markdown | Redistributed as driver-development references; no SDK binaries, drivers speak the documented protocols directly |
 
 The QHY/ToupTek/SVBONY subsets carry no written redistribution grant from the

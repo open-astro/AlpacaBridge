@@ -1,0 +1,2 @@
+# Astroasis Oasis Focuser (USB HID vendor protocol, no kernel driver needed)
+ACTION=="add", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="338f", ATTRS{idProduct}=="a0f0", GROUP="plugdev", MODE="0660"

@@ -116,6 +116,9 @@ override_dh_auto_install:
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/ZWO/asiair-plus/99-zwo-asiair-plus.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
+	install -m 644 \
+	  $(CURDIR)/AlpacaCore/external/oasisastro/99-astroasis-focuser.rules \
+	  $(STAGING)/usr/lib/udev/rules.d/
 
 	# --- Web UI assets ---
 	install -d $(STAGING)/usr/share/alpacabridge/web

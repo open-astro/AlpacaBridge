@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-07-21
+## Updated 2026-07-22
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -238,6 +238,23 @@ This document lists all hardware vendors and device types that are verified to w
 [↑ Back to top](#alpacabridge-supported-drivers)
 
 ## Focuser Drivers
+
+### Astroasis
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Oasis Focuser | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Astroasis/Oasis%20Focuser/) |
+
+<details>
+<summary><strong>Astroasis Focuser Driver Notes</strong></summary>
+
+- **Protocol**: Reverse-engineered USB HID vendor protocol (VID:PID 338F:A0F0). No vendor SDK is linked into AlpacaBridge — see `AlpacaCore/external/oasisastro/README.md` for the protocol reference recovered from the vendor's ASCOM driver installer.
+- **Connection**: USB HID, via `hidapi`'s hidraw backend.
+- **Configuration**: `hidPath` (explicit HID device path) or `focuserIndex` (0-based among enumerated Oasis focusers).
+- **Capabilities**: Absolute positioning, halt, max-step/max-increment query, on-board temperature. `StepSize` and temperature compensation are not exposed by the device.
+- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues on Linux arm64.
+
+</details>
 
 ### Gemini
 

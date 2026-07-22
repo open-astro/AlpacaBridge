@@ -115,6 +115,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | Celestron | Telescope | Protocol wrapper | Production |
 | Losmandy Gemini | Focuser, CoverCalibrator (Astro Flat Panel Cover Lite) | Protocol wrapper | Production |
 | WandererAstro | CoverCalibrator (WandererCover V4) | Protocol wrapper | Production |
+| Astroasis | Focuser (Oasis Focuser) | Protocol wrapper | Production |
 | WeeWX | ObservingConditions | HTTP client | Production |
 | Bisque | Telescope | Script/protocol | In development |
 

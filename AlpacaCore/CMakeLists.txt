@@ -32,6 +32,7 @@ option(ALPACACORE_ENABLE_BISQUE "Enable Bisque/Paramount (TheSkyX) telescope sup
 option(ALPACACORE_ENABLE_TOUPTEK "Enable ToupTek vendor support" OFF)
 option(ALPACACORE_ENABLE_PLAYERONE "Enable Player One vendor support" OFF)
 option(ALPACACORE_ENABLE_WANDERERASTRO "Enable WandererAstro CoverCalibrator vendor support" OFF)
+option(ALPACACORE_ENABLE_ASTROASIS "Enable Astroasis Oasis Focuser vendor support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
@@ -48,6 +49,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_TOUPTEK ON)
     set(ALPACACORE_ENABLE_PLAYERONE ON)
     set(ALPACACORE_ENABLE_WANDERERASTRO ON)
+    set(ALPACACORE_ENABLE_ASTROASIS ON)
 endif()
 
 # Compiler warnings (Linux)
@@ -192,6 +194,13 @@ if(ALPACACORE_ENABLE_PLAYERONE)
     endif()
 endif()
 
+if(ALPACACORE_ENABLE_ASTROASIS)
+    add_subdirectory(src/vendors/astroasis)
+    if(TARGET alpacacore_astroasis)
+        target_link_libraries(alpacacore PRIVATE alpacacore_astroasis)
+    endif()
+endif()
+
 # Custom target to clean everything including CMake cache
 # Usage: cmake --build . --target alpacacore-clean-all
 # Note: Named with project prefix to avoid conflicts when used as subdirectory
@@ -287,6 +296,15 @@ endif()
 
 if(ALPACACORE_ENABLE_WANDERERASTRO AND TARGET alpacacore_wandererastro)
     install(TARGETS alpacacore_wandererastro
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_ASTROASIS AND TARGET alpacacore_astroasis)
+    install(TARGETS alpacacore_astroasis
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

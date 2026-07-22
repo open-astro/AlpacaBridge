@@ -16,6 +16,10 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Gemini Flat Panel Device Support** (AlpacaHTTP): router registration for the `covercalibrator` device type under the `gemini` vendor, web UI vendor/device-type gating (hidden focuser/panel fields are disabled, not just hidden, so stale values can't leak between the two), config fields for auto-detect (panel index) or manual serial (port path + baud rate), and a routing round-trip test guarding `panelIndex` persistence.
 - **Gemini Flat Panel Unit Tests**: 9 test cases, 48 assertions.
 - **Gemini Astro Flat Panel Cover Lite ConformU validation**: 4.4.0 — 0 errors, 0 issues, 0 timing issues on Linux arm64.
+- **Astroasis Oasis Focuser Driver** (AlpacaCore): Focuser driver for the Astroasis Oasis Focuser. Protocol reverse-engineered from the vendor's ASCOM driver installer (decompilation/disassembly of the .NET wrapper and native SDK; no vendor SDK binary is extracted, redistributed, or linked) — a USB HID vendor protocol (VID:PID 338F:A0F0, 65-byte reports) talked to directly via `hidapi`'s hidraw backend. Supports absolute positioning, halt, max-step/max-increment query, and on-board temperature; `StepSize` and temperature compensation are not exposed by the device and correctly throw `NotImplementedException`.
+- **Astroasis Device Support** (AlpacaHTTP): router registration for the `focuser` device type under the `astroasis` vendor, config by explicit `hidPath` or auto-detected `focuserIndex`.
+- **Astroasis Unit Tests**: handshake discrimination and protocol wrapper coverage in `test_astroasis_focuser.cpp`.
+- **Astroasis Oasis Focuser ConformU validation**: 4.4.0 — 0 errors, 0 issues, 0 timing issues on Linux arm64.
 
 ### Fixed
 - **QHY: `PulseGuide`'s detached thread could `std::terminate` the whole server** (PR #139 review): `guide()` throws `NotConnected` if a disconnect races the thread's start, or any SDK failure via `check_result` — an exception escaping a `std::thread` entry point calls `std::terminate`. The SDK call is now wrapped in try/catch (log-and-continue), and the in-flight flag clears on every exit path instead of only the success path.
