@@ -114,8 +114,9 @@ public:
             // Shared, reference-counted open — coexists with the paired camera
             // driver on the same physical handle (see qhy_sdk_wrapper.h).
             // Deliberately no init_camera(): the CFW port works on the raw
-            // opened handle (confirmed against the QHY SDK's own ControlCFW.cpp
-            // sample, which never calls InitQHYCCD), so the wheel doesn't need
+            // opened handle (per the 25.09.29 SDK's ControlCFW.cpp sample,
+            // which never calls InitQHYCCD; validated on real miniCam8M
+            // hardware -- see AGENTS.md), so the wheel doesn't need
             // to wait on -- or trigger -- the imaging chip's init sequence.
             sdk.open_camera(id);
             try {
