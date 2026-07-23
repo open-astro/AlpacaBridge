@@ -82,7 +82,7 @@ install_udev_rules() {
   fi
 
   # QHY cameras require firmware files that the udev rules load via fxload.
-  local qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_Arm64_25.09.29"
+  local qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux_arm64_26.06.04"
   if [[ -d "${qhy_sdk_dir}/lib/firmware/qhy" ]]; then
     echo "Installing QHY firmware files from ${qhy_sdk_dir}/lib/firmware/qhy"
     sudo mkdir -p /lib/firmware/qhy

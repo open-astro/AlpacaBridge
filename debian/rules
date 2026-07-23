@@ -12,7 +12,7 @@ STAGING   := $(CURDIR)/debian/alpacabridge
 ifneq ($(DEB_HOST_ARCH),arm64)
   $(error AlpacaBridge supports arm64 only; DEB_HOST_ARCH=$(DEB_HOST_ARCH) is not supported)
 endif
-QHY_SDK_DIR        := $(CURDIR)/AlpacaCore/external/QHY/sdk_Arm64_25.09.29
+QHY_SDK_DIR        := $(CURDIR)/AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04
 ZWO_EAF_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/armv8
 ZWO_CAMERA_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/armv8
 SVBONY_LIB_DIR     := $(CURDIR)/AlpacaCore/external/SVBONY/lib/armv8
