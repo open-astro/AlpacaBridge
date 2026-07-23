@@ -62,6 +62,13 @@ jobs:
           # Subscription (Pro/Max) auth. Generate locally with `claude setup-token`
           # and store as an org or repo secret named CLAUDE_CODE_OAUTH_TOKEN.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Explicit token so the action skips its OIDC -> GitHub App token
+          # exchange: Anthropic's exchange endpoint 401s pull_request_target
+          # runs ("Invalid OIDC token"), which this workflow needs for
+          # label-gated fork reviews. The workflow's own permissions block
+          # grants this token pull-requests: write; the review comment posts
+          # as github-actions[bot], which the assert step already accepts.
+          github_token: ${{ github.token }}
           # Keep the whole review in ONE top-level comment that updates in place,
           # instead of posting a new comment on every push.
           use_sticky_comment: true
