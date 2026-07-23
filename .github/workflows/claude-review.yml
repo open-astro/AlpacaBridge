@@ -1,8 +1,15 @@
 name: Claude Code Review
 
+# pull_request_target (not pull_request) so repository secrets are available
+# to fork PRs — but ONLY once a maintainer applies the `safe-to-review` label
+# (see the job-level `if`). The workflow definition always comes from the
+# default branch under this trigger, so a fork PR cannot alter the bot's
+# prompt/tools; the residual risk is the agent READING hostile PR content
+# (prompt injection into the review comment), bounded by the locked-down
+# allowedTools below. The maintainer's label click is the trust decision.
 on:
-  pull_request:
-    types: [opened, synchronize]
+  pull_request_target:  # zizmor: ignore[dangerous-triggers] -- label-gated; see comment above
+    types: [opened, synchronize, labeled]
 
 # Cancel an in-progress review if a newer commit is pushed to the same PR,
 # so rapid pushes don't stack up redundant reviews (saves usage).
@@ -12,14 +19,18 @@ concurrency:
 
 jobs:
   review:
-    # CLAUDE_CODE_OAUTH_TOKEN is a repository secret, which GitHub withholds from
-    # Dependabot-triggered and fork-triggered pull_request runs as a security
-    # boundary. Without the token the claude-code-action can't authenticate and
-    # the job fails spuriously. Skip the review in those cases (it is not a
-    # required status check; a maintainer reviews bot and fork PRs by hand).
+    # Same-repo branches review automatically on every push. Fork PRs review
+    # only while a maintainer has applied the `safe-to-review` label: the
+    # `labeled` trigger fires the first review the moment the label lands, and
+    # `synchronize` keeps reviewing later pushes for as long as the label stays
+    # on (remove it to stop the bot). Dependabot PRs are skipped entirely (its
+    # bumps are reviewed by eye; no point spending bot runs on lockstep bumps).
     if: >-
       github.actor != 'dependabot[bot]'
-      && github.event.pull_request.head.repo.full_name == github.repository
+      && (
+        github.event.pull_request.head.repo.full_name == github.repository
+        || contains(github.event.pull_request.labels.*.name, 'safe-to-review')
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,6 +39,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          # pull_request_target checks out the BASE branch by default; the bot
+          # must review the PR's actual code. Explicit head SHA (not the merge
+          # ref) so the review matches exactly what the author pushed.
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
           persist-credentials: false
 
