@@ -9,7 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.0.3] - UNRELEASED
+## [3.1.0] - UNRELEASED
+
+### Added
+- **Gemini Flat Panel Driver** (AlpacaCore): CoverCalibrator driver for the Astro Flat Panel Cover Lite. Protocol reverse-engineered from the vendor's Windows control app (no SDK or published spec) — ASCII commands `>X#`/`>Xnnn#` over USB serial (9600 8N1), replies `*` + echoed letter + payload + `#`. Auto-detection scans `/dev/serial/by-id/` for CH340/CH341/generic USB-serial names plus `Espressif` (the panel's controller is an ESP32-class board using the native USB-serial/JTAG stack, not a CH340/CH341 adapter), probing with the `>H#` identity handshake (requiring its known `*H` reply prefix, since the same by-id patterns also match the Gemini focuser's port) and falling back to `/dev/ttyUSB0`–`9`. Light-only — no motorized cover, so `OpenCover`/`CloseCover`/`HaltCover` throw `MethodNotImplemented` and `CoverState` always reports `NotPresent`.
+- **Gemini Flat Panel Device Support** (AlpacaHTTP): router registration for the `covercalibrator` device type under the `gemini` vendor, web UI vendor/device-type gating (hidden focuser/panel fields are disabled, not just hidden, so stale values can't leak between the two), config fields for auto-detect (panel index) or manual serial (port path + baud rate), and a routing round-trip test guarding `panelIndex` persistence.
+- **Gemini Flat Panel Unit Tests**: 9 test cases, 48 assertions.
+- **Gemini Astro Flat Panel Cover Lite ConformU validation**: 4.4.0 — 0 errors, 0 issues, 0 timing issues on Linux arm64.
 
 ### Fixed
 - **QHY: `PulseGuide`'s detached thread could `std::terminate` the whole server** (PR #139 review): `guide()` throws `NotConnected` if a disconnect races the thread's start, or any SDK failure via `check_result` — an exception escaping a `std::thread` entry point calls `std::terminate`. The SDK call is now wrapped in try/catch (log-and-continue), and the in-flight flag clears on every exit path instead of only the success path.
