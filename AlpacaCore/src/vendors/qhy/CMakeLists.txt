@@ -8,7 +8,7 @@ if(ALPACACORE_ENABLE_QHY)
     if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
         message(FATAL_ERROR "Unsupported architecture for QHY SDK: ${CMAKE_SYSTEM_PROCESSOR}. AlpacaBridge is arm64-only.")
     endif()
-    set(QHY_SDK_ROOT "${ALPACACORE_ROOT}/external/QHY/sdk_Arm64_25.09.29")
+    set(QHY_SDK_ROOT "${ALPACACORE_ROOT}/external/QHY/sdk_linux_arm64_26.06.04")
 
     set(QHY_SDK_INCLUDE  "${QHY_SDK_ROOT}/usr/local/include")
     set(QHY_SDK_LIB_DIR  "${QHY_SDK_ROOT}/usr/local/lib")
@@ -34,6 +34,11 @@ if(ALPACACORE_ENABLE_QHY)
 
     target_include_directories(alpacacore_qhy PRIVATE
         ${CMAKE_SOURCE_DIR}/include
+    )
+    # SYSTEM: the vendored SDK headers trip -Werror otherwise (26.06.04 ships
+    # qhyccdcamdef.h with QHY26800A_MAX_WIDTH defined twice with different
+    # values -- a vendor bug we don't get to fix).
+    target_include_directories(alpacacore_qhy SYSTEM PRIVATE
         ${QHY_SDK_INCLUDE}
     )
 

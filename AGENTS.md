@@ -797,7 +797,7 @@ The CM4-based ASIAIR Plus is electrically a Pi-class board and **reuses the exis
 
 Devices: Camera.
 
-SDK location: `AlpacaCore/external/QHY/sdk_Arm64_25.09.29/`.
+SDK location: `AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04/`.
 
 - Camera IDs are strings (`char[32]`), not integers — use `std::optional<std::string>` for camera_id and `std::optional<int>` for camera_index.
 - `GetQHYCCDSingleFrame()` blocks until the frame is ready; run it in a background thread and use an exposure status enum (Idle/Working/Success/Failed) to communicate results.
@@ -807,8 +807,8 @@ SDK location: `AlpacaCore/external/QHY/sdk_Arm64_25.09.29/`.
 - Guide direction convention differs from Alpaca: QHY uses EAST=0, NORTH=1, SOUTH=2, WEST=3 vs Alpaca North=0, South=1, East=2, West=3 — map explicitly.
 - After changing readout mode, refresh chip info and reset ROI — sensor dimensions can change per mode.
 - SDK global lifecycle (`InitQHYCCDResource` / `ReleaseQHYCCDResource`) is managed as a singleton in the wrapper; include `#define __CPP_MODE__ 1` before `#include <qhyccd.h>` in the wrapper `.cpp` only.
-- Cameras require firmware files (`/lib/firmware/qhy/*.img` / `*.HEX`) in addition to udev rules. The udev rules call `fxload` to load firmware on plug-in, after which the device re-enumerates with a different USB product ID. Install firmware from `AlpacaCore/external/QHY/sdk_Arm64_25.09.29/lib/firmware/qhy/` to `/lib/firmware/qhy/`.
-- The system `fxload` from apt does **not** support `-t fx3` (FX3-based cameras) and will exit 255 silently — always install the QHY SDK's own `fxload` binary from `sdk_Arm64_25.09.29/sbin/fxload` to `/sbin/fxload` instead.
+- Cameras require firmware files (`/lib/firmware/qhy/*.img` / `*.HEX`) in addition to udev rules. The udev rules call `fxload` to load firmware on plug-in, after which the device re-enumerates with a different USB product ID. Install firmware from `AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04/lib/firmware/qhy/` to `/lib/firmware/qhy/`.
+- The system `fxload` from apt does **not** support `-t fx3` (FX3-based cameras) and will exit 255 silently — always install the QHY SDK's own `fxload` binary from `sdk_linux_arm64_26.06.04/sbin/fxload` to `/sbin/fxload` instead.
 - Re-enumeration in VMs: after `fxload` fires, the camera disconnects as `1618:c268` (Cypress WestBridge) and reconnects with its operational product ID. VMware and similar hypervisors will not automatically pass through the re-enumerated device unless the USB filter covers the entire QHYCCD vendor ID (`1618`). Test QHY cameras on bare metal or RPi rather than VMs where possible.
 
 ### SVBONY

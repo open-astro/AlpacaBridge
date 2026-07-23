@@ -67,7 +67,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>QHY Driver Notes</strong></summary>
 
-- **SDK**: QHY CCD SDK 25.09.29.11 (build target)
+- **SDK**: QHY CCD SDK 26.06.04.16 (build target)
 - **Connection**: USB (requires udev rules and firmware; see below)
 - **Cooler power**: `CanGetCoolerPower` returns false; cooler power reporting is not implemented to avoid SDK timeouts.
 - **PulseGuide**: runs the SDK guide call on a detached thread so the initiator returns immediately (ControlQHYCCDGuide blocks for the full pulse duration on real hardware).

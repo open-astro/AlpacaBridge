@@ -152,7 +152,7 @@ jobs:
             "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
             "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
             "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_Arm64_25.09.29/usr/local/lib/libqhyccd.so"
+            "$core/QHY/sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so"
           )
           for lib in "${libs[@]}"; do
             if compgen -G "${lib}*" > /dev/null; then
@@ -261,7 +261,7 @@ jobs:
             "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
             "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
             "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_Arm64_25.09.29/usr/local/lib/libqhyccd.so"
+            "$core/QHY/sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so"
           )
           for lib in "${libs[@]}"; do
             if compgen -G "${lib}*" > /dev/null; then

@@ -11,6 +11,9 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ## [3.0.3] - UNRELEASED
 
+### Changed
+- **QHY SDK updated to 26.06.04.16** (from 25.09.29.11): vendored SDK replaced at `AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04/`; all build/install/CI references updated. The SDK headers are now included as SYSTEM — 26.06.04 ships `qhyccdcamdef.h` with `QHY26800A_MAX_WIDTH` defined twice with different values, which tripped `-Werror`; SYSTEM inclusion is the standard treatment for third-party headers we can't fix.
+
 ### Fixed
 - **QHY: `PulseGuide`'s detached thread could `std::terminate` the whole server** (PR #139 review): `guide()` throws `NotConnected` if a disconnect races the thread's start, or any SDK failure via `check_result` — an exception escaping a `std::thread` entry point calls `std::terminate`. The SDK call is now wrapped in try/catch (log-and-continue), and the in-flight flag clears on every exit path instead of only the success path.
 - **QHY: temp-control and cooler-off stop/running flags were reused across thread generations**, undermining the timeout→detach safety story from the previous disconnect-hang fix: a detached zombie thread and its replacement could share the same `shared_ptr<std::atomic<bool>>`, letting the zombie's flag writes resurrect an unbounded `join()` or keep the zombie looping (touching `this`) after a reconnect reset the shared stop flag. Both `start_temp_control_thread()` and the cooler-off worker now allocate a fresh flag pair per spawn, so a detached generation's flags stay permanently stopped and can never be observed or cleared by the next generation.
