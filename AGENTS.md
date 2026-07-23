@@ -196,6 +196,17 @@ Two of our worst deadlocks are documented later, not in the checklist above — 
 narrow-`firmware_mutex_` rule (under "Device firmware / SDK version") before touching
 any connect/disconnect path or a getter that takes the coarse driver `mutex_`.
 
+### Review bot on fork PRs (`safe-to-review` label)
+
+The Claude review bot (`.github/workflows/claude-review.yml`) runs automatically on
+every push to a same-repo PR branch. Fork PRs are gated: the bot runs only while a
+maintainer has applied the **`safe-to-review`** label — applying it triggers the
+first review immediately, later pushes keep reviewing while the label stays on, and
+removing the label stops the bot. The label is the maintainer's trust decision: the
+workflow runs with `pull_request_target` (definition always taken from `main`, so a
+fork can't alter the bot's prompt/tools), and the residual risk of the bot *reading*
+hostile PR content is accepted per-PR by whoever applies the label.
+
 ### When fixing a review finding (avoid the regression treadmill)
 
 Across our driver PRs, most review rounds were spent on **regressions introduced by
