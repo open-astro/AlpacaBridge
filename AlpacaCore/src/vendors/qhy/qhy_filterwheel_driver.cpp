@@ -151,7 +151,18 @@ public:
                     cached_position_.reset();
                 }
             } catch (...) {
-                sdk.close_camera(id);
+                // Copy before the reset below: `id` is a reference into
+                // camera_id_ and must stay valid for the close call.
+                const std::string close_id = id;
+                if (camera_index_.has_value()) {
+                    // A failed index-based connect must not pin the resolved
+                    // ID: the next connect re-resolves from the index (same
+                    // rule as the disconnect path below), so a USB
+                    // re-enumeration between attempts can't leave us reusing
+                    // a stale ID.
+                    camera_id_.reset();
+                }
+                sdk.close_camera(close_id);
                 throw;
             }
             connected_.store(true);

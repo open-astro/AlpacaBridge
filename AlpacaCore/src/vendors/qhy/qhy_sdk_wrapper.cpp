@@ -528,7 +528,7 @@ void QHYSDKWrapper::move_cfw(const std::string& camera_id, int position) {
     }
 
     // SDK convention (see the vendored ControlCFW.cpp sample): the order is a
-    // single ASCII digit '0'-'8' for the target slot, not a raw byte.
+    // single ASCII digit '0'-'9' for the target slot, not a raw byte.
     char order = static_cast<char>('0' + position);
     check_result(SendOrder2QHYCCDCFW(handle.get(), &order, 1), "SendOrder2QHYCCDCFW");
 }
