@@ -43,6 +43,11 @@ jobs:
           # must review the PR's actual code. Explicit head SHA (not the merge
           # ref) so the review matches exactly what the author pushed.
           ref: ${{ github.event.pull_request.head.sha }}
+          # checkout v7 refuses fork-code checkout under pull_request_target
+          # without this opt-in. Accepting that risk is exactly what the
+          # maintainer's safe-to-review label means (see the trigger comment);
+          # the fork code is read, never built or executed, in this job.
+          allow-unsafe-pr-checkout: true
           fetch-depth: 1
           persist-credentials: false
 
