@@ -282,12 +282,22 @@ public:
 
             try {
                 // Confirmed against real hardware: >H# replies
-                // "*HGeminiFlatPanelLite#". Any well-formed '#'-terminated
-                // reply is still accepted here (rather than requiring an exact
-                // string match) since that's enough to prove a live device is
-                // on the other end.
-                send_command_locked(">H#");
-                success = true;
+                // "*HGeminiFlatPanelLite#". Require the "*H" prefix here too
+                // (PR #143 review), not just in auto-detect's probe_port():
+                // a manually configured portPath is the ONE path that never
+                // went through the probe, and pointing it at the Gemini
+                // focuser's port (whose MyFocuserPro2 firmware answers
+                // unrelated queries with its own '#'-terminated replies)
+                // would otherwise "connect" to the wrong device and parse
+                // garbage from every later >S#/>J# reply. Better to fail the
+                // handshake loudly at connect.
+                std::string reply = send_command_locked(">H#");
+                if (is_flatpanel_handshake_reply(reply)) {
+                    success = true;
+                } else {
+                    ALPACA_LOG_WARN("Gemini", "Flat panel handshake attempt " + std::to_string(attempt + 1) +
+                                                  " got a non-flat-panel reply: " + reply);
+                }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini",
                                 "Flat panel handshake attempt " + std::to_string(attempt + 1) + " failed: " + e.what());
