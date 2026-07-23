@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-07-20
+## Updated 2026-07-22
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -138,6 +138,23 @@ This document lists all hardware vendors and device types that are verified to w
 [↑ Back to top](#alpacabridge-supported-drivers)
 
 ## CoverCalibrator Drivers
+
+### Gemini
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Astro Flat Panel Cover Lite | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro%20Flat%20Panel%20Cover%20Lite/) |
+
+<details>
+<summary><strong>Gemini CoverCalibrator Driver Notes</strong></summary>
+
+- **Protocol**: reverse-engineered from the vendor's Windows control app (no SDK or published spec). ASCII commands `">X#"`/`">Xnnn#"`, 9600 baud 8N1. Replies are `"*"` + echoed command letter + payload + `"#"` (e.g. `>V#` → `*V206#`); `>S#` is the exception, replying three single-digit flags (`*S111#`) rather than one combined number.
+- **Connection**: USB. The panel's controller is an ESP32-class board using Espressif's native USB-serial/JTAG stack (by-id name `usb-Espressif_USB_JTAG_serial_debug_unit_...`), not a CH340/CH341 adapter. Auto-detection scans `/dev/serial/by-id/` for CH340/CH341/generic USB-serial names as well as `Espressif`, then probes with the `>H#` identity handshake. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
+- **Cover**: no motorized cover on this model — `OpenCover`/`CloseCover`/`HaltCover` throw `MethodNotImplemented` unconditionally and `CoverState` always reports `NotPresent`.
+- **Tested model**: Gemini Astro Flat Panel Cover Lite (firmware 206) on Linux arm64.
+- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues.
+
+</details>
 
 ### WandererAstro
 

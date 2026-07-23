@@ -325,6 +325,7 @@ const INDEX_FIELDS = [
     { fieldId: 'playerone-switch-camera-index', vendor: 'playerone', deviceType: 'switch', configKey: 'cameraIndex' },
     { fieldId: 'playerone-filterwheel-index', vendor: 'playerone', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
+    { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
     { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
 ];
 
@@ -877,6 +878,19 @@ function startEditDevice(device) {
         setFormValue('weewx-url', config.weewxUrl);
         setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
         setFormValue('weewx-timeout', config.timeoutMs);
+    } else if (vendor === 'gemini' && deviceType === 'covercalibrator') {
+        const connType = config.connectionType || 'auto';
+        setFormValue('gemini-flatpanel-connection-type', connType);
+        if (connType === 'auto') {
+            setFormValue('gemini-flatpanel-index', config.panelIndex);
+        } else if (connType === 'serial') {
+            setFormValue('gemini-flatpanel-port-path', config.portPath);
+            setFormValue('gemini-flatpanel-baud-rate', config.baudRate);
+        }
+        const geminiFlatPanelConnTypeEl = document.getElementById('gemini-flatpanel-connection-type');
+        if (geminiFlatPanelConnTypeEl) {
+            geminiFlatPanelConnTypeEl.dispatchEvent(new Event('change'));
+        }
     } else if (vendor === 'gemini') {
         const connType = config.connectionType || 'auto';
         setFormValue('gemini-connection-type', connType);
@@ -1707,8 +1721,11 @@ function updateVendorOptions() {
     }
     const geminiOption = vendorSelect.querySelector('option[value="gemini"]');
     if (geminiOption) {
-        geminiOption.disabled = !isFocuser;
-        geminiOption.hidden = !isFocuser;
+        // Gemini provides the Automatic Astro Focuser Pro (focuser) and the
+        // Flat Panel Cover Lite (CoverCalibrator, light-only).
+        const geminiAllowed = isFocuser || isCoverCalibrator;
+        geminiOption.disabled = !geminiAllowed;
+        geminiOption.hidden = !geminiAllowed;
     }
     const wandererastroOption = vendorSelect.querySelector('option[value="wandererastro"]');
     if (wandererastroOption) {
@@ -1748,7 +1765,7 @@ function updateVendorOptions() {
     if (!isObservingConditions && vendorSelect.value === 'weewx') {
         vendorSelect.value = '';
     }
-    if (!isFocuser && vendorSelect.value === 'gemini') {
+    if (!isFocuser && !isCoverCalibrator && vendorSelect.value === 'gemini') {
         vendorSelect.value = '';
     }
     if (!isCoverCalibrator && vendorSelect.value === 'wandererastro') {
@@ -1788,6 +1805,7 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('weewx-config').style.display = 'block';
     } else if (vendor === 'gemini') {
         document.getElementById('gemini-config').style.display = 'block';
+        updateGeminiConfigFields();
     } else if (vendor === 'wandererastro') {
         document.getElementById('wandererastro-config').style.display = 'block';
     }
@@ -1798,6 +1816,29 @@ document.getElementById('vendor').addEventListener('change', function() {
     updateQhyConfigFields();
     updateAutoNumbering();
 });
+
+// Gemini covers two device types from one vendor config block: the
+// Automatic Astro Focuser Pro (focuser) and the Flat Panel Cover Lite
+// (CoverCalibrator). Show the relevant sub-section based on Device Type
+// (same pattern as updateIoptronConfigFields).
+function updateGeminiConfigFields() {
+    const focuserSection = document.getElementById('gemini-focuser-fields');
+    const flatPanelSection = document.getElementById('gemini-flatpanel-fields');
+    if (!focuserSection || !flatPanelSection) {
+        return;
+    }
+    const deviceTypeSelect = document.getElementById('device-type');
+    const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
+    const isCoverCalibrator = deviceType === 'covercalibrator';
+    focuserSection.style.display = isCoverCalibrator ? 'none' : 'block';
+    flatPanelSection.style.display = isCoverCalibrator ? 'block' : 'none';
+    // Disable the hidden section's inputs too (not just display:none) so
+    // stale portPath/baudRate/connectionType values can't leak into the
+    // other device type's config if form serialization ever changes
+    // (matches the QHY camera/filterwheel split from PR #142).
+    setFieldGroupEnabled(focuserSection, !isCoverCalibrator);
+    setFieldGroupEnabled(flatPanelSection, isCoverCalibrator);
+}
 
 // iOptron covers two device types from one vendor config block: the mount
 // (telescope) and the iMate PowerBox (switch). Show the relevant sub-section
@@ -1867,6 +1908,15 @@ if (geminiConnectionType) {
         const type = this.value;
         document.getElementById('gemini-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
         document.getElementById('gemini-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
+const geminiFlatPanelConnectionType = document.getElementById('gemini-flatpanel-connection-type');
+if (geminiFlatPanelConnectionType) {
+    geminiFlatPanelConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('gemini-flatpanel-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('gemini-flatpanel-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -2798,6 +2848,19 @@ document.getElementById('device-form').addEventListener('submit', async function
         const timeoutMs = readOptionalNumber(formData, 'timeoutMs');
         if (timeoutMs !== null) {
             deviceData.timeoutMs = timeoutMs;
+        }
+    } else if (deviceData.vendor === 'gemini' && normalizeDeviceType(deviceData.deviceType) === 'covercalibrator') {
+        const geminiFlatPanelConnType = document.getElementById('gemini-flatpanel-connection-type');
+        deviceData.connectionType = geminiFlatPanelConnType ? geminiFlatPanelConnType.value : 'auto';
+        if (deviceData.connectionType === 'auto') {
+            const panelIndex = readOptionalNumber(formData, 'geminiFlatPanelIndex');
+            deviceData.panelIndex = panelIndex !== null ? panelIndex : 0;
+        } else if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('geminiFlatPanelPortPath') || '';
+            const baudRate = readOptionalNumber(formData, 'geminiFlatPanelBaudRate');
+            if (baudRate !== null) {
+                deviceData.baudRate = baudRate;
+            }
         }
     } else if (deviceData.vendor === 'gemini') {
         const geminiConnType = document.getElementById('gemini-connection-type');

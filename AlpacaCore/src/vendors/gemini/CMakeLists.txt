@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.20)
 set(GEMINI_SOURCES
     gemini_protocol_wrapper.cpp
     gemini_focuser_driver.cpp
+    gemini_flatpanel_protocol_wrapper.cpp
+    gemini_flatpanel_driver.cpp
 )
 
 add_library(alpacacore_gemini STATIC ${GEMINI_SOURCES})

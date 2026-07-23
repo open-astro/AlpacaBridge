@@ -196,6 +196,17 @@ Two of our worst deadlocks are documented later, not in the checklist above — 
 narrow-`firmware_mutex_` rule (under "Device firmware / SDK version") before touching
 any connect/disconnect path or a getter that takes the coarse driver `mutex_`.
 
+### Review bot on fork PRs (`safe-to-review` label)
+
+The Claude review bot (`.github/workflows/claude-review.yml`) runs automatically on
+every push to a same-repo PR branch. Fork PRs are gated: the bot runs only while a
+maintainer has applied the **`safe-to-review`** label — applying it triggers the
+first review immediately, later pushes keep reviewing while the label stays on, and
+removing the label stops the bot. The label is the maintainer's trust decision: the
+workflow runs with `pull_request_target` (definition always taken from `main`, so a
+fork can't alter the bot's prompt/tools), and the residual risk of the bot *reading*
+hostile PR content is accepted per-PR by whoever applies the label.
+
 ### When fixing a review finding (avoid the regression treadmill)
 
 Across our driver PRs, most review rounds were spent on **regressions introduced by
@@ -986,9 +997,11 @@ Connection types: TCP only. TheSkyX acts as middleware between the driver and th
 - Find Home uses `FindHome()` with a 60-second timeout.
 - Slew speed presets: 9 rates (1x, 2x, 4x, 8x, 32x, 64x, 128x, 256x, 512x sidereal).
 
-### Gemini (Automatic Astro Focuser Pro)
+### Gemini
 
-Devices: Focuser.
+Devices: Focuser (Automatic Astro Focuser Pro), CoverCalibrator (Astro Flat Panel Cover Lite).
+
+#### Automatic Astro Focuser Pro (Focuser)
 
 Protocol: MyFocuserPro2 serial protocol (Arduino-based). Reference docs in `AlpacaCore/external/Losmandy/` (Gemini L4 command set). No external SDK required.
 
@@ -1004,6 +1017,21 @@ Connection types: USB serial (CH340/CH341 adapters) only. No WiFi support.
 - Some commands are blind (no response). Use `send_command_blind_locked()` for these to avoid blocking on a timeout waiting for data that will never arrive.
 - Default baud rate is 9600 (8N1). Configurable: 9600, 19200, 38400, 57600, 115200.
 - ConformU validated (v4.2.1) on Debian 13 arm64. Results in `AlpacaCore/conformu/Gemini/`.
+
+#### Astro Flat Panel Cover Lite (CoverCalibrator)
+
+Light-only flat panel — no motorized cover. Not the same MCU family as the focuser above: don't assume shared protocol or auto-detect matching.
+
+Protocol: no SDK or published spec exists for this model. Reverse-engineered entirely from the vendor's Windows control app (traffic capture). Treat the parsing notes below as the ground truth for this driver, not an external reference doc — there is nothing else to cross-check against except real hardware.
+
+- **Command/reply shape**: ASCII `>X#` (query) / `>Xnnn#` (set) at 9600 baud 8N1. Replies are `*` + the echoed command letter + payload + `#` (e.g. `>V#` → `*V206#` for firmware 206). **`>S#` is the one exception**: it replies `*S<d1><d2><d3>#` — three single-digit flags, not one combined number. `d1` is the light on/off flag; `d2`/`d3` stayed `"1"` across every light/brightness change observed on the test unit and are presumed cover-related flags that don't apply to this motorless model. Parse `d1` directly (the digit right after `S`) — don't run the generic trailing-integer parser against `>S#` replies, since `"*S011#"` would parse as `11` (nonzero → wrongly "on").
+- **`>H#` handshake reply must be held in full**: confirmed on hardware as `*HGeminiFlatPanelLite#` (22 chars) — a too-small read buffer truncates before the `#` terminator and the port gets wrongly rejected as a non-match during auto-detect.
+- **Auto-detect's `probe_port()` must check the reply *content*, not just that it's `#`-terminated** (PR #143 review, joeytroy): the candidate by-id patterns (CH340/CH341/`USB_Serial`/`1a86`) are exactly what the Gemini focuser also enumerates as, and the focuser's MyFocuserPro2 firmware answers unrelated queries with its own `#`-terminated replies. With both devices plugged in, accepting any well-formed reply let `probe_port()` misidentify the focuser's port as the flat panel. Fix: require the known `*H` reply prefix before accepting a port as a match. The connect-time handshake requires the same `*H` prefix (second review round): a manually configured `portPath` is the one path that never went through the probe, and pointing it at the focuser's port would otherwise "connect" to the wrong device and parse garbage from every later `>S#`/`>J#` reply — every `>H#` reply check goes through `is_flatpanel_handshake_reply()`, discovery and connect alike.
+- **Controller is an ESP32-class board on Espressif's native USB-serial/JTAG stack** (by-id name `usb-Espressif_USB_JTAG_serial_debug_unit_...`), **not** a CH340/CH341 adapter like the focuser. Auto-detection scans `/dev/serial/by-id/` for CH340/CH341/generic `USB_Serial`/vendor-`1a86` names *and* `Espressif`, then probes with the `>H#` handshake; falls back to `/dev/ttyUSB0`–`9`. If a future revision uses a different USB bridge chip, add its by-id pattern rather than assuming the CH340 quirk applies here too — it might not need the DTR/HUPCL workaround at all on native USB, but the driver applies it defensively anyway (see next point) since it's cheap and matches the focuser's proven-safe behavior.
+- **DTR/HUPCL quirk applied defensively**: same HUPCL-clear-before-close as the Gemini focuser and WandererAstro, to keep DTR high across port close and avoid a possible MCU reset on reopen. Probe waits up to 2s (first attempt) + 1s (retry) for a post-reset boot before the `>H#` handshake.
+- **No motorized cover**: `OpenCover`/`CloseCover`/`HaltCover` throw `MethodNotImplemented` unconditionally (do not follow the WandererCover pattern of making `HaltCover` function — that rule applies to CoverState-capable covers; this model's `CoverState` always reports `NotPresent`, so ConformU never requires `HaltCover` to work).
+- Default baud rate 9600 (8N1); configurable 9600/19200/38400/57600/115200 same as the focuser, though only 9600 has been confirmed against real hardware.
+- ConformU 4.4.0 validated on Debian 13 arm64: **0 errors, 0 issues, 0 timing issues**. Results in `AlpacaCore/conformu/Gemini/Astro Flat Panel Cover Lite/`.
 
 ### WandererAstro (WandererCover V4)
 

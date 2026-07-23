@@ -1163,6 +1163,26 @@ int main() {
         EXPECT(cfg.value("focuserIndex", -1) == 1);
         remove_device(router, "gemini", "focuser", 9613);
     }
+    {
+        // gemini / covercalibrator (Flat Panel Cover Lite) — shares the vendor
+        // config block with the focuser above; guards panelIndex persistence
+        // through sanitize_device_config.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "gemini"},
+                                           {"deviceType", "covercalibrator"},
+                                           {"deviceNumber", 9618},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB8"},
+                                           {"baudRate", 19200},
+                                           {"panelIndex", 2}},
+                                          "CoverCalibrator", 9618);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB8");
+        EXPECT(cfg.value("baudRate", -1) == 19200);
+        EXPECT(cfg.value("panelIndex", -1) == 2);
+        remove_device(router, "gemini", "covercalibrator", 9618);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_WEEWX
