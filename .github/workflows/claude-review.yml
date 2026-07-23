@@ -43,10 +43,21 @@ jobs:
           # must review the PR's actual code. Explicit head SHA (not the merge
           # ref) so the review matches exactly what the author pushed.
           ref: ${{ github.event.pull_request.head.sha }}
+          # checkout v7 refuses fork-code checkout under pull_request_target
+          # without this opt-in. Accepting that risk is exactly what the
+          # maintainer's safe-to-review label means (see the trigger comment);
+          # the fork code is read, never built or executed, in this job.
+          allow-unsafe-pr-checkout: true
           fetch-depth: 1
           persist-credentials: false
 
       - uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35  # v1
+        # The assert step below is the REAL gate (comment posted or fail), and
+        # it exempts workflow-editing PRs — where this action refuses to run
+        # ("Invalid OIDC token" when the workflow file differs from the default
+        # branch) and would otherwise hard-fail the job before the assert
+        # step's exemption can apply.
+        continue-on-error: true
         with:
           # Subscription (Pro/Max) auth. Generate locally with `claude setup-token`
           # and store as an org or repo secret named CLAUDE_CODE_OAUTH_TOKEN.
