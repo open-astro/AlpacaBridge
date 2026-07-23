@@ -270,10 +270,24 @@ public:
         if (position >= slot_count_) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
-        // Set BEFORE issuing the move (not after): if move_cfw throws, we
-        // can't be sure whether the wheel physically started moving, so
-        // get_position() must fall back to live reads either way until a
-        // read confirms where the wheel actually ended up.
+        // Protocol ceiling, checked BEFORE any state mutation (PR #142 bot
+        // review): the CFW wire protocol is a single ASCII digit, so slots
+        // above 9 are unreachable even if a future wheel reports a larger
+        // slot count. move_cfw() has the same guard, but throwing from there
+        // would leave pending_target_ set for a move that was never issued —
+        // a target no live read can ever match, silently degrading every
+        // later Position poll to a ~100-130ms hardware read for the rest of
+        // the connection.
+        if (position > 9) {
+            throw AlpacaException("Filter position out of range for QHY CFW protocol (max 9)",
+                                  AlpacaError::InvalidValue);
+        }
+        // Set BEFORE issuing the move (not after): if move_cfw throws mid-
+        // call, we can't be sure whether the wheel physically started moving,
+        // so get_position() must fall back to live reads either way until a
+        // read confirms where the wheel actually ended up. (That conservative
+        // fallback is deliberate for SDK-level failures; the guard above
+        // keeps the never-issued-move case from ever reaching this point.)
         cached_position_.reset();
         pending_target_ = position;
         QHYSDKWrapper::instance().move_cfw(camera_id_.value(), position);

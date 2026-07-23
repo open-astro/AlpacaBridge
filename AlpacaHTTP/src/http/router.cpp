@@ -4126,6 +4126,14 @@ Response Router::dispatch_filterwheel_method(
                 if (!names_val) {
                     throw_invalid_value("Missing parameter: Names");
                 }
+                if (!names_val->is_array()) {
+                    throw_invalid_value("Names must be an array of strings");
+                }
+                for (const auto& name : *names_val) {
+                    if (!name.is_string()) {
+                        throw_invalid_value("Names must be an array of strings");
+                    }
+                }
                 std::vector<std::string> names = names_val->get<std::vector<std::string>>();
                 filterwheel->set_names(names);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
@@ -6644,6 +6652,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 error_message = "ZWO filter wheel filterNames must be an array";
                 return false;
             }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "ZWO filter wheel filterNames must be an array of strings";
+                    return false;
+                }
+            }
             wheel->set_names(names_value.get<std::vector<std::string>>());
         }
 
@@ -6934,6 +6948,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 error_message = "QHY filter wheel filterNames must be an array";
                 return false;
             }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "QHY filter wheel filterNames must be an array of strings";
+                    return false;
+                }
+            }
             wheel->set_names(names_value.get<std::vector<std::string>>());
         }
 
@@ -7033,6 +7053,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (!names_value.is_array()) {
                 error_message = "ToupTek filter wheel filterNames must be an array";
                 return false;
+            }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "ToupTek filter wheel filterNames must be an array of strings";
+                    return false;
+                }
             }
             wheel->set_names(names_value.get<std::vector<std::string>>());
         }
@@ -7153,6 +7179,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (!names_value.is_array()) {
                 error_message = "Player One filter wheel filterNames must be an array";
                 return false;
+            }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "Player One filter wheel filterNames must be an array of strings";
+                    return false;
+                }
             }
             wheel->set_names(names_value.get<std::vector<std::string>>());
         }
