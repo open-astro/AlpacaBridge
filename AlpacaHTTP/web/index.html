@@ -925,39 +925,82 @@
                     </div>
                 </div>
 
-                <!-- WandererAstro WandererCover V4 Configuration -->
+                <!-- WandererAstro Configuration: WandererCover V4 (CoverCalibrator) and
+                     WandererRotator Mini (Rotator) share one vendor block, with the
+                     relevant sub-section shown based on Device Type (same pattern as
+                     the Gemini focuser/flat-panel config). -->
                 <div id="wandererastro-config" class="vendor-config" style="display: none;">
-                    <h3>WandererAstro WandererCover V4</h3>
+                    <div id="wandererastro-cover-fields">
+                        <h3>WandererAstro WandererCover V4</h3>
 
-                    <div class="form-group">
-                        <label for="wandererastro-connection-type">Connection Type:</label>
-                        <select id="wandererastro-connection-type" name="wandererastroConnectionType">
-                            <option value="auto" selected>Auto-detect (recommended)</option>
-                            <option value="serial">Serial (USB) — manual port</option>
-                        </select>
-                        <small>Auto-detect scans USB serial ports for the WandererCover status stream automatically.</small>
-                    </div>
-
-                    <div id="wandererastro-auto-fields">
                         <div class="form-group">
-                            <label for="wandererastro-cover-index">Cover Index:</label>
-                            <input type="number" id="wandererastro-cover-index" name="wandererastroCoverIndex" value="0" min="0">
-                            <small>0-based index if multiple covers are detected. Usually 0.</small>
-                        </div>
-                    </div>
-
-                    <div id="wandererastro-serial-fields" style="display: none;">
-                        <div class="form-group">
-                            <label for="wandererastro-port-path">Serial Port:</label>
-                            <input type="text" id="wandererastro-port-path" name="wandererastroPortPath" placeholder="/dev/ttyUSB0">
-                            <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
-                        </div>
-                        <div class="form-group">
-                            <label for="wandererastro-baud-rate">Baud Rate:</label>
-                            <select id="wandererastro-baud-rate" name="wandererastroBaudRate">
-                                <option value="19200" selected>19200</option>
+                            <label for="wandererastro-connection-type">Connection Type:</label>
+                            <select id="wandererastro-connection-type" name="wandererastroConnectionType">
+                                <option value="auto" selected>Auto-detect (recommended)</option>
+                                <option value="serial">Serial (USB) — manual port</option>
                             </select>
-                            <small>The WandererCover V4 protocol is fixed at 19200 baud.</small>
+                            <small>Auto-detect scans USB serial ports for the WandererCover status stream automatically.</small>
+                        </div>
+
+                        <div id="wandererastro-auto-fields">
+                            <div class="form-group">
+                                <label for="wandererastro-cover-index">Cover Index:</label>
+                                <input type="number" id="wandererastro-cover-index" name="wandererastroCoverIndex" value="0" min="0">
+                                <small>0-based index if multiple covers are detected. Usually 0.</small>
+                            </div>
+                        </div>
+
+                        <div id="wandererastro-serial-fields" style="display: none;">
+                            <div class="form-group">
+                                <label for="wandererastro-port-path">Serial Port:</label>
+                                <input type="text" id="wandererastro-port-path" name="wandererastroPortPath" placeholder="/dev/ttyUSB0">
+                                <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="wandererastro-baud-rate">Baud Rate:</label>
+                                <select id="wandererastro-baud-rate" name="wandererastroBaudRate">
+                                    <option value="19200" selected>19200</option>
+                                </select>
+                                <small>The WandererCover V4 protocol is fixed at 19200 baud.</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="wandererastro-rotator-fields" style="display: none;">
+                        <h3>WandererAstro WandererRotator Mini</h3>
+                        <p><small>Worm-drive camera rotator (Mini V1/V2). USB serial for control; the motor
+                           needs the separate DC power input connected.</small></p>
+
+                        <div class="form-group">
+                            <label for="wandererastro-rotator-connection-type">Connection Type:</label>
+                            <select id="wandererastro-rotator-connection-type" name="wandererastroRotatorConnectionType">
+                                <option value="auto" selected>Auto-detect (recommended)</option>
+                                <option value="serial">Serial (USB) — manual port</option>
+                            </select>
+                            <small>Auto-detect scans USB serial ports and probes for the rotator automatically.</small>
+                        </div>
+
+                        <div id="wandererastro-rotator-auto-fields">
+                            <div class="form-group">
+                                <label for="wandererastro-rotator-index">Rotator Index:</label>
+                                <input type="number" id="wandererastro-rotator-index" name="wandererastroRotatorIndex" value="0" min="0">
+                                <small>0-based index if multiple rotators are detected. Usually 0.</small>
+                            </div>
+                        </div>
+
+                        <div id="wandererastro-rotator-serial-fields" style="display: none;">
+                            <div class="form-group">
+                                <label for="wandererastro-rotator-port-path">Serial Port:</label>
+                                <input type="text" id="wandererastro-rotator-port-path" name="wandererastroRotatorPortPath" placeholder="/dev/ttyUSB0">
+                                <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="wandererastro-rotator-baud-rate">Baud Rate:</label>
+                                <select id="wandererastro-rotator-baud-rate" name="wandererastroRotatorBaudRate">
+                                    <option value="19200" selected>19200</option>
+                                </select>
+                                <small>The WandererRotator protocol is fixed at 19200 baud.</small>
+                            </div>
                         </div>
                     </div>
                 </div>

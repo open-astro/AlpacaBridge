@@ -13,6 +13,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_protocol_wrapper.h>
 
 #include <atomic>
@@ -43,34 +44,15 @@ namespace {
 constexpr char kModelPrefix[] = "WandererCoverV4";
 constexpr int MAX_LINE_LEN = 256;
 
-// Resolved serial-port paths currently held open by a connected wrapper.
-// enumerate_wanderer_ports() skips these so probing a second auto-detect device
-// never opens/reads a /dev node a WandererCover is already streaming on (which
-// would split the shared kernel receive buffer between two readers and freeze
-// the connected device's status for the probe window). Function-local statics
-// avoid static-init-order issues.
-std::mutex& open_ports_mutex() {
-    static std::mutex m;
-    return m;
-}
-std::set<std::string>& open_ports() {
-    static std::set<std::string> s;
-    return s;
-}
-void mark_port_open(const std::string& path) {
-    if (path.empty()) return;
-    std::lock_guard<std::mutex> lock(open_ports_mutex());
-    open_ports().insert(path);
-}
-void mark_port_closed(const std::string& path) {
-    if (path.empty()) return;
-    std::lock_guard<std::mutex> lock(open_ports_mutex());
-    open_ports().erase(path);
-}
-bool is_port_in_use(const std::string& path) {
-    std::lock_guard<std::mutex> lock(open_ports_mutex());
-    return open_ports().count(path) > 0;
-}
+// The in-use port registry lives in util/serial_port_registry.h and is shared
+// process-wide: enumerate_wanderer_ports() skips registered paths so probing a
+// second auto-detect device never opens/reads a /dev node another connected
+// device (cover OR rotator) is already using — two readers on the same node
+// would split the shared kernel receive buffer and freeze the connected
+// device's stream for the probe window.
+using util::is_serial_port_in_use;
+using util::mark_serial_port_closed;
+using util::mark_serial_port_open;
 
 // Configure an already-open POSIX fd for 19200 8N1 raw I/O. HUPCL is cleared so
 // DTR stays asserted on close: the CH340 adapter asserts DTR on open, which
@@ -170,10 +152,10 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
     }
 
     // Re-check after opening: a driver may have claimed this port (open_serial()
-    // marks it before opening) in the window between the caller's is_port_in_use()
+    // marks it before opening) in the window between the caller's is_serial_port_in_use()
     // check and this open(). Bail immediately rather than reading for ~2.5s and
     // stealing bytes from that device's stream.
-    if (is_port_in_use(port_path)) {
+    if (is_serial_port_in_use(port_path)) {
         close(fd);
         return false;
     }
@@ -237,7 +219,7 @@ std::vector<WandererPortInfo> enumerate_wanderer_ports() {
         for (int i = 0; i < 10; ++i) {
             std::string port = "/dev/ttyUSB" + std::to_string(i);
             if (!std::filesystem::exists(port)) continue;
-            if (is_port_in_use(port)) continue;  // already held by a connected WandererCover
+            if (is_serial_port_in_use(port)) continue;  // already held by a connected WandererCover
             ALPACA_LOG_INFO("WandererAstro", "Probing " + port + "...");
             WandererPortInfo info;
             if (probe_port(port, info)) {
@@ -267,7 +249,7 @@ std::vector<WandererPortInfo> enumerate_wanderer_ports() {
         if (ec) continue;
 
         // Don't probe a port another connected WandererCover is streaming on.
-        if (is_port_in_use(resolved)) continue;
+        if (is_serial_port_in_use(resolved)) continue;
         std::string probe_msg = "Probing ";
         probe_msg.append(resolved).append(" (").append(name).append(")...");
         ALPACA_LOG_INFO("WandererAstro", probe_msg);
@@ -549,7 +531,7 @@ private:
         PurgeComm(serial_handle_, PURGE_RXCLEAR | PURGE_TXCLEAR);
 #else
         // Claim the port in the in-use set BEFORE opening it, so a concurrent
-        // auto-detect scan can't slip between its is_port_in_use() check and our
+        // auto-detect scan can't slip between its is_serial_port_in_use() check and our
         // open() and probe this same node. Store the canonical path so the check
         // matches the canonical paths enumerate_wanderer_ports() compares against
         // (a user may configure a /dev/serial/by-id/... symlink that resolves to
@@ -557,11 +539,11 @@ private:
         std::error_code path_ec;
         std::string canonical_path = std::filesystem::canonical(config_.serial_port, path_ec).string();
         opened_port_ = path_ec ? config_.serial_port : canonical_path;
-        mark_port_open(opened_port_);
+        mark_serial_port_open(opened_port_);
 
         serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
-            mark_port_closed(opened_port_);
+            mark_serial_port_closed(opened_port_);
             opened_port_.clear();
             throw AlpacaException(
                 "Failed to open serial port: " + config_.serial_port + " (" + std::strerror(errno) + ")",
@@ -570,7 +552,7 @@ private:
         if (!configure_serial_fd(serial_fd_)) {
             close(serial_fd_);
             serial_fd_ = -1;
-            mark_port_closed(opened_port_);
+            mark_serial_port_closed(opened_port_);
             opened_port_.clear();
             throw AlpacaException("Failed to configure serial port", AlpacaError::DriverException);
         }
@@ -588,7 +570,7 @@ private:
             close(serial_fd_);
             serial_fd_ = -1;
         }
-        mark_port_closed(opened_port_);
+        mark_serial_port_closed(opened_port_);
         opened_port_.clear();
 #endif
     }

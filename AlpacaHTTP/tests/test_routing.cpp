@@ -871,6 +871,65 @@ int main() {
 #endif
     }
 
+    // --- WandererAstro Rotator routing/config persistence test ---
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+    {
+        nlohmann::json remove_body = {{"vendor", "wandererastro"}, {"deviceType", "rotator"}, {"deviceNumber", 9402}};
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        // Serial mode with an explicit (dummy) port avoids the auto-detect scan
+        // and registers the driver without opening a real device.
+        nlohmann::json configure_body = {{"vendor", "wandererastro"}, {"deviceType", "rotator"},
+                                         {"deviceNumber", 9402},      {"connectionType", "serial"},
+                                         {"portPath", "/dev/null"},   {"baudRate", 19200}};
+
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        EXPECT(configured_json.value("ErrorNumber", -1) == 0);
+
+        bool found_rotator = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Rotator" && entry.value("DeviceNumber", -1) == 9402) {
+                EXPECT(entry.value("Vendor", "") == "wandererastro");
+                EXPECT(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                EXPECT(cfg.value("vendor", "") == "wandererastro");
+                EXPECT(cfg.value("deviceType", "") == "rotator");
+                EXPECT(cfg.value("connectionType", "") == "serial");
+                EXPECT(cfg.value("portPath", "") == "/dev/null");
+                EXPECT(cfg.value("baudRate", -1) == 19200);
+                found_rotator = true;
+                break;
+            }
+        }
+        EXPECT(found_rotator);
+
+        // CanReverse and StepSize are static capabilities that report without
+        // hardware (1142 steps/degree worm drive).
+        const auto canreverse_response = route_request(router, "GET", "/api/v1/rotator/9402/canreverse");
+        const auto canreverse_json = nlohmann::json::parse(canreverse_response.body());
+        EXPECT(canreverse_json.value("ErrorNumber", -1) == 0);
+        EXPECT(canreverse_json.value("Value", false) == true);
+
+        nlohmann::json remove_body = {{"vendor", "wandererastro"}, {"deviceType", "rotator"}, {"deviceNumber", 9402}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        EXPECT(remove_json.value("ErrorNumber", -1) == 0);
+#else
+        EXPECT(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
     // =====================================================================
     // Issue #102 back-fill: config save->load round-trips for every
     // (vendor, deviceType) that persists fields. Each block POSTs distinctive
@@ -1125,6 +1184,24 @@ int main() {
         EXPECT(cfg.value("baudRate", -1) == 19200);
         EXPECT(cfg.value("panelIndex", -1) == 2);
         remove_device(router, "gemini", "covercalibrator", 9618);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+    {
+        // wandererastro / rotator (WandererRotator Mini) — auto mode persists
+        // rotatorIndex through sanitize_device_config.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "wandererastro"},
+                                           {"deviceType", "rotator"},
+                                           {"deviceNumber", 9619},
+                                           {"connectionType", "auto"},
+                                           {"rotatorIndex", 1}},
+                                          "Rotator", 9619);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("connectionType", "") == "auto");
+        EXPECT(cfg.value("rotatorIndex", -1) == 1);
+        remove_device(router, "wandererastro", "rotator", 9619);
     }
 #endif
 
