@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-07-22
+## Updated 2026-07-23
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -338,6 +338,24 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **SDK**: ZWO CAA SDK Version 1.5.9 (build target)
 - **Connection**: USB (requires libusb-1.0)
+
+</details>
+
+### WandererAstro
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| WandererRotator Mini (V1 / V2) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/WandererAstro/WandererRotator%20Mini%20V2/) |
+
+<details>
+<summary><strong>WandererAstro Rotator Driver Notes</strong></summary>
+
+- **Protocol**: WandererRotator ASCII serial protocol, firmware ≥ 20240226 required (no SDK; protocol reference: INDI `wanderer_rotator_mini`). No published docs — V2 firmware report formats verified against real hardware.
+- **Connection**: USB (CH340 adapter, fixed **19200 baud, 8N1**). The motor needs the separate DC power input; the serial link works without it, but moves silently do nothing.
+- **Auto-detection**: Scans `/dev/serial/by-id/` for CH340/CH341 USB-serial devices (vendor `1a86`) and probes each with the rotator identity handshake. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
+- **Capabilities**: absolute/relative/mechanical moves, halt, hardware reverse, IRotatorV4 Sync (driver-side offset). StepSize is 1/1142°.
+- **Tested model**: WandererRotator Mini V2 (firmware 20250222) on Linux arm64 (Debian 13).
+- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues.
 
 </details>
 

@@ -327,6 +327,7 @@ const INDEX_FIELDS = [
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
     { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
+    { fieldId: 'wandererastro-rotator-index', vendor: 'wandererastro', deviceType: 'rotator', configKey: 'rotatorIndex' },
 ];
 
 // Lowest unused value of field.configKey across already-configured devices that
@@ -906,16 +907,30 @@ function startEditDevice(device) {
         }
     } else if (vendor === 'wandererastro') {
         const connType = config.connectionType || 'auto';
-        setFormValue('wandererastro-connection-type', connType);
-        if (connType === 'auto') {
-            setFormValue('wandererastro-cover-index', config.coverIndex);
-        } else if (connType === 'serial') {
-            setFormValue('wandererastro-port-path', config.portPath);
-            setFormValue('wandererastro-baud-rate', config.baudRate);
-        }
-        const wandererConnTypeEl = document.getElementById('wandererastro-connection-type');
-        if (wandererConnTypeEl) {
-            wandererConnTypeEl.dispatchEvent(new Event('change'));
+        if (normalizeDeviceType(config.deviceType) === 'rotator') {
+            setFormValue('wandererastro-rotator-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('wandererastro-rotator-index', config.rotatorIndex);
+            } else if (connType === 'serial') {
+                setFormValue('wandererastro-rotator-port-path', config.portPath);
+                setFormValue('wandererastro-rotator-baud-rate', config.baudRate);
+            }
+            const wandererRotatorConnTypeEl = document.getElementById('wandererastro-rotator-connection-type');
+            if (wandererRotatorConnTypeEl) {
+                wandererRotatorConnTypeEl.dispatchEvent(new Event('change'));
+            }
+        } else {
+            setFormValue('wandererastro-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('wandererastro-cover-index', config.coverIndex);
+            } else if (connType === 'serial') {
+                setFormValue('wandererastro-port-path', config.portPath);
+                setFormValue('wandererastro-baud-rate', config.baudRate);
+            }
+            const wandererConnTypeEl = document.getElementById('wandererastro-connection-type');
+            if (wandererConnTypeEl) {
+                wandererConnTypeEl.dispatchEvent(new Event('change'));
+            }
         }
     }
     setFormValue('camera-index', config.cameraIndex);
@@ -1729,9 +1744,11 @@ function updateVendorOptions() {
     }
     const wandererastroOption = vendorSelect.querySelector('option[value="wandererastro"]');
     if (wandererastroOption) {
-        // WandererAstro provides the WandererCover V4 (CoverCalibrator).
-        wandererastroOption.disabled = !isCoverCalibrator;
-        wandererastroOption.hidden = !isCoverCalibrator;
+        // WandererAstro provides the WandererCover V4 (CoverCalibrator) and the
+        // WandererRotator Mini (Rotator).
+        const wandererastroAllowed = isCoverCalibrator || isRotator;
+        wandererastroOption.disabled = !wandererastroAllowed;
+        wandererastroOption.hidden = !wandererastroAllowed;
     }
 
     if (!isTelescope && !isSwitch && vendorSelect.value === 'ioptron') {
@@ -1768,7 +1785,7 @@ function updateVendorOptions() {
     if (!isFocuser && !isCoverCalibrator && vendorSelect.value === 'gemini') {
         vendorSelect.value = '';
     }
-    if (!isCoverCalibrator && vendorSelect.value === 'wandererastro') {
+    if (!isCoverCalibrator && !isRotator && vendorSelect.value === 'wandererastro') {
         vendorSelect.value = '';
     }
 
@@ -1808,6 +1825,7 @@ document.getElementById('vendor').addEventListener('change', function() {
         updateGeminiConfigFields();
     } else if (vendor === 'wandererastro') {
         document.getElementById('wandererastro-config').style.display = 'block';
+        updateWandererastroConfigFields();
     }
 
     updateZwoConfigFields();
@@ -1838,6 +1856,27 @@ function updateGeminiConfigFields() {
     // (matches the QHY camera/filterwheel split from PR #142).
     setFieldGroupEnabled(focuserSection, !isCoverCalibrator);
     setFieldGroupEnabled(flatPanelSection, isCoverCalibrator);
+}
+
+// WandererAstro covers two device types from one vendor config block: the
+// WandererCover V4 (covercalibrator) and the WandererRotator Mini (rotator).
+// Show the relevant sub-section based on the selected device type.
+function updateWandererastroConfigFields() {
+    const coverSection = document.getElementById('wandererastro-cover-fields');
+    const rotatorSection = document.getElementById('wandererastro-rotator-fields');
+    if (!coverSection || !rotatorSection) {
+        return;
+    }
+    const deviceTypeSelect = document.getElementById('device-type');
+    const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
+    const isRotator = deviceType === 'rotator';
+    coverSection.style.display = isRotator ? 'none' : 'block';
+    rotatorSection.style.display = isRotator ? 'block' : 'none';
+    // Disable the hidden section's inputs too (not just display:none) so
+    // stale portPath/baudRate/connectionType values can't leak into the
+    // other device type's config (matches the Gemini/QHY split pattern).
+    setFieldGroupEnabled(coverSection, !isRotator);
+    setFieldGroupEnabled(rotatorSection, isRotator);
 }
 
 // iOptron covers two device types from one vendor config block: the mount
@@ -1917,6 +1956,15 @@ if (geminiFlatPanelConnectionType) {
         const type = this.value;
         document.getElementById('gemini-flatpanel-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
         document.getElementById('gemini-flatpanel-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
+const wandererastroRotatorConnectionType = document.getElementById('wandererastro-rotator-connection-type');
+if (wandererastroRotatorConnectionType) {
+    wandererastroRotatorConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('wandererastro-rotator-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('wandererastro-rotator-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -2871,6 +2919,19 @@ document.getElementById('device-form').addEventListener('submit', async function
         } else if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('portPath') || '';
             const baudRate = readOptionalNumber(formData, 'baudRate');
+            if (baudRate !== null) {
+                deviceData.baudRate = baudRate;
+            }
+        }
+    } else if (deviceData.vendor === 'wandererastro' && normalizeDeviceType(deviceData.deviceType) === 'rotator') {
+        const wandererRotatorConnType = document.getElementById('wandererastro-rotator-connection-type');
+        deviceData.connectionType = wandererRotatorConnType ? wandererRotatorConnType.value : 'auto';
+        if (deviceData.connectionType === 'auto') {
+            const rotatorIndex = readOptionalNumber(formData, 'wandererastroRotatorIndex');
+            deviceData.rotatorIndex = rotatorIndex !== null ? rotatorIndex : 0;
+        } else if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('wandererastroRotatorPortPath') || '';
+            const baudRate = readOptionalNumber(formData, 'wandererastroRotatorBaudRate');
             if (baudRate !== null) {
                 deviceData.baudRate = baudRate;
             }

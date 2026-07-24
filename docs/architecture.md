@@ -114,7 +114,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | SynScan | Telescope | Protocol wrapper | Production |
 | Celestron | Telescope | Protocol wrapper | Production |
 | Losmandy Gemini | Focuser, CoverCalibrator (Astro Flat Panel Cover Lite) | Protocol wrapper | Production |
-| WandererAstro | CoverCalibrator (WandererCover V4) | Protocol wrapper | Production |
+| WandererAstro | CoverCalibrator (WandererCover V4), Rotator (WandererRotator Mini V1/V2) | Protocol wrapper | Production |
 | WeeWX | ObservingConditions | HTTP client | Production |
 | Bisque | Telescope | Script/protocol | In development |
 

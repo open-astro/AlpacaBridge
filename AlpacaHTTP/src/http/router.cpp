@@ -76,6 +76,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
+#include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_SVBONY
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
@@ -7329,6 +7330,46 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "wandererastro" && device_type_str == "rotator") {
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::RotatorDriver> rotator;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // Serial mode means an explicit port. Don't silently auto-detect
+                // behind the user's back — surface a clear validation error.
+                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
+                return false;
+            }
+            int baud_rate = config.value("baudRate", 19200);
+            rotator =
+                alpacacore::vendor::wandererastro::create_wandererastro_rotator(device_number, port_path, baud_rate);
+        } else {
+            // "auto" or unset — auto-detect
+            int rotator_index = config.value("rotatorIndex", 0);
+            if (rotator_index < 0) {
+                error_message = "rotatorIndex must be >= 0.";
+                return false;
+            }
+            rotator =
+                alpacacore::vendor::wandererastro::create_wandererastro_rotator_by_index(device_number, rotator_index);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(rotator)))) {
+            util::log_info("Registered WandererAstro Rotator");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -7494,6 +7535,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "wandererastro") {
         copy_if_present("connectionType");
         copy_if_present("coverIndex");
+        copy_if_present("rotatorIndex");  // WandererRotator Mini auto-detect index
         std::string connection_type = config.value("connectionType", "auto");
         if (connection_type == "serial") {
             copy_if_present("portPath");
