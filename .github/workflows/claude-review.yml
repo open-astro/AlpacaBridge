@@ -52,6 +52,16 @@ jobs:
           persist-credentials: false
 
       - uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35  # v1
+        env:
+          # allowed_non_write_users (below) auto-enables subprocess secret
+          # scrubbing, which strips the GitHub token from the agent's
+          # subprocesses and breaks this workflow's "agent posts its review
+          # via gh pr comment" design — the assert step then fails EVERY run.
+          # Opt out: this restores the pre-#149 posture (own-actor runs always
+          # reviewed the same untrusted fork content unscrubbed); the
+          # safe-to-review label is the per-PR trust gate and the token
+          # carries only pull-requests: write.
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
         # The assert step below is the REAL gate (comment posted or fail), and
         # it exempts workflow-editing PRs — where this action refuses to run
         # ("Invalid OIDC token" when the workflow file differs from the default
