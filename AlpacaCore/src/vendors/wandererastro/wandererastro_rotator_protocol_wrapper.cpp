@@ -141,7 +141,12 @@ struct HandshakeResult {
 // The reply is five 'A'-terminated fields:
 //   <name>A<firmware>A<angle*1000>A<backlash>A<reverse>A
 // Returns std::nullopt if the port does not answer like a WandererRotator.
-std::optional<HandshakeResult> do_handshake(int fd, int timeout_ms) {
+//
+// @p resets_left bounds the out-of-range-angle recovery: an implausible angle
+// triggers one "1500002" reset + re-handshake, and if the angle is STILL out
+// of range the handshake fails cleanly instead of recursing forever (a device
+// whose reset never takes effect would otherwise hang the connect path).
+std::optional<HandshakeResult> do_handshake(int fd, int timeout_ms, int resets_left = 1) {
     tcflush(fd, TCIOFLUSH);
     // The controller parses the bare digit string; no terminator is sent
     // (matches the INDI reference, which only appends '\n' to config commands).
@@ -183,6 +188,13 @@ std::optional<HandshakeResult> do_handshake(int fd, int timeout_ms) {
         const bool decimal_degrees = (angle->find('.') != std::string::npos);
         const double angle_limit = decimal_degrees ? 400.0 : 400000.0;
         if (std::fabs(raw_angle) > angle_limit) {
+            if (resets_left <= 0) {
+                // The reset already ran and the angle is still implausible —
+                // fail cleanly rather than resetting (and recursing) forever.
+                ALPACA_LOG_WARN("WandererAstro",
+                                "Rotator virtual mechanical angle still out of range after reset; handshake failed");
+                return std::nullopt;
+            }
             // Accumulated virtual angle is implausible — reset to zero like the
             // INDI reference, then re-handshake once for a consistent snapshot.
             const char reset_cmd[] = "1500002\n";
@@ -191,7 +203,7 @@ std::optional<HandshakeResult> do_handshake(int fd, int timeout_ms) {
             }
             ALPACA_LOG_WARN("WandererAstro", "Rotator virtual mechanical angle out of range; reset to zero");
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            return do_handshake(fd, timeout_ms);
+            return do_handshake(fd, timeout_ms, resets_left - 1);
         }
         result.mechanical_angle = decimal_degrees ? std::fabs(raw_angle) : std::fabs(raw_angle) / 1000.0;
         result.backlash = std::stod(*backlash);
