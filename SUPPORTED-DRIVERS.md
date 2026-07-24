@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-07-23
+## Updated 2026-07-24
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -212,7 +212,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>QHY FilterWheel Driver Notes</strong></summary>
 
-- **SDK**: QHY CCD SDK 25.09.29.11 (shared with the QHY camera driver)
+- **SDK**: QHY CCD SDK 26.06.04.16 (shared with the QHY camera driver)
 - **Connection**: USB — controlled through the SAME physical handle as its paired QHY camera (not a separately enumerable device); the camera and filter wheel driver share one `OpenQHYCCD` via a reference-counted handle in `QHYSDKWrapper`, and can be connected/disconnected independently.
 - **Tested model**: miniCam8M integrated CFW (8-slot) on Linux arm64
 - **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues
