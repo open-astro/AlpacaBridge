@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.20)
 set(WANDERERASTRO_SOURCES
     wandererastro_protocol_wrapper.cpp
     wandererastro_covercalibrator_driver.cpp
+    wandererastro_rotator_protocol_wrapper.cpp
+    wandererastro_rotator_driver.cpp
 )
 
 add_library(alpacacore_wandererastro STATIC ${WANDERERASTRO_SOURCES})
