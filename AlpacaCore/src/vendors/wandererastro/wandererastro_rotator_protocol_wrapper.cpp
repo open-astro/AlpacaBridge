@@ -364,6 +364,17 @@ public:
     }
 
     void disconnect() {
+        // Order matters (PR #148 review): mark disconnected under io_mutex_
+        // FIRST so a concurrent move_relative() — which holds io_mutex_ for its
+        // whole body and checks connected_ — can no longer spawn a fresh
+        // monitor thread after we join. Then join WITHOUT holding io_mutex_
+        // (the monitor locks it each iteration to fetch the fd, so joining
+        // under the lock would deadlock), and only then close the fd — never
+        // while a monitor that could still read it is alive.
+        {
+            std::lock_guard<std::mutex> lock(io_mutex_);
+            connected_ = false;
+        }
         stop_monitor();
         std::lock_guard<std::mutex> lock(io_mutex_);
         {
@@ -371,7 +382,6 @@ public:
             state_ = RotatorState{};
             firmware_date_.clear();
         }
-        connected_ = false;
 #ifndef _WIN32
         close_serial_locked();
 #endif
