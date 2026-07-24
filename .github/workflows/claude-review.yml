@@ -69,6 +69,14 @@ jobs:
           # grants this token pull-requests: write; the review comment posts
           # as github-actions[bot], which the assert step already accepts.
           github_token: ${{ github.token }}
+          # The action independently requires the TRIGGERING ACTOR to have
+          # write access, so a fork contributor's own push fails the review
+          # job in seconds ("Actor does not have write permissions") even
+          # when the maintainer has applied the safe-to-review label. List
+          # trusted fork contributors here (never '*') — the label remains
+          # the per-PR trust decision, this list is the per-person one.
+          # Requires the explicit github_token above.
+          allowed_non_write_users: "htly9981"
           # Keep the whole review in ONE top-level comment that updates in place,
           # instead of posting a new comment on every push.
           use_sticky_comment: true
