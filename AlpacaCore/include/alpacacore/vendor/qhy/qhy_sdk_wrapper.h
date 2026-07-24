@@ -75,9 +75,11 @@ namespace control {
     constexpr int BIN3X3            = 23;  //!< capability: 3x3 binning
     constexpr int BIN4X4            = 24;  //!< capability: 4x4 binning
     constexpr int MECHANICALSHUTTER = 25;  //!< capability: mechanical shutter
+    constexpr int CFWPORT = 17;            //!< capability: has color filter wheel port
     constexpr int CHIPTEMP          = 32;  //!< capability: chip temperature sensor
     constexpr int BITS8             = 34;  //!< capability: 8-bit output
     constexpr int BITS16            = 35;  //!< capability: 16-bit output
+    constexpr int CFWSLOTSNUM = 44;        //!< query: color filter wheel slot count
     constexpr int IS_EXPOSING_DONE  = 45;  //!< poll: 1 if exposure complete
 } // namespace control
 
@@ -127,6 +129,15 @@ public:
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
+    /**
+     * @brief Open (or share) the physical handle for a camera.
+     *
+     * Reference-counted by camera_id: a camera driver and an accessory driver
+     * on the same physical device (e.g. the miniCam8M's integrated CFW) can
+     * both call this for the same id and each get an independent open/close
+     * lifecycle -- the underlying OpenQHYCCD fires once, on the first opener,
+     * and CloseQHYCCD only when the last owner calls close_camera().
+     */
     void open_camera(const std::string& camera_id);
     void init_camera(const std::string& camera_id);
     void close_camera(const std::string& camera_id);
@@ -201,6 +212,20 @@ public:
      * is active.
      */
     void control_temp(const std::string& camera_id, double target_temp_c);
+
+    // ── Filter wheel (integrated CFW) ────────────────────────────────────────
+
+    /**
+     * @brief Move the integrated color filter wheel to a slot.
+     * @param position 0-based slot index.
+     */
+    void move_cfw(const std::string& camera_id, int position);
+
+    /**
+     * @brief Read the CFW's current settled position.
+     * @return 0-based slot index, or -1 if the wheel is still moving/unsettled.
+     */
+    int get_cfw_position(const std::string& camera_id);
 
     // ── Readout modes ────────────────────────────────────────────────────────
 

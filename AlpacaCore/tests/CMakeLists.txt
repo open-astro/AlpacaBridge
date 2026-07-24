@@ -44,6 +44,7 @@ endif()
 
 if(TARGET alpacacore_qhy)
     list(APPEND TEST_SOURCES test_qhy_camera.cpp)
+    list(APPEND TEST_SOURCES test_qhy_filterwheel.cpp)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)

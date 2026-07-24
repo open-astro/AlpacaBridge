@@ -54,7 +54,20 @@ public:
     // the LAST reference drops -- ours in this map, or a copy still held by
     // one of those in-flight blocking calls -- so the physical close is
     // deferred rather than racing a call that's still using the handle.
-    std::unordered_map<std::string, std::shared_ptr<qhyccd_handle>> handles;
+    //
+    // open_count on top of that: some QHY cameras (e.g. miniCam8M) have an
+    // integrated CFW controlled through the SAME physical handle as the
+    // camera. The camera driver and the filter wheel driver each call
+    // open_camera()/close_camera() independently for the same camera_id;
+    // open_count lets the first opener's OpenQHYCCD stay live and shared
+    // while either owner is connected, and only the last owner's
+    // close_camera() actually erases the entry (mirrors ToupTek's
+    // open_shared_by_id/close_shared for its camera+thermal-switch pairing).
+    struct SharedHandle {
+        std::shared_ptr<qhyccd_handle> handle;
+        int open_count{0};
+    };
+    std::unordered_map<std::string, SharedHandle> handles;
     mutable bool resource_initialized{false};
     mutable bool resource_init_attempted{false};
     mutable std::string sdk_version_cache;  // filled on successful init
@@ -89,10 +102,10 @@ public:
 
     std::shared_ptr<qhyccd_handle> get_handle(const std::string& camera_id) const {
         auto it = handles.find(camera_id);
-        if (it == handles.end() || !it->second) {
+        if (it == handles.end() || !it->second.handle) {
             throw AlpacaException("QHY camera not open: " + camera_id, AlpacaError::NotConnected);
         }
-        return it->second;
+        return it->second.handle;
     }
 
     // Lazy one-shot init (see the constructor comment for why). Callers hold
@@ -196,10 +209,25 @@ void QHYSDKWrapper::open_camera(const std::string& camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
     pimpl_->ensure_resource();
 
-    // Drop any existing handle for this id. Erase (not an explicit
-    // CloseQHYCCD) so a stale handle still in use by an in-flight blocking
-    // call elsewhere isn't closed out from under it -- see the Impl comment.
-    pimpl_->handles.erase(camera_id);
+    // Shared open: if another owner (camera driver or CFW driver) already
+    // has this id open, just bump the ref count onto the SAME handle instead
+    // of erasing and re-opening -- a second OpenQHYCCD on an id that's
+    // already open would either fail or hand back an independent handle the
+    // SDK doesn't expect two live owners for.
+    //
+    // Accepted trade-off (matches ToupTek's open_shared_by_id): this means a
+    // reconnect no longer self-heals a stale handle left by an unplug/replug
+    // while a second owner is still connected -- e.g. camera + CFW both
+    // connected, USB drops and re-enumerates, user reconnects only the
+    // camera; the reused handle is dead until *every* owner disconnects and
+    // reconnects. No liveness check on reuse today; if this bites in
+    // practice, the fix is a cheap probe (e.g. IsQHYCCDControlAvailable) on
+    // reuse that re-opens on failure.
+    auto it = pimpl_->handles.find(camera_id);
+    if (it != pimpl_->handles.end() && it->second.open_count > 0) {
+        ++it->second.open_count;
+        return;
+    }
 
     char id_buf[64] = {};
     std::strncpy(id_buf, camera_id.c_str(), sizeof(id_buf) - 1);
@@ -216,15 +244,19 @@ void QHYSDKWrapper::open_camera(const std::string& camera_id) {
         throw AlpacaException("Failed to set QHY stream mode for: " + camera_id, AlpacaError::DriverException);
     }
 
-    pimpl_->handles[camera_id] = std::shared_ptr<qhyccd_handle>(raw_handle, [](qhyccd_handle* h) {
-        if (h != nullptr) {
-            try {
-                CloseQHYCCD(h);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
-                // Best-effort close during teardown; nothing to recover here.
-            }
-        }
-    });
+    pimpl_->handles[camera_id] =
+        Impl::SharedHandle{std::shared_ptr<qhyccd_handle>(raw_handle,
+                                                          [](qhyccd_handle* h) {
+                                                              if (h != nullptr) {
+                                                                  try {
+                                                                      CloseQHYCCD(h);
+                                                                  } catch (...) {  // NOLINT(bugprone-empty-catch)
+                                                                      // Best-effort close during teardown; nothing to
+                                                                      // recover here.
+                                                                  }
+                                                              }
+                                                          }),
+                           1};
 }
 
 void QHYSDKWrapper::init_camera(const std::string& camera_id) {
@@ -235,14 +267,22 @@ void QHYSDKWrapper::init_camera(const std::string& camera_id) {
 
 void QHYSDKWrapper::close_camera(const std::string& camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
-    // Erase, don't call CloseQHYCCD directly: the shared_ptr deleter runs it
-    // once the last reference drops. If control_temp()/set_param()/
-    // get_single_frame() are mid-call on this handle right now (they hold
-    // their own copy while pimpl_->mutex is released -- see those functions),
-    // this erase just drops OUR reference; the actual hardware close is
-    // deferred until that in-flight call returns and its copy goes out of
-    // scope, instead of racing it.
-    pimpl_->handles.erase(camera_id);
+    auto it = pimpl_->handles.find(camera_id);
+    if (it == pimpl_->handles.end()) {
+        return;  // not open -- idempotent
+    }
+    if (it->second.open_count > 1) {
+        --it->second.open_count;  // another owner (camera or CFW) still has it open
+        return;
+    }
+    // Last owner: erase, don't call CloseQHYCCD directly. The shared_ptr
+    // deleter runs it once the last reference drops. If control_temp()/
+    // set_param()/get_single_frame() are mid-call on this handle right now
+    // (they hold their own copy while pimpl_->mutex is released -- see those
+    // functions), this erase just drops OUR reference; the actual hardware
+    // close is deferred until that in-flight call returns and its copy goes
+    // out of scope, instead of racing it.
+    pimpl_->handles.erase(it);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -417,11 +457,11 @@ bool QHYSDKWrapper::get_single_frame(const std::string& camera_id,
 void QHYSDKWrapper::cancel_exposure(const std::string& camera_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
     auto it = pimpl_->handles.find(camera_id);
-    if (it == pimpl_->handles.end() || !it->second) {
+    if (it == pimpl_->handles.end() || !it->second.handle) {
         return;
     }
     // CancelQHYCCDExposingAndReadout is supported by all cameras
-    CancelQHYCCDExposingAndReadout(it->second.get());
+    CancelQHYCCDExposingAndReadout(it->second.handle.get());
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -460,6 +500,66 @@ void QHYSDKWrapper::control_temp(const std::string& camera_id, double target_tem
     }
     // ControlQHYCCDTemp implements PID cooler control — must be called ~every second
     ControlQHYCCDTemp(handle.get(), target_temp_c);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Filter wheel (integrated CFW)
+// ────────────────────────────────────────────────────────────────────────────
+
+void QHYSDKWrapper::move_cfw(const std::string& camera_id, int position) {
+    // Matches the release-before-call pattern used by set_param()/
+    // control_temp()/get_single_frame() above: fetch the shared_ptr under the
+    // lock, then call the SDK unlocked so this can't stack behind (or block)
+    // get_cfw_position()'s much longer hold below. Keep the shared_ptr itself
+    // alive across the call so a concurrent close_camera() can't invalidate
+    // the handle mid-call (see the Impl comment).
+    // The single-ASCII-digit protocol below only has room for slots 0-9;
+    // QHY's current lineup tops out at 9 slots, but the web UI accepts a
+    // custom slot count up to 16, so make the protocol's real ceiling
+    // explicit rather than silently sending a bogus byte for position 10+.
+    if (position > 9) {
+        throw AlpacaException("Filter position out of range for QHY CFW protocol (max 9)", AlpacaError::InvalidValue);
+    }
+
+    std::shared_ptr<qhyccd_handle> handle;
+    {
+        std::lock_guard<std::mutex> lock(pimpl_->mutex);
+        handle = pimpl_->get_handle(camera_id);
+    }
+
+    // SDK convention (per the 25.09.29 SDK's ControlCFW.cpp sample): the order is a
+    // single ASCII digit '0'-'9' for the target slot, not a raw byte.
+    char order = static_cast<char>('0' + position);
+    check_result(SendOrder2QHYCCDCFW(handle.get(), &order, 1), "SendOrder2QHYCCDCFW");
+}
+
+int QHYSDKWrapper::get_cfw_position(const std::string& camera_id) {
+    // GetQHYCCDCFWStatus is a genuine ~100-130ms hardware round trip on real
+    // miniCam8M hardware (ConformU finding, see qhy_filterwheel_driver.cpp),
+    // and the filter wheel driver's get_position() calls this on every poll
+    // while a move is in flight. Do not hold pimpl_->mutex for the duration --
+    // every other SDK call, on this camera or any other open QHY camera,
+    // takes the same global mutex and would stall behind it. Matches
+    // set_param()/control_temp()/get_single_frame() above: fetch the
+    // shared_ptr under the lock, release, then call unlocked, keeping the
+    // shared_ptr alive across the call so a concurrent close_camera() can't
+    // invalidate the handle mid-call.
+    std::shared_ptr<qhyccd_handle> handle;
+    {
+        std::lock_guard<std::mutex> lock(pimpl_->mutex);
+        handle = pimpl_->get_handle(camera_id);
+    }
+
+    char status[64] = {};
+    if (GetQHYCCDCFWStatus(handle.get(), status) != QHYCCD_SUCCESS) {
+        return -1;
+    }
+    // Settled position is reported as an ASCII digit; any other value means
+    // the wheel is still moving or the status is not yet known.
+    if (status[0] < '0' || status[0] > '9') {
+        return -1;
+    }
+    return status[0] - '0';
 }
 
 // ────────────────────────────────────────────────────────────────────────────

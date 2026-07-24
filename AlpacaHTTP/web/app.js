@@ -240,6 +240,7 @@ function resetDeviceForm() {
     zwoFilterwheelSlotUI.syncSlotsFromTextarea();
     playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
     touptekFilterwheelSlotUI.syncSlotsFromTextarea();
+    qhyFilterwheelSlotUI.syncSlotsFromTextarea();
     const messageDiv = document.getElementById('form-message');
     if (messageDiv) {
         messageDiv.style.display = 'none';
@@ -314,6 +315,7 @@ const INDEX_FIELDS = [
     { fieldId: 'focuser-index', vendor: 'zwo', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'focuser-id' },
     { fieldId: 'rotator-index', vendor: 'zwo', deviceType: 'rotator', configKey: 'rotatorIndex', idFieldId: 'rotator-id' },
     { fieldId: 'qhy-camera-index', vendor: 'qhy', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'qhy-cfw-camera-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'cameraIndex', idFieldId: 'qhy-cfw-camera-id' },
     { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
@@ -793,6 +795,18 @@ function startEditDevice(device) {
         const zwoMountConnectionTypeEl = document.getElementById('zwo-mount-connection-type');
         if (zwoMountConnectionTypeEl) {
             zwoMountConnectionTypeEl.dispatchEvent(new Event('change'));
+        }
+    } else if (vendor === 'qhy' && deviceType === 'filterwheel') {
+        // Integrated CFW: bound to the same camera index/id as the paired
+        // QHY camera device, but stored under its own field names.
+        setFormValue('qhy-cfw-camera-index', config.cameraIndex);
+        setFormValue('qhy-cfw-camera-id', config.cameraId);
+        const qhyFilterNamesField = document.getElementById('qhy-filter-names');
+        if (qhyFilterNamesField) {
+            qhyFilterNamesField.value = Array.isArray(config.filterNames)
+                ? config.filterNames.join('\n')
+                : '';
+            qhyFilterwheelSlotUI.syncSlotsFromTextarea();
         }
     } else if (vendor === 'qhy') {
         setFormValue('qhy-camera-index', config.cameraIndex);
@@ -1688,8 +1702,11 @@ function updateVendorOptions() {
     }
     const qhyOption = vendorSelect.querySelector('option[value="qhy"]');
     if (qhyOption) {
-        qhyOption.disabled = !isCamera;
-        qhyOption.hidden = !isCamera;
+        // QHY provides cameras and, on models like the miniCam8M, an
+        // integrated CFW (filter wheel) sharing the camera's SDK handle.
+        const qhyAllowed = isCamera || isFilterWheel;
+        qhyOption.disabled = !qhyAllowed;
+        qhyOption.hidden = !qhyAllowed;
     }
     const svbonyOption = vendorSelect.querySelector('option[value="svbony"]');
     if (svbonyOption) {
@@ -1750,7 +1767,7 @@ function updateVendorOptions() {
         vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
     }
-    if (!isCamera && vendorSelect.value === 'qhy') {
+    if (!isCamera && !isFilterWheel && vendorSelect.value === 'qhy') {
         vendorSelect.value = '';
     }
     if (!isCamera && vendorSelect.value === 'svbony') {
@@ -1814,6 +1831,7 @@ document.getElementById('vendor').addEventListener('change', function() {
     updateZwoConfigFields();
     updateTouptekConfigFields();
     updatePlayerOneConfigFields();
+    updateQhyConfigFields();
     updateAutoNumbering();
 });
 
@@ -2000,6 +2018,13 @@ const touptekFilterwheelSlotUI = createFilterwheelSlotUI({
     customInputId: 'touptek-filterwheel-slot-custom',
     slotListId: 'touptek-filterwheel-slot-list',
     namesTextareaId: 'touptek-filter-names'
+});
+
+const qhyFilterwheelSlotUI = createFilterwheelSlotUI({
+    countSelectId: 'qhy-filterwheel-slot-count',
+    customInputId: 'qhy-filterwheel-slot-custom',
+    slotListId: 'qhy-filterwheel-slot-list',
+    namesTextareaId: 'qhy-filter-names'
 });
 
 const apertureDiameterInput = document.getElementById('aperture-diameter');
@@ -2412,6 +2437,26 @@ function updateTouptekConfigFields() {
     }
 }
 
+function updateQhyConfigFields() {
+    const deviceTypeSelect = document.getElementById('device-type');
+    if (!deviceTypeSelect) {
+        return;
+    }
+    const cameraFields = document.getElementById('qhy-camera-fields');
+    const filterwheelFields = document.getElementById('qhy-filterwheel-fields');
+    const deviceType = normalizeDeviceType(deviceTypeSelect.value);
+    const isCamera = deviceType === 'camera';
+    const isFilterWheel = deviceType === 'filterwheel';
+    if (cameraFields) {
+        cameraFields.style.display = isCamera ? 'block' : 'none';
+        setFieldGroupEnabled(cameraFields, isCamera);
+    }
+    if (filterwheelFields) {
+        filterwheelFields.style.display = isFilterWheel ? 'block' : 'none';
+        setFieldGroupEnabled(filterwheelFields, isFilterWheel);
+    }
+}
+
 function updatePlayerOneConfigFields() {
     const deviceTypeSelect = document.getElementById('device-type');
     if (!deviceTypeSelect) {
@@ -2736,6 +2781,21 @@ document.getElementById('device-form').addEventListener('submit', async function
                     deviceData.rotatorId = rotatorId;
                 }
             }
+        }
+    } else if (deviceData.vendor === 'qhy' && normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
+        // Integrated CFW (e.g. miniCam8M): unique field names so hidden
+        // fields don't collide with the QHY camera device's own cameraId/
+        // cameraIndex when both sections are present in the same form.
+        const qhyCfwCameraId = formData.get('qhyCfwCameraId');
+        if (qhyCfwCameraId && qhyCfwCameraId.trim() !== '') {
+            deviceData.cameraId = qhyCfwCameraId.trim();
+        } else {
+            const qhyCfwCameraIndex = readOptionalNumber(formData, 'qhyCfwCameraIndex');
+            deviceData.cameraIndex = qhyCfwCameraIndex !== null ? qhyCfwCameraIndex : 0;
+        }
+        const qhyFilterNames = parseFilterNamesInput(formData.get('qhyFilterNames'), false);
+        if (qhyFilterNames.length > 0) {
+            deviceData.filterNames = qhyFilterNames;
         }
     } else if (deviceData.vendor === 'qhy') {
         const qhyCameraId = formData.get('cameraId');

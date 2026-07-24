@@ -337,44 +337,56 @@ private:
         const std::string& id = resolve_camera_id_locked();
 
         sdk.open_camera(id);
-        sdk.init_camera(id);
+        // Roll back the ref-counted open if any init step throws: open_camera()
+        // now shares one handle per camera_id with the CFW driver via an
+        // open_count, so an unmatched open is no longer self-healed by the next
+        // connect — it would pin the handle (CloseQHYCCD never firing) for the
+        // life of the process. Same pattern as the filter wheel's connect path.
+        try {
+            sdk.init_camera(id);
 
-        // Populate full camera info
-        QHYCameraInfo info{};
-        info.camera_id = id;
-        if (!camera_info_valid_ || camera_info_.model.empty()) {
-            sdk.get_camera_model(id, info.model);
-        } else {
-            info.model = camera_info_.model;
+            // Populate full camera info
+            QHYCameraInfo info{};
+            info.camera_id = id;
+            if (!camera_info_valid_ || camera_info_.model.empty()) {
+                sdk.get_camera_model(id, info.model);
+            } else {
+                info.model = camera_info_.model;
+            }
+            if (sdk.get_chip_info(id, info)) {
+                camera_info_ = info;
+                camera_info_valid_ = true;
+            }
+
+            // Select bit depth (prefer 16-bit)
+            bits_ = 8;
+            if (sdk.is_control_available(id, control::BITS16)) {
+                bits_ = 16;
+            }
+            sdk.set_bits_mode(id, bits_);
+
+            // Default to full-frame 1x1 binning
+            bin_x_ = 1;
+            bin_y_ = 1;
+            start_x_ = 0;
+            start_y_ = 0;
+            num_x_ = static_cast<int>(camera_info_.max_width);
+            num_y_ = static_cast<int>(camera_info_.max_height);
+            sdk.set_bin_mode(id, 1, 1);
+            sdk.set_resolution(id, 0, 0, static_cast<uint32_t>(num_x_), static_cast<uint32_t>(num_y_));
+
+            // Enumerate readout modes
+            load_readout_modes_locked(id);
+
+            reset_exposure_state_locked();
+        } catch (...) {
+            try {
+                sdk.close_camera(id);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "Failed to roll back camera open after connect error: " + std::string(e.what()));
+            }
+            throw;
         }
-        if (sdk.get_chip_info(id, info)) {
-            camera_info_ = info;
-            camera_info_valid_ = true;
-        }
-
-        // Select bit depth (prefer 16-bit)
-        bits_ = 8;
-        if (sdk.is_control_available(id, control::BITS16)) {
-            bits_ = 16;
-        }
-        sdk.set_bits_mode(id, bits_);
-
-        // Default to full-frame 1x1 binning
-        bin_x_ = 1;
-        bin_y_ = 1;
-        start_x_ = 0;
-        start_y_ = 0;
-        num_x_ = static_cast<int>(camera_info_.max_width);
-        num_y_ = static_cast<int>(camera_info_.max_height);
-        sdk.set_bin_mode(id, 1, 1);
-        sdk.set_resolution(id, 0, 0,
-                           static_cast<uint32_t>(num_x_),
-                           static_cast<uint32_t>(num_y_));
-
-        // Enumerate readout modes
-        load_readout_modes_locked(id);
-
-        reset_exposure_state_locked();
         connected_.store(true);
 
         // Start threads without holding the lock so they don't block the caller.

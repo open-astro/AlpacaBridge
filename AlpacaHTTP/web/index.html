@@ -648,14 +648,54 @@
 
                 </div>
 
-                <!-- QHY Camera Configuration -->
+                <!-- QHY Configuration -->
                 <div id="qhy-config" class="vendor-config" style="display: none;">
-                    <h3>QHY Camera Configuration</h3>
+                    <h3>QHY Configuration</h3>
 
-                    <div class="form-group">
-                        <label for="qhy-camera-index">Camera Index:</label>
-                        <input type="number" id="qhy-camera-index" name="qhyCameraIndex" value="0" min="0">
-                        <small>0-based index from the QHY SDK enumeration.</small>
+                    <div id="qhy-camera-fields">
+                        <div class="form-group">
+                            <label for="qhy-camera-index">Camera Index:</label>
+                            <input type="number" id="qhy-camera-index" name="qhyCameraIndex" value="0" min="0">
+                            <small>0-based index from the QHY SDK enumeration.</small>
+                        </div>
+                    </div>
+
+                    <!-- Integrated CFW (e.g. miniCam8M): controlled through the SAME
+                         physical handle as its paired camera, so this device points at
+                         the camera's own index/id rather than a separate wheel enumeration. -->
+                    <div id="qhy-filterwheel-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="qhy-cfw-camera-index">Camera Index:</label>
+                            <input type="number" id="qhy-cfw-camera-index" name="qhyCfwCameraIndex" value="0" min="0">
+                            <small>0-based index of the QHY camera this CFW is built into (same index as the paired camera device).</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="qhy-cfw-camera-id">Camera ID (optional):</label>
+                            <input type="text" id="qhy-cfw-camera-id" name="qhyCfwCameraId" placeholder="(leave blank to use index)">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="qhy-filterwheel-slot-count">Filter Wheel Slots:</label>
+                            <select id="qhy-filterwheel-slot-count">
+                                <option value="">Select slot count</option>
+                                <option value="5">5 slots</option>
+                                <option value="7">7 slots</option>
+                                <option value="8">8 slots</option>
+                                <option value="9">9 slots</option>
+                                <option value="custom">Custom</option>
+                            </select>
+                            <input type="number" id="qhy-filterwheel-slot-custom" min="1" max="16" placeholder="Custom">
+                            <small>The actual slot count is read from the wheel at connect; this only pre-seeds the filter name list.</small>
+                        </div>
+                        <div id="qhy-filterwheel-slot-list" class="filterwheel-slot-list"></div>
+
+                        <details>
+                            <summary>Advanced: edit filter names as lines</summary>
+                            <div class="form-group">
+                                <label for="qhy-filter-names">Filter Names (optional):</label>
+                                <textarea id="qhy-filter-names" name="qhyFilterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                            </div>
+                        </details>
                     </div>
 
                 </div>
