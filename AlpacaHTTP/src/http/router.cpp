@@ -76,6 +76,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
+#include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_SVBONY
@@ -7370,6 +7371,61 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "wandererastro" && device_type_str == "filterwheel") {
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // Serial mode means an explicit port. Don't silently auto-detect
+                // behind the user's back — surface a clear validation error.
+                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
+                return false;
+            }
+            int baud_rate = config.value("baudRate", 19200);
+            wheel = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(device_number, port_path,
+                                                                                        baud_rate);
+        } else {
+            // "auto" or unset — auto-detect
+            int wheel_index = config.value("wandererFilterwheelIndex", 0);
+            if (wheel_index < 0) {
+                error_message = "wandererFilterwheelIndex must be >= 0.";
+                return false;
+            }
+            wheel = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel_by_index(device_number,
+                                                                                                 wheel_index);
+        }
+
+        if (config.contains("filterNames")) {
+            const auto& names_value = config.at("filterNames");
+            if (!names_value.is_array()) {
+                error_message = "Wanderer filter wheel filterNames must be an array";
+                return false;
+            }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "Wanderer filter wheel filterNames must be an array of strings";
+                    return false;
+                }
+            }
+            wheel->set_names(names_value.get<std::vector<std::string>>());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
+            util::log_info("Registered WandererAstro filter wheel");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -7536,6 +7592,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("connectionType");
         copy_if_present("coverIndex");
         copy_if_present("rotatorIndex");  // WandererRotator Mini auto-detect index
+        if (device_type == "filterwheel") {
+            copy_if_present("wandererFilterwheelIndex");  // SFW auto-detect index
+            copy_if_present("filterNames");
+        }
         std::string connection_type = config.value("connectionType", "auto");
         if (connection_type == "serial") {
             copy_if_present("portPath");

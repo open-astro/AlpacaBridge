@@ -1033,7 +1033,7 @@ Protocol: no SDK or published spec exists for this model. Reverse-engineered ent
 - Default baud rate 9600 (8N1); configurable 9600/19200/38400/57600/115200 same as the focuser, though only 9600 has been confirmed against real hardware.
 - ConformU 4.4.0 validated on Debian 13 arm64: **0 errors, 0 issues, 0 timing issues**. Results in `AlpacaCore/conformu/Gemini/Astro Flat Panel Cover Lite/`.
 
-### WandererAstro (WandererCover V4, WandererRotator Mini)
+### WandererAstro (WandererCover V4, WandererRotator Mini, SFW filter wheels)
 
 Devices: CoverCalibrator, Rotator (the project's first — the generic CoverCalibrator dispatch already existed in `AlpacaHTTP/src/http/router.cpp`; only the vendor instantiation block + web UI were new). The WandererCover V4 is a motorized dust cover combined with an EL flat panel.
 
@@ -1065,6 +1065,16 @@ Connection types: USB serial (CH340 adapter, vendor `1a86`) only. No WiFi. Fixed
 - The in-use serial-port registry is now shared across wrappers (`util/serial_port_registry.h`, promoted from the cover wrapper) so a rotator auto-detect probe never injects its handshake into a port the connected cover holds, and vice versa. Any future serial vendor should use it too.
 - ConformU 4.4.0 validated on real hardware (WandererRotator Mini V2, firmware 20250222, Debian 13 arm64): **0 errors, 0 issues, 0 timing issues**. Results in `AlpacaCore/conformu/WandererAstro/WandererRotator Mini V2/Linux-arm64.txt`. Took three rounds: round 1 (23 issues) exposed the V2 decimal-degrees/relative report format, round 2 (7 issues) exposed the read-window partial-token loss — both documented above.
 - ConformU 4.3.0 validated on real hardware (WandererCover V4 Pro, firmware 20250504, Debian 13 arm64): **0 errors, 0 issues, 0 timing issues**. Results in `AlpacaCore/conformu/WandererAstro/WandererCover V4/Linux-arm64.txt`. First clean run had 7 issues (6× calibrator-state lag, 1× HaltCover NotImplemented) — see the two notes above; both are general ASCOM CoverCalibrator lessons, not WandererCover-specific.
+
+**SFW filter wheels (SFW50 / SFW50S / SFW36S)** — FilterWheel, `wandererastro_filterwheel_driver` + `wandererastro_filterwheel_protocol_wrapper`. Protocol reference: INDI `drivers/filter_wheel/wanderer_snowflake.cpp`. The whole lineup is 8-slot; the wire model tokens are `WSFW508` (SFW50/SFW50S) and `WSFW368` (SFW36S). USB serial only (CH340, 19200 8N1); **12 V DC is separate from USB** — the serial link and status stream work with DC absent, but moves silently do nothing.
+
+- **Streaming like the cover, but token-based, not line-based**: the wheel streams an 'A'-delimited frame `<model>A<firmware>A<position 1-8>A<letters>A<8 per-filter fields>A<deviceID>A`, and **line terminators may be omitted entirely while the wheel is moving** (documented in the INDI reference). A line-based reader like the cover's would stall mid-move, so the wrapper parses a rolling 'A'-delimited token stream that resynchronises on each `WSFW` model token. Filter letters are restricted to B–Z by the vendor precisely so 'A' stays unambiguous as the delimiter.
+- **Commands are '\r'-terminated** (the cover uses '\n') fire-and-forget ASCII numbers: move `2000+slot` (1-based), auto-calibrate `1500002` (note: same code the ROTATOR uses for set-zero — same vendor, different meaning per device), zero-detect `1002`, set slot letter `(161+i)*10000+(letter-'A'+1)`, set device ID `1900000+id`. Only move and calibrate are used; letters/device-ID are out of ASCOM scope.
+- **Minimum firmware 20260124** (enforced at connect, like the rotator's floor) — older firmware predates the streamed-status protocol; update via WandererEmpire.
+- **Homing at connect**: calibrate (`1500002`) is sent once per connect, matching INDI. Fire-and-forget with no move target recorded — Position reports the live streamed slot during the home. ConformU 4.4.0 is untroubled by this.
+- **Position -1 while moving**: the driver records the commanded target; Position returns -1 until the streamed position matches, then latches idle (so a later out-of-band position change reads as the live slot, not a stuck move). Slot count is statically 8 for the whole lineup, so the full Position range is validated as InvalidValue BEFORE the connection check, and names/offsets state is built at construction.
+- Filter Names/FocusOffsets are driver-side (config-persisted) like ZWO/PlayerOne — the on-device single-letter names are parsed from the stream but not used or written back.
+- ConformU 4.4.0 validated on real hardware (SFW36S, firmware 20260124, Debian 13 arm64): **0 errors, 0 issues, 0 timing issues** on the first run. Results in `AlpacaCore/conformu/WandererAstro/SFW36S/Linux-arm64.txt`.
 
 ### WeeWX
 

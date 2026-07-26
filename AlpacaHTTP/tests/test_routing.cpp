@@ -987,6 +987,75 @@ int main() {
 #endif
     }
 
+    // --- WandererAstro FilterWheel routing/config persistence test ---
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+    {
+        nlohmann::json remove_body = {
+            {"vendor", "wandererastro"}, {"deviceType", "filterwheel"}, {"deviceNumber", 9403}};
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        // Serial mode with an explicit (dummy) port avoids the auto-detect scan
+        // and registers the driver without opening a real device.
+        nlohmann::json configure_body = {{"vendor", "wandererastro"},
+                                         {"deviceType", "filterwheel"},
+                                         {"deviceNumber", 9403},
+                                         {"connectionType", "serial"},
+                                         {"portPath", "/dev/null"},
+                                         {"baudRate", 19200},
+                                         {"filterNames", {"L", "R", "G", "B", "Ha", "OIII", "SII", "Clear"}}};
+
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        EXPECT(configured_json.value("ErrorNumber", -1) == 0);
+
+        bool found_filterwheel = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "FilterWheel" && entry.value("DeviceNumber", -1) == 9403) {
+                EXPECT(entry.value("Vendor", "") == "wandererastro");
+                EXPECT(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                EXPECT(cfg.value("vendor", "") == "wandererastro");
+                EXPECT(cfg.value("deviceType", "") == "filterwheel");
+                EXPECT(cfg.value("connectionType", "") == "serial");
+                EXPECT(cfg.value("portPath", "") == "/dev/null");
+                EXPECT(cfg.value("baudRate", -1) == 19200);
+                EXPECT(cfg.contains("filterNames"));
+                EXPECT(cfg["filterNames"].size() == 8);
+                EXPECT(cfg["filterNames"][4] == "Ha");
+                found_filterwheel = true;
+                break;
+            }
+        }
+        EXPECT(found_filterwheel);
+
+        // Names and FocusOffsets are driver-side state that report without
+        // hardware (the whole Wanderer lineup is fixed at 8 slots).
+        const auto names_response = route_request(router, "GET", "/api/v1/filterwheel/9403/names");
+        const auto names_json = nlohmann::json::parse(names_response.body());
+        EXPECT(names_json.value("ErrorNumber", -1) == 0);
+        EXPECT(names_json["Value"].size() == 8);
+        EXPECT(names_json["Value"][0] == "L");
+
+        nlohmann::json remove_body = {
+            {"vendor", "wandererastro"}, {"deviceType", "filterwheel"}, {"deviceNumber", 9403}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        EXPECT(remove_json.value("ErrorNumber", -1) == 0);
+#else
+        EXPECT(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
     // =====================================================================
     // Issue #102 back-fill: config save->load round-trips for every
     // (vendor, deviceType) that persists fields. Each block POSTs distinctive
