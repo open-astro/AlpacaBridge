@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-07-24
+## Updated 2026-07-26
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -234,6 +234,25 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested model**: AFW-M 7-slot on Linux arm64 (wheel firmware `FILTERWHEEL01A_V202_20250903.iic`)
 - **ConformU**: 4.3.0 — 0 errors, 0 issues, 0 timing issues
 - **Homing at connect**: the driver reads the slot count, writes it back, and homes the wheel (`FILTERWHEEL_POSITION = -1`) at connect — mirroring the INDI toupbase reference driver — so the firmware establishes its slot reference. This is unconditional (matches INDI) and does not depend on a particular firmware; it matters most right after a firmware flash, which clears the slot reference and otherwise leaves the wheel hunting without landing. Expect the wheel to home once on connect.
+- **Position** reports −1 while the wheel is rotating, per the ASCOM IFilterWheelV3 contract.
+
+</details>
+
+### WandererAstro
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| SFW36S (8x36mm) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/WandererAstro/SFW36S/) |
+
+<details>
+<summary><strong>WandererAstro FilterWheel Driver Notes</strong></summary>
+
+- **Protocol**: ASCII serial over CH340 USB-serial, 19200 8N1 (streamed 'A'-delimited status frames; no SDK)
+- **Connection**: USB serial for control; the motor needs the separate 12 V DC input connected (moves silently do nothing without it)
+- **Tested model**: SFW36S 8x36mm (reports as `WSFW368`, firmware 20260124) on Linux arm64 — the SFW50/SFW50S (`WSFW508`) share the same 8-slot protocol
+- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues
+- **Minimum firmware**: 20260124 (older firmware predates the status-stream protocol; update via WandererEmpire)
+- **Homing at connect**: the driver sends the automatic calibration command (`1500002`) once per connect, matching the vendor's INDI reference — expect the wheel to home once on connect.
 - **Position** reports −1 while the wheel is rotating, per the ASCOM IFilterWheelV3 contract.
 
 </details>

@@ -328,6 +328,7 @@ const INDEX_FIELDS = [
     { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
     { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
     { fieldId: 'wandererastro-rotator-index', vendor: 'wandererastro', deviceType: 'rotator', configKey: 'rotatorIndex' },
+    { fieldId: 'wandererastro-filterwheel-index', vendor: 'wandererastro', deviceType: 'filterwheel', configKey: 'wandererFilterwheelIndex' },
 ];
 
 // Lowest unused value of field.configKey across already-configured devices that
@@ -907,7 +908,26 @@ function startEditDevice(device) {
         }
     } else if (vendor === 'wandererastro') {
         const connType = config.connectionType || 'auto';
-        if (normalizeDeviceType(config.deviceType) === 'rotator') {
+        if (normalizeDeviceType(config.deviceType) === 'filterwheel') {
+            setFormValue('wandererastro-filterwheel-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('wandererastro-filterwheel-index', config.wandererFilterwheelIndex);
+            } else if (connType === 'serial') {
+                setFormValue('wandererastro-filterwheel-port-path', config.portPath);
+                setFormValue('wandererastro-filterwheel-baud-rate', config.baudRate);
+            }
+            const wandererFwConnTypeEl = document.getElementById('wandererastro-filterwheel-connection-type');
+            if (wandererFwConnTypeEl) {
+                wandererFwConnTypeEl.dispatchEvent(new Event('change'));
+            }
+            const wandererFilterNamesField = document.getElementById('wandererastro-filter-names');
+            if (wandererFilterNamesField) {
+                wandererFilterNamesField.value = Array.isArray(config.filterNames)
+                    ? config.filterNames.join('\n')
+                    : '';
+                wandererFilterwheelSlotUI.syncSlotsFromTextarea();
+            }
+        } else if (normalizeDeviceType(config.deviceType) === 'rotator') {
             setFormValue('wandererastro-rotator-connection-type', connType);
             if (connType === 'auto') {
                 setFormValue('wandererastro-rotator-index', config.rotatorIndex);
@@ -1744,9 +1764,9 @@ function updateVendorOptions() {
     }
     const wandererastroOption = vendorSelect.querySelector('option[value="wandererastro"]');
     if (wandererastroOption) {
-        // WandererAstro provides the WandererCover V4 (CoverCalibrator) and the
-        // WandererRotator Mini (Rotator).
-        const wandererastroAllowed = isCoverCalibrator || isRotator;
+        // WandererAstro provides the WandererCover V4 (CoverCalibrator), the
+        // WandererRotator Mini (Rotator) and the SFW filter wheels (FilterWheel).
+        const wandererastroAllowed = isCoverCalibrator || isRotator || isFilterWheel;
         wandererastroOption.disabled = !wandererastroAllowed;
         wandererastroOption.hidden = !wandererastroAllowed;
     }
@@ -1785,7 +1805,7 @@ function updateVendorOptions() {
     if (!isFocuser && !isCoverCalibrator && vendorSelect.value === 'gemini') {
         vendorSelect.value = '';
     }
-    if (!isCoverCalibrator && !isRotator && vendorSelect.value === 'wandererastro') {
+    if (!isCoverCalibrator && !isRotator && !isFilterWheel && vendorSelect.value === 'wandererastro') {
         vendorSelect.value = '';
     }
 
@@ -1858,25 +1878,31 @@ function updateGeminiConfigFields() {
     setFieldGroupEnabled(flatPanelSection, isCoverCalibrator);
 }
 
-// WandererAstro covers two device types from one vendor config block: the
-// WandererCover V4 (covercalibrator) and the WandererRotator Mini (rotator).
-// Show the relevant sub-section based on the selected device type.
+// WandererAstro covers three device types from one vendor config block: the
+// WandererCover V4 (covercalibrator), the WandererRotator Mini (rotator) and
+// the SFW filter wheels (filterwheel). Show the relevant sub-section based on
+// the selected device type.
 function updateWandererastroConfigFields() {
     const coverSection = document.getElementById('wandererastro-cover-fields');
     const rotatorSection = document.getElementById('wandererastro-rotator-fields');
-    if (!coverSection || !rotatorSection) {
+    const filterwheelSection = document.getElementById('wandererastro-filterwheel-fields');
+    if (!coverSection || !rotatorSection || !filterwheelSection) {
         return;
     }
     const deviceTypeSelect = document.getElementById('device-type');
     const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
     const isRotator = deviceType === 'rotator';
-    coverSection.style.display = isRotator ? 'none' : 'block';
+    const isFilterWheel = deviceType === 'filterwheel';
+    const isCover = !isRotator && !isFilterWheel;
+    coverSection.style.display = isCover ? 'block' : 'none';
     rotatorSection.style.display = isRotator ? 'block' : 'none';
-    // Disable the hidden section's inputs too (not just display:none) so
+    filterwheelSection.style.display = isFilterWheel ? 'block' : 'none';
+    // Disable the hidden sections' inputs too (not just display:none) so
     // stale portPath/baudRate/connectionType values can't leak into the
     // other device type's config (matches the Gemini/QHY split pattern).
-    setFieldGroupEnabled(coverSection, !isRotator);
+    setFieldGroupEnabled(coverSection, isCover);
     setFieldGroupEnabled(rotatorSection, isRotator);
+    setFieldGroupEnabled(filterwheelSection, isFilterWheel);
 }
 
 // iOptron covers two device types from one vendor config block: the mount
@@ -1968,6 +1994,15 @@ if (wandererastroRotatorConnectionType) {
     });
 }
 
+const wandererastroFilterwheelConnectionType = document.getElementById('wandererastro-filterwheel-connection-type');
+if (wandererastroFilterwheelConnectionType) {
+    wandererastroFilterwheelConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('wandererastro-filterwheel-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('wandererastro-filterwheel-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
 const wandererastroConnectionType = document.getElementById('wandererastro-connection-type');
 if (wandererastroConnectionType) {
     wandererastroConnectionType.addEventListener('change', function() {
@@ -2018,6 +2053,13 @@ const touptekFilterwheelSlotUI = createFilterwheelSlotUI({
     customInputId: 'touptek-filterwheel-slot-custom',
     slotListId: 'touptek-filterwheel-slot-list',
     namesTextareaId: 'touptek-filter-names'
+});
+
+const wandererFilterwheelSlotUI = createFilterwheelSlotUI({
+    countSelectId: 'wandererastro-filterwheel-slot-count',
+    customInputId: 'wandererastro-filterwheel-slot-custom',
+    slotListId: 'wandererastro-filterwheel-slot-list',
+    namesTextareaId: 'wandererastro-filter-names'
 });
 
 const qhyFilterwheelSlotUI = createFilterwheelSlotUI({
@@ -2922,6 +2964,25 @@ document.getElementById('device-form').addEventListener('submit', async function
             if (baudRate !== null) {
                 deviceData.baudRate = baudRate;
             }
+        }
+    } else if (deviceData.vendor === 'wandererastro' && normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
+        const wandererFwConnType = document.getElementById('wandererastro-filterwheel-connection-type');
+        deviceData.connectionType = wandererFwConnType ? wandererFwConnType.value : 'auto';
+        if (deviceData.connectionType === 'auto') {
+            const wheelIndex = readOptionalNumber(formData, 'wandererastroFilterwheelIndex');
+            deviceData.wandererFilterwheelIndex = wheelIndex !== null ? wheelIndex : 0;
+        } else if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('wandererastroFilterwheelPortPath') || '';
+            const baudRate = readOptionalNumber(formData, 'wandererastroFilterwheelBaudRate');
+            if (baudRate !== null) {
+                deviceData.baudRate = baudRate;
+            }
+        }
+        // Raw token (expandShorthand=false): the server-side C++ expansion is
+        // slot-count-aware and handles "LRGBSHOC" itself.
+        const wandererFilterNames = parseFilterNamesInput(formData.get('wandererastroFilterNames'), false);
+        if (wandererFilterNames.length > 0) {
+            deviceData.filterNames = wandererFilterNames;
         }
     } else if (deviceData.vendor === 'wandererastro' && normalizeDeviceType(deviceData.deviceType) === 'rotator') {
         const wandererRotatorConnType = document.getElementById('wandererastro-rotator-connection-type');
