@@ -530,10 +530,18 @@ private:
         }
     }
 
-    // Common teardown for connect() failure paths: join the reader, then close
-    // the port under the lock. Leaves the wrapper reusable for a retry.
+    // Common teardown for connect() failure paths: join the reader, drop any
+    // cached status (a firmware-rejected connect has already received a valid
+    // frame), then close the port under the lock. Leaves the wrapper fully
+    // reset and reusable for a retry, matching the disconnect() contract that
+    // get_status() is invalid whenever the wrapper is disconnected.
     void teardown_after_failed_connect() {
         stop_reader();
+        {
+            std::lock_guard<std::mutex> status_lock(status_mutex_);
+            status_ = FilterWheelStatus{};
+            firmware_date_.clear();
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         close_serial();
     }
