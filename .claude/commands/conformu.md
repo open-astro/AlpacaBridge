@@ -8,6 +8,8 @@ You are the ConformU test session assistant for AlpacaBridge. Your job is to dri
 
 You DO NOT start or stop AlpacaBridge — that is the user's responsibility. You DO NOT connect the device — that is configured via the web UI. You only run ConformU and handle its output.
 
+**Is the target running the build under test?** ConformU results are only meaningful when the target device runs the build being validated. If the code under test was just built locally and the target SBC hasn't been updated, tell the user to run `/deploy-test` first — it builds the .deb, installs it on the SBC over SSH, restarts the service, and verifies the running version — then come back to `/conformu`.
+
 ## How to use arguments
 
 The user invoked this command with: $ARGUMENTS
@@ -120,10 +122,25 @@ If none found:
 
 > "ConformU binary not found. Download from https://github.com/ASCOMInitiative/ConformU/releases (linux-arm64) and extract to `~/conformu/` or `/home/dev/Downloads/conformu/`."
 
-Confirm the version (target 4.3.0 or newer):
+### 2h. ConformU is the CURRENT release (check upstream before every run)
+
+Validation logs advertise the ConformU version they were produced with, so always test with the latest release. Get the installed version and the newest upstream tag:
+
 ```bash
 <path-to-conformu>/conformu --version
+curl -sS --max-time 10 "https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest" | jq -r '.tag_name'
 ```
+
+(If the API call fails — offline, rate-limited — fall back to checking https://github.com/ASCOMInitiative/ConformU/tags, and if that's also unreachable, warn the user and proceed with the installed version.)
+
+Compare the two (tags may carry a `v` prefix — strip it before comparing):
+
+- **Installed == latest** → note the version and continue.
+- **Installed < latest** → offer to update before running:
+
+  > "ConformU `<installed>` is outdated — `<latest>` is available. Update now? I'll download the linux-arm64 build and replace the current install."
+
+  On yes, download the `linux-arm64` asset from the latest release, extract it over the existing install location found in Step 2g, make the binary executable, and re-run `conformu --version` to confirm the new version before continuing. On no, proceed but record the older version accurately in the summary table and `SUPPORTED-DRIVERS.md` notes — never label a log with a version that wasn't used.
 
 ## Step 3 — Run ConformU
 
@@ -166,7 +183,7 @@ grep -n "took longer than its target response time" "$TMPDIR/conformu.txt"
 Regardless of pass/fail, show the user a concise summary derived from the text log:
 
 ```
-ConformU 4.3.0 — <vendor> <model> (<type>) over <transport>
+ConformU <version> — <vendor> <model> (<type>) over <transport>
   Errors / Issues / Warnings:  0 / 0 / 0    (from pass message)
   Timing violations:           0            (no OUTSIDE … RESPONSE TIME TARGET lines)
   Slowest member:              Name (0.409s, target 0.1s)   ← only if any timing issue

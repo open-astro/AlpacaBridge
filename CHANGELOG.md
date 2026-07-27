@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.1.0] - UNRELEASED
+## [3.1.0] - 2026-07-27
 
 ### Added
 - **QHY Filter Wheel Driver** (AlpacaCore): support for the integrated CFW on QHY cameras like the miniCam8M — a color filter wheel controlled through the SAME physical USB handle as the camera, not a separately enumerable device. `QHYSDKWrapper::open_camera()`/`close_camera()` are now reference-counted per camera_id (mirroring ToupTek's camera+thermal-switch sharing) so the camera driver and the new filter wheel driver can connect/disconnect independently while sharing one `OpenQHYCCD`. New wrapper calls `move_cfw()`/`get_cfw_position()` wrap `SendOrder2QHYCCDCFW`/`GetQHYCCDCFWStatus` (ASCII-digit protocol); slot count is read from `CONTROL_CFWSLOTSNUM` at connect (no hardcoded slot count), and `Position` reports −1 while the wheel is moving per the ASCOM IFilterWheelV3 contract. No `InitQHYCCD` is required for CFW-only operation. `move_cfw()`/`get_cfw_position()` release `QHYSDKWrapper`'s global mutex before making their SDK call, matching `set_param()`/`control_temp()`/`get_single_frame()` — `GetQHYCCDCFWStatus`'s ~100-130ms hardware round trip would otherwise stall every other open QHY camera's SDK calls for that duration on every `Position` poll during a filter change.
@@ -39,6 +39,16 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ### Changed
 - **QHY SDK updated to 26.06.04.16** (from 25.09.29.11): vendored SDK replaced at `AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04/`; all build/install/CI references updated. The SDK headers are now included as SYSTEM — 26.06.04 ships `qhyccdcamdef.h` with `QHY26800A_MAX_WIDTH` defined twice with different values, which tripped `-Werror`; SYSTEM inclusion is the standard treatment for third-party headers we can't fix. Re-validated against SDK 26.06.04 with ConformU 4.4.0 on real miniCam8M hardware (camera and CFW) — 0 errors, 0 issues, 0 timing issues on both.
+
+### Added
+- **`/deploy-test` Claude Code skill**: builds the AlpacaBridge .deb from the working tree and deploys it to a test SBC over SSH — install, service restart, and management-API version verification — closing the gap between building locally and running `/conformu` against the device. `/conformu` now points users at it when the target isn't running the build under test.
+
+### Changed
+- **`/conformu` skill now verifies ConformU is current before every run**: compares the installed binary against the latest ASCOMInitiative/ConformU release tag and offers to download/update the linux-arm64 build, so validation logs are always produced with (and labeled as) the newest ConformU.
+
+### Changed (documentation)
+- **README overhaul**: shields badge row (CI status, AGPL license, Debian 13 arm64 platforms, ConformU-validated, PRs-welcome) at the top of the document; donation links removed; supported-hardware table reordered to match the website (iMate, StellaVita, Raspberry Pi, ASIAIR).
+- **Development guide restructured Claude-first** (docs/development.md): the Claude Code skills workflow (`/driver-build` → `/conformu` → `/commit` → `/submit-pr`) and the AGENTS.md knowledge base now lead the document, with the previously undocumented `/conformu` skill added and skill descriptions brought current (spec-currency check, ConformU hard blocks, `scripts/ci_preflight.sh`); `libhidapi-dev` added to the build prerequisites.
 
 ### Fixed
 - **iOptron: park-position epsilon checks now normalize the azimuth delta across the 0/360 wrap** (issue #135): both `park()`'s zero-distance detection and the wedged-park finalizer compared azimuths with a plain `fabs(a - b) < 0.01°`, so with the factory-default park azimuth of exactly 0° a mount reporting 359.995° — physically on target — never matched, reintroducing the "reports slewing forever" class. Deltas are now normalized to [-180°, 180°] via `std::remainder`, matching the RA-hours wraparound handling in `get_slewing()`.
