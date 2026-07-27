@@ -2,9 +2,15 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
+[![CI](https://github.com/open-astro/AlpacaBridge/actions/workflows/ci.yml/badge.svg)](https://github.com/open-astro/AlpacaBridge/actions/workflows/ci.yml)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Debian%2013%20arm64-Raspberry%20Pi%20%7C%20iMate%20%7C%20StellaVita%20%7C%20ASIAIR-orange.svg)](#supported-hardware)
+[![ConformU](https://img.shields.io/badge/ConformU-validated%20on%20hardware-success.svg)](SUPPORTED-DRIVERS.md)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](docs/development.md)
+
 AlpacaBridge is a growing suite of native ASCOM Alpaca drivers for Linux, every one ConformU-verified, that turns any single-board computer into a gear-control server. There's no ASCOM Platform to install and no vendor COM drivers to chase down. Just flash it onto a Raspberry Pi, iOptron iMate, ToupTek StellaVita, or ZWO ASIAIR, connect your equipment once, and control gear like cameras, mounts, focusers, filter wheels, rotators, cover calibrators, switches, and weather stations over the network from any Alpaca-compatible app, including N.I.N.A., Sequence Generator Pro, and SharpCap.
 
-#### [3.0.2] - 2026-07-16 &middot; [Changelog](CHANGELOG.md)
+#### [3.1.0] - 2026-07-27 &middot; [Changelog](CHANGELOG.md)
 
 ## Features
 
@@ -30,9 +36,9 @@ AlpacaBridge runs on **Debian 13 (Trixie)** `arm64`. The [Wiki](https://github.c
 
 | Machine | Setup guide |
 |---------|-------------|
-| Raspberry Pi 3B+, 4 & 5 | [Raspberry Pi](https://github.com/open-astro/AlpacaBridge/wiki/Raspberry-Pi-%283,-4,-%26-5%29) |
 | iOptron iMate | [iOptron iMate](https://github.com/open-astro/AlpacaBridge/wiki/iOptron-iMate) |
 | ToupTek StellaVita (Pi CM4) | [ToupTek StellaVita](https://github.com/open-astro/AlpacaBridge/wiki/ToupTek-StellaVita-%28Pi-CM4%29) |
+| Raspberry Pi 3B+, 4 & 5 | [Raspberry Pi](https://github.com/open-astro/AlpacaBridge/wiki/Raspberry-Pi-%283,-4,-%26-5%29) |
 | ZWO ASIAIR Pro | [ZWO ASIAIR Pro](https://github.com/open-astro/AlpacaBridge/wiki/ZWO-ASIAIR-Pro) |
 | ZWO ASIAIR Plus (Pi CM4) | [ZWO ASIAIR Plus — CM4](https://github.com/open-astro/AlpacaBridge/wiki/ZWO-ASIAIR-Plus-%28Pi-CM4%29) |
 | ZWO ASIAIR Plus (RK3568) | [ZWO ASIAIR Plus — RK3568](https://github.com/open-astro/AlpacaBridge/wiki/ZWO-ASIAIR-Plus-%28RK3568%29) |
@@ -93,12 +99,6 @@ sudo apt upgrade alpacabridge
 ```sh
 sudo apt remove alpacabridge
 ```
-
-## Support the project
-
-AlpacaBridge is developed and maintained independently. Contributions help fund hardware access, testing, and ongoing standards-compliance work.
-
-[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/paypalme/joeytroynm)
 
 ## License
 

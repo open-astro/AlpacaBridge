@@ -1,17 +1,88 @@
 # Development Guide
 
-This guide covers building AlpacaBridge from source, running tests, and contributing drivers. For end-user install instructions, see the [README](../README.md).
+AlpacaBridge is developed **Claude-first**: the project ships with [Claude Code](https://claude.com/claude-code) skills that automate the entire driver lifecycle — from scaffolding a new vendor driver through ConformU hardware validation to opening the pull request — and an [AGENTS.md](../AGENTS.md) knowledge base that captures every architecture rule and hardware lesson learned. Start there; the manual build, test, and packaging reference follows for the full picture of how everything works.
+
+For end-user install instructions, see the [README](../README.md).
 
 ## Supported platforms
 
 - **Debian 13 (Trixie)** on `arm64` (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate) — the only supported architecture
 - Linux arm64 only — no amd64/x86_64, no 32-bit, no Windows or macOS
 
+### Development machines
+
+You don't need an SBC to develop — any arm64 machine running a **Debian 13 arm64 VM** makes a fast dev box:
+
+- **Apple Silicon Mac** (M1 or newer) — run Debian 13 arm64 in [UTM](https://mac.getutm.app/), Parallels, or VMware Fusion
+- **Windows on ARM laptop** (Snapdragon X, etc.) — run Debian 13 arm64 in Hyper-V or VMware Workstation
+
+Inside the VM the full toolchain, test suite, and CI pre-flight run natively at full speed. USB devices can be passed through to the VM for hardware work, but final ConformU validation should still run on a real supported SBC (see the [`/conformu` skill](#conformu--hardware-validation)).
+
+## Developing with Claude Code
+
+Open Claude Code in the repository root and the skills below are available as slash commands (defined in `.claude/commands/`). Together they cover the whole workflow:
+
+```
+/driver-build  →  /deploy-test  →  /conformu  →  /commit  →  /submit-pr
+   implement       deploy to SBC     validate      commit       PR + review
+```
+
+### `/driver-build` — guided driver implementation
+
+Walks through building, extending, or fixing device drivers:
+
+- Verifies the vendored ASCOM Alpaca API spec is current against ascom-standards.org before any code is written
+- Interactive Q&A: device type, vendor, connection method, SDK availability
+- Searches INDI/INDIGO for reference drivers with fuzzy vendor name matching
+- Creates the feature branch (`driver/<vendor>-<device>`)
+- Guides through the 3-layer architecture, SDK cleanup, auto-detection, CMake setup, and AlpacaHTTP/web UI integration
+- Enforces Catch2 tests (8 cases, 30+ assertions) and ASCOM Alpaca API compliance
+- Validates with ConformU on arm64 and updates AGENTS.md with lessons learned
+
+### `/deploy-test` — push the build to a test SBC
+
+Gets the current working tree running on the test device so ConformU validates the right build:
+
+- Builds the .deb from the working tree (`scripts/build_deb.sh`), reporting exactly what is deployed (branch, commit, dirty-tree state)
+- Copies it to the SBC over SSH, installs it, and restarts `alpacabridge.service`
+- Verifies the device is reachable and reports the deployed version via the management API before handing off to `/conformu`
+
+### `/conformu` — hardware validation
+
+Runs ConformU against a connected AlpacaBridge device and processes the results:
+
+- Checks the installed ConformU against the [latest upstream release](https://github.com/ASCOMInitiative/ConformU/tags) and offers to update before running
+- Validates the full pass criteria: 0 errors, 0 issues, **and** 0 timing issues (the Timing Summary is a separate pass criterion)
+- Saves the logs under `AlpacaCore/conformu/<vendor>/<model>/`
+- Updates [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) with the validated entry
+
+### `/commit` — stage, review, and commit
+
+- Assesses the working tree, reviews diffs, flags red flags (SDK bloat, secrets, build artifacts)
+- Hard-blocks committing failing ConformU reports
+- Updates SUPPORTED-DRIVERS.md and `docs/architecture.md` if driver or ConformU changes are present
+- Updates CHANGELOG.md under the UNRELEASED version, applying the SemVer policy (driver = minor, fix/docs = patch, breaking = major)
+- Writes verb-first commit messages with vendor/device specificity
+
+### `/submit-pr` — pull request submission
+
+- Safety checks: refuses to PR from `main`, blocks on uncommitted changes and failing ConformU reports
+- Auto-detects direct contributor vs fork and handles both flows
+- Runs the pre-submission checklist (tests, ConformU, CHANGELOG, SUPPORTED-DRIVERS, AGENTS.md, license headers, SDK cleanup)
+- Reproduces CI locally via `scripts/ci_preflight.sh` before pushing, so PRs never open red
+- Builds the PR title and body with component-tagged changes and a test plan, then creates the PR via `gh`
+- Watches for the automated review verdict and batches fixes into single pushes (every push restarts a full fresh review)
+
+### AGENTS.md — the knowledge base
+
+[AGENTS.md](../AGENTS.md) is the project's living memory: architecture rules, the three-layer driver pattern, ConformU failure patterns, and per-vendor quirks discovered on real hardware. Every driver session ends by updating it — if something surprising was learned, it gets documented so the next session (human or agent) doesn't rediscover it. Read it before touching any driver code.
+
 ## Prerequisites
 
 ```sh
 sudo apt install git build-essential cmake g++ \
     libusb-1.0-0-dev libudev-dev libgpiod-dev \
+    libhidapi-dev \
     nlohmann-json3-dev libcurl4-openssl-dev \
     catch2
 ```
@@ -19,6 +90,7 @@ sudo apt install git build-essential cmake g++ \
 Verify: `cmake --version` (3.20+), `g++ --version` (GCC 10+, C++20 required).
 
 > `libgpiod-dev` (>= 2.0) is required only for the GPIO-backed power-port Switch drivers (ZWO ASIAIR, iOptron iMate, ToupTek StellaVita). Without it those switches are cleanly disabled at configure time and the rest of the build is unaffected. See [PowerPorts.md](../AlpacaCore/PowerPorts.md).
+> `libhidapi-dev` is required for the Astroasis USB HID focuser driver when building with all vendors enabled.
 
 ## Build and run
 
@@ -68,6 +140,14 @@ cd build && ctest
 
 Filter by tag: `./build/tests/alpacacore_tests [zwo][camera]`
 Exclude hardware tests: `./build/tests/alpacacore_tests ~[hardware]`
+
+Before pushing, reproduce the full CI gate set locally:
+
+```sh
+./scripts/ci_preflight.sh
+```
+
+This runs clang-format, the Unicode/Trojan-Source scan, both build+test configurations (vendors OFF and ON), clang-tidy, cppcheck, and — when the relevant files changed — shellcheck, JavaScript syntax, and zizmor. `/submit-pr` runs it automatically.
 
 ## Writing tests
 
@@ -221,43 +301,7 @@ AlpacaBridge drivers follow a **three-layer architecture**:
 
 SDK-based drivers (ZWO, QHY, Player One, SVBONY, ToupTek) use an **SDK wrapper**. Protocol-based drivers (iOptron, SynScan, Celestron, Gemini) use a **protocol wrapper**.
 
-For the full interactive workflow, use the `/driver-build` skill in Claude Code — it walks through every step from SDK placement through ConformU validation. See [AGENTS.md](../AGENTS.md) for architecture rules and vendor-specific lessons learned.
-
-## Claude Code skills
-
-AlpacaBridge ships with Claude Code skills (slash commands) that automate common development workflows. These are defined in `.claude/commands/` and available when using Claude Code in this repository.
-
-### `/driver-build`
-
-Guided driver implementation assistant. Walks through building, extending, or fixing device drivers:
-
-- Interactive Q&A: device type, vendor, connection method, SDK availability
-- Searches INDI/INDIGO for reference drivers with fuzzy vendor name matching
-- Creates feature branch (`driver/<vendor>-<device>`)
-- Guides through the 3-layer architecture, SDK cleanup, auto-detection, CMake setup
-- Enforces Catch2 tests (8 cases, 30+ assertions) and ASCOM Alpaca API compliance
-- Validates with ConformU 4.3.0 on arm64
-- Updates AGENTS.md with lessons learned
-
-### `/commit`
-
-Stage, review, and commit changes with proper formatting:
-
-- Assesses the working tree, reviews diffs, flags red flags (SDK bloat, secrets, build artifacts)
-- Updates SUPPORTED-DRIVERS.md if driver or ConformU changes are present
-- Updates CHANGELOG.md with entries under the UNRELEASED version
-- Writes verb-first commit messages with vendor/device specificity
-- Suggests logical commit splits (driver code vs ConformU vs docs vs SDK)
-
-### `/submit-pr`
-
-Submit a pull request from the current feature branch:
-
-- Safety checks: refuses to PR from `main`, blocks on uncommitted changes
-- Auto-detects direct contributor vs fork, handles both flows
-- Runs pre-submission checklist (tests, ConformU, CHANGELOG, SUPPORTED-DRIVERS, AGENTS.md, license headers, SDK cleanup)
-- Builds PR title and body with component-tagged changes and test plan
-- Pushes branch and creates PR via `gh`
+Use the [`/driver-build` skill](#driver-build--guided-driver-implementation) for the full interactive workflow — it walks through every step from SDK placement through ConformU validation. See [AGENTS.md](../AGENTS.md) for architecture rules and vendor-specific lessons learned.
 
 ## Installing a source build as a service
 
