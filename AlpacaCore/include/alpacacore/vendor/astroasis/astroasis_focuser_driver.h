@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/focuser_driver.h>
+
 #include <memory>
 #include <string>
 
@@ -39,4 +40,4 @@ std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const
  */
 std::unique_ptr<FocuserDriver> create_astroasis_focuser_by_index(int device_number, int focuser_index = 0);
 
-} // namespace alpacacore::vendor::astroasis
+}  // namespace alpacacore::vendor::astroasis

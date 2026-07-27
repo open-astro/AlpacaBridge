@@ -30,7 +30,7 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     }
 }
 
-} // namespace
+}  // namespace
 
 TEST_CASE("Astroasis Focuser Driver - Defaults", "[astroasis][focuser][unit]") {
     auto driver = alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw0");
@@ -81,9 +81,11 @@ TEST_CASE("Astroasis Focuser Driver - Disconnected Behavior", "[astroasis][focus
 
     require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
-    require_alpaca_error([&]() { driver->command_blind("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("noop", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->command_bool("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&]() { driver->command_string("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_string("noop", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("Astroasis Focuser Driver - Connecting State", "[astroasis][focuser][unit]") {

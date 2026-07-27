@@ -23,8 +23,8 @@ namespace alpacacore::vendor::astroasis {
  * @brief Information about a detected Astroasis Oasis focuser USB HID device.
  */
 struct AstroasisPortInfo {
-    std::string hid_path;      // hidapi device path (opaque, OS-specific)
-    std::string serial_number; // best-effort; empty if unavailable
+    std::string hid_path;       // hidapi device path (opaque, OS-specific)
+    std::string serial_number;  // best-effort; empty if unavailable
 };
 
 /**
@@ -102,4 +102,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace alpacacore::vendor::astroasis
+}  // namespace alpacacore::vendor::astroasis

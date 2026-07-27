@@ -13,7 +13,6 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/astroasis/astroasis_protocol_wrapper.h>
-
 #include <hidapi.h>
 
 #include <array>
@@ -54,6 +53,9 @@ int raw_adc_to_centidegrees(std::int32_t raw) {
         clamped = 0xffe;
     }
     const double ratio = static_cast<double>(0xfff - clamped) / static_cast<double>(clamped);
+    // cppcheck-suppress invalidFunctionArg
+    // clamped is bounded to [1, 0xffe] above, so ratio = (0xfff-clamped)/clamped is always > 0
+    // (minimum 1/4094 when clamped == 0xffe); cppcheck's value-flow analysis doesn't track that.
     const double t_kelvin = 3380.0 / (std::log(ratio) + 11.336575508117676);
     const double t_celsius = t_kelvin - 273.1499938964844;
     const double rounded = t_celsius + (t_celsius >= 0.0 ? 0.004999999888241291 : -0.004999999888241291);
@@ -62,16 +64,14 @@ int raw_adc_to_centidegrees(std::int32_t raw) {
 
 // DS18B20-style raw digital sensor (1/16 degC per count) for the external probe.
 int raw_digital_to_centidegrees(std::int16_t raw) {
-    return static_cast<int>(static_cast<float>(raw) * 0.0625f * 100.0f + 0.5f);
+    return static_cast<int>(std::lround(static_cast<double>(raw) * 0.0625 * 100.0));
 }
 
-} // namespace
+}  // namespace
 
 class AstroasisProtocolWrapper::Impl {
 public:
-    ~Impl() {
-        disconnect();
-    }
+    ~Impl() { disconnect(); }
 
     void connect(const std::string& hid_path) {
         hid_init();
@@ -89,8 +89,7 @@ public:
         // token confirmation, or possibly the cached protocol/firmware
         // version the vendor SDK uses to pick the GetStatus/GetConfig
         // response layout; not confirmed which).
-        std::uint32_t ticks =
-            static_cast<std::uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+        std::uint32_t ticks = static_cast<std::uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
         std::array<std::uint8_t, 4> handshake1{};
         std::memcpy(handshake1.data(), &ticks, 4);
         try {
@@ -115,9 +114,7 @@ public:
         connected_ = false;
     }
 
-    bool is_connected() const {
-        return connected_;
-    }
+    bool is_connected() const { return connected_; }
 
     AstroasisProtocolWrapper::Status get_status() {
         require_connected();
@@ -144,7 +141,7 @@ public:
         } else {
             const auto raw_ext16 = static_cast<std::int16_t>(raw_ext & 0xFFFF);
             status.temperature_external = raw_digital_to_centidegrees(raw_ext16) / 100.0;
-            status.temperature_external_valid = resp[8] != 0; // temperatureDetection flag
+            status.temperature_external_valid = resp[8] != 0;  // temperatureDetection flag
         }
         status.moving = resp[9] != 0;
         status.position = static_cast<std::int32_t>(read_be32(resp, 10));
@@ -194,9 +191,9 @@ private:
     // callers use to retry with a different expected length) and
     // AlpacaError::DriverException on I/O failure.
     std::vector<std::uint8_t> send_command(std::uint8_t cmd, const std::uint8_t* payload, std::uint8_t payload_len,
-                                            std::uint8_t expected_resp_len, int timeout_ms) {
+                                           std::uint8_t expected_resp_len, int timeout_ms) {
         std::array<std::uint8_t, kReportSize> out{};
-        out[0] = 0; // report ID
+        out[0] = 0;  // report ID
         out[1] = cmd;
         out[2] = payload_len;
         if (payload != nullptr && payload_len > 0) {
@@ -237,33 +234,19 @@ private:
 AstroasisProtocolWrapper::AstroasisProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
 AstroasisProtocolWrapper::~AstroasisProtocolWrapper() = default;
 
-void AstroasisProtocolWrapper::connect(const std::string& hid_path) {
-    impl_->connect(hid_path);
-}
+void AstroasisProtocolWrapper::connect(const std::string& hid_path) { impl_->connect(hid_path); }
 
-void AstroasisProtocolWrapper::disconnect() {
-    impl_->disconnect();
-}
+void AstroasisProtocolWrapper::disconnect() { impl_->disconnect(); }
 
-bool AstroasisProtocolWrapper::is_connected() const {
-    return impl_->is_connected();
-}
+bool AstroasisProtocolWrapper::is_connected() const { return impl_->is_connected(); }
 
-AstroasisProtocolWrapper::Status AstroasisProtocolWrapper::get_status() {
-    return impl_->get_status();
-}
+AstroasisProtocolWrapper::Status AstroasisProtocolWrapper::get_status() { return impl_->get_status(); }
 
-int AstroasisProtocolWrapper::get_max_step() {
-    return impl_->get_max_step();
-}
+int AstroasisProtocolWrapper::get_max_step() { return impl_->get_max_step(); }
 
-void AstroasisProtocolWrapper::move_to(int position) {
-    impl_->move_to(position);
-}
+void AstroasisProtocolWrapper::move_to(int position) { impl_->move_to(position); }
 
-void AstroasisProtocolWrapper::stop_move() {
-    impl_->stop_move();
-}
+void AstroasisProtocolWrapper::stop_move() { impl_->stop_move(); }
 
 std::vector<AstroasisPortInfo> enumerate_astroasis_focusers() {
     std::vector<AstroasisPortInfo> results;
@@ -288,4 +271,4 @@ std::vector<AstroasisPortInfo> enumerate_astroasis_focusers() {
     return results;
 }
 
-} // namespace alpacacore::vendor::astroasis
+}  // namespace alpacacore::vendor::astroasis

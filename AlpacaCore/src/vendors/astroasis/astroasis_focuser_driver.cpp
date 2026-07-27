@@ -37,48 +37,32 @@ public:
         shutdown_connection();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Astroasis", "Error during focuser destruction: " + std::string(e.what()));
             }
         }
     }
 
-    int get_device_number() const override {
-        return device_number_;
-    }
+    int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override {
-        return "Astroasis Oasis Focuser";
-    }
+    std::string get_name() const override { return "Astroasis Oasis Focuser"; }
 
-    DeviceType get_device_type() const override {
-        return DeviceType::Focuser;
-    }
+    DeviceType get_device_type() const override { return DeviceType::Focuser; }
 
-    std::string get_unique_id() const override {
-        return "ASTROASIS_FOCUSER_" + std::to_string(device_number_);
-    }
+    std::string get_unique_id() const override { return "ASTROASIS_FOCUSER_" + std::to_string(device_number_); }
 
-    std::string get_description() const override {
-        return "Astroasis Oasis Focuser Driver";
-    }
+    std::string get_description() const override { return "Astroasis Oasis Focuser Driver"; }
 
-    std::string get_driver_info() const override {
-        return "AlpacaCore Astroasis Focuser Driver";
-    }
+    std::string get_driver_info() const override { return "AlpacaCore Astroasis Focuser Driver"; }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     int get_interface_version() const override { return 4; }
 
-    bool get_connected() const override {
-        return connected_.load();
-    }
+    bool get_connected() const override { return connected_.load(); }
 
-    void connect() override {
-        start_connection_task(true);
-    }
+    void connect() override { start_connection_task(true); }
 
     void disconnect() override {
         // Disconnect synchronously — closing the HID handle is trivial and
@@ -117,18 +101,13 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
 
     std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name),
-                              AlpacaError::ActionNotImplemented);
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
-    bool can_action(std::string_view) const override {
-        return false;
-    }
+    bool can_action(std::string_view) const override { return false; }
 
     std::string command_blind(std::string_view, bool) override {
         throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
@@ -144,9 +123,7 @@ public:
 
     // --- Focuser interface ---
 
-    bool get_absolute() const override {
-        return true;
-    }
+    bool get_absolute() const override { return true; }
 
     bool get_is_moving() const override {
         ensure_connected();
@@ -175,13 +152,9 @@ public:
         throw AlpacaException("Step size not available for this focuser", AlpacaError::PropertyNotImplemented);
     }
 
-    bool get_temp_comp_available() const override {
-        return false;
-    }
+    bool get_temp_comp_available() const override { return false; }
 
-    bool get_temp_comp() const override {
-        return false;
-    }
+    bool get_temp_comp() const override { return false; }
 
     void set_temp_comp(bool) override {
         ensure_connected();
@@ -234,12 +207,11 @@ std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const
 std::unique_ptr<FocuserDriver> create_astroasis_focuser_by_index(int device_number, int focuser_index) {
     auto ports = enumerate_astroasis_focusers();
     if (ports.empty()) {
-        throw AlpacaException("No Astroasis Oasis Focuser detected on the USB bus",
-                              AlpacaError::NotConnected);
+        throw AlpacaException("No Astroasis Oasis Focuser detected on the USB bus", AlpacaError::NotConnected);
     }
     if (focuser_index < 0 || focuser_index >= static_cast<int>(ports.size())) {
-        throw AlpacaException("Focuser index " + std::to_string(focuser_index) +
-                              " out of range (detected " + std::to_string(ports.size()) + ")",
+        throw AlpacaException("Focuser index " + std::to_string(focuser_index) + " out of range (detected " +
+                                  std::to_string(ports.size()) + ")",
                               AlpacaError::InvalidValue);
     }
 
@@ -249,4 +221,4 @@ std::unique_ptr<FocuserDriver> create_astroasis_focuser_by_index(int device_numb
     return std::make_unique<AstroasisFocuserDriver>(device_number, port.hid_path);
 }
 
-} // namespace alpacacore::vendor::astroasis
+}  // namespace alpacacore::vendor::astroasis
