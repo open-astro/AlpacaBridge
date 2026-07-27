@@ -24,6 +24,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
@@ -1240,7 +1241,22 @@ private:
             // Let any queued TX bytes reach the mount and discard unread RX
             // before closing — slamming the port shut mid-exchange is what
             // wedges the mount under rapid connect/disconnect cycling.
-            tcdrain(serial_fd_);
+            // tcdrain() has no timeout and this is the disconnect path the
+            // original wedge symptoms implicated, so bound the drain: poll
+            // the TX queue depth (TIOCOUTQ) with a deadline instead of
+            // blocking, and discard whatever is left if it doesn't empty
+            // (issue #137). At 115200 baud a full command is <1 ms of TX
+            // time, so the 250 ms budget only trips on a genuinely stuck
+            // port — where discarding is the right call anyway.
+            const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+            int tx_pending = 0;
+            while (ioctl(serial_fd_, TIOCOUTQ, &tx_pending) == 0 && tx_pending > 0 &&
+                   std::chrono::steady_clock::now() < drain_deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            if (tx_pending > 0) {
+                tcflush(serial_fd_, TCOFLUSH);
+            }
             tcflush(serial_fd_, TCIFLUSH);
             close(serial_fd_);
             serial_fd_ = -1;
@@ -1963,8 +1979,14 @@ bool iOptronProtocolWrapper::park(bool zero_distance_workaround) {
             AltAz current = get_alt_az();
             AltAz park_pos = get_park_position();
             constexpr double kEpsDeg = 0.01;  // 36 arcsec; GAC/GPC agree to 0.01"
-            zero_distance = std::fabs(current.altitude_degrees - park_pos.altitude_degrees) < kEpsDeg &&
-                            std::fabs(current.azimuth_degrees - park_pos.azimuth_degrees) < kEpsDeg;
+            // Azimuth wraps at 0/360: with the factory-default park azimuth of
+            // exactly 0, a mount reporting 359.995 is on target but the raw
+            // delta (~359.99) never matches. remainder() normalizes to
+            // [-180, 180] (issue #135; same wraparound handling as the
+            // RA-hours check in get_slewing()).
+            zero_distance =
+                std::fabs(current.altitude_degrees - park_pos.altitude_degrees) < kEpsDeg &&
+                std::fabs(std::remainder(current.azimuth_degrees - park_pos.azimuth_degrees, 360.0)) < kEpsDeg;
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
             // Position unavailable — proceed with a plain park attempt.
         }

@@ -269,11 +269,14 @@ protected:
 private:
     void run_connection_task(bool connect) {
         ALPACA_LOG_TRACE(log_tag_, std::string("run_connection_task: entry connect=") + (connect ? "true" : "false"));
+        bool last_failed = false;
         try {
             set_connected(connect);
         } catch (const std::exception& e) {
+            last_failed = true;
             ALPACA_LOG_ERROR(log_tag_, std::string("Connection task failed: ") + e.what());
         } catch (...) {
+            last_failed = true;
             // A non-std exception escaping a std::thread entry point calls
             // std::terminate. Every driver throws std:: exceptions today, but
             // this base is now the single chokepoint for 26 drivers' connect
@@ -322,7 +325,14 @@ private:
                     need_disconnect = connected_now;
                 } else if (pending_connect_) {
                     pending_connect_ = false;
-                    need_connect = !connected_now;
+                    // A queued connect must NOT run right after a FAILED
+                    // disconnect: the teardown threw partway, so the hardware
+                    // state is unknown and connected_now (forced false by the
+                    // last_was_connect short-circuit) can't be trusted.
+                    // Drop it — a dropped connect is visible to the client
+                    // (Connected stays false) and retryable, the class's
+                    // usual asymmetry (issue #136).
+                    need_connect = !connected_now && !(last_failed && !last_was_connect);
                 }
                 conn_task_.store(need_disconnect ? kConnDisconnect : need_connect ? kConnConnect : kConnIdle);
             }
@@ -333,12 +343,15 @@ private:
             if (!need_disconnect && !need_connect) {
                 return;
             }
+            last_failed = false;
             try {
                 set_connected(need_connect);
             } catch (const std::exception& e) {
+                last_failed = true;
                 ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") + (need_connect ? "connect" : "disconnect") +
                                                " failed: " + e.what());
             } catch (...) {
+                last_failed = true;
                 ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") + (need_connect ? "connect" : "disconnect") +
                                                " failed: non-std exception");
             }
