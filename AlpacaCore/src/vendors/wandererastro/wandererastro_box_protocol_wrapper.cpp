@@ -337,6 +337,14 @@ public:
             throw AlpacaException("WandererBox already connected; call disconnect() first",
                                   AlpacaError::InvalidOperation);
         }
+        // The protocol is fixed at 19200 8N1; configure_serial_fd() hardcodes
+        // B19200, so reject any other configured rate instead of silently
+        // ignoring it (the stored config value must not imply control it
+        // doesn't have — PR #152 review).
+        if (config.baud_rate != 19200) {
+            throw AlpacaException("WandererBox baud rate is fixed at 19200, got " + std::to_string(config.baud_rate),
+                                  AlpacaError::InvalidValue);
+        }
         config_ = config;
         open_serial_locked();
 

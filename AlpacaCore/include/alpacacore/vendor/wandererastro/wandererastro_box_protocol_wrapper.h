@@ -126,8 +126,9 @@ std::vector<BoxPortInfo> enumerate_wandererbox_ports();
  *   - commands are "\n"-terminated fire-and-forget ASCII numbers:
  *     DC3-4 "101"/"100", DC8-9 "201"/"200", DC10-11 "211"/"210",
  *     USB3.1-1/2/3 "11x"/"12x"/"13x", USB2.0(1-3) "14x", USB2.0(4-6) "15x",
- *     PWM "<ch><value %03d>" (ch 5/6/7), DC3-4 voltage "20<volts*10 %03d>",
- *     current calibration "66300744"
+ *     PWM "<ch><value %03d>" (ch 5/6/7), DC3-4 voltage "20<volts*10 %03d>".
+ *     (The protocol also has a current-calibration command, "66300744" — not
+ *     implemented here; calibrate via the vendor's WandererEmpire app.)
  */
 class WandererBoxProtocolWrapper {
 public:

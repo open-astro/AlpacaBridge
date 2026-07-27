@@ -165,6 +165,13 @@ TEST_CASE("WandererAstro Box Protocol Wrapper - Defaults and disconnected state"
     require_alpaca_error([&]() { wrapper.set_dc3_4_voltage(13.3); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { wrapper.set_usb(5, true); }, alpacacore::AlpacaError::InvalidValue);
 
+    // The protocol baud is fixed: a non-19200 config is rejected as
+    // InvalidValue before any port is opened.
+    BoxConnectionConfig bad_baud;
+    bad_baud.serial_port = "/dev/null";
+    bad_baud.baud_rate = 9600;
+    require_alpaca_error([&]() { wrapper.connect(bad_baud); }, alpacacore::AlpacaError::InvalidValue);
+
     // Disconnect on a never-connected wrapper is a safe no-op.
     CHECK_NOTHROW(wrapper.disconnect());
 }
