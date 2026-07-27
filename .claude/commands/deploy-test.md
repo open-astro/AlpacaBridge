@@ -23,6 +23,20 @@ Ask **one at a time**, presenting arguments as defaults where given:
 2. **SSH user** — the login user on the SBC. Must be able to `sudo` (installing a package and restarting a systemd service require it).
 3. **Alpaca port** — default `6800`; used for the post-deploy verification.
 
+### 1b. Validate the inputs (HARD STOP on failure)
+
+The host, user, and port are interpolated into `ssh`/`scp` command lines, so validate them against a strict allowlist BEFORE using them in any command — even though they normally come from the developer's own keyboard, a value pasted from elsewhere must never be able to smuggle shell metacharacters or an ssh option (e.g. a leading `-`):
+
+```bash
+HOST='<host>'; USER='<user>'; PORT='<port>'
+[[ "$HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || { echo "REJECT: invalid host"; exit 1; }
+[[ "$USER" =~ ^[a-z_][a-z0-9_-]*$ ]]         || { echo "REJECT: invalid user"; exit 1; }
+[[ "$PORT" =~ ^[0-9]{1,5}$ ]]                || { echo "REJECT: invalid port"; exit 1; }
+echo "validated: ${USER}@${HOST}:${PORT}"
+```
+
+If any value is rejected, stop and re-ask — do not "fix it up" silently. Every later command double-quotes the interpolated values; the allowlist plus quoting means no input can be interpreted as shell syntax or an option flag.
+
 Then confirm:
 
 > "Ready to build the .deb from the current working tree (branch `<branch>`, VERSION `<version>`) and deploy to `<user>@<host>`, then restart `alpacabridge.service` and verify. Proceed?"
@@ -41,7 +55,7 @@ Report the branch and any uncommitted changes. Uncommitted changes are ALLOWED (
 ### 2b. SSH reachability (never prompt for a password mid-flow)
 
 ```bash
-ssh -o BatchMode=yes -o ConnectTimeout=5 <user>@<host> 'echo ok && sudo -n true && dpkg --print-architecture'
+ssh -o BatchMode=yes -o ConnectTimeout=5 -- "<user>@<host>" 'echo ok && sudo -n true && dpkg --print-architecture'
 ```
 
 - If the connection fails: stop and tell the user to check the host/network or set up key auth (`ssh-copy-id <user>@<host>`).
@@ -78,9 +92,9 @@ If an artifact with that name predates this build (timestamp check), rebuild rat
 The restart is structurally gated on the install having actually succeeded: the package must report `install ok installed` before `systemctl restart` runs. A partial install followed by a restart would leave the service running a broken package — never restart on a failed install.
 
 ```bash
-scp "../alpacabridge_${VERSION}_arm64.deb" <user>@<host>:/tmp/
-ssh <user>@<host> "sudo dpkg -i /tmp/alpacabridge_${VERSION}_arm64.deb || sudo apt-get -y -f install"
-ssh <user>@<host> "dpkg-query -W -f='\${Status} \${Version}\n' alpacabridge"
+scp -- "../alpacabridge_${VERSION}_arm64.deb" "<user>@<host>:/tmp/"
+ssh -- "<user>@<host>" "sudo dpkg -i /tmp/alpacabridge_${VERSION}_arm64.deb || sudo apt-get -y -f install"
+ssh -- "<user>@<host>" "dpkg-query -W -f='\${Status} \${Version}\n' alpacabridge"
 ```
 
 - `apt-get -f install` only runs if `dpkg -i` reported unmet dependencies.
@@ -89,12 +103,12 @@ ssh <user>@<host> "dpkg-query -W -f='\${Status} \${Version}\n' alpacabridge"
 Only after the gate passes:
 
 ```bash
-ssh <user>@<host> "sudo systemctl restart alpacabridge && rm -f /tmp/alpacabridge_${VERSION}_arm64.deb"
+ssh -- "<user>@<host>" "sudo systemctl restart alpacabridge && rm -f /tmp/alpacabridge_${VERSION}_arm64.deb"
 ```
 
 - If the service fails to restart, pull the journal and show it:
   ```bash
-  ssh <user>@<host> "sudo journalctl -u alpacabridge -n 50 --no-pager"
+  ssh -- "<user>@<host>" "sudo journalctl -u alpacabridge -n 50 --no-pager"
   ```
   **STOP** on a crash loop — a broken deploy must be fixed before ConformU, and the previous working version is gone, so tell the user plainly that the device is down until this is resolved.
 
