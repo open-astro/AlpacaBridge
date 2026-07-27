@@ -345,9 +345,9 @@ public:
         auto state = await_frame(serial_fd_, config_.serial_timeout_s * 1000 + 3500);
         if (!state.has_value()) {
             close_serial_locked();
-            throw AlpacaException("No WandererBox Pro V3 detected on " + config_.serial_port +
-                                      " (no status frame received)",
-                                  AlpacaError::NotConnected);
+            throw AlpacaException(
+                "No WandererBox Pro V3 detected on " + config_.serial_port + " (no status frame received)",
+                AlpacaError::NotConnected);
         }
         if (state->firmware_version < kBoxCalibratedPowerMinFirmware) {
             // Not fatal (INDI behaviour): older firmware just lacks calibrated

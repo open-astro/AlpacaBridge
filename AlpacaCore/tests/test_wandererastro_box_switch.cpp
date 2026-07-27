@@ -136,8 +136,7 @@ TEST_CASE("WandererAstro Box Switch Driver - Connect failure on invalid port", "
     CHECK_NOTHROW(driver->set_connected(false));
 }
 
-TEST_CASE("WandererAstro Box Protocol Wrapper - Defaults and disconnected state",
-          "[wandererastro][switch][unit]") {
+TEST_CASE("WandererAstro Box Protocol Wrapper - Defaults and disconnected state", "[wandererastro][switch][unit]") {
     using namespace alpacacore::vendor::wandererastro;
 
     // Hardware constants the Switch surface is built on.

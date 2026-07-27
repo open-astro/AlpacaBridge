@@ -75,9 +75,9 @@
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
+#include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
-#include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_SVBONY
@@ -7434,8 +7434,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // a second backend under the same vendor/device-type pair.
         std::string switch_type = config.value("switchType", "wandererbox-pro-v3");
         if (switch_type != "wandererbox-pro-v3") {
-            error_message = "Unknown WandererAstro switchType: " + switch_type +
-                            " (supported: wandererbox-pro-v3)";
+            error_message = "Unknown WandererAstro switchType: " + switch_type + " (supported: wandererbox-pro-v3)";
             return false;
         }
 
@@ -7451,8 +7450,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 return false;
             }
             int baud_rate = config.value("baudRate", 19200);
-            box = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(device_number, port_path,
-                                                                                     baud_rate);
+            box =
+                alpacacore::vendor::wandererastro::create_wandererastro_box_switch(device_number, port_path, baud_rate);
         } else {
             // "auto" or unset — auto-detect
             int box_index = config.value("boxIndex", 0);
@@ -7460,8 +7459,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 error_message = "boxIndex must be >= 0.";
                 return false;
             }
-            box = alpacacore::vendor::wandererastro::create_wandererastro_box_switch_by_index(device_number,
-                                                                                              box_index);
+            box = alpacacore::vendor::wandererastro::create_wandererastro_box_switch_by_index(device_number, box_index);
         }
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(box)))) {

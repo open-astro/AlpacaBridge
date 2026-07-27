@@ -22,6 +22,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -32,21 +33,21 @@ namespace {
 
 // Switch id layout. Outputs first (matching the vendor's own ASCOM driver
 // ordering), then the read-only sensor values.
-enum BoxSwitchId : int {
-    kDc1AlwaysOn = 0,   // 12 V always-on rail (read-only)
-    kDc2AlwaysOn = 1,   // 19 V regulated always-on rail (read-only)
-    kDc34Power = 2,     // adjustable regulated output, on/off
-    kDc34Voltage = 3,   // adjustable regulated output setpoint, 5.0-13.2 V
-    kDc5Pwm = 4,        // dew heater PWM 0-255
-    kDc6Pwm = 5,        // dew heater PWM 0-255
-    kDc7Pwm = 6,        // dew heater PWM 0-255
-    kDc89Power = 7,     // 12 V switched pair
-    kDc1011Power = 8,   // 12 V switched pair
-    kUsb31_1 = 9,       // USB3.1 port 1
-    kUsb31_2 = 10,      // USB3.1 port 2
-    kUsb31_3 = 11,      // USB3.1 port 3
-    kUsb20_13 = 12,     // USB2.0 ports 1-3 (switched together)
-    kUsb20_46 = 13,     // USB2.0 ports 4-6 (switched together)
+enum BoxSwitchId : std::uint8_t {
+    kDc1AlwaysOn = 0,  // 12 V always-on rail (read-only)
+    kDc2AlwaysOn = 1,  // 19 V regulated always-on rail (read-only)
+    kDc34Power = 2,    // adjustable regulated output, on/off
+    kDc34Voltage = 3,  // adjustable regulated output setpoint, 5.0-13.2 V
+    kDc5Pwm = 4,       // dew heater PWM 0-255
+    kDc6Pwm = 5,       // dew heater PWM 0-255
+    kDc7Pwm = 6,       // dew heater PWM 0-255
+    kDc89Power = 7,    // 12 V switched pair
+    kDc1011Power = 8,  // 12 V switched pair
+    kUsb31_1 = 9,      // USB3.1 port 1
+    kUsb31_2 = 10,     // USB3.1 port 2
+    kUsb31_3 = 11,     // USB3.1 port 3
+    kUsb20_13 = 12,    // USB2.0 ports 1-3 (switched together)
+    kUsb20_46 = 13,    // USB2.0 ports 4-6 (switched together)
     kInputVoltage = 14,
     kTotalCurrent = 15,
     kV19Current = 16,
@@ -309,9 +310,9 @@ public:
             throw AlpacaException("Switch value must be a finite number", AlpacaError::InvalidValue);
         }
         if (value < info.min || value > info.max) {
-            throw AlpacaException("Switch value out of range [" + std::to_string(info.min) + ", " +
-                                      std::to_string(info.max) + "]",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException(
+                "Switch value out of range [" + std::to_string(info.min) + ", " + std::to_string(info.max) + "]",
+                AlpacaError::InvalidValue);
         }
         // Quantise to the switch step BEFORE commanding and recording, so the
         // reported value is exactly what went on the wire (FP-noise lesson

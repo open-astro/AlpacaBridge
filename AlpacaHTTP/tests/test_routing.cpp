@@ -1067,9 +1067,9 @@ int main() {
     {
         // Serial mode with an explicit (dummy) port avoids the auto-detect scan
         // and registers the driver without opening a real device.
-        nlohmann::json configure_body = {{"vendor", "wandererastro"},   {"deviceType", "switch"},
-                                         {"deviceNumber", 9404},        {"switchType", "wandererbox-pro-v3"},
-                                         {"connectionType", "serial"},  {"portPath", "/dev/null"},
+        nlohmann::json configure_body = {{"vendor", "wandererastro"},  {"deviceType", "switch"},
+                                         {"deviceNumber", 9404},       {"switchType", "wandererbox-pro-v3"},
+                                         {"connectionType", "serial"}, {"portPath", "/dev/null"},
                                          {"baudRate", 19200}};
 
         const auto configure_response =
@@ -1109,8 +1109,10 @@ int main() {
         EXPECT(maxswitch_json.value("Value", -1) == 24);
 
         // An unknown switchType must be rejected with a clear error.
-        nlohmann::json bad_body = {{"vendor", "wandererastro"}, {"deviceType", "switch"},
-                                   {"deviceNumber", 9405},      {"switchType", "not-a-backend"}};
+        nlohmann::json bad_body = {{"vendor", "wandererastro"},
+                                   {"deviceType", "switch"},
+                                   {"deviceNumber", 9405},
+                                   {"switchType", "not-a-backend"}};
         const auto bad_response = route_request(router, "POST", "/management/v1/configuredevice", bad_body.dump());
         const auto bad_json = nlohmann::json::parse(bad_response.body());
         EXPECT(bad_json.value("ErrorNumber", 0) != 0);
