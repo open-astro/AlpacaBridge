@@ -23,8 +23,11 @@ namespace alpacacore::vendor::astroasis {
  * @brief Information about a detected Astroasis Oasis focuser USB HID device.
  */
 struct AstroasisPortInfo {
-    std::string hid_path;       // hidapi device path (opaque, OS-specific)
-    std::string serial_number;  // best-effort; empty if unavailable
+    std::string hid_path;  // hidapi device path (opaque, OS-specific)
+    // No serial_number field: nothing consumes it today, and the naive
+    // wchar_t->char narrowing it needed would mangle non-ASCII USB serial
+    // strings. Re-add with proper UTF-8 conversion if/when it is wired into
+    // unique_id or auto-detect disambiguation (issue #155).
 };
 
 /**

@@ -2019,8 +2019,10 @@ private:
         try {
             AltAz current = protocol.get_alt_az();
             constexpr double kEpsDeg = 0.01;  // 36 arcsec; GAC/GPC agree to 0.01"
+            // Azimuth delta normalized to [-180, 180]: a mount at 359.995 with
+            // a park azimuth of 0 is on target (issue #135).
             if (std::fabs(current.altitude_degrees - park_target_.altitude_degrees) >= kEpsDeg ||
-                std::fabs(current.azimuth_degrees - park_target_.azimuth_degrees) >= kEpsDeg) {
+                std::fabs(std::remainder(current.azimuth_degrees - park_target_.azimuth_degrees, 360.0)) >= kEpsDeg) {
                 return;  // still genuinely slewing toward the park position
             }
             ALPACA_LOG_INFO("iOptron",

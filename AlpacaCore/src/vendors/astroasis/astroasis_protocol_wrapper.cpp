@@ -228,6 +228,12 @@ private:
         if (bytes_read <= 0) {
             throw AlpacaException("Astroasis HID read timed out", AlpacaError::DriverException);
         }
+        // hidraw delivers full 64-byte reports today, but guard against a
+        // short read before slicing: a future variable-length command would
+        // otherwise silently return zero-padded data (issue #154).
+        if (bytes_read < 2 + static_cast<int>(expected_resp_len)) {
+            throw AlpacaException("Astroasis HID response truncated", AlpacaError::DriverException);
+        }
         if (in[0] != cmd) {
             throw AlpacaException("Astroasis HID response command mismatch", AlpacaError::DriverException);
         }
@@ -272,10 +278,6 @@ std::vector<AstroasisPortInfo> enumerate_astroasis_focusers() {
         }
         AstroasisPortInfo info;
         info.hid_path = cur->path;
-        if (cur->serial_number != nullptr) {
-            std::wstring wide(cur->serial_number);
-            info.serial_number.assign(wide.begin(), wide.end());
-        }
         results.push_back(std::move(info));
     }
     hid_free_enumeration(devs);
