@@ -74,6 +74,7 @@
                         <!-- TODO: re-enable when drivers are ready
                         <option value="bisque">Bisque (Paramount / TheSkyX)</option>
                         -->
+                        <option value="astroasis">Astroasis</option>
                         <option value="celestron">Celestron NexStar</option>
                         <option value="gemini">Gemini</option>
                         <option value="ioptron">iOptron</option>
@@ -86,6 +87,21 @@
                         <option value="weewx">WeeWX</option>
                         <option value="zwo">ZWO</option>
                     </select>
+                </div>
+
+                <!-- Astroasis Oasis Focuser Configuration -->
+                <div id="astroasis-config" class="vendor-config" style="display: none;">
+                    <h3>Astroasis Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="astroasis-focuser-index">Focuser Index:</label>
+                        <input type="number" id="astroasis-focuser-index" name="astroasisFocuserIndex" value="0" min="0">
+                        <small>0-based index among enumerated Oasis focusers. Ignored if a HID device path is given below.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="astroasis-hid-path">HID Device Path (optional):</label>
+                        <input type="text" id="astroasis-hid-path" name="astroasisHidPath" placeholder="(leave blank to use index)">
+                    </div>
                 </div>
 
                 <!-- iOptron Telescope Configuration -->

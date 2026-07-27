@@ -324,6 +324,7 @@ const INDEX_FIELDS = [
     { fieldId: 'playerone-camera-index', vendor: 'playerone', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'playerone-switch-camera-index', vendor: 'playerone', deviceType: 'switch', configKey: 'cameraIndex' },
     { fieldId: 'playerone-filterwheel-index', vendor: 'playerone', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
+    { fieldId: 'astroasis-focuser-index', vendor: 'astroasis', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'astroasis-hid-path' },
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
     { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
@@ -813,6 +814,9 @@ function startEditDevice(device) {
     } else if (vendor === 'qhy') {
         setFormValue('qhy-camera-index', config.cameraIndex);
         setFormValue('qhy-camera-id', config.cameraId);
+    } else if (vendor === 'astroasis') {
+        setFormValue('astroasis-focuser-index', config.focuserIndex);
+        setFormValue('astroasis-hid-path', config.hidPath);
     } else if (vendor === 'svbony') {
         setFormValue('svbony-camera-index', config.cameraIndex);
     } else if (vendor === 'touptek' && deviceType === 'switch') {
@@ -1705,6 +1709,12 @@ function updateVendorOptions() {
     const isRotator = deviceType === 'rotator';
     const isObservingConditions = deviceType === 'observingconditions';
     const isCoverCalibrator = deviceType === 'covercalibrator';
+    const astroasisOption = vendorSelect.querySelector('option[value="astroasis"]');
+    if (astroasisOption) {
+        // Astroasis provides only the Oasis Focuser.
+        astroasisOption.disabled = !isFocuser;
+        astroasisOption.hidden = !isFocuser;
+    }
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
         // iOptron provides the mount (telescope) and the iMate PowerBox (switch).
@@ -1785,6 +1795,9 @@ function updateVendorOptions() {
         wandererastroOption.hidden = !wandererastroAllowed;
     }
 
+    if (!isFocuser && vendorSelect.value === 'astroasis') {
+        vendorSelect.value = '';
+    }
     if (!isTelescope && !isSwitch && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
     }
@@ -1833,7 +1846,9 @@ document.getElementById('vendor').addEventListener('change', function() {
     const configs = document.querySelectorAll('.vendor-config');
     configs.forEach(config => config.style.display = 'none');
     
-    if (vendor === 'ioptron') {
+    if (vendor === 'astroasis') {
+        document.getElementById('astroasis-config').style.display = 'block';
+    } else if (vendor === 'ioptron') {
         document.getElementById('ioptron-config').style.display = 'block';
         updateIoptronConfigFields();
     } else if (vendor === 'synscan') {
@@ -3050,6 +3065,14 @@ document.getElementById('device-form').addEventListener('submit', async function
             if (baudRate !== null) {
                 deviceData.baudRate = baudRate;
             }
+        }
+    } else if (deviceData.vendor === 'astroasis') {
+        const astroasisHidPath = (formData.get('astroasisHidPath') || '').trim();
+        if (astroasisHidPath !== '') {
+            deviceData.hidPath = astroasisHidPath;
+        } else {
+            const astroasisFocuserIndex = readOptionalNumber(formData, 'astroasisFocuserIndex');
+            deviceData.focuserIndex = astroasisFocuserIndex !== null ? astroasisFocuserIndex : 0;
         }
     }
 

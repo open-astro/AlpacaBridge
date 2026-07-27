@@ -1383,6 +1383,24 @@ int main() {
     }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+    {
+        // astroasis / focuser — explicit hidPath persists through
+        // sanitize_device_config. (An empty hidPath instead falls back to
+        // focuserIndex, which eagerly scans the USB bus at construction and
+        // has no lazy no-hardware path to round-trip in this test.)
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "astroasis"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9621},
+                                           {"hidPath", "/dev/hidraw3"}},
+                                          "Focuser", 9621);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("hidPath", "") == "/dev/hidraw3");
+        remove_device(router, "astroasis", "focuser", 9621);
+    }
+#endif
+
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
     {
         // wandererastro / rotator (WandererRotator Mini) — auto mode persists

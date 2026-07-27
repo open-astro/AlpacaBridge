@@ -33,7 +33,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Gemini Flat Panel Unit Tests**: 9 test cases, 48 assertions.
 - **Gemini Astro Flat Panel Cover Lite ConformU validation**: 4.4.0 — 0 errors, 0 issues, 0 timing issues on Linux arm64.
 - **Astroasis Oasis Focuser Driver** (AlpacaCore): Focuser driver for the Astroasis Oasis Focuser. Protocol reverse-engineered from the vendor's ASCOM driver installer (decompilation/disassembly of the .NET wrapper and native SDK; no vendor SDK binary is extracted, redistributed, or linked) — a USB HID vendor protocol (VID:PID 338F:A0F0, 65-byte reports) talked to directly via `hidapi`'s hidraw backend. Supports absolute positioning, halt, max-step/max-increment query, and on-board temperature; `StepSize` and temperature compensation are not exposed by the device and correctly throw `NotImplementedException`.
-- **Astroasis Device Support** (AlpacaHTTP): router registration for the `focuser` device type under the `astroasis` vendor, config by explicit `hidPath` or auto-detected `focuserIndex`.
+- **Astroasis Device Support** (AlpacaHTTP): router registration for the `focuser` device type under the `astroasis` vendor, config by explicit `hidPath` or auto-detected `focuserIndex`, web UI vendor option and config form, and a routing round-trip test guarding `hidPath` persistence.
 - **Astroasis Unit Tests**: handshake discrimination and protocol wrapper coverage in `test_astroasis_focuser.cpp`.
 - **Astroasis Oasis Focuser ConformU validation**: 4.4.0 — 0 errors, 0 issues, 0 timing issues on Linux arm64.
 

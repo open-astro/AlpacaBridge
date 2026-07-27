@@ -997,6 +997,18 @@ Connection types: TCP only. TheSkyX acts as middleware between the driver and th
 - Find Home uses `FindHome()` with a 60-second timeout.
 - Slew speed presets: 9 rates (1x, 2x, 4x, 8x, 32x, 64x, 128x, 256x, 512x sidereal).
 
+### Astroasis
+
+Devices: Focuser (Oasis Focuser).
+
+Protocol: reverse-engineered USB HID vendor protocol (VID:PID `338F:A0F0`, 65-byte reports: 1 report-ID byte + 64-byte payload) recovered from decompiling/disassembling the vendor's ASCOM driver installer (`OasisFocuser64.dll` and its native SDK) — no vendor SDK binary is extracted, redistributed, or linked. See `AlpacaCore/external/oasisastro/README.md` for the recovered command reference. Talked to directly via `hidapi`'s hidraw backend — no serial port involved.
+
+- Config takes either `hidPath` (explicit HID device path — lazy, does not touch hardware until `connect()`) or `focuserIndex` (0-based index into `enumerate_astroasis_focusers()`). **`create_astroasis_focuser_by_index()` scans the USB bus eagerly at construction time** and throws `NotConnected` immediately if no device is found — unlike SDK-index vendors (ZWO/QHY) whose index-based constructors are hardware-free. This means a no-hardware routing/config test must use the explicit `hidPath` form; the auto-index path can't round-trip without a real device attached (see `test_routing.cpp`'s astroasis case).
+- `hidPath` takes precedence over `focuserIndex` when both are present — router checks `hidPath.empty()` first.
+- The onboard temperature sensor is an NTC thermistor read through a 12-bit ADC and converted via a Steinhart-Hart-style curve ported byte-for-byte from the vendor DLL's data section (see `raw_adc_to_centidegrees()` in `astroasis_protocol_wrapper.cpp`) — the formula constants have not been cross-checked against a real temperature reading, only against the DLL's own math.
+- `StepSize` and temperature compensation are not exposed by the device/protocol — both throw `PropertyNotImplemented`, don't try to synthesize a value.
+- ConformU 4.4.0 validated on Debian 13 arm64: **0 errors, 0 issues, 0 timing issues**. Results in `AlpacaCore/conformu/Astroasis/Oasis Focuser/`.
+
 ### Gemini
 
 Devices: Focuser (Automatic Astro Focuser Pro), CoverCalibrator (Astro Flat Panel Cover Lite).
