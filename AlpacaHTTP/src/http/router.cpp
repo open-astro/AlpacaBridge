@@ -75,6 +75,7 @@
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
+#include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
@@ -7426,6 +7427,54 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "wandererastro" && device_type_str == "switch") {
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        // switchType discriminates the vendor's switch backends. Only the
+        // WandererBox Pro V3 exists today; the ETA tilt adjuster is planned as
+        // a second backend under the same vendor/device-type pair.
+        std::string switch_type = config.value("switchType", "wandererbox-pro-v3");
+        if (switch_type != "wandererbox-pro-v3") {
+            error_message = "Unknown WandererAstro switchType: " + switch_type + " (supported: wandererbox-pro-v3)";
+            return false;
+        }
+
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::SwitchDriver> box;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // Serial mode means an explicit port. Don't silently auto-detect
+                // behind the user's back — surface a clear validation error.
+                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
+                return false;
+            }
+            int baud_rate = config.value("baudRate", 19200);
+            box =
+                alpacacore::vendor::wandererastro::create_wandererastro_box_switch(device_number, port_path, baud_rate);
+        } else {
+            // "auto" or unset — auto-detect
+            int box_index = config.value("boxIndex", 0);
+            if (box_index < 0) {
+                error_message = "boxIndex must be >= 0.";
+                return false;
+            }
+            box = alpacacore::vendor::wandererastro::create_wandererastro_box_switch_by_index(device_number, box_index);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(box)))) {
+            util::log_info("Registered WandererAstro WandererBox Pro V3");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -7592,6 +7641,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("connectionType");
         copy_if_present("coverIndex");
         copy_if_present("rotatorIndex");  // WandererRotator Mini auto-detect index
+        if (device_type == "switch") {
+            copy_if_present("switchType");  // backend selector (wandererbox-pro-v3)
+            copy_if_present("boxIndex");    // WandererBox auto-detect index
+        }
         if (device_type == "filterwheel") {
             copy_if_present("wandererFilterwheelIndex");  // SFW auto-detect index
             copy_if_present("filterNames");

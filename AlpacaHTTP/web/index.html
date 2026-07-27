@@ -1103,6 +1103,45 @@
                             </div>
                         </details>
                     </div>
+
+                    <div id="wandererastro-box-fields" style="display: none;">
+                        <h3>WandererAstro WandererBox Pro V3</h3>
+                        <p><small>11-port power box with USB hub control, three PWM dew heater channels, an
+                           adjustable 0&ndash;13.2&nbsp;V regulated output, and environment/power sensors. All ports and
+                           sensors appear as Alpaca Switch values. USB serial for control.</small></p>
+
+                        <div class="form-group">
+                            <label for="wandererastro-box-connection-type">Connection Type:</label>
+                            <select id="wandererastro-box-connection-type" name="wandererastroBoxConnectionType">
+                                <option value="auto" selected>Auto-detect (recommended)</option>
+                                <option value="serial">Serial (USB) — manual port</option>
+                            </select>
+                            <small>Auto-detect scans USB serial ports and listens for the box's status stream automatically.</small>
+                        </div>
+
+                        <div id="wandererastro-box-auto-fields">
+                            <div class="form-group">
+                                <label for="wandererastro-box-index">Power Box Index:</label>
+                                <input type="number" id="wandererastro-box-index" name="wandererastroBoxIndex" value="0" min="0">
+                                <small>0-based index if multiple WandererBoxes are detected. Usually 0.</small>
+                            </div>
+                        </div>
+
+                        <div id="wandererastro-box-serial-fields" style="display: none;">
+                            <div class="form-group">
+                                <label for="wandererastro-box-port-path">Serial Port:</label>
+                                <input type="text" id="wandererastro-box-port-path" name="wandererastroBoxPortPath" placeholder="/dev/ttyUSB0">
+                                <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="wandererastro-box-baud-rate">Baud Rate:</label>
+                                <select id="wandererastro-box-baud-rate" name="wandererastroBoxBaudRate">
+                                    <option value="19200" selected>19200</option>
+                                </select>
+                                <small>The WandererBox protocol is fixed at 19200 baud.</small>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="form-actions">

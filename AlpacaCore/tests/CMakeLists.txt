@@ -71,7 +71,7 @@ if(TARGET alpacacore_gemini)
 endif()
 if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp
-         test_wandererastro_filterwheel.cpp)
+         test_wandererastro_filterwheel.cpp test_wandererastro_box_switch.cpp)
 endif()
 if(TARGET alpacacore_svbony)
     list(APPEND TEST_SOURCES test_svbony_camera.cpp)

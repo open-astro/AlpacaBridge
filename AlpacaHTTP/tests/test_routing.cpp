@@ -1056,6 +1056,76 @@ int main() {
 #endif
     }
 
+    // --- WandererAstro WandererBox Pro V3 Switch routing/config persistence test ---
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+    {
+        nlohmann::json remove_body = {{"vendor", "wandererastro"}, {"deviceType", "switch"}, {"deviceNumber", 9404}};
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        // Serial mode with an explicit (dummy) port avoids the auto-detect scan
+        // and registers the driver without opening a real device.
+        nlohmann::json configure_body = {{"vendor", "wandererastro"},  {"deviceType", "switch"},
+                                         {"deviceNumber", 9404},       {"switchType", "wandererbox-pro-v3"},
+                                         {"connectionType", "serial"}, {"portPath", "/dev/null"},
+                                         {"baudRate", 19200}};
+
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        EXPECT(configured_json.value("ErrorNumber", -1) == 0);
+
+        bool found_switch = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Switch" && entry.value("DeviceNumber", -1) == 9404) {
+                EXPECT(entry.value("Vendor", "") == "wandererastro");
+                EXPECT(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                EXPECT(cfg.value("vendor", "") == "wandererastro");
+                EXPECT(cfg.value("deviceType", "") == "switch");
+                EXPECT(cfg.value("switchType", "") == "wandererbox-pro-v3");
+                EXPECT(cfg.value("connectionType", "") == "serial");
+                EXPECT(cfg.value("portPath", "") == "/dev/null");
+                EXPECT(cfg.value("baudRate", -1) == 19200);
+                found_switch = true;
+                break;
+            }
+        }
+        EXPECT(found_switch);
+
+        // MaxSwitch is a static capability that reports without hardware (the
+        // Pro V3 exposes 14 outputs + 10 sensor values).
+        const auto maxswitch_response = route_request(router, "GET", "/api/v1/switch/9404/maxswitch");
+        const auto maxswitch_json = nlohmann::json::parse(maxswitch_response.body());
+        EXPECT(maxswitch_json.value("ErrorNumber", -1) == 0);
+        EXPECT(maxswitch_json.value("Value", -1) == 24);
+
+        // An unknown switchType must be rejected with a clear error.
+        nlohmann::json bad_body = {{"vendor", "wandererastro"},
+                                   {"deviceType", "switch"},
+                                   {"deviceNumber", 9405},
+                                   {"switchType", "not-a-backend"}};
+        const auto bad_response = route_request(router, "POST", "/management/v1/configuredevice", bad_body.dump());
+        const auto bad_json = nlohmann::json::parse(bad_response.body());
+        EXPECT(bad_json.value("ErrorNumber", 0) != 0);
+
+        nlohmann::json remove_body = {{"vendor", "wandererastro"}, {"deviceType", "switch"}, {"deviceNumber", 9404}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        EXPECT(remove_json.value("ErrorNumber", -1) == 0);
+#else
+        EXPECT(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
     // =====================================================================
     // Issue #102 back-fill: config save->load round-trips for every
     // (vendor, deviceType) that persists fields. Each block POSTs distinctive
@@ -1328,6 +1398,24 @@ int main() {
         EXPECT(cfg.value("connectionType", "") == "auto");
         EXPECT(cfg.value("rotatorIndex", -1) == 1);
         remove_device(router, "wandererastro", "rotator", 9619);
+    }
+
+    {
+        // wandererastro / switch (WandererBox Pro V3) — auto mode persists
+        // switchType and boxIndex through sanitize_device_config.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "wandererastro"},
+                                           {"deviceType", "switch"},
+                                           {"deviceNumber", 9620},
+                                           {"switchType", "wandererbox-pro-v3"},
+                                           {"connectionType", "auto"},
+                                           {"boxIndex", 1}},
+                                          "Switch", 9620);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("switchType", "") == "wandererbox-pro-v3");
+        EXPECT(cfg.value("connectionType", "") == "auto");
+        EXPECT(cfg.value("boxIndex", -1) == 1);
+        remove_device(router, "wandererastro", "switch", 9620);
     }
 #endif
 
