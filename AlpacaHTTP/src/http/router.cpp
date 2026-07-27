@@ -74,6 +74,9 @@
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+#include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
 #include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
@@ -7258,6 +7261,31 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "astroasis" && device_type_str == "focuser") {
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+        std::string hid_path = config.value("hidPath", "");
+
+        std::unique_ptr<alpacacore::FocuserDriver> focuser;
+        if (hid_path.empty()) {
+            int focuser_index = config.value("focuserIndex", 0);
+            focuser = alpacacore::vendor::astroasis::create_astroasis_focuser_by_index(device_number, focuser_index);
+        } else {
+            focuser = alpacacore::vendor::astroasis::create_astroasis_focuser(device_number, hid_path);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
+            util::log_info("Registered Astroasis focuser");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "Astroasis support not enabled. Rebuild with -DALPACACORE_ENABLE_ASTROASIS=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "gemini" && device_type_str == "covercalibrator") {
 #ifdef ALPACACORE_ENABLE_GEMINI
         std::string conn_type = config.value("connectionType", "auto");
@@ -7637,6 +7665,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("portPath");
             copy_if_present("baudRate");
         }
+    } else if (vendor == "astroasis") {
+        copy_if_present("focuserIndex");
+        copy_if_present("hidPath");
     } else if (vendor == "wandererastro") {
         copy_if_present("connectionType");
         copy_if_present("coverIndex");

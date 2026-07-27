@@ -73,6 +73,9 @@ if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp
          test_wandererastro_filterwheel.cpp test_wandererastro_box_switch.cpp)
 endif()
+if(TARGET alpacacore_astroasis)
+    list(APPEND TEST_SOURCES test_astroasis_focuser.cpp)
+endif()
 if(TARGET alpacacore_svbony)
     list(APPEND TEST_SOURCES test_svbony_camera.cpp)
     # Camera lifecycle storm for the issue-#116 close-order/held-mutex fixes;
@@ -152,6 +155,9 @@ if(TARGET alpacacore_touptek)
 endif()
 if(TARGET alpacacore_playerone)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_playerone)
+endif()
+if(TARGET alpacacore_astroasis)
+    target_link_libraries(alpacacore_tests PRIVATE alpacacore_astroasis)
 endif()
 
 # Both QHY and ZWO SDKs define isLeapYear() at file scope.

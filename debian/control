@@ -8,6 +8,7 @@ Build-Depends: debhelper-compat (= 13),
                libusb-1.0-0-dev,
                libudev-dev,
                libgpiod-dev (>= 2.0),
+               libhidapi-dev,
                nlohmann-json3-dev,
                zlib1g-dev,
                libcurl4-openssl-dev | libcurl4-gnutls-dev
@@ -21,6 +22,7 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
          libusb-1.0-0,
          libudev1,
          libgpiod3,
+         libhidapi-hidraw0,
          adduser
 Conflicts: fxload
 Replaces: fxload

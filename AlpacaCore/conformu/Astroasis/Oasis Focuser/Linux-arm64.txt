@@ -1,0 +1,86 @@
+20:16:48.166 ASCOM Universal Device Conformance Checker Version 4.4.0.52526, Build time: Fri 26 June 2026 23:06:27          
+20:16:48.167                                              
+20:16:48.176 Operating system is Debian GNU/Linux 13 (trixie), Processor is ARM 64bit, Application is 64bit.          
+20:16:48.181                                              
+20:16:48.182 Alpaca device:  (localhost:6800 Focuser/0)          
+20:16:48.182                                              
+20:16:48.184 CreateDevice                        INFO     Creating Alpaca device: IP address: localhost, IP Port: 6800, Alpaca device number: 0
+20:16:48.308 CreateDevice                        INFO     Alpaca device created OK
+20:16:48.308 CreateDevice                        INFO     Successfully created driver
+20:16:49.502 CreateDevice                        OK       Found a valid interface version: 4
+20:16:49.502 CreateDevice                        OK       Driver instance created successfully
+20:16:49.502                                              
+20:16:49.502 Connect to device                            
+20:16:49.595 Connected                           OK       Connected to device successfully using Connected = True
+20:16:50.100 Connected                           OK       Disconnected from device successfully using Connected = False
+20:16:50.613 Connect                             OK       Connected to device successfully using Connect()
+20:16:50.613                                              
+20:16:50.623 Common Driver Methods                        
+20:16:50.623 InterfaceVersion                    OK       4
+20:16:50.626 Connected                           OK       True
+20:16:50.632 Description                         OK       Astroasis Oasis Focuser Driver
+20:16:50.634 DriverInfo                          OK       AlpacaCore Astroasis Focuser Driver
+20:16:50.636 DriverVersion                       OK       3.0.2
+20:16:50.638 Name                                OK       Astroasis Oasis Focuser
+20:16:50.638                                              
+20:16:50.643 SupportedActions                    OK       Driver returned an empty action list
+20:16:50.643 Action                              INFO     Conform cannot test the Action method
+20:16:50.643                                              
+20:16:50.696 DeviceState                         OK       Received 4 operational state properties.
+20:16:50.697 DeviceState                         OK         IsMoving = False
+20:16:50.697 DeviceState                         OK         Position = 23275
+20:16:50.697 DeviceState                         OK         Temperature = 42.42
+20:16:50.697 DeviceState                         OK         TimeStamp = 22/07/2026 11:16:50
+20:16:50.706 DeviceState                         OK       Found all expected operational properties
+20:16:50.706                                              
+20:16:50.706 Properties                                   
+20:16:50.710 Absolute                            OK       True
+20:16:50.720 IsMoving                            OK       False
+20:16:50.757 MaxStep                             OK       80000
+20:16:50.764 MaxIncrement                        OK       80000
+20:16:50.771 Position                            OK       23275
+20:16:50.911 StepSize                            OK       Optional member returned a NotImplementedException error.
+20:16:50.918 TempCompAvailable                   OK       False
+20:16:50.920 TempComp Read                       OK       False
+20:16:50.922 TempComp Write                      OK       Temperature compensation is not available and a NotImplementedException error was generated as expected
+20:16:50.933 Temperature                         OK       42.42
+20:16:50.933                                              
+20:16:50.933 Methods                                      
+20:16:50.943 Halt                                OK       Focuser halted OK
+20:16:55.531 Move - TempComp False               OK       Absolute move OK
+20:17:00.080                                              
+20:17:00.080 Disconnect from device                       
+20:17:00.089 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+20:17:00.089                                              
+20:17:00.089 Conformance test has finished                
+20:17:00.089                                              
+20:17:00.090 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+20:17:00.090                                     
+20:17:00.090 Timing Summary                               See Help for further information.
+20:17:00.090 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+20:17:00.090 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+20:17:00.090 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+20:17:00.090 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+20:17:00.090                                              
+20:17:00.090 Connect                                      At 20:16:50.104 Connect                  0.002 seconds. ✓ (STANDARD)
+20:17:00.090 InterfaceVersion                             At 20:16:50.623 InterfaceVersion         0.000 seconds. ✓ (FAST)
+20:17:00.090 Connected                                    At 20:16:50.626 Connected                0.002 seconds. ✓ (FAST)
+20:17:00.090 Description                                  At 20:16:50.632 Description              0.004 seconds. ✓ (FAST)
+20:17:00.090 DriverInfo                                   At 20:16:50.634 DriverInfo               0.002 seconds. ✓ (FAST)
+20:17:00.090 DriverVersion                                At 20:16:50.636 DriverVersion            0.002 seconds. ✓ (FAST)
+20:17:00.090 Name                                         At 20:16:50.638 Name                     0.002 seconds. ✓ (FAST)
+20:17:00.090 SupportedActions                             At 20:16:50.643 SupportedActions         0.005 seconds. ✓ (FAST)
+20:17:00.090 DeviceState                                  At 20:16:50.696 DeviceState              0.053 seconds. ✓ (FAST)
+20:17:00.090 Absolute                                     At 20:16:50.710 Absolute                 0.002 seconds. ✓ (FAST)
+20:17:00.090 IsMoving                                     At 20:16:50.720 IsMoving                 0.010 seconds. ✓ (FAST)
+20:17:00.091 MaxStep                                      At 20:16:50.757 MaxStep                  0.037 seconds. ✓ (FAST)
+20:17:00.091 MaxIncrement                                 At 20:16:50.763 MaxIncrement             0.006 seconds. ✓ (FAST)
+20:17:00.091 Position                                     At 20:16:50.771 Position                 0.008 seconds. ✓ (FAST)
+20:17:00.091 TempCompAvailable                            At 20:16:50.918 TempCompAvailable        0.002 seconds. ✓ (FAST)
+20:17:00.091 TempComp Read                                At 20:16:50.920 TempComp Read            0.002 seconds. ✓ (FAST)
+20:17:00.091 Temperature                                  At 20:16:50.933 Temperature              0.009 seconds. ✓ (FAST)
+20:17:00.091 Halt                                         At 20:16:50.943 Halt                     0.008 seconds. ✓ (STANDARD)
+20:17:00.091 Move to 31275                                At 20:16:50.975 Move to 31275            0.016 seconds. ✓ (STANDARD)
+20:17:00.091 Disconnect                                   At 20:17:00.085 Disconnect               0.003 seconds. ✓ (STANDARD)
+20:17:00.091                                              
+20:17:00.091 Congratulations, all members returned within their target response times!!          
