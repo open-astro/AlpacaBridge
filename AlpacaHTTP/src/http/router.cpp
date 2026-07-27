@@ -65,6 +65,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
+#include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WEEWX
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
@@ -77,7 +78,10 @@
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
+#include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
+#include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
+#include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_SVBONY
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
@@ -4128,6 +4132,14 @@ Response Router::dispatch_filterwheel_method(
                 if (!names_val) {
                     throw_invalid_value("Missing parameter: Names");
                 }
+                if (!names_val->is_array()) {
+                    throw_invalid_value("Names must be an array of strings");
+                }
+                for (const auto& name : *names_val) {
+                    if (!name.is_string()) {
+                        throw_invalid_value("Names must be an array of strings");
+                    }
+                }
                 std::vector<std::string> names = names_val->get<std::vector<std::string>>();
                 filterwheel->set_names(names);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
@@ -6646,6 +6658,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 error_message = "ZWO filter wheel filterNames must be an array";
                 return false;
             }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "ZWO filter wheel filterNames must be an array of strings";
+                    return false;
+                }
+            }
             wheel->set_names(names_value.get<std::vector<std::string>>());
         }
 
@@ -6911,6 +6929,53 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "qhy" && device_type_str == "filterwheel") {
+#ifdef ALPACACORE_ENABLE_QHY
+        // Integrated CFW (e.g. miniCam8M): controlled through the SAME
+        // physical handle as its paired camera (QHYSDKWrapper ref-counts the
+        // shared open), so it is addressed by the same cameraId/cameraIndex
+        // as the camera device rather than a separate wheel enumeration.
+        std::string camera_id = config.value("cameraId", "");
+        int camera_index = config.value("cameraIndex", -1);
+
+        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
+        if (!camera_id.empty()) {
+            wheel = alpacacore::vendor::qhy::create_qhy_filterwheel(device_number, camera_id);
+        } else if (camera_index >= 0) {
+            wheel = alpacacore::vendor::qhy::create_qhy_filterwheel_by_index(device_number, camera_index);
+        } else {
+            error_message = "QHY filter wheel requires cameraIndex or cameraId";
+            return false;
+        }
+
+        if (config.contains("filterNames")) {
+            const auto& names_value = config.at("filterNames");
+            if (!names_value.is_array()) {
+                error_message = "QHY filter wheel filterNames must be an array";
+                return false;
+            }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "QHY filter wheel filterNames must be an array of strings";
+                    return false;
+                }
+            }
+            wheel->set_names(names_value.get<std::vector<std::string>>());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
+            util::log_info("Registered QHY filter wheel");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "QHY support not enabled. Rebuild with -DALPACACORE_ENABLE_QHY=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "svbony" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_SVBONY
         int camera_index = config.value("cameraIndex", 0);
@@ -6994,6 +7059,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (!names_value.is_array()) {
                 error_message = "ToupTek filter wheel filterNames must be an array";
                 return false;
+            }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "ToupTek filter wheel filterNames must be an array of strings";
+                    return false;
+                }
             }
             wheel->set_names(names_value.get<std::vector<std::string>>());
         }
@@ -7114,6 +7185,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (!names_value.is_array()) {
                 error_message = "Player One filter wheel filterNames must be an array";
                 return false;
+            }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "Player One filter wheel filterNames must be an array of strings";
+                    return false;
+                }
             }
             wheel->set_names(names_value.get<std::vector<std::string>>());
         }
@@ -7283,6 +7360,149 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "wandererastro" && device_type_str == "rotator") {
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::RotatorDriver> rotator;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // Serial mode means an explicit port. Don't silently auto-detect
+                // behind the user's back — surface a clear validation error.
+                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
+                return false;
+            }
+            int baud_rate = config.value("baudRate", 19200);
+            rotator =
+                alpacacore::vendor::wandererastro::create_wandererastro_rotator(device_number, port_path, baud_rate);
+        } else {
+            // "auto" or unset — auto-detect
+            int rotator_index = config.value("rotatorIndex", 0);
+            if (rotator_index < 0) {
+                error_message = "rotatorIndex must be >= 0.";
+                return false;
+            }
+            rotator =
+                alpacacore::vendor::wandererastro::create_wandererastro_rotator_by_index(device_number, rotator_index);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(rotator)))) {
+            util::log_info("Registered WandererAstro Rotator");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
+        return false;
+#endif
+    }
+
+    if (vendor == "wandererastro" && device_type_str == "filterwheel") {
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // Serial mode means an explicit port. Don't silently auto-detect
+                // behind the user's back — surface a clear validation error.
+                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
+                return false;
+            }
+            int baud_rate = config.value("baudRate", 19200);
+            wheel = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(device_number, port_path,
+                                                                                        baud_rate);
+        } else {
+            // "auto" or unset — auto-detect
+            int wheel_index = config.value("wandererFilterwheelIndex", 0);
+            if (wheel_index < 0) {
+                error_message = "wandererFilterwheelIndex must be >= 0.";
+                return false;
+            }
+            wheel = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel_by_index(device_number,
+                                                                                                 wheel_index);
+        }
+
+        if (config.contains("filterNames")) {
+            const auto& names_value = config.at("filterNames");
+            if (!names_value.is_array()) {
+                error_message = "Wanderer filter wheel filterNames must be an array";
+                return false;
+            }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "Wanderer filter wheel filterNames must be an array of strings";
+                    return false;
+                }
+            }
+            wheel->set_names(names_value.get<std::vector<std::string>>());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
+            util::log_info("Registered WandererAstro filter wheel");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
+        return false;
+#endif
+    }
+
+    if (vendor == "wandererastro" && device_type_str == "switch") {
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        // switchType discriminates the vendor's switch backends. Only the
+        // WandererBox Pro V3 exists today; the ETA tilt adjuster is planned as
+        // a second backend under the same vendor/device-type pair.
+        std::string switch_type = config.value("switchType", "wandererbox-pro-v3");
+        if (switch_type != "wandererbox-pro-v3") {
+            error_message = "Unknown WandererAstro switchType: " + switch_type + " (supported: wandererbox-pro-v3)";
+            return false;
+        }
+
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::SwitchDriver> box;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // Serial mode means an explicit port. Don't silently auto-detect
+                // behind the user's back — surface a clear validation error.
+                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
+                return false;
+            }
+            int baud_rate = config.value("baudRate", 19200);
+            box =
+                alpacacore::vendor::wandererastro::create_wandererastro_box_switch(device_number, port_path, baud_rate);
+        } else {
+            // "auto" or unset — auto-detect
+            int box_index = config.value("boxIndex", 0);
+            if (box_index < 0) {
+                error_message = "boxIndex must be >= 0.";
+                return false;
+            }
+            box = alpacacore::vendor::wandererastro::create_wandererastro_box_switch_by_index(device_number, box_index);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(box)))) {
+            util::log_info("Registered WandererAstro WandererBox Pro V3");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
+        return false;
+#endif
+    }
+
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -7378,6 +7598,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "qhy") {
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
+        // Integrated CFW (filter wheel device type): persist custom filter
+        // names too, or they silently revert to "Filter N" after a save
+        // (sanitize_device_config strips anything not allowlisted).
+        copy_if_present("filterNames");
     } else if (vendor == "svbony") {
         copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
@@ -7447,6 +7671,15 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "wandererastro") {
         copy_if_present("connectionType");
         copy_if_present("coverIndex");
+        copy_if_present("rotatorIndex");  // WandererRotator Mini auto-detect index
+        if (device_type == "switch") {
+            copy_if_present("switchType");  // backend selector (wandererbox-pro-v3)
+            copy_if_present("boxIndex");    // WandererBox auto-detect index
+        }
+        if (device_type == "filterwheel") {
+            copy_if_present("wandererFilterwheelIndex");  // SFW auto-detect index
+            copy_if_present("filterNames");
+        }
         std::string connection_type = config.value("connectionType", "auto");
         if (connection_type == "serial") {
             copy_if_present("portPath");

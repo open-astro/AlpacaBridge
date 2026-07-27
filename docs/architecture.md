@@ -106,7 +106,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | Vendor | Device Types | Wrapper Type | Status |
 |--------|-------------|--------------|--------|
 | ZWO | Camera, Focuser (EAF), Rotator (CAA), FilterWheel (EFW), Switch (dew heater, ASIAIR power), Telescope (AM mount) | SDK + protocol wrapper | Production |
-| QHY | Camera | SDK wrapper | Production |
+| QHY | Camera, FilterWheel (integrated CFW, e.g. miniCam8M) | SDK wrapper | Production |
 | Player One | Camera, FilterWheel (Phoenix Wheel), Switch (dew heater + fan) | SDK wrapper | Production |
 | SVBONY | Camera | SDK wrapper | Production |
 | ToupTek | Camera (incl. cooled + High Full Well), Focuser (AAF), FilterWheel (AFW-M), Switch (camera thermal: dew heater + fan; StellaVita power) | SDK + protocol wrapper | Production |
@@ -114,7 +114,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | SynScan | Telescope | Protocol wrapper | Production |
 | Celestron | Telescope | Protocol wrapper | Production |
 | Losmandy Gemini | Focuser, CoverCalibrator (Astro Flat Panel Cover Lite) | Protocol wrapper | Production |
-| WandererAstro | CoverCalibrator (WandererCover V4) | Protocol wrapper | Production |
+| WandererAstro | CoverCalibrator (WandererCover V4), Rotator (WandererRotator Mini V1/V2), FilterWheel (SFW50/SFW50S/SFW36S), Switch (WandererBox Pro V3) | Protocol wrapper | Production |
 | Astroasis | Focuser (Oasis Focuser) | Protocol wrapper | Production |
 | WeeWX | ObservingConditions | HTTP client | Production |
 | Bisque | Telescope | Script/protocol | In development |

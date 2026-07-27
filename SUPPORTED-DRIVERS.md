@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-07-22
+## Updated 2026-07-27
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -67,7 +67,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>QHY Driver Notes</strong></summary>
 
-- **SDK**: QHY CCD SDK 25.09.29.11 (build target)
+- **SDK**: QHY CCD SDK 26.06.04.16 (build target)
 - **Connection**: USB (requires udev rules and firmware; see below)
 - **Cooler power**: `CanGetCoolerPower` returns false; cooler power reporting is not implemented to avoid SDK timeouts.
 - **PulseGuide**: runs the SDK guide call on a detached thread so the initiator returns immediately (ControlQHYCCDGuide blocks for the full pulse duration on real hardware).
@@ -203,6 +203,23 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
+### QHY
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| miniCam8M CFW (integrated, 8-slot) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/miniCam8M%20CFW/) |
+
+<details>
+<summary><strong>QHY FilterWheel Driver Notes</strong></summary>
+
+- **SDK**: QHY CCD SDK 26.06.04.16 (shared with the QHY camera driver)
+- **Connection**: USB — controlled through the SAME physical handle as its paired QHY camera (not a separately enumerable device); the camera and filter wheel driver share one `OpenQHYCCD` via a reference-counted handle in `QHYSDKWrapper`, and can be connected/disconnected independently.
+- **Tested model**: miniCam8M integrated CFW (8-slot) on Linux arm64
+- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues
+- **Position caching**: `GetQHYCCDCFWStatus` is a ~100-130ms hardware round trip on this SDK, which blows the ASCOM FAST (0.1s) target for the first `Position`/`DeviceState` read after `Connect`. The driver does one warm-up read during `Connect` (charged against the 1.0s STANDARD budget) and caches the settled position afterward. The cache is served only when no move is outstanding — while a move is pending, every read stays live and is compared against the commanded target before caching, because this SDK does **not** report a distinct "moving" sentinel the way ToupTek's does: `GetQHYCCDCFWStatus` reports the wheel's actual passing position throughout the physical rotation (including intermediate slots and occasional `-1`) until it settles, so caching the first post-move reading unconditionally would freeze `Position` at a stale value and the wheel would never appear to arrive.
+
+</details>
+
 ### ToupTek
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
@@ -217,6 +234,25 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested model**: AFW-M 7-slot on Linux arm64 (wheel firmware `FILTERWHEEL01A_V202_20250903.iic`)
 - **ConformU**: 4.3.0 — 0 errors, 0 issues, 0 timing issues
 - **Homing at connect**: the driver reads the slot count, writes it back, and homes the wheel (`FILTERWHEEL_POSITION = -1`) at connect — mirroring the INDI toupbase reference driver — so the firmware establishes its slot reference. This is unconditional (matches INDI) and does not depend on a particular firmware; it matters most right after a firmware flash, which clears the slot reference and otherwise leaves the wheel hunting without landing. Expect the wheel to home once on connect.
+- **Position** reports −1 while the wheel is rotating, per the ASCOM IFilterWheelV3 contract.
+
+</details>
+
+### WandererAstro
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| SFW36S (8x36mm) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/WandererAstro/SFW36S/) |
+
+<details>
+<summary><strong>WandererAstro FilterWheel Driver Notes</strong></summary>
+
+- **Protocol**: ASCII serial over CH340 USB-serial, 19200 8N1 (streamed 'A'-delimited status frames; no SDK)
+- **Connection**: USB serial for control; the motor needs the separate 12 V DC input connected (moves silently do nothing without it)
+- **Tested model**: SFW36S 8x36mm (reports as `WSFW368`, firmware 20260124) on Linux arm64 — the SFW50/SFW50S (`WSFW508`) share the same 8-slot protocol
+- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues
+- **Minimum firmware**: 20260124 (older firmware predates the status-stream protocol; update via WandererEmpire)
+- **Homing at connect**: the driver sends the automatic calibration command (`1500002`) once per connect, matching the vendor's INDI reference — expect the wheel to home once on connect.
 - **Position** reports −1 while the wheel is rotating, per the ASCOM IFilterWheelV3 contract.
 
 </details>
@@ -341,6 +377,24 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
+### WandererAstro
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| WandererRotator Mini (V1 / V2) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/WandererAstro/WandererRotator%20Mini%20V2/) |
+
+<details>
+<summary><strong>WandererAstro Rotator Driver Notes</strong></summary>
+
+- **Protocol**: WandererRotator ASCII serial protocol, firmware ≥ 20240226 required (no SDK; protocol reference: INDI `wanderer_rotator_mini`). No published docs — V2 firmware report formats verified against real hardware.
+- **Connection**: USB (CH340 adapter, fixed **19200 baud, 8N1**). The motor needs the separate DC power input; the serial link works without it, but moves silently do nothing.
+- **Auto-detection**: Scans `/dev/serial/by-id/` for CH340/CH341 USB-serial devices (vendor `1a86`) and probes each with the rotator identity handshake. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
+- **Capabilities**: absolute/relative/mechanical moves, halt, hardware reverse, IRotatorV4 Sync (driver-side offset). StepSize is 1/1142°.
+- **Tested model**: WandererRotator Mini V2 (firmware 20250222) on Linux arm64 (Debian 13).
+- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues.
+
+</details>
+
 [↑ Back to top](#alpacabridge-supported-drivers)
 
 ## SafetyMonitor Drivers
@@ -393,6 +447,22 @@ This document lists all hardware vendors and device types that are verified to w
   - **ConformU** 4.4.0 — ✓ validated on ATR2600M hardware (Linux arm64): 0 errors, 0 issues, 0 timing issues. Three elements exercised: `DewHeater` (0–4), `Fan` (0–1, single-speed on this model), `TailLight` (0–1). Re-validated on the shared `SwitchDriver` base `DeviceState` (issue #107): all per-id properties + TimeStamp present and GET-consistent; slowest member 2 ms. [Report](AlpacaCore/conformu/ToupTek/ATR2600M%20Thermal%20Switch/Linux-arm64.txt).
 - **StellaVita PowerBox** (`vendor: touptek`, `deviceType: switch`, `switchType: stellavita`) — the StellaVita's four on-board 12V DC ports via libgpiod v2 on `/dev/gpiochip0` (override with `gpioChip`). Exposes Port 1–4 mapped to BCM GPIO 18/10/17/4 (on BCM2711 the libgpiod line offset equals the BCM GPIO number); mapping verified on hardware against the board's `gpio=18,10,17,4,9,11=op,dh,pu` config.txt directive. GPIO 9/11 power the on-board Cypress USB hub and are deliberately not exposed. All four ports are boolean on/off by default; each can opt into 0–100% soft-PWM dimming (per-port `pwm` flag, `pwmFrequencyHz` default **100 Hz** — tested best on StellaVita, dims flat panels smoothly without 50 Hz flicker). Local GPIO only — independent of the ToupTek camera/focuser SDK; runs on the StellaVita itself (arm64). Connecting preserves the board's boot-high state (ports powered on); disconnecting does not power them off. Setup: [PowerPorts.md](AlpacaCore/PowerPorts.md#touptek-stellavita-raspberry-pi-cm4).
   - **ConformU** 4.4.0 — ✓ validated on StellaVita hardware (Linux arm64; Raspberry Pi CM4, Debian 13 Trixie, `/dev/gpiochip0`): 0 errors, 0 issues, 0 timing issues. Run against a mixed config (Port 1 PWM with the full 0–100% sweep, Ports 2–4 boolean) so both the boolean and soft-PWM paths were exercised in one pass; DeviceState reported all 4 ids + TimeStamp via the shared `SwitchDriver` base in 9 ms. [Report](AlpacaCore/conformu/ToupTek/StellaVita/Linux-arm64.txt).
+
+</details>
+
+### WandererAstro
+
+| Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
+|-------------|--------------|------------|------------------|--------|
+| WandererBox Pro V3 Power Box | WandererBox Pro V3 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/WandererAstro/WandererBox%20Pro%20V3/) |
+
+<details>
+<summary><strong>WandererAstro Switch Driver Notes</strong></summary>
+
+- **WandererBox Pro V3** (`vendor: wandererastro`, `deviceType: switch`, `switchType: wandererbox-pro-v3`) — the 11-port power box as 24 Alpaca switches: DC1/DC2 always-on rails (read-only), DC3-4 adjustable output (on/off + 5.0–13.2 V setpoint, 0.1 V steps), DC5/6/7 PWM dew heaters (0–255), DC8-9/DC10-11 switched pairs, five USB power groups, and ten read-only sensor switches (input voltage, three currents, ambient temp/humidity, dew point, three temperature probes; unconnected sensors report -127 °C / 0). Dew-heater auto modes (dew-point/constant-temperature) stay device-side — set them in WandererEmpire; the driver writes manual PWM only, matching the vendor's own ASCOM driver.
+  - **Protocol**: WandererBox streamed-status serial protocol at 19200 8N1 (no SDK). Reference: INDI `wandererbox_pro_v3`.
+  - **Tested model**: WandererBox Pro V3 (firmware 20250410) on Linux arm64 (Debian 13).
+  - **ConformU** 4.4.0 — ✓ 0 errors, 0 issues, 0 timing issues. [Report](AlpacaCore/conformu/WandererAstro/WandererBox%20Pro%20V3/Linux-arm64.txt).
 
 </details>
 

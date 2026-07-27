@@ -240,6 +240,7 @@ function resetDeviceForm() {
     zwoFilterwheelSlotUI.syncSlotsFromTextarea();
     playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
     touptekFilterwheelSlotUI.syncSlotsFromTextarea();
+    qhyFilterwheelSlotUI.syncSlotsFromTextarea();
     const messageDiv = document.getElementById('form-message');
     if (messageDiv) {
         messageDiv.style.display = 'none';
@@ -314,6 +315,7 @@ const INDEX_FIELDS = [
     { fieldId: 'focuser-index', vendor: 'zwo', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'focuser-id' },
     { fieldId: 'rotator-index', vendor: 'zwo', deviceType: 'rotator', configKey: 'rotatorIndex', idFieldId: 'rotator-id' },
     { fieldId: 'qhy-camera-index', vendor: 'qhy', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'qhy-cfw-camera-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'cameraIndex', idFieldId: 'qhy-cfw-camera-id' },
     { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
@@ -325,6 +327,9 @@ const INDEX_FIELDS = [
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
     { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
+    { fieldId: 'wandererastro-rotator-index', vendor: 'wandererastro', deviceType: 'rotator', configKey: 'rotatorIndex' },
+    { fieldId: 'wandererastro-filterwheel-index', vendor: 'wandererastro', deviceType: 'filterwheel', configKey: 'wandererFilterwheelIndex' },
+    { fieldId: 'wandererastro-box-index', vendor: 'wandererastro', deviceType: 'switch', configKey: 'boxIndex' },
 ];
 
 // Lowest unused value of field.configKey across already-configured devices that
@@ -793,6 +798,18 @@ function startEditDevice(device) {
         if (zwoMountConnectionTypeEl) {
             zwoMountConnectionTypeEl.dispatchEvent(new Event('change'));
         }
+    } else if (vendor === 'qhy' && deviceType === 'filterwheel') {
+        // Integrated CFW: bound to the same camera index/id as the paired
+        // QHY camera device, but stored under its own field names.
+        setFormValue('qhy-cfw-camera-index', config.cameraIndex);
+        setFormValue('qhy-cfw-camera-id', config.cameraId);
+        const qhyFilterNamesField = document.getElementById('qhy-filter-names');
+        if (qhyFilterNamesField) {
+            qhyFilterNamesField.value = Array.isArray(config.filterNames)
+                ? config.filterNames.join('\n')
+                : '';
+            qhyFilterwheelSlotUI.syncSlotsFromTextarea();
+        }
     } else if (vendor === 'qhy') {
         setFormValue('qhy-camera-index', config.cameraIndex);
         setFormValue('qhy-camera-id', config.cameraId);
@@ -892,16 +909,61 @@ function startEditDevice(device) {
         }
     } else if (vendor === 'wandererastro') {
         const connType = config.connectionType || 'auto';
-        setFormValue('wandererastro-connection-type', connType);
-        if (connType === 'auto') {
-            setFormValue('wandererastro-cover-index', config.coverIndex);
-        } else if (connType === 'serial') {
-            setFormValue('wandererastro-port-path', config.portPath);
-            setFormValue('wandererastro-baud-rate', config.baudRate);
-        }
-        const wandererConnTypeEl = document.getElementById('wandererastro-connection-type');
-        if (wandererConnTypeEl) {
-            wandererConnTypeEl.dispatchEvent(new Event('change'));
+        if (normalizeDeviceType(config.deviceType) === 'filterwheel') {
+            setFormValue('wandererastro-filterwheel-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('wandererastro-filterwheel-index', config.wandererFilterwheelIndex);
+            } else if (connType === 'serial') {
+                setFormValue('wandererastro-filterwheel-port-path', config.portPath);
+                setFormValue('wandererastro-filterwheel-baud-rate', config.baudRate);
+            }
+            const wandererFwConnTypeEl = document.getElementById('wandererastro-filterwheel-connection-type');
+            if (wandererFwConnTypeEl) {
+                wandererFwConnTypeEl.dispatchEvent(new Event('change'));
+            }
+            const wandererFilterNamesField = document.getElementById('wandererastro-filter-names');
+            if (wandererFilterNamesField) {
+                wandererFilterNamesField.value = Array.isArray(config.filterNames)
+                    ? config.filterNames.join('\n')
+                    : '';
+                wandererFilterwheelSlotUI.syncSlotsFromTextarea();
+            }
+        } else if (normalizeDeviceType(config.deviceType) === 'rotator') {
+            setFormValue('wandererastro-rotator-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('wandererastro-rotator-index', config.rotatorIndex);
+            } else if (connType === 'serial') {
+                setFormValue('wandererastro-rotator-port-path', config.portPath);
+                setFormValue('wandererastro-rotator-baud-rate', config.baudRate);
+            }
+            const wandererRotatorConnTypeEl = document.getElementById('wandererastro-rotator-connection-type');
+            if (wandererRotatorConnTypeEl) {
+                wandererRotatorConnTypeEl.dispatchEvent(new Event('change'));
+            }
+        } else if (normalizeDeviceType(config.deviceType) === 'switch') {
+            setFormValue('wandererastro-box-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('wandererastro-box-index', config.boxIndex);
+            } else if (connType === 'serial') {
+                setFormValue('wandererastro-box-port-path', config.portPath);
+                setFormValue('wandererastro-box-baud-rate', config.baudRate);
+            }
+            const wandererBoxConnTypeEl = document.getElementById('wandererastro-box-connection-type');
+            if (wandererBoxConnTypeEl) {
+                wandererBoxConnTypeEl.dispatchEvent(new Event('change'));
+            }
+        } else {
+            setFormValue('wandererastro-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('wandererastro-cover-index', config.coverIndex);
+            } else if (connType === 'serial') {
+                setFormValue('wandererastro-port-path', config.portPath);
+                setFormValue('wandererastro-baud-rate', config.baudRate);
+            }
+            const wandererConnTypeEl = document.getElementById('wandererastro-connection-type');
+            if (wandererConnTypeEl) {
+                wandererConnTypeEl.dispatchEvent(new Event('change'));
+            }
         }
     }
     setFormValue('camera-index', config.cameraIndex);
@@ -1673,8 +1735,11 @@ function updateVendorOptions() {
     }
     const qhyOption = vendorSelect.querySelector('option[value="qhy"]');
     if (qhyOption) {
-        qhyOption.disabled = !isCamera;
-        qhyOption.hidden = !isCamera;
+        // QHY provides cameras and, on models like the miniCam8M, an
+        // integrated CFW (filter wheel) sharing the camera's SDK handle.
+        const qhyAllowed = isCamera || isFilterWheel;
+        qhyOption.disabled = !qhyAllowed;
+        qhyOption.hidden = !qhyAllowed;
     }
     const svbonyOption = vendorSelect.querySelector('option[value="svbony"]');
     if (svbonyOption) {
@@ -1712,9 +1777,12 @@ function updateVendorOptions() {
     }
     const wandererastroOption = vendorSelect.querySelector('option[value="wandererastro"]');
     if (wandererastroOption) {
-        // WandererAstro provides the WandererCover V4 (CoverCalibrator).
-        wandererastroOption.disabled = !isCoverCalibrator;
-        wandererastroOption.hidden = !isCoverCalibrator;
+        // WandererAstro provides the WandererCover V4 (CoverCalibrator), the
+        // WandererRotator Mini (Rotator), the SFW filter wheels (FilterWheel)
+        // and the WandererBox Pro V3 power box (Switch).
+        const wandererastroAllowed = isCoverCalibrator || isRotator || isFilterWheel || isSwitch;
+        wandererastroOption.disabled = !wandererastroAllowed;
+        wandererastroOption.hidden = !wandererastroAllowed;
     }
 
     if (!isTelescope && !isSwitch && vendorSelect.value === 'ioptron') {
@@ -1733,7 +1801,7 @@ function updateVendorOptions() {
         vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
     }
-    if (!isCamera && vendorSelect.value === 'qhy') {
+    if (!isCamera && !isFilterWheel && vendorSelect.value === 'qhy') {
         vendorSelect.value = '';
     }
     if (!isCamera && vendorSelect.value === 'svbony') {
@@ -1751,7 +1819,7 @@ function updateVendorOptions() {
     if (!isFocuser && !isCoverCalibrator && vendorSelect.value === 'gemini') {
         vendorSelect.value = '';
     }
-    if (!isCoverCalibrator && vendorSelect.value === 'wandererastro') {
+    if (!isCoverCalibrator && !isRotator && !isFilterWheel && !isSwitch && vendorSelect.value === 'wandererastro') {
         vendorSelect.value = '';
     }
 
@@ -1791,11 +1859,13 @@ document.getElementById('vendor').addEventListener('change', function() {
         updateGeminiConfigFields();
     } else if (vendor === 'wandererastro') {
         document.getElementById('wandererastro-config').style.display = 'block';
+        updateWandererastroConfigFields();
     }
 
     updateZwoConfigFields();
     updateTouptekConfigFields();
     updatePlayerOneConfigFields();
+    updateQhyConfigFields();
     updateAutoNumbering();
 });
 
@@ -1820,6 +1890,37 @@ function updateGeminiConfigFields() {
     // (matches the QHY camera/filterwheel split from PR #142).
     setFieldGroupEnabled(focuserSection, !isCoverCalibrator);
     setFieldGroupEnabled(flatPanelSection, isCoverCalibrator);
+}
+
+// WandererAstro covers three device types from one vendor config block: the
+// WandererCover V4 (covercalibrator), the WandererRotator Mini (rotator) and
+// the SFW filter wheels (filterwheel). Show the relevant sub-section based on
+// the selected device type.
+function updateWandererastroConfigFields() {
+    const coverSection = document.getElementById('wandererastro-cover-fields');
+    const rotatorSection = document.getElementById('wandererastro-rotator-fields');
+    const filterwheelSection = document.getElementById('wandererastro-filterwheel-fields');
+    const boxSection = document.getElementById('wandererastro-box-fields');
+    if (!coverSection || !rotatorSection || !filterwheelSection || !boxSection) {
+        return;
+    }
+    const deviceTypeSelect = document.getElementById('device-type');
+    const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
+    const isRotator = deviceType === 'rotator';
+    const isFilterWheel = deviceType === 'filterwheel';
+    const isBox = deviceType === 'switch';
+    const isCover = !isRotator && !isFilterWheel && !isBox;
+    coverSection.style.display = isCover ? 'block' : 'none';
+    rotatorSection.style.display = isRotator ? 'block' : 'none';
+    filterwheelSection.style.display = isFilterWheel ? 'block' : 'none';
+    boxSection.style.display = isBox ? 'block' : 'none';
+    // Disable the hidden sections' inputs too (not just display:none) so
+    // stale portPath/baudRate/connectionType values can't leak into the
+    // other device type's config (matches the Gemini/QHY split pattern).
+    setFieldGroupEnabled(coverSection, isCover);
+    setFieldGroupEnabled(rotatorSection, isRotator);
+    setFieldGroupEnabled(filterwheelSection, isFilterWheel);
+    setFieldGroupEnabled(boxSection, isBox);
 }
 
 // iOptron covers two device types from one vendor config block: the mount
@@ -1902,6 +2003,33 @@ if (geminiFlatPanelConnectionType) {
     });
 }
 
+const wandererastroRotatorConnectionType = document.getElementById('wandererastro-rotator-connection-type');
+if (wandererastroRotatorConnectionType) {
+    wandererastroRotatorConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('wandererastro-rotator-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('wandererastro-rotator-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
+const wandererastroFilterwheelConnectionType = document.getElementById('wandererastro-filterwheel-connection-type');
+if (wandererastroFilterwheelConnectionType) {
+    wandererastroFilterwheelConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('wandererastro-filterwheel-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('wandererastro-filterwheel-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
+const wandererastroBoxConnectionType = document.getElementById('wandererastro-box-connection-type');
+if (wandererastroBoxConnectionType) {
+    wandererastroBoxConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('wandererastro-box-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('wandererastro-box-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
 const wandererastroConnectionType = document.getElementById('wandererastro-connection-type');
 if (wandererastroConnectionType) {
     wandererastroConnectionType.addEventListener('change', function() {
@@ -1952,6 +2080,20 @@ const touptekFilterwheelSlotUI = createFilterwheelSlotUI({
     customInputId: 'touptek-filterwheel-slot-custom',
     slotListId: 'touptek-filterwheel-slot-list',
     namesTextareaId: 'touptek-filter-names'
+});
+
+const wandererFilterwheelSlotUI = createFilterwheelSlotUI({
+    countSelectId: 'wandererastro-filterwheel-slot-count',
+    customInputId: 'wandererastro-filterwheel-slot-custom',
+    slotListId: 'wandererastro-filterwheel-slot-list',
+    namesTextareaId: 'wandererastro-filter-names'
+});
+
+const qhyFilterwheelSlotUI = createFilterwheelSlotUI({
+    countSelectId: 'qhy-filterwheel-slot-count',
+    customInputId: 'qhy-filterwheel-slot-custom',
+    slotListId: 'qhy-filterwheel-slot-list',
+    namesTextareaId: 'qhy-filter-names'
 });
 
 const apertureDiameterInput = document.getElementById('aperture-diameter');
@@ -2364,6 +2506,26 @@ function updateTouptekConfigFields() {
     }
 }
 
+function updateQhyConfigFields() {
+    const deviceTypeSelect = document.getElementById('device-type');
+    if (!deviceTypeSelect) {
+        return;
+    }
+    const cameraFields = document.getElementById('qhy-camera-fields');
+    const filterwheelFields = document.getElementById('qhy-filterwheel-fields');
+    const deviceType = normalizeDeviceType(deviceTypeSelect.value);
+    const isCamera = deviceType === 'camera';
+    const isFilterWheel = deviceType === 'filterwheel';
+    if (cameraFields) {
+        cameraFields.style.display = isCamera ? 'block' : 'none';
+        setFieldGroupEnabled(cameraFields, isCamera);
+    }
+    if (filterwheelFields) {
+        filterwheelFields.style.display = isFilterWheel ? 'block' : 'none';
+        setFieldGroupEnabled(filterwheelFields, isFilterWheel);
+    }
+}
+
 function updatePlayerOneConfigFields() {
     const deviceTypeSelect = document.getElementById('device-type');
     if (!deviceTypeSelect) {
@@ -2689,6 +2851,21 @@ document.getElementById('device-form').addEventListener('submit', async function
                 }
             }
         }
+    } else if (deviceData.vendor === 'qhy' && normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
+        // Integrated CFW (e.g. miniCam8M): unique field names so hidden
+        // fields don't collide with the QHY camera device's own cameraId/
+        // cameraIndex when both sections are present in the same form.
+        const qhyCfwCameraId = formData.get('qhyCfwCameraId');
+        if (qhyCfwCameraId && qhyCfwCameraId.trim() !== '') {
+            deviceData.cameraId = qhyCfwCameraId.trim();
+        } else {
+            const qhyCfwCameraIndex = readOptionalNumber(formData, 'qhyCfwCameraIndex');
+            deviceData.cameraIndex = qhyCfwCameraIndex !== null ? qhyCfwCameraIndex : 0;
+        }
+        const qhyFilterNames = parseFilterNamesInput(formData.get('qhyFilterNames'), false);
+        if (qhyFilterNames.length > 0) {
+            deviceData.filterNames = qhyFilterNames;
+        }
     } else if (deviceData.vendor === 'qhy') {
         const qhyCameraId = formData.get('cameraId');
         if (qhyCameraId && qhyCameraId.trim() !== '') {
@@ -2811,6 +2988,52 @@ document.getElementById('device-form').addEventListener('submit', async function
         } else if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('portPath') || '';
             const baudRate = readOptionalNumber(formData, 'baudRate');
+            if (baudRate !== null) {
+                deviceData.baudRate = baudRate;
+            }
+        }
+    } else if (deviceData.vendor === 'wandererastro' && normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
+        const wandererFwConnType = document.getElementById('wandererastro-filterwheel-connection-type');
+        deviceData.connectionType = wandererFwConnType ? wandererFwConnType.value : 'auto';
+        if (deviceData.connectionType === 'auto') {
+            const wheelIndex = readOptionalNumber(formData, 'wandererastroFilterwheelIndex');
+            deviceData.wandererFilterwheelIndex = wheelIndex !== null ? wheelIndex : 0;
+        } else if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('wandererastroFilterwheelPortPath') || '';
+            const baudRate = readOptionalNumber(formData, 'wandererastroFilterwheelBaudRate');
+            if (baudRate !== null) {
+                deviceData.baudRate = baudRate;
+            }
+        }
+        // Raw token (expandShorthand=false): the server-side C++ expansion is
+        // slot-count-aware and handles "LRGBSHOC" itself.
+        const wandererFilterNames = parseFilterNamesInput(formData.get('wandererastroFilterNames'), false);
+        if (wandererFilterNames.length > 0) {
+            deviceData.filterNames = wandererFilterNames;
+        }
+    } else if (deviceData.vendor === 'wandererastro' && normalizeDeviceType(deviceData.deviceType) === 'rotator') {
+        const wandererRotatorConnType = document.getElementById('wandererastro-rotator-connection-type');
+        deviceData.connectionType = wandererRotatorConnType ? wandererRotatorConnType.value : 'auto';
+        if (deviceData.connectionType === 'auto') {
+            const rotatorIndex = readOptionalNumber(formData, 'wandererastroRotatorIndex');
+            deviceData.rotatorIndex = rotatorIndex !== null ? rotatorIndex : 0;
+        } else if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('wandererastroRotatorPortPath') || '';
+            const baudRate = readOptionalNumber(formData, 'wandererastroRotatorBaudRate');
+            if (baudRate !== null) {
+                deviceData.baudRate = baudRate;
+            }
+        }
+    } else if (deviceData.vendor === 'wandererastro' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
+        deviceData.switchType = 'wandererbox-pro-v3';
+        const wandererBoxConnType = document.getElementById('wandererastro-box-connection-type');
+        deviceData.connectionType = wandererBoxConnType ? wandererBoxConnType.value : 'auto';
+        if (deviceData.connectionType === 'auto') {
+            const boxIndex = readOptionalNumber(formData, 'wandererastroBoxIndex');
+            deviceData.boxIndex = boxIndex !== null ? boxIndex : 0;
+        } else if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('wandererastroBoxPortPath') || '';
+            const baudRate = readOptionalNumber(formData, 'wandererastroBoxBaudRate');
             if (baudRate !== null) {
                 deviceData.baudRate = baudRate;
             }
