@@ -433,6 +433,22 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
+### WandererAstro
+
+| Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
+|-------------|--------------|------------|------------------|--------|
+| WandererBox Pro V3 Power Box | WandererBox Pro V3 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/WandererAstro/WandererBox%20Pro%20V3/) |
+
+<details>
+<summary><strong>WandererAstro Switch Driver Notes</strong></summary>
+
+- **WandererBox Pro V3** (`vendor: wandererastro`, `deviceType: switch`, `switchType: wandererbox-pro-v3`) — the 11-port power box as 24 Alpaca switches: DC1/DC2 always-on rails (read-only), DC3-4 adjustable output (on/off + 5.0–13.2 V setpoint, 0.1 V steps), DC5/6/7 PWM dew heaters (0–255), DC8-9/DC10-11 switched pairs, five USB power groups, and ten read-only sensor switches (input voltage, three currents, ambient temp/humidity, dew point, three temperature probes; unconnected sensors report -127 °C / 0). Dew-heater auto modes (dew-point/constant-temperature) stay device-side — set them in WandererEmpire; the driver writes manual PWM only, matching the vendor's own ASCOM driver.
+  - **Protocol**: WandererBox streamed-status serial protocol at 19200 8N1 (no SDK). Reference: INDI `wandererbox_pro_v3`.
+  - **Tested model**: WandererBox Pro V3 (firmware 20250410) on Linux arm64 (Debian 13).
+  - **ConformU** 4.4.0 — ✓ 0 errors, 0 issues, 0 timing issues. [Report](AlpacaCore/conformu/WandererAstro/WandererBox%20Pro%20V3/Linux-arm64.txt).
+
+</details>
+
 ### ZWO
 
 | Device Type | Model Series | Connection | Linux<br>(arm64) | Status |

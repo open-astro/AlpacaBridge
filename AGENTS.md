@@ -1033,7 +1033,7 @@ Protocol: no SDK or published spec exists for this model. Reverse-engineered ent
 - Default baud rate 9600 (8N1); configurable 9600/19200/38400/57600/115200 same as the focuser, though only 9600 has been confirmed against real hardware.
 - ConformU 4.4.0 validated on Debian 13 arm64: **0 errors, 0 issues, 0 timing issues**. Results in `AlpacaCore/conformu/Gemini/Astro Flat Panel Cover Lite/`.
 
-### WandererAstro (WandererCover V4, WandererRotator Mini, SFW filter wheels)
+### WandererAstro (WandererCover V4, WandererRotator Mini, SFW filter wheels, WandererBox Pro V3)
 
 Devices: CoverCalibrator, Rotator (the project's first — the generic CoverCalibrator dispatch already existed in `AlpacaHTTP/src/http/router.cpp`; only the vendor instantiation block + web UI were new). The WandererCover V4 is a motorized dust cover combined with an EL flat panel.
 
@@ -1075,6 +1075,18 @@ Connection types: USB serial (CH340 adapter, vendor `1a86`) only. No WiFi. Fixed
 - **Position -1 while moving**: the driver records the commanded target; Position returns -1 until the streamed position matches, then latches idle (so a later out-of-band position change reads as the live slot, not a stuck move). Slot count is statically 8 for the whole lineup, so the full Position range is validated as InvalidValue BEFORE the connection check, and names/offsets state is built at construction.
 - Filter Names/FocusOffsets are driver-side (config-persisted) like ZWO/PlayerOne — the on-device single-letter names are parsed from the stream but not used or written back.
 - ConformU 4.4.0 validated on real hardware (SFW36S, firmware 20260124, Debian 13 arm64): **0 errors, 0 issues, 0 timing issues** on the first run. Results in `AlpacaCore/conformu/WandererAstro/SFW36S/Linux-arm64.txt`.
+
+**WandererBox Pro V3 (power box)** — Switch, `wandererastro_box_switch_driver` + `wandererastro_box_protocol_wrapper`. Protocol reference: INDI `drivers/auxiliary/wandererbox_pro_v3.cpp`. USB serial only (CH340, 19200 8N1). The vendor's WandererEmpire app and their own ASCOM driver were used as the surface reference (screenshots verified 2026-07-26).
+
+- **Streaming, token-based like the SFW**: continuous 23-field 'A'-delimited frame: `ZXWBProV3`A`<fw>`A`<probe1>`A`<probe2>`A`<probe3>`A`<DHT hum>`A`<DHT temp>`A`<total A>`A`<19V A>`A`<DC3-4 A>`A`<input V>`A`<USB3.1-1>`A`<USB3.1-2>`A`<USB3.1-3>`A`<USB2 1-3>`A`<USB2 4-6>`A`<DC3-4>`A`<DC5>`A`<DC6>`A`<DC7>`A`<DC8-9>`A`<DC10-11>`A`<DC3-4 set×10>`. All values raw except the DC3-4 setpoint (÷10). Identity must be exactly `ZXWBProV3` — the Plus V3 (`ZXWBPlusV3`) is a DIFFERENT port layout with its own INDI driver; reject it rather than mis-mapping ports. Dew point is NOT in the frame — compute via the Magnus formula from the DHT22 pair (matches INDI/vendor app).
+- **Commands** are `\n`-terminated fire-and-forget: DC3-4 `101`/`100`, DC8-9 `201`/`200`, DC10-11 `211`/`210`, USB3.1-1/2/3 `11x`/`12x`/`13x`, USB2.0(1-3) `14x`, USB2.0(4-6) `15x`, PWM `<ch><%03d>` (ch 5/6/7, 0-255), DC3-4 voltage `20<%03d>` (volts×10, floor 5.0V per INDI/vendor UI), current calibration `66300744` (not exposed via Alpaca).
+- **Switch surface**: 24 ids — outputs 0-13 (vendor ASCOM driver ordering: DC1/DC2 read-only always-on gauges first), sensors 14-23 as READ-ONLY switches. Sensors can't go in `DeviceState` (the `SwitchDriver` base `get_device_state()` is `override final` and only reports per-switch members), so read-only switch values are the pattern for sensor telemetry. Sensor [Min,Max] ranges must cover error sentinels (DS18B20 unconnected probes report -127/85 °C — range floor -273.15 covers both) or ConformU's value-in-range check fails.
+- **Commanded-value semantics on writable outputs** (cover/ETA lesson): the frame lags a command by up to a frame period, ConformU reads back microseconds after writing. Writes quantise to the switch step before commanding/recording.
+- **Firmware floor 20240216 is a WARN, not a reject** (INDI behaviour): older firmware only lacks calibrated current readings.
+- **Firmware streams literal `nan` for an absent DHT22** (found via ConformU round 1, firmware 20250410): `std::stod("nan")` parses successfully to NaN, nlohmann::json serializes NaN as JSON `null`, and ConformU's DeviceState parser crashes on it ("Object reference not set"). Sanitize ALL non-finite sensor values at frame parse (temps/dew point → -127, humidity/power → 0). General lesson for any driver exposing parsed floats via DeviceState or switch values.
+- **Step-quantisation FP accumulation** (ConformU round 1): `min + round((v-min)/step)*step` at v=Max produced 13.200000000000001 > 13.2 and failed the wrapper's range check exactly at the boundary ConformU tests. Clamp the quantised value into [min, max].
+- ConformU 4.4.0 validated on real hardware (WandererBox Pro V3, firmware 20250410, Debian 13 arm64): **0 errors, 0 issues, 0 timing issues**. Results in `AlpacaCore/conformu/WandererAstro/WandererBox Pro V3/Linux-arm64.txt`. Round 1 had the two issues above; round 2 was clean.
+- **`switchType` discriminator** (`wandererbox-pro-v3`) in the router config from day one — the parked ETA tilt adjuster branch will add `eta` as a second backend under (wandererastro, switch); dew-heater auto modes (dew-point/constant-temp) stay device-side per the runtime-only thermal policy (the vendor's own ASCOM driver also only writes Manual Mode).
 
 ### WeeWX
 

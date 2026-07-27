@@ -329,6 +329,7 @@ const INDEX_FIELDS = [
     { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
     { fieldId: 'wandererastro-rotator-index', vendor: 'wandererastro', deviceType: 'rotator', configKey: 'rotatorIndex' },
     { fieldId: 'wandererastro-filterwheel-index', vendor: 'wandererastro', deviceType: 'filterwheel', configKey: 'wandererFilterwheelIndex' },
+    { fieldId: 'wandererastro-box-index', vendor: 'wandererastro', deviceType: 'switch', configKey: 'boxIndex' },
 ];
 
 // Lowest unused value of field.configKey across already-configured devices that
@@ -938,6 +939,18 @@ function startEditDevice(device) {
             const wandererRotatorConnTypeEl = document.getElementById('wandererastro-rotator-connection-type');
             if (wandererRotatorConnTypeEl) {
                 wandererRotatorConnTypeEl.dispatchEvent(new Event('change'));
+            }
+        } else if (normalizeDeviceType(config.deviceType) === 'switch') {
+            setFormValue('wandererastro-box-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('wandererastro-box-index', config.boxIndex);
+            } else if (connType === 'serial') {
+                setFormValue('wandererastro-box-port-path', config.portPath);
+                setFormValue('wandererastro-box-baud-rate', config.baudRate);
+            }
+            const wandererBoxConnTypeEl = document.getElementById('wandererastro-box-connection-type');
+            if (wandererBoxConnTypeEl) {
+                wandererBoxConnTypeEl.dispatchEvent(new Event('change'));
             }
         } else {
             setFormValue('wandererastro-connection-type', connType);
@@ -1765,8 +1778,9 @@ function updateVendorOptions() {
     const wandererastroOption = vendorSelect.querySelector('option[value="wandererastro"]');
     if (wandererastroOption) {
         // WandererAstro provides the WandererCover V4 (CoverCalibrator), the
-        // WandererRotator Mini (Rotator) and the SFW filter wheels (FilterWheel).
-        const wandererastroAllowed = isCoverCalibrator || isRotator || isFilterWheel;
+        // WandererRotator Mini (Rotator), the SFW filter wheels (FilterWheel)
+        // and the WandererBox Pro V3 power box (Switch).
+        const wandererastroAllowed = isCoverCalibrator || isRotator || isFilterWheel || isSwitch;
         wandererastroOption.disabled = !wandererastroAllowed;
         wandererastroOption.hidden = !wandererastroAllowed;
     }
@@ -1805,7 +1819,7 @@ function updateVendorOptions() {
     if (!isFocuser && !isCoverCalibrator && vendorSelect.value === 'gemini') {
         vendorSelect.value = '';
     }
-    if (!isCoverCalibrator && !isRotator && !isFilterWheel && vendorSelect.value === 'wandererastro') {
+    if (!isCoverCalibrator && !isRotator && !isFilterWheel && !isSwitch && vendorSelect.value === 'wandererastro') {
         vendorSelect.value = '';
     }
 
@@ -1886,23 +1900,27 @@ function updateWandererastroConfigFields() {
     const coverSection = document.getElementById('wandererastro-cover-fields');
     const rotatorSection = document.getElementById('wandererastro-rotator-fields');
     const filterwheelSection = document.getElementById('wandererastro-filterwheel-fields');
-    if (!coverSection || !rotatorSection || !filterwheelSection) {
+    const boxSection = document.getElementById('wandererastro-box-fields');
+    if (!coverSection || !rotatorSection || !filterwheelSection || !boxSection) {
         return;
     }
     const deviceTypeSelect = document.getElementById('device-type');
     const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
     const isRotator = deviceType === 'rotator';
     const isFilterWheel = deviceType === 'filterwheel';
-    const isCover = !isRotator && !isFilterWheel;
+    const isBox = deviceType === 'switch';
+    const isCover = !isRotator && !isFilterWheel && !isBox;
     coverSection.style.display = isCover ? 'block' : 'none';
     rotatorSection.style.display = isRotator ? 'block' : 'none';
     filterwheelSection.style.display = isFilterWheel ? 'block' : 'none';
+    boxSection.style.display = isBox ? 'block' : 'none';
     // Disable the hidden sections' inputs too (not just display:none) so
     // stale portPath/baudRate/connectionType values can't leak into the
     // other device type's config (matches the Gemini/QHY split pattern).
     setFieldGroupEnabled(coverSection, isCover);
     setFieldGroupEnabled(rotatorSection, isRotator);
     setFieldGroupEnabled(filterwheelSection, isFilterWheel);
+    setFieldGroupEnabled(boxSection, isBox);
 }
 
 // iOptron covers two device types from one vendor config block: the mount
@@ -2000,6 +2018,15 @@ if (wandererastroFilterwheelConnectionType) {
         const type = this.value;
         document.getElementById('wandererastro-filterwheel-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
         document.getElementById('wandererastro-filterwheel-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
+const wandererastroBoxConnectionType = document.getElementById('wandererastro-box-connection-type');
+if (wandererastroBoxConnectionType) {
+    wandererastroBoxConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('wandererastro-box-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('wandererastro-box-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -2993,6 +3020,20 @@ document.getElementById('device-form').addEventListener('submit', async function
         } else if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('wandererastroRotatorPortPath') || '';
             const baudRate = readOptionalNumber(formData, 'wandererastroRotatorBaudRate');
+            if (baudRate !== null) {
+                deviceData.baudRate = baudRate;
+            }
+        }
+    } else if (deviceData.vendor === 'wandererastro' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
+        deviceData.switchType = 'wandererbox-pro-v3';
+        const wandererBoxConnType = document.getElementById('wandererastro-box-connection-type');
+        deviceData.connectionType = wandererBoxConnType ? wandererBoxConnType.value : 'auto';
+        if (deviceData.connectionType === 'auto') {
+            const boxIndex = readOptionalNumber(formData, 'wandererastroBoxIndex');
+            deviceData.boxIndex = boxIndex !== null ? boxIndex : 0;
+        } else if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('wandererastroBoxPortPath') || '';
+            const baudRate = readOptionalNumber(formData, 'wandererastroBoxBaudRate');
             if (baudRate !== null) {
                 deviceData.baudRate = baudRate;
             }
