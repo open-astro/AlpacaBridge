@@ -75,13 +75,23 @@ If an artifact with that name predates this build (timestamp check), rebuild rat
 
 ## Step 4 — Deploy and install
 
+The restart is structurally gated on the install having actually succeeded: the package must report `install ok installed` before `systemctl restart` runs. A partial install followed by a restart would leave the service running a broken package — never restart on a failed install.
+
 ```bash
 scp "../alpacabridge_${VERSION}_arm64.deb" <user>@<host>:/tmp/
 ssh <user>@<host> "sudo dpkg -i /tmp/alpacabridge_${VERSION}_arm64.deb || sudo apt-get -y -f install"
+ssh <user>@<host> "dpkg-query -W -f='\${Status} \${Version}\n' alpacabridge"
+```
+
+- `apt-get -f install` only runs if `dpkg -i` reported unmet dependencies.
+- **Gate:** the `dpkg-query` line must print `install ok installed <VERSION>` (the version just built). If the status is anything else (`half-configured`, `unpacked`, an older version), **STOP** — do NOT restart the service. Show the dpkg/apt output, leave the currently-running (old but working) service untouched, and tell the user the install failed.
+
+Only after the gate passes:
+
+```bash
 ssh <user>@<host> "sudo systemctl restart alpacabridge && rm -f /tmp/alpacabridge_${VERSION}_arm64.deb"
 ```
 
-- `apt-get -f install` only runs if `dpkg -i` reported unmet dependencies; if it runs, re-check with `dpkg -s alpacabridge` that the package ended up installed and configured.
 - If the service fails to restart, pull the journal and show it:
   ```bash
   ssh <user>@<host> "sudo journalctl -u alpacabridge -n 50 --no-pager"

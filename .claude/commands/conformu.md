@@ -131,9 +131,16 @@ Validation logs advertise the ConformU version they were produced with, so alway
 curl -sS --max-time 10 "https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest" | jq -r '.tag_name'
 ```
 
-(If the API call fails — offline, rate-limited — fall back to checking https://github.com/ASCOMInitiative/ConformU/tags, and if that's also unreachable, warn the user and proceed with the installed version.)
+(If the API call fails — offline, or the 60/hr unauthenticated rate limit when `/conformu` runs repeatedly in a session — fall back to checking https://github.com/ASCOMInitiative/ConformU/tags, and if that's also unreachable, warn the user and proceed with the installed version. When `gh` is authenticated, prefer `gh api repos/ASCOMInitiative/ConformU/releases/latest --jq .tag_name` to avoid the unauthenticated limit entirely.)
 
-Compare the two (tags may carry a `v` prefix — strip it before comparing):
+Compare the two **numerically per dot-segment, never lexicographically** — a string compare misjudges `4.9.0` vs `4.10.0`. Strip any `v` prefix, then:
+
+```bash
+# Prints the higher of the two versions
+printf '%s\n%s\n' "<installed>" "<latest>" | sort -V | tail -1
+```
+
+The installed version is current if and only if it equals the `sort -V` maximum:
 
 - **Installed == latest** → note the version and continue.
 - **Installed < latest** → offer to update before running:
