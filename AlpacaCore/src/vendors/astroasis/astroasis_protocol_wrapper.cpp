@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace alpacacore::vendor::astroasis {
@@ -74,6 +75,7 @@ public:
     ~Impl() { disconnect(); }
 
     void connect(const std::string& hid_path) {
+        std::lock_guard<std::mutex> lock(mutex_);
         hid_init();
         device_ = hid_open_path(hid_path.c_str());
         if (!device_) {
@@ -105,6 +107,7 @@ public:
     }
 
     void disconnect() {
+        std::lock_guard<std::mutex> lock(mutex_);
         // No protocol command here -- AOFocuserClose only tears down the OS
         // handle, it does not send anything to the device.
         if (device_) {
@@ -114,9 +117,13 @@ public:
         connected_ = false;
     }
 
-    bool is_connected() const { return connected_; }
+    bool is_connected() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return connected_;
+    }
 
     AstroasisProtocolWrapper::Status get_status() {
+        std::lock_guard<std::mutex> lock(mutex_);
         require_connected();
         // Try the older/shorter firmware response layout first, then the
         // newer/longer one -- see the header TODO: the vendor SDK instead
@@ -149,6 +156,7 @@ public:
     }
 
     int get_max_step() {
+        std::lock_guard<std::mutex> lock(mutex_);
         require_connected();
         std::vector<std::uint8_t> resp;
         try {
@@ -166,6 +174,7 @@ public:
     }
 
     void move_to(int position) {
+        std::lock_guard<std::mutex> lock(mutex_);
         require_connected();
         std::array<std::uint8_t, 4> payload{};
         const std::uint32_t be = to_big_endian(static_cast<std::uint32_t>(position));
@@ -174,6 +183,7 @@ public:
     }
 
     void stop_move() {
+        std::lock_guard<std::mutex> lock(mutex_);
         require_connected();
         send_command(0x37, nullptr, 0, 1, kDefaultTimeoutMs);
     }
@@ -227,6 +237,7 @@ private:
         return std::vector<std::uint8_t>(in.begin() + 2, in.begin() + 2 + expected_resp_len);
     }
 
+    mutable std::mutex mutex_;
     hid_device* device_ = nullptr;
     bool connected_ = false;
 };

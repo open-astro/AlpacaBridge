@@ -109,6 +109,7 @@ jobs:
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
+            libhidapi-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
             libcurl4-openssl-dev
@@ -229,6 +230,7 @@ jobs:
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
+            libhidapi-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
             libcurl4-openssl-dev
@@ -372,6 +374,7 @@ jobs:
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
+            libhidapi-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
             libcurl4-openssl-dev
