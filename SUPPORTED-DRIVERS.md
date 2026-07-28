@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-07-27
+## Updated 2026-07-28
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -216,7 +216,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB — controlled through the SAME physical handle as its paired QHY camera (not a separately enumerable device); the camera and filter wheel driver share one `OpenQHYCCD` via a reference-counted handle in `QHYSDKWrapper`, and can be connected/disconnected independently.
 - **Tested model**: miniCam8M integrated CFW (8-slot) on Linux arm64
 - **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues
-- **Position caching**: `GetQHYCCDCFWStatus` is a ~100-130ms hardware round trip on this SDK, which blows the ASCOM FAST (0.1s) target for the first `Position`/`DeviceState` read after `Connect`. The driver does one warm-up read during `Connect` (charged against the 1.0s STANDARD budget) and caches the settled position afterward. The cache is served only when no move is outstanding — while a move is pending, every read stays live and is compared against the commanded target before caching, because this SDK does **not** report a distinct "moving" sentinel the way ToupTek's does: `GetQHYCCDCFWStatus` reports the wheel's actual passing position throughout the physical rotation (including intermediate slots and occasional `-1`) until it settles, so caching the first post-move reading unconditionally would freeze `Position` at a stale value and the wheel would never appear to arrive.
+- **Position caching**: `GetQHYCCDCFWStatus` is a ~100-130ms hardware round trip on this SDK, which blows the ASCOM FAST (0.1s) target for the first `Position`/`DeviceState` read after `Connect`. The driver does one warm-up read during `Connect` (charged against the 1.0s STANDARD budget) and caches the settled position afterward. The cache is served only when no move is outstanding — while a move is pending, every read stays live and is compared against the commanded target before caching, because this SDK does **not** report a distinct "moving" sentinel the way ToupTek's does: `GetQHYCCDCFWStatus` reports the wheel's actual passing position throughout the physical rotation (including intermediate slots and occasional `-1`) until it settles. A live read taken mid-move that doesn't match the commanded target is masked to `-1` rather than passed through raw — otherwise a client polling during the move can read a real but unrelated transit slot and mistake it for an erroneous arrival — and caching the first post-move reading unconditionally would still freeze `Position` at a stale value and the wheel would never appear to arrive.
 
 </details>
 

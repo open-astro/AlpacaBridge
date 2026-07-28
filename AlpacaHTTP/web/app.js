@@ -594,9 +594,15 @@ async function loadDevices() {
     }
 }
 
-function handleEditDeviceClick(event) {
+async function handleEditDeviceClick(event) {
     const button = event.currentTarget;
     const index = Number.parseInt(button.dataset.deviceIndex, 10);
+    // Re-fetch before opening the form: currentDevices is only populated on
+    // page load or after a submit from THIS tab, so a tab left open across an
+    // out-of-band config change (another tab, a direct API call) would
+    // otherwise populate the edit form from stale data and silently
+    // re-persist it over the newer config on save.
+    await loadDevices();
     const device = currentDevices[index];
     if (!device) {
         return;
