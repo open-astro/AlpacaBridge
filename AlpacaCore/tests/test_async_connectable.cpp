@@ -32,7 +32,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 
@@ -63,6 +65,12 @@ public:
             }
             connected_.store(false);  // cleared FIRST, before the "slow" teardown
             std::this_thread::sleep_for(op_delay_);
+            if (fail_disconnect_.load()) {
+                // Mirrors a throwing SDK close mid-teardown: connected_ is
+                // already cleared (AGENTS.md pattern) but the teardown did
+                // not complete.
+                throw std::runtime_error("simulated teardown failure");
+            }
             ++disconnect_completions_;
             return;
         }
@@ -81,6 +89,7 @@ public:
     void disconnect() { start_connection_task(false); }
 
     std::chrono::milliseconds op_delay_{50};
+    std::atomic<bool> fail_disconnect_{false};
     std::atomic<int> connect_completions_{0};
     std::atomic<int> disconnect_completions_{0};
 
@@ -166,4 +175,90 @@ TEST_CASE("AsyncConnectable - disconnect racing an in-flight connect is never dr
     // The device must end up disconnected: the deferred disconnect the task
     // tail runs after a no-op-looking connect completes.
     CHECK_FALSE(d.get_connected());
+}
+
+TEST_CASE("AsyncConnectable - disconnect/connect/disconnect chain lands disconnected", "[async_connectable][unit]") {
+    // Issue #136: the third-alternating-request reconciliation. A disconnect
+    // running, a connect queued against it, then a SECOND disconnect — the
+    // newest instruction must cancel the queued connect, or the tail
+    // reconnects against the caller's latest word.
+    TestConnectable d;
+    d.op_delay_ = 100ms;
+    d.connect();
+    wait_until_idle(d);
+    REQUIRE(d.get_connected());
+
+    d.disconnect();
+    std::this_thread::sleep_for(10ms);  // disconnect in flight
+    d.connect();                        // queued
+    std::this_thread::sleep_for(10ms);
+    d.disconnect();  // must cancel the queued connect
+
+    wait_until_idle(d);
+    CHECK_FALSE(d.get_connected());
+    CHECK(d.connect_completions_.load() == 1);  // the queued connect never ran
+}
+
+TEST_CASE("AsyncConnectable - failed disconnect drops a queued connect", "[async_connectable][unit]") {
+    // Issue #136: if the teardown throws with a pending_connect_ queued, the
+    // tail must NOT fire the connect right after the failed teardown — the
+    // hardware state is unknown. The dropped connect is visible (Connected
+    // stays false) and retryable.
+    TestConnectable d;
+    d.op_delay_ = 100ms;
+    d.connect();
+    wait_until_idle(d);
+    REQUIRE(d.get_connected());
+
+    d.fail_disconnect_.store(true);
+    d.disconnect();
+    std::this_thread::sleep_for(10ms);  // failing disconnect in flight
+    d.connect();                        // queued; must be dropped
+
+    wait_until_idle(d);
+    CHECK_FALSE(d.get_connecting());
+    CHECK(d.connect_completions_.load() == 1);  // no reconnect after the failed teardown
+}
+
+TEST_CASE("AsyncConnectable - lifecycle stress with chained pending flags", "[async_connectable][stress]") {
+    // TSan-covered regression for the pending_connect_ queuing path and the
+    // tail's chained-flag draining (issue #136): hammer alternating async
+    // requests from several threads while readers poll. Run under the
+    // sanitizers-tsan CI job; even without TSan this catches crashes, hangs,
+    // and std::terminate.
+    TestConnectable d;
+    d.op_delay_ = 2ms;
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 4; ++i) {
+        threads.emplace_back([&d, &stop, i]() {
+            int n = i;
+            while (!stop.load()) {
+                ((n++ % 2) == 0) ? d.connect() : d.disconnect();
+                std::this_thread::sleep_for(1ms);
+            }
+        });
+    }
+    for (int i = 0; i < 2; ++i) {
+        threads.emplace_back([&d, &stop]() {
+            while (!stop.load()) {
+                static_cast<void>(d.get_connecting());
+                static_cast<void>(d.get_connected());
+                std::this_thread::sleep_for(1ms);
+            }
+        });
+    }
+    std::this_thread::sleep_for(750ms);
+    stop.store(true);
+    for (auto& t : threads) {
+        t.join();
+    }
+    wait_until_idle(d);
+
+    // Converge deterministically: the final instruction is a disconnect and
+    // it must win regardless of what the hammering left queued.
+    d.disconnect();
+    wait_until_idle(d);
+    CHECK_FALSE(d.get_connected());
+    CHECK_FALSE(d.get_connecting());
 }
