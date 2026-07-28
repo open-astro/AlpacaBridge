@@ -51,7 +51,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35  # v1
+      - uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b  # v1
         env:
           # allowed_non_write_users (below) auto-enables subprocess secret
           # scrubbing, which strips the GitHub token from the agent's
