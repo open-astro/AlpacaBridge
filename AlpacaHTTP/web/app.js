@@ -594,10 +594,26 @@ async function loadDevices() {
     }
 }
 
-function handleEditDeviceClick(event) {
+async function handleEditDeviceClick(event) {
     const button = event.currentTarget;
     const index = Number.parseInt(button.dataset.deviceIndex, 10);
-    const device = currentDevices[index];
+    const clickedDevice = currentDevices[index];
+    if (!clickedDevice) {
+        return;
+    }
+    const deviceType = clickedDevice.DeviceType;
+    const deviceNumber = clickedDevice.DeviceNumber;
+    // Re-fetch before opening the form: currentDevices is only populated on
+    // page load or after a submit from THIS tab, so a tab left open across an
+    // out-of-band config change (another tab, a direct API call) would
+    // otherwise populate the edit form from stale data and silently
+    // re-persist it over the newer config on save.
+    await loadDevices();
+    // Look up by stable identity (DeviceType + DeviceNumber) rather than the
+    // pre-reload positional index: an out-of-band change can alter the sort
+    // order of currentDevices, so the same index could now point at a
+    // different device.
+    const device = currentDevices.find(d => d.DeviceType === deviceType && d.DeviceNumber === deviceNumber);
     if (!device) {
         return;
     }

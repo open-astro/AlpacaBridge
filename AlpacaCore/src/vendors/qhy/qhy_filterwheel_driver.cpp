@@ -226,14 +226,21 @@ public:
         // -- ConformU flags it OUTSIDE the FAST 0.1s target). Only serve the
         // cache when NO move is outstanding (pending_target_ empty): while a
         // move is pending, this SDK call does not report a distinct "moving"
-        // sentinel the way ToupTek's does -- it keeps returning the PRE-move
-        // digit until the wheel physically arrives -- so caching the first
-        // post-move reading unconditionally (an earlier version of this code
-        // did exactly that) freezes Position at the stale old slot forever
-        // and the wheel never appears to arrive. Every read taken while
-        // pending_target_ is set is therefore always live and passed through
-        // unchanged; only once a live read matches the commanded target do
-        // we consider the wheel settled and start serving it from cache.
+        // sentinel the way ToupTek's does -- it reports whatever slot the
+        // wheel is physically passing (observed 4->3 move: 4,5,6,-1,0,1,2,3,
+        // taking the short way round) -- so caching the first post-move
+        // reading unconditionally (an earlier version of this code did
+        // exactly that) freezes Position at the stale old slot forever and
+        // the wheel never appears to arrive. Every read taken while
+        // pending_target_ is set is therefore always live; but a transit
+        // reading that doesn't match the commanded target is masked to -1
+        // (matches ToupTek AFW's Position semantics) rather than passed
+        // through raw, so an Alpaca client polling mid-move sees a clean
+        // "moving" signal instead of a real but unrelated slot number
+        // flashing by (NINA in particular read a mid-rotation digit as the
+        // arrived filter and surfaced a spurious mismatch error). Only once
+        // a live read matches the commanded target do we consider the wheel
+        // settled and start serving it from cache.
         if (cached_position_.has_value() && !pending_target_.has_value()) {
             return cached_position_.value();
         }
@@ -242,8 +249,9 @@ public:
             if (pos == pending_target_.value()) {
                 cached_position_ = pos;
                 pending_target_.reset();
+                return pos;
             }
-            return pos;
+            return -1;
         }
         if (pos >= 0) {
             cached_position_ = pos;
