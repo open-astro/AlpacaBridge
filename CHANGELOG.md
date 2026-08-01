@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.1.2] - UNRELEASED
+## [3.1.2] - 2026-07-31
 
 ### Fixed
 - **Per-client Connected registry: clients are now discriminated by peer address, not ClientID alone** (AlpacaHTTP, issue #163): the server stamps each request with the connection's peer address (`getpeername`, IPv4/IPv6) and the router keys Connected registrations by a length-prefixed (address, ClientID) composite — the prefix keeps an adversarial ClientID containing the delimiter from forging a collision with another client's key. Two clients that omit ClientID — or happen to reuse the same one — on different hosts now get distinct registry slots and can no longer shadow-disconnect each other (the last narrow recurrence of the issue #160 shared-device bug). Requests with no known peer address (unit tests, `getpeername` failure) degrade to the previous ClientID-only identity. Regression-tested with dual-host anonymous and same-ClientID scenarios.
