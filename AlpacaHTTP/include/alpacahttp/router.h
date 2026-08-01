@@ -216,10 +216,18 @@ private:
     void touch_client_connection(const void* device, const std::string& client_key);
     void clear_client_connections(const void* device);
 
+    // Serializes the connect/disconnect DECISION + driver call per device so
+    // a client connecting during another client's last-out teardown can't
+    // register against a link that is about to drop (review of #160). Held
+    // across the blocking connect/disconnect waits — same-device connection
+    // ops queue; everything else (other devices, GETs) is unaffected.
+    std::shared_ptr<std::mutex> device_connection_op_mutex(const void* device);
+
     // Guards client_connections_ only; never held across driver calls.
     mutable std::mutex client_connections_mutex_;
     std::unordered_map<const void*, std::unordered_map<std::string, std::chrono::steady_clock::time_point>>
         client_connections_;
+    std::unordered_map<const void*, std::shared_ptr<std::mutex>> connection_op_mutexes_;
 
     // Guards persisted_devices_ and persisted_devices_loaded_. Never held
     // together with server_info_mutex_ or across driver-registry calls.

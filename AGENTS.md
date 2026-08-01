@@ -622,8 +622,16 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   registrations idle >10 min expire so vanished clients can't pin the
   device connected; device removal clears the registry entry (the map is
   keyed by driver pointer — a later driver at a recycled address must not
-  inherit registrations). If you add any new endpoint that connects or
-  disconnects a device, route the decision through this registry.
+  inherit registrations). A per-device connection-op mutex
+  (`device_connection_op_mutex`) serializes the whole decision + driver call
+  so a client connecting during another client's last-out teardown can't
+  register against a link about to drop; it is held across the blocking
+  connect/disconnect waits (same-device ops queue) while the registry mutex
+  itself still never spans driver calls — and `clear_client_connections`
+  must never erase the op-mutex entry (it runs under the op mutex; erasing
+  would let a concurrent op mint a fresh mutex and bypass serialization).
+  If you add any new endpoint that connects or disconnects a device, route
+  the decision through this registry and take the op mutex.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging

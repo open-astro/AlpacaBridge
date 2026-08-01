@@ -1894,6 +1894,20 @@ void Router::touch_client_connection(const void* device, const std::string& clie
 void Router::clear_client_connections(const void* device) {
     std::lock_guard<std::mutex> lock(client_connections_mutex_);
     client_connections_.erase(device);
+    // connection_op_mutexes_ is deliberately NOT erased: this runs while the
+    // op mutex is held (dead-link sweep inside a PUT handler), and erasing
+    // would let a concurrent op mint a fresh mutex and bypass serialization.
+    // The map is bounded by registered-device count; a recycled pointer
+    // sharing an old mutex only means harmless extra serialization.
+}
+
+std::shared_ptr<std::mutex> Router::device_connection_op_mutex(const void* device) {
+    std::lock_guard<std::mutex> lock(client_connections_mutex_);
+    auto& mutex = connection_op_mutexes_[device];
+    if (!mutex) {
+        mutex = std::make_shared<std::mutex>();
+    }
+    return mutex;
 }
 
 Response Router::dispatch_device_method(
@@ -2016,8 +2030,15 @@ Response Router::dispatch_device_method(
                 // client in powers the upstream link, the last one out turns
                 // it off. A dead link (not mid-transition) invalidates stale
                 // registrations first so they can't block a fresh connect or
-                // pin the decision below.
+                // pin the decision below. The per-device op mutex makes the
+                // whole decision + driver call atomic against other clients'
+                // connection ops: without it, a client connecting during
+                // another client's last-out teardown window could register
+                // against a link that is about to drop and be left believing
+                // it holds a live connection.
                 const std::string client_key = extract_client_key(request);
+                const auto op_mutex = device_connection_op_mutex(device.get());
+                std::lock_guard<std::mutex> op_lock(*op_mutex);
                 if (!device->get_connected() && !device->get_connecting()) {
                     clear_client_connections(device.get());
                 }
@@ -2261,6 +2282,14 @@ Response Router::dispatch_device_method(
         else if (method_name == "connect") {
             if (request.method() == HttpMethod::PUT) {
                 // Same per-client refcounting as PUT connected (issue #160).
+                // Deliberately NOT the poll/unregister-on-failure path used by
+                // PUT connected: Platform 7 Connect must return immediately,
+                // with completion observed via Connecting. If the async
+                // connect fails, this client's registration is a phantom until
+                // the dead-link sweep clears it — harmless, since GET
+                // connected ANDs the registration with real device state.
+                const auto op_mutex = device_connection_op_mutex(device.get());
+                std::lock_guard<std::mutex> op_lock(*op_mutex);
                 if (!device->get_connected() && !device->get_connecting()) {
                     clear_client_connections(device.get());
                 }
@@ -2275,6 +2304,8 @@ Response Router::dispatch_device_method(
         }
         else if (method_name == "disconnect") {
             if (request.method() == HttpMethod::PUT) {
+                const auto op_mutex = device_connection_op_mutex(device.get());
+                std::lock_guard<std::mutex> op_lock(*op_mutex);
                 if (!device->get_connected() && !device->get_connecting()) {
                     clear_client_connections(device.get());
                 }
