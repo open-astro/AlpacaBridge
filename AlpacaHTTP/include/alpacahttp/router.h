@@ -26,11 +26,14 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 
+#include <chrono>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "request.h"
@@ -199,6 +202,25 @@ private:
         std::uint32_t client_tx_id,
         std::uint32_t server_tx_id
     );
+
+    // Per-client Connected tracking (issue #160). Alpaca allows several
+    // clients to share one device (imaging app + guider on the same mount);
+    // the upstream link must only be torn down when the LAST client
+    // disconnects. Keyed by driver instance; the inner map records each
+    // ClientID's last-seen time so registrations from vanished clients can
+    // expire instead of pinning the device connected forever.
+    std::size_t register_client_connection(const void* device, const std::string& client_key);
+    std::size_t unregister_client_connection(const void* device, const std::string& client_key);
+    std::size_t count_client_connections(const void* device);
+    bool client_connection_registered(const void* device, const std::string& client_key);
+    void touch_client_connection(const void* device, const std::string& client_key);
+    void clear_client_connections(const void* device);
+
+    // Guards client_connections_ only; never held across driver calls.
+    mutable std::mutex client_connections_mutex_;
+    std::unordered_map<const void*,
+                       std::unordered_map<std::string, std::chrono::steady_clock::time_point>>
+        client_connections_;
 
     // Guards persisted_devices_ and persisted_devices_loaded_. Never held
     // together with server_info_mutex_ or across driver-registry calls.

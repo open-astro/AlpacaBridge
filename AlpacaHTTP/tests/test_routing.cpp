@@ -129,6 +129,73 @@ private:
     std::optional<std::string> sdk_version_;
 };
 
+// Connectable stub for the per-client Connected refcounting tests
+// (issue #160): tracks real connect/disconnect calls so the tests can assert
+// the upstream link is only touched by the first client in / last client out.
+class ConnectStubDriver final : public alpacacore::AlpacaDriver {
+public:
+    explicit ConnectStubDriver(int number) : number_(number) {}
+
+    int get_device_number() const override { return number_; }
+    std::string get_name() const override { return "Connect Stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::CoverCalibrator; }
+    std::string get_unique_id() const override { return "connect-stub-" + std::to_string(number_); }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 1; }
+    bool get_connected() const override { return connected_; }
+    void set_connected(bool connected) override {
+        if (connected && !connected_) {
+            ++connect_count;
+        } else if (!connected && connected_) {
+            ++disconnect_count;
+        }
+        connected_ = connected;
+    }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return ""; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return ""; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return ""; }
+
+    // Simulate the upstream link dying underneath the bridge (USB unplug,
+    // serial wedge) without going through disconnect().
+    void drop_link() { connected_ = false; }
+
+    int connect_count = 0;
+    int disconnect_count = 0;
+
+private:
+    int number_;
+    bool connected_ = false;
+};
+
+// GET .../connected for a given ClientID (no ClientID when client_id is empty)
+// and return the reported Value.
+bool get_connected_value(alpacahttp::Router& router, const std::string& path_base,
+                         const std::string& client_id) {
+    std::string path = path_base + "/connected";
+    if (!client_id.empty()) {
+        path += "?ClientID=" + client_id;
+    }
+    const auto resp = route_request(router, "GET", path);
+    const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+    EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+    return json.value("Value", false);
+}
+
+// PUT .../connected with a form body; expects success unless expect_error.
+void put_connected(alpacahttp::Router& router, const std::string& path_base,
+                   const std::string& client_id, bool connected) {
+    const std::string body =
+        "Connected=" + std::string(connected ? "true" : "false") + "&ClientID=" + client_id;
+    const auto resp = route_request(router, "PUT", path_base + "/connected", body);
+    const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+    EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -1566,6 +1633,89 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9501);
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9502);
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9503);
+    }
+
+    // Issue #160: per-client Connected refcounting. Two clients sharing one
+    // device (imaging app + guider on the same mount): the first client in
+    // powers the upstream link, the last one out tears it down, and one
+    // client's disconnect must never take the device away from the other.
+    {
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9701);
+        EXPECT(registry.register_device(stub));
+        const std::string base = "/api/v1/covercalibrator/9701";
+
+        // Before anyone connects: false for everyone.
+        EXPECT(!get_connected_value(router, base, "1"));
+        EXPECT(!get_connected_value(router, base, ""));
+
+        // Client 1 connects: the device link comes up exactly once.
+        put_connected(router, base, "1", true);
+        EXPECT(stub->connect_count == 1);
+        EXPECT(get_connected_value(router, base, "1"));
+
+        // A client that never connected reads false even though the device is
+        // up; a ClientID-less probe reads raw device state (legacy behavior).
+        EXPECT(!get_connected_value(router, base, "2"));
+        EXPECT(get_connected_value(router, base, ""));
+
+        // Client 2 joins: no second upstream connect.
+        put_connected(router, base, "2", true);
+        EXPECT(stub->connect_count == 1);
+        EXPECT(get_connected_value(router, base, "2"));
+
+        // Client 2 leaves: the device MUST stay up for client 1 (the bug in
+        // issue #160 tore it down here).
+        put_connected(router, base, "2", false);
+        EXPECT(stub->disconnect_count == 0);
+        EXPECT(stub->get_connected());
+        EXPECT(get_connected_value(router, base, "1"));
+        EXPECT(!get_connected_value(router, base, "2"));
+
+        // Last client out: now the link is torn down.
+        put_connected(router, base, "1", false);
+        EXPECT(stub->disconnect_count == 1);
+        EXPECT(!stub->get_connected());
+
+        // Disconnecting a client that was never registered on a live device
+        // must not touch the link.
+        put_connected(router, base, "1", true);
+        EXPECT(stub->connect_count == 2);
+        put_connected(router, base, "99", false);
+        EXPECT(stub->disconnect_count == 1);
+        EXPECT(stub->get_connected());
+
+        // Upstream failure: the link dies underneath the bridge. Every
+        // client's registration is invalidated so all observers see the
+        // disconnect, and a reconnect works from a clean slate.
+        stub->drop_link();
+        EXPECT(!get_connected_value(router, base, "1"));
+        put_connected(router, base, "1", true);
+        EXPECT(stub->connect_count == 3);
+        EXPECT(get_connected_value(router, base, "1"));
+        put_connected(router, base, "1", false);
+        EXPECT(stub->disconnect_count == 2);
+
+        // Platform 7 connect/disconnect endpoints share the same refcount.
+        route_request(router, "PUT", base + "/connect", "ClientID=1");
+        route_request(router, "PUT", base + "/connect", "ClientID=2");
+        EXPECT(stub->connect_count == 4);
+        route_request(router, "PUT", base + "/disconnect", "ClientID=1");
+        EXPECT(stub->get_connected());
+        route_request(router, "PUT", base + "/disconnect", "ClientID=2");
+        EXPECT(!stub->get_connected());
+
+        // JSON PUT bodies carry ClientID too (numeric JSON ClientID).
+        const auto resp = route_request(router, "PUT", base + "/connected",
+                                        R"({"Connected": true, "ClientID": 7})");
+        const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        EXPECT(get_connected_value(router, base, "7"));
+        EXPECT(!get_connected_value(router, base, "8"));
+        put_connected(router, base, "7", false);
+        EXPECT(!stub->get_connected());
+
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9701);
     }
 
     // Security: path traversal via the static-file handler must be rejected
