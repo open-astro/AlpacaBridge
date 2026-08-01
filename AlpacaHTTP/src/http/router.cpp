@@ -1814,8 +1814,7 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
 
 namespace {
 
-void prune_stale_client_connections(
-    std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
+void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
     const auto cutoff = std::chrono::steady_clock::now() - kClientConnectionStaleAfter;
     for (auto it = clients.begin(); it != clients.end();) {
         if (it->second < cutoff) {
@@ -1826,7 +1825,7 @@ void prune_stale_client_connections(
     }
 }
 
-} // namespace
+}  // namespace
 
 std::size_t Router::register_client_connection(const void* device, const std::string& client_key) {
     std::lock_guard<std::mutex> lock(client_connections_mutex_);
@@ -1964,11 +1963,9 @@ Response Router::dispatch_device_method(
                 } else {
                     // Per-client semantics: a client only reads true if IT
                     // connected, not merely because another client did.
-                    value = device->get_connected()
-                        && client_connection_registered(device.get(), client_key);
+                    value = device->get_connected() && client_connection_registered(device.get(), client_key);
                 }
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, value);
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, value);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -2052,9 +2049,8 @@ Response Router::dispatch_device_method(
                             "Connection failed",
                             alpacacore::AlpacaError::NotConnected);
                     }
-                } else if (!connected
-                           && unregister_client_connection(device.get(), client_key) == 0
-                           && device->get_connected()) {
+                } else if (!connected && unregister_client_connection(device.get(), client_key) == 0 &&
+                           device->get_connected()) {
                     // Last client out: tear down the upstream link. While other
                     // clients remain registered the device stays connected —
                     // one client's disconnect must not take the mount away

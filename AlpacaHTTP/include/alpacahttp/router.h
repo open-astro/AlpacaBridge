@@ -218,8 +218,7 @@ private:
 
     // Guards client_connections_ only; never held across driver calls.
     mutable std::mutex client_connections_mutex_;
-    std::unordered_map<const void*,
-                       std::unordered_map<std::string, std::chrono::steady_clock::time_point>>
+    std::unordered_map<const void*, std::unordered_map<std::string, std::chrono::steady_clock::time_point>>
         client_connections_;
 
     // Guards persisted_devices_ and persisted_devices_loaded_. Never held

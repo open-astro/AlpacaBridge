@@ -174,8 +174,7 @@ private:
 
 // GET .../connected for a given ClientID (no ClientID when client_id is empty)
 // and return the reported Value.
-bool get_connected_value(alpacahttp::Router& router, const std::string& path_base,
-                         const std::string& client_id) {
+bool get_connected_value(alpacahttp::Router& router, const std::string& path_base, const std::string& client_id) {
     std::string path = path_base + "/connected";
     if (!client_id.empty()) {
         path += "?ClientID=" + client_id;
@@ -187,10 +186,9 @@ bool get_connected_value(alpacahttp::Router& router, const std::string& path_bas
 }
 
 // PUT .../connected with a form body; expects success unless expect_error.
-void put_connected(alpacahttp::Router& router, const std::string& path_base,
-                   const std::string& client_id, bool connected) {
-    const std::string body =
-        "Connected=" + std::string(connected ? "true" : "false") + "&ClientID=" + client_id;
+void put_connected(alpacahttp::Router& router, const std::string& path_base, const std::string& client_id,
+                   bool connected) {
+    const std::string body = "Connected=" + std::string(connected ? "true" : "false") + "&ClientID=" + client_id;
     const auto resp = route_request(router, "PUT", path_base + "/connected", body);
     const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
     EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
@@ -1706,8 +1704,7 @@ int main() {
         EXPECT(!stub->get_connected());
 
         // JSON PUT bodies carry ClientID too (numeric JSON ClientID).
-        const auto resp = route_request(router, "PUT", base + "/connected",
-                                        R"({"Connected": true, "ClientID": 7})");
+        const auto resp = route_request(router, "PUT", base + "/connected", R"({"Connected": true, "ClientID": 7})");
         const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
         EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
         EXPECT(get_connected_value(router, base, "7"));
