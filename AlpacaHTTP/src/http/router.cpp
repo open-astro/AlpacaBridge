@@ -1850,20 +1850,6 @@ std::size_t Router::unregister_client_connection(const void* device, const std::
     return it->second.size();
 }
 
-std::size_t Router::count_client_connections(const void* device) {
-    std::lock_guard<std::mutex> lock(client_connections_mutex_);
-    auto it = client_connections_.find(device);
-    if (it == client_connections_.end()) {
-        return 0;
-    }
-    prune_stale_client_connections(it->second);
-    if (it->second.empty()) {
-        client_connections_.erase(it);
-        return 0;
-    }
-    return it->second.size();
-}
-
 bool Router::client_connection_registered(const void* device, const std::string& client_key) {
     std::lock_guard<std::mutex> lock(client_connections_mutex_);
     auto it = client_connections_.find(device);
@@ -1966,8 +1952,18 @@ Response Router::dispatch_device_method(
                 // A dead upstream link (failed or dropped, not mid-transition)
                 // invalidates every client's registration so all observers see
                 // the disconnect and reconnect explicitly (issue #160).
-                if (!device->get_connected() && !device->get_connecting()) {
-                    clear_client_connections(device.get());
+                // try_lock, not lock: if a connection op is in flight the
+                // state is mid-transition and the sweep must skip — and it
+                // must not run inside PUT's register-then-connect gap, where
+                // the device still looks dead and the sweep would wipe the
+                // registration just added. Never blocks a polling GET behind
+                // a slow connect.
+                const auto op_mutex = device_connection_op_mutex(device.get());
+                if (op_mutex->try_lock()) {
+                    std::lock_guard<std::mutex> op_lock(*op_mutex, std::adopt_lock);
+                    if (!device->get_connected() && !device->get_connecting()) {
+                        clear_client_connections(device.get());
+                    }
                 }
                 const std::string client_key = extract_client_key(request);
                 bool value;
@@ -5825,11 +5821,18 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
 
         // Drop any per-client Connected registrations before the driver goes
         // away; a re-registered device at the same address must start clean.
+        // The op mutex is held across clear + registry removal so an
+        // in-flight connection op on this device can't re-register between
+        // the clear and the removal (PR #161 review).
+        bool was_registered = false;
         if (auto device = registry.get_device(device_type, device_number)) {
+            const auto op_mutex = device_connection_op_mutex(device.get());
+            std::lock_guard<std::mutex> op_lock(*op_mutex);
             clear_client_connections(device.get());
+            was_registered = registry.unregister_device(device_type, device_number);
+        } else {
+            was_registered = registry.unregister_device(device_type, device_number);
         }
-
-        bool was_registered = registry.unregister_device(device_type, device_number);
 
         bool was_persisted = remove_persisted_device(vendor, device_type_str, device_number);
 

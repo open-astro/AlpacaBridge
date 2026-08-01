@@ -211,7 +211,6 @@ private:
     // expire instead of pinning the device connected forever.
     std::size_t register_client_connection(const void* device, const std::string& client_key);
     std::size_t unregister_client_connection(const void* device, const std::string& client_key);
-    std::size_t count_client_connections(const void* device);
     bool client_connection_registered(const void* device, const std::string& client_key);
     void touch_client_connection(const void* device, const std::string& client_key);
     void clear_client_connections(const void* device);
