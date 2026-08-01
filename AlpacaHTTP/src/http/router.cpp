@@ -845,12 +845,14 @@ ClientKey extract_client_key(const alpacahttp::Request& request) {
     if (!result.has_client_id) {
         result.key = kAnonymousClientKey;
     }
-    // Qualify by peer address (issue #163). Empty when unknown (unit tests,
-    // or getpeername failure) — those callers degrade to the pre-#163
-    // ClientID-only identity rather than all colliding on one "@" suffix.
-    if (!request.remote_address().empty()) {
-        result.key += "@" + request.remote_address();
-    }
+    // Qualify by peer address (issue #163). The address is length-prefixed so
+    // the composite key decodes unambiguously — ClientID is an arbitrary
+    // client-supplied string, so any plain delimiter could be forged into a
+    // collision with another client's (address, ClientID) pair. Empty when
+    // unknown (unit tests, or getpeername failure): "0##<id>" degrades to a
+    // ClientID-only identity that no address-qualified key can collide with.
+    const std::string& addr = request.remote_address();
+    result.key = std::to_string(addr.size()) + "#" + addr + "#" + result.key;
     return result;
 }
 
@@ -1918,12 +1920,28 @@ void Router::purge_device_connection_state(const void* device) {
     connection_op_mutexes_.erase(device);
 }
 
-std::shared_ptr<std::mutex> Router::device_connection_op_mutex(const void* device) {
+bool Router::device_is_current(const std::shared_ptr<alpacacore::AlpacaDriver>& device) {
+    auto& registry = alpacacore::management::DeviceRegistry::instance();
+    return registry.get_device(device->get_device_type(), device->get_device_number()) == device;
+}
+
+std::shared_ptr<std::mutex> Router::device_connection_op_mutex(
+    const std::shared_ptr<alpacacore::AlpacaDriver>& device) {
     std::lock_guard<std::mutex> lock(client_connections_mutex_);
-    auto& mutex = connection_op_mutexes_[device];
-    if (!mutex) {
-        mutex = std::make_shared<std::mutex>();
+    auto it = connection_op_mutexes_.find(device.get());
+    if (it != connection_op_mutexes_.end()) {
+        return it->second;
     }
+    // Insert only for a device the registry still resolves: a straggler op on
+    // a removed device (purge_device_connection_state already ran) gets an
+    // ephemeral mutex instead of re-inserting an entry nobody will ever reap
+    // (PR #164 review). Lock order: client_connections_mutex_ -> registry
+    // mutex; the registry never calls back into the router.
+    if (!device_is_current(device)) {
+        return std::make_shared<std::mutex>();
+    }
+    auto mutex = std::make_shared<std::mutex>();
+    connection_op_mutexes_[device.get()] = mutex;
     return mutex;
 }
 
@@ -1989,7 +2007,7 @@ Response Router::dispatch_device_method(
                 // the device still looks dead and the sweep would wipe the
                 // registration just added. Never blocks a polling GET behind
                 // a slow connect.
-                const auto op_mutex = device_connection_op_mutex(device.get());
+                const auto op_mutex = device_connection_op_mutex(device);
                 if (op_mutex->try_lock()) {
                     std::lock_guard<std::mutex> op_lock(*op_mutex, std::adopt_lock);
                     if (!device->get_connected() && !device->get_connecting()) {
@@ -2064,13 +2082,20 @@ Response Router::dispatch_device_method(
                 // against a link that is about to drop and be left believing
                 // it holds a live connection.
                 const std::string client_key = extract_client_key(request).key;
-                const auto op_mutex = device_connection_op_mutex(device.get());
+                const auto op_mutex = device_connection_op_mutex(device);
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
                 if (!device->get_connected() && !device->get_connecting()) {
                     clear_client_connections(device.get());
                 }
 
                 if (connected) {
+                    // Straggler guard: a request that fetched the device
+                    // before a concurrent removedevice must not re-insert a
+                    // registration nobody will reap (PR #164 review).
+                    if (!device_is_current(device)) {
+                        throw alpacacore::AlpacaException("Device has been removed",
+                                                          alpacacore::AlpacaError::InvalidOperation);
+                    }
                     register_client_connection(device.get(), client_key);
                 }
 
@@ -2315,10 +2340,15 @@ Response Router::dispatch_device_method(
                 // connect fails, this client's registration is a phantom until
                 // the dead-link sweep clears it — harmless, since GET
                 // connected ANDs the registration with real device state.
-                const auto op_mutex = device_connection_op_mutex(device.get());
+                const auto op_mutex = device_connection_op_mutex(device);
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
                 if (!device->get_connected() && !device->get_connecting()) {
                     clear_client_connections(device.get());
+                }
+                if (!device_is_current(device)) {
+                    // Straggler guard — see PUT connected (PR #164 review).
+                    throw alpacacore::AlpacaException("Device has been removed",
+                                                      alpacacore::AlpacaError::InvalidOperation);
                 }
                 register_client_connection(device.get(), extract_client_key(request).key);
                 if (!device->get_connected()) {
@@ -2331,7 +2361,7 @@ Response Router::dispatch_device_method(
         }
         else if (method_name == "disconnect") {
             if (request.method() == HttpMethod::PUT) {
-                const auto op_mutex = device_connection_op_mutex(device.get());
+                const auto op_mutex = device_connection_op_mutex(device);
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
                 if (!device->get_connected() && !device->get_connecting()) {
                     clear_client_connections(device.get());
@@ -5858,7 +5888,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         bool was_registered = false;
         if (auto device = registry.get_device(device_type, device_number)) {
             {
-                const auto op_mutex = device_connection_op_mutex(device.get());
+                const auto op_mutex = device_connection_op_mutex(device);
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
                 clear_client_connections(device.get());
                 was_registered = registry.unregister_device(device_type, device_number);
@@ -5867,11 +5897,11 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
             // out of the DeviceRegistry (issue #162: the op-mutex map grew
             // unboundedly across add/remove cycles). Must happen AFTER the
             // op lock is released — erasing under it is the mint-a-fresh-
-            // mutex trap — and is safe here because new requests can no
-            // longer resolve this device; a straggler op that fetched the
-            // device shared_ptr pre-removal at worst creates a short-lived
-            // entry at the dying pointer, which the clear-on-recycled-
-            // pointer path in the PUT handlers already handles.
+            // mutex trap. Stragglers that fetched the device shared_ptr
+            // pre-removal cannot re-insert entries after this: the
+            // device_is_current guards in device_connection_op_mutex and
+            // the registering handlers refuse a device the registry no
+            // longer resolves (PR #164 review).
             purge_device_connection_state(device.get());
         } else {
             was_registered = registry.unregister_device(device_type, device_number);

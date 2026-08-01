@@ -223,7 +223,13 @@ private:
     // register against a link that is about to drop (review of #160). Held
     // across the blocking connect/disconnect waits — same-device connection
     // ops queue; everything else (other devices, GETs) is unaffected.
-    std::shared_ptr<std::mutex> device_connection_op_mutex(const void* device);
+    std::shared_ptr<std::mutex> device_connection_op_mutex(const std::shared_ptr<alpacacore::AlpacaDriver>& device);
+
+    // True while `device` is still the DeviceRegistry's driver for its
+    // type/number. Straggler requests that fetched the shared_ptr before a
+    // removedevice must not re-insert registry/op-mutex entries for it —
+    // nothing would ever reap them (PR #164 review of issue #162).
+    static bool device_is_current(const std::shared_ptr<alpacacore::AlpacaDriver>& device);
 
     // Guards client_connections_ only; never held across driver calls.
     mutable std::mutex client_connections_mutex_;

@@ -610,10 +610,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   endpoint straight to `device->connect()`/`disconnect()`** (issue #160).
   Alpaca is designed for several clients sharing one device (imaging app +
   guider on the same mount), so the router keeps a per-device registry of
-  connected clients keyed `ClientID@peer-address` (issue #163: the server
-  stamps `Request::remote_address()` from `getpeername`, so ClientID-less
-  clients on different hosts get distinct anonymous slots; an empty address
-  degrades to ClientID-only) via `Router::register_client_connection` and
+  connected clients keyed by a length-prefixed `<addrlen>#<addr>#<ClientID>`
+  composite (issue #163: the server stamps `Request::remote_address()` from
+  `getpeername`, so ClientID-less clients on different hosts get distinct
+  anonymous slots; the length prefix keeps a client-supplied ClientID from
+  forging a collision with another (address, ClientID) pair, and an empty
+  address degrades to ClientID-only) via `Router::register_client_connection` and
   friends: first client in powers the upstream link, `PUT connected=false`
   (and Platform 7 `disconnect`) only tears it down when the LAST registered
   client leaves, and `GET connected` answers the *caller's* registration
@@ -635,7 +637,11 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   would let a concurrent op mint a fresh mutex and bypass serialization) —
   op-mutex entries are reaped only by `purge_device_connection_state`,
   called in `handle_remove_device` AFTER the op lock is released and the
-  device is out of the DeviceRegistry (issue #162). If you add any new
+  device is out of the DeviceRegistry (issue #162); `device_is_current`
+  guards every map insertion so a straggler request that fetched the device
+  shared_ptr before a removedevice can't re-insert entries nobody will reap
+  (registering handlers throw InvalidOperation, the op-mutex accessor hands
+  back an ephemeral mutex). If you add any new
   endpoint that connects or disconnects a device, route the decision
   through this registry and take the op mutex.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
