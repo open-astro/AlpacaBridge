@@ -214,6 +214,9 @@ private:
     bool client_connection_registered(const void* device, const std::string& client_key);
     void touch_client_connection(const void* device, const std::string& client_key);
     void clear_client_connections(const void* device);
+    // Erase BOTH maps' entries for a removed device (issue #162). Never call
+    // while the device's op mutex is held — see clear_client_connections.
+    void purge_device_connection_state(const void* device);
 
     // Serializes the connect/disconnect DECISION + driver call per device so
     // a client connecting during another client's last-out teardown can't

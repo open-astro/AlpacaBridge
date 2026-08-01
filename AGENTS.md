@@ -610,12 +610,15 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   endpoint straight to `device->connect()`/`disconnect()`** (issue #160).
   Alpaca is designed for several clients sharing one device (imaging app +
   guider on the same mount), so the router keeps a per-device registry of
-  connected ClientIDs (`Router::register_client_connection` and friends):
-  first client in powers the upstream link, `PUT connected=false` (and
-  Platform 7 `disconnect`) only tears it down when the LAST registered
+  connected clients keyed `ClientID@peer-address` (issue #163: the server
+  stamps `Request::remote_address()` from `getpeername`, so ClientID-less
+  clients on different hosts get distinct anonymous slots; an empty address
+  degrades to ClientID-only) via `Router::register_client_connection` and
+  friends: first client in powers the upstream link, `PUT connected=false`
+  (and Platform 7 `disconnect`) only tears it down when the LAST registered
   client leaves, and `GET connected` answers the *caller's* registration
-  AND-ed with device state (ClientID-less requests share one anonymous slot
-  and read raw device state on GET). Supporting rules: a dead upstream link
+  AND-ed with device state (ClientID-less requests read raw device state on
+  GET). Supporting rules: a dead upstream link
   (`!get_connected() && !get_connecting()`) clears the whole registry so
   every client observes the failure; a failed connect drops the caller's
   registration; any request from a client refreshes its registration, and
@@ -629,9 +632,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   connect/disconnect waits (same-device ops queue) while the registry mutex
   itself still never spans driver calls — and `clear_client_connections`
   must never erase the op-mutex entry (it runs under the op mutex; erasing
-  would let a concurrent op mint a fresh mutex and bypass serialization).
-  If you add any new endpoint that connects or disconnects a device, route
-  the decision through this registry and take the op mutex.
+  would let a concurrent op mint a fresh mutex and bypass serialization) —
+  op-mutex entries are reaped only by `purge_device_connection_state`,
+  called in `handle_remove_device` AFTER the op lock is released and the
+  device is out of the DeviceRegistry (issue #162). If you add any new
+  endpoint that connects or disconnects a device, route the decision
+  through this registry and take the op mutex.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging

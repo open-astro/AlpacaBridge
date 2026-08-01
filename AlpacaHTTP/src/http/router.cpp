@@ -793,9 +793,12 @@ std::optional<std::string> get_form_value(std::string_view body, const std::stri
 }
 
 // Per-client Connected tracking (issue #160): identify the caller by its
-// Alpaca ClientID (query param on GET, form/JSON field on PUT). Clients that
-// send no ClientID share a single anonymous slot so they still participate in
-// refcounting rather than tearing the device link down for everyone.
+// Alpaca ClientID (query param on GET, form/JSON field on PUT), qualified by
+// the connection's peer address (issue #163) so two clients on different
+// hosts that happen to share a ClientID — or both omit it — get distinct
+// registry slots. Clients that send no ClientID share one anonymous slot per
+// peer address, so they still participate in refcounting rather than tearing
+// the device link down for everyone.
 constexpr const char* kAnonymousClientKey = "<anonymous>";
 
 // A registration not refreshed within this window is considered abandoned
@@ -804,29 +807,51 @@ constexpr const char* kAnonymousClientKey = "<anonymous>";
 // device refreshes its registration, so ordinary polling keeps it alive.
 constexpr std::chrono::minutes kClientConnectionStaleAfter{10};
 
-std::string extract_client_key(const alpacahttp::Request& request) {
+// The caller's registry identity plus whether it actually supplied a
+// ClientID — GET connected falls back to raw device state for ClientID-less
+// probes, which can't be told from the key alone once the peer address is
+// folded in.
+struct ClientKey {
+    std::string key;
+    bool has_client_id = false;
+};
+
+ClientKey extract_client_key(const alpacahttp::Request& request) {
+    ClientKey result;
     if (request.method() == alpacahttp::HttpMethod::GET) {
         if (auto value = get_query_param_case_insensitive(request, "ClientID")) {
-            return *value;
+            result.key = *value;
+            result.has_client_id = true;
         }
-        return kAnonymousClientKey;
-    }
-    if (!request.body().empty()) {
+    } else if (!request.body().empty()) {
         if (auto json_opt = alpacahttp::parse_json(request.body())) {
             if (const auto* val = find_json_value(*json_opt, "ClientID")) {
                 if (val->is_string()) {
-                    return val->get<std::string>();
-                }
-                if (val->is_number_integer()) {
-                    return std::to_string(val->get<std::int64_t>());
+                    result.key = val->get<std::string>();
+                    result.has_client_id = true;
+                } else if (val->is_number_integer()) {
+                    result.key = std::to_string(val->get<std::int64_t>());
+                    result.has_client_id = true;
                 }
             }
         }
-        if (auto value = get_form_value(request.body(), "ClientID")) {
-            return *value;
+        if (!result.has_client_id) {
+            if (auto value = get_form_value(request.body(), "ClientID")) {
+                result.key = *value;
+                result.has_client_id = true;
+            }
         }
     }
-    return kAnonymousClientKey;
+    if (!result.has_client_id) {
+        result.key = kAnonymousClientKey;
+    }
+    // Qualify by peer address (issue #163). Empty when unknown (unit tests,
+    // or getpeername failure) — those callers degrade to the pre-#163
+    // ClientID-only identity rather than all colliding on one "@" suffix.
+    if (!request.remote_address().empty()) {
+        result.key += "@" + request.remote_address();
+    }
+    return result;
 }
 
 nlohmann::json make_log_level_payload() {
@@ -1777,7 +1802,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         // Any request from a registered client refreshes its Connected
         // registration so routine polling keeps it from expiring as stale
         // (issue #160).
-        touch_client_connection(device.get(), extract_client_key(request));
+        touch_client_connection(device.get(), extract_client_key(request).key);
 
         // Dispatch the method call
         return dispatch_device_method(device, match.method_name, request, client_tx_id, server_tx_id);
@@ -1887,6 +1912,12 @@ void Router::clear_client_connections(const void* device) {
     // sharing an old mutex only means harmless extra serialization.
 }
 
+void Router::purge_device_connection_state(const void* device) {
+    std::lock_guard<std::mutex> lock(client_connections_mutex_);
+    client_connections_.erase(device);
+    connection_op_mutexes_.erase(device);
+}
+
 std::shared_ptr<std::mutex> Router::device_connection_op_mutex(const void* device) {
     std::lock_guard<std::mutex> lock(client_connections_mutex_);
     auto& mutex = connection_op_mutexes_[device];
@@ -1965,15 +1996,15 @@ Response Router::dispatch_device_method(
                         clear_client_connections(device.get());
                     }
                 }
-                const std::string client_key = extract_client_key(request);
+                const ClientKey client = extract_client_key(request);
                 bool value;
-                if (client_key == kAnonymousClientKey) {
+                if (!client.has_client_id) {
                     // No ClientID → can't answer per-client; report device state.
                     value = device->get_connected();
                 } else {
                     // Per-client semantics: a client only reads true if IT
                     // connected, not merely because another client did.
-                    value = device->get_connected() && client_connection_registered(device.get(), client_key);
+                    value = device->get_connected() && client_connection_registered(device.get(), client.key);
                 }
                 AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, value);
                 response.set_body(alpaca_response);
@@ -2032,7 +2063,7 @@ Response Router::dispatch_device_method(
                 // another client's last-out teardown window could register
                 // against a link that is about to drop and be left believing
                 // it holds a live connection.
-                const std::string client_key = extract_client_key(request);
+                const std::string client_key = extract_client_key(request).key;
                 const auto op_mutex = device_connection_op_mutex(device.get());
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
                 if (!device->get_connected() && !device->get_connecting()) {
@@ -2289,7 +2320,7 @@ Response Router::dispatch_device_method(
                 if (!device->get_connected() && !device->get_connecting()) {
                     clear_client_connections(device.get());
                 }
-                register_client_connection(device.get(), extract_client_key(request));
+                register_client_connection(device.get(), extract_client_key(request).key);
                 if (!device->get_connected()) {
                     device->connect();
                 }
@@ -2307,7 +2338,7 @@ Response Router::dispatch_device_method(
                 }
                 // Last client out tears down the link; otherwise only this
                 // client's registration is dropped (issue #160).
-                if (unregister_client_connection(device.get(), extract_client_key(request)) == 0) {
+                if (unregister_client_connection(device.get(), extract_client_key(request).key) == 0) {
                     device->disconnect();
                 }
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
@@ -5826,10 +5857,22 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         // the clear and the removal (PR #161 review).
         bool was_registered = false;
         if (auto device = registry.get_device(device_type, device_number)) {
-            const auto op_mutex = device_connection_op_mutex(device.get());
-            std::lock_guard<std::mutex> op_lock(*op_mutex);
-            clear_client_connections(device.get());
-            was_registered = registry.unregister_device(device_type, device_number);
+            {
+                const auto op_mutex = device_connection_op_mutex(device.get());
+                std::lock_guard<std::mutex> op_lock(*op_mutex);
+                clear_client_connections(device.get());
+                was_registered = registry.unregister_device(device_type, device_number);
+            }
+            // Reap the device's registry + op-mutex entries now that it is
+            // out of the DeviceRegistry (issue #162: the op-mutex map grew
+            // unboundedly across add/remove cycles). Must happen AFTER the
+            // op lock is released — erasing under it is the mint-a-fresh-
+            // mutex trap — and is safe here because new requests can no
+            // longer resolve this device; a straggler op that fetched the
+            // device shared_ptr pre-removal at worst creates a short-lived
+            // entry at the dying pointer, which the clear-on-recycled-
+            // pointer path in the PUT handlers already handles.
+            purge_device_connection_state(device.get());
         } else {
             was_registered = registry.unregister_device(device_type, device_number);
         }

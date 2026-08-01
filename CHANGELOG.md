@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [3.1.2] - UNRELEASED
+
+### Fixed
+- **Per-client Connected registry: clients are now discriminated by peer address, not ClientID alone** (AlpacaHTTP, issue #163): the server stamps each request with the connection's peer address (`getpeername`, IPv4/IPv6) and the router keys Connected registrations by `ClientID@address`. Two clients that omit ClientID — or happen to reuse the same one — on different hosts now get distinct registry slots and can no longer shadow-disconnect each other (the last narrow recurrence of the issue #160 shared-device bug). Requests with no known peer address (unit tests, `getpeername` failure) degrade to the previous ClientID-only identity. Regression-tested with dual-host anonymous and same-ClientID scenarios.
+- **Per-device connection-op mutex map is now pruned on device removal** (AlpacaHTTP, issue #162): `handle_remove_device` reaps the device's registration and op-mutex entries after releasing the op lock (erasing under it would let a concurrent op mint a fresh mutex and bypass serialization), once the device can no longer be resolved from the registry — so repeated add/remove/reconfigure cycles no longer grow `connection_op_mutexes_` unboundedly over the process lifetime.
+
 ## [3.1.1] - 2026-07-31
 
 ### Fixed

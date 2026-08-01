@@ -58,7 +58,15 @@ public:
     std::string get_header(const std::string& key) const;
     bool has_header(const std::string& key) const;
 
+    // Peer address of the connection this request arrived on (set by the
+    // server after parse, not derived from request content). Empty when
+    // unknown (e.g. requests built directly in tests). Used to discriminate
+    // clients in the per-client Connected registry (issue #163).
+    const std::string& remote_address() const { return remote_address_; }
+    void set_remote_address(std::string address) { remote_address_ = std::move(address); }
+
 private:
+    std::string remote_address_;
     HttpMethod method_ = HttpMethod::UNKNOWN;
     std::string path_;
     std::string query_string_;
