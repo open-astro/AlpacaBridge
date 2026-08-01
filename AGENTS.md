@@ -606,6 +606,32 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `test_async_connectable.cpp` for the regression test. This is a router bug,
   not a driver bug: no per-driver fix can work around a caller that trusts
   the wrong flag.
+- **`Connected` is per-client, refcounted in the router — never wire an
+  endpoint straight to `device->connect()`/`disconnect()`** (issue #160).
+  Alpaca is designed for several clients sharing one device (imaging app +
+  guider on the same mount), so the router keeps a per-device registry of
+  connected ClientIDs (`Router::register_client_connection` and friends):
+  first client in powers the upstream link, `PUT connected=false` (and
+  Platform 7 `disconnect`) only tears it down when the LAST registered
+  client leaves, and `GET connected` answers the *caller's* registration
+  AND-ed with device state (ClientID-less requests share one anonymous slot
+  and read raw device state on GET). Supporting rules: a dead upstream link
+  (`!get_connected() && !get_connecting()`) clears the whole registry so
+  every client observes the failure; a failed connect drops the caller's
+  registration; any request from a client refreshes its registration, and
+  registrations idle >10 min expire so vanished clients can't pin the
+  device connected; device removal clears the registry entry (the map is
+  keyed by driver pointer — a later driver at a recycled address must not
+  inherit registrations). A per-device connection-op mutex
+  (`device_connection_op_mutex`) serializes the whole decision + driver call
+  so a client connecting during another client's last-out teardown can't
+  register against a link about to drop; it is held across the blocking
+  connect/disconnect waits (same-device ops queue) while the registry mutex
+  itself still never spans driver calls — and `clear_client_connections`
+  must never erase the op-mutex entry (it runs under the op mutex; erasing
+  would let a concurrent op mint a fresh mutex and bypass serialization).
+  If you add any new endpoint that connects or disconnects a device, route
+  the decision through this registry and take the op mutex.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging
