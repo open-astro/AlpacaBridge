@@ -30,11 +30,11 @@
 
 namespace {
 
-alpacahttp::Response route_request(alpacahttp::Router& router,
-                                   const std::string& method,
-                                   const std::string& path,
-                                   const std::string& body = std::string()) {
+alpacahttp::Response route_request(alpacahttp::Router& router, const std::string& method, const std::string& path,
+                                   const std::string& body = std::string(),
+                                   const std::string& remote_addr = std::string()) {
     alpacahttp::Request request;
+    request.set_remote_address(remote_addr);
     std::ostringstream raw;
     raw << method << " " << path << " HTTP/1.1\r\n";
     raw << "Host: localhost\r\n";
@@ -174,12 +174,13 @@ private:
 
 // GET .../connected for a given ClientID (no ClientID when client_id is empty)
 // and return the reported Value.
-bool get_connected_value(alpacahttp::Router& router, const std::string& path_base, const std::string& client_id) {
+bool get_connected_value(alpacahttp::Router& router, const std::string& path_base, const std::string& client_id,
+                         const std::string& remote_addr = std::string()) {
     std::string path = path_base + "/connected";
     if (!client_id.empty()) {
         path += "?ClientID=" + client_id;
     }
-    const auto resp = route_request(router, "GET", path);
+    const auto resp = route_request(router, "GET", path, "", remote_addr);
     const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
     EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
     return json.value("Value", false);
@@ -187,9 +188,12 @@ bool get_connected_value(alpacahttp::Router& router, const std::string& path_bas
 
 // PUT .../connected with a form body; expects success unless expect_error.
 void put_connected(alpacahttp::Router& router, const std::string& path_base, const std::string& client_id,
-                   bool connected) {
-    const std::string body = "Connected=" + std::string(connected ? "true" : "false") + "&ClientID=" + client_id;
-    const auto resp = route_request(router, "PUT", path_base + "/connected", body);
+                   bool connected, const std::string& remote_addr = std::string()) {
+    std::string body = "Connected=" + std::string(connected ? "true" : "false");
+    if (!client_id.empty()) {
+        body += "&ClientID=" + client_id;
+    }
+    const auto resp = route_request(router, "PUT", path_base + "/connected", body, remote_addr);
     const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
     EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
 }
@@ -1713,6 +1717,46 @@ int main() {
         EXPECT(!stub->get_connected());
 
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9701);
+    }
+
+    // Issue #163: the client key is qualified by peer address, so two clients
+    // that omit ClientID (or reuse the same one) on DIFFERENT hosts get
+    // distinct registry slots and can no longer shadow-disconnect each other.
+    {
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9702);
+        EXPECT(registry.register_device(stub));
+        const std::string base = "/api/v1/covercalibrator/9702";
+
+        // Two anonymous (no-ClientID) clients on different hosts.
+        put_connected(router, base, "", true, "10.0.0.1");
+        put_connected(router, base, "", true, "10.0.0.2");
+        EXPECT(stub->connect_count == 1);
+
+        // Host 2's anonymous disconnect must not drop host 1's link (the
+        // pre-#163 shared anonymous slot did exactly that).
+        put_connected(router, base, "", false, "10.0.0.2");
+        EXPECT(stub->disconnect_count == 0);
+        EXPECT(stub->get_connected());
+
+        // Last anonymous client out tears it down.
+        put_connected(router, base, "", false, "10.0.0.1");
+        EXPECT(stub->disconnect_count == 1);
+
+        // Same ClientID from different hosts are distinct clients too, and
+        // GET answers per (ClientID, host).
+        put_connected(router, base, "5", true, "10.0.0.1");
+        put_connected(router, base, "5", true, "10.0.0.2");
+        EXPECT(stub->connect_count == 2);
+        EXPECT(get_connected_value(router, base, "5", "10.0.0.1"));
+        put_connected(router, base, "5", false, "10.0.0.2");
+        EXPECT(stub->get_connected());
+        EXPECT(get_connected_value(router, base, "5", "10.0.0.1"));
+        EXPECT(!get_connected_value(router, base, "5", "10.0.0.2"));
+        put_connected(router, base, "5", false, "10.0.0.1");
+        EXPECT(!stub->get_connected());
+
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9702);
     }
 
     // Security: path traversal via the static-file handler must be rejected

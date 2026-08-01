@@ -421,6 +421,23 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
         return;
     }
 
+    // Stamp the peer address so the router can discriminate clients that
+    // send no ClientID in the per-client Connected registry (issue #163).
+    {
+        struct sockaddr_storage peer {};
+        util::SocketLen peer_len = sizeof(peer);
+        char addr_buf[INET6_ADDRSTRLEN] = {0};
+        if (getpeername(socket_fd, reinterpret_cast<struct sockaddr*>(&peer), &peer_len) == 0) {
+            if (peer.ss_family == AF_INET) {
+                inet_ntop(AF_INET, &reinterpret_cast<struct sockaddr_in*>(&peer)->sin_addr, addr_buf, sizeof(addr_buf));
+            } else if (peer.ss_family == AF_INET6) {
+                inet_ntop(AF_INET6, &reinterpret_cast<struct sockaddr_in6*>(&peer)->sin6_addr, addr_buf,
+                          sizeof(addr_buf));
+            }
+        }
+        request.set_remote_address(addr_buf);
+    }
+
     // Generate transaction ID (thread-safe)
     static std::atomic<std::uint32_t> transaction_counter{0};
     std::uint32_t server_tx_id = ++transaction_counter;
