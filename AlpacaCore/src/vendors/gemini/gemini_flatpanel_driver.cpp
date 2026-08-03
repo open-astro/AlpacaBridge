@@ -415,14 +415,15 @@ public:
 
     void connect() override { start_connection_task(true); }
 
-    void disconnect() override {
-        stop_connection_thread();
-        try {
-            set_connected(false);
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("Gemini", "Flat panel v2 disconnect error: " + std::string(e.what()));
-        }
-    }
+    // Async, not synchronous like the Lite driver's disconnect(): this
+    // model's protocol_.disconnect() takes the same port mutex that
+    // open_cover()/close_cover() (and now calibrator_on()/off()) can hold for
+    // up to kCoverMoveTimeoutS while a wire command is in flight, so a
+    // synchronous call here could block the HTTP handler for up to 30s.
+    // Routing through start_connection_task() (as ZWOTelescopeDriver does)
+    // runs set_connected(false) on the base class's background thread
+    // instead -- run_connection_task() already catches and logs exceptions.
+    void disconnect() override { start_connection_task(false); }
 
     bool get_connecting() const override { return connection_task_active(); }
 
@@ -698,6 +699,20 @@ private:
      * and lets CalibratorOn/Off return immediately per ICoverCalibratorV2's
      * documented async contract, with CalibratorChanging/CalibratorState
      * reporting NotReady until the background command completes.
+     *
+     * Deliberately asymmetric with start_cover_task(), which REJECTS a new
+     * command (InvalidOperation) when one is already in flight rather than
+     * joining it: two overlapping Open/Close calls make no physical sense
+     * and joining could block the caller for the rest of a 30s motor move.
+     * A calibrator command, by contrast, is routinely re-issued in quick
+     * succession (e.g. a client ramping Brightness through several values --
+     * ConformU itself does this) and normally completes in well under a
+     * second, so joining the previous one here is the right default: it
+     * serializes back-to-back calls without rejecting a legitimate use case.
+     * The join is only unbounded in the rare case where a calibrator command
+     * is queued behind ANOTHER calibrator command that is itself blocked on
+     * protocol_'s port mutex by a concurrent cover move -- bounded by the
+     * same kCoverMoveTimeoutS (30s) as everything else sharing that mutex.
      */
     void start_calibrator_task(bool on, int brightness) {
         std::lock_guard<std::mutex> lock(calibrator_task_mutex_);
