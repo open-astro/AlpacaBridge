@@ -572,17 +572,17 @@ public:
      * move that this driver doesn't control tick-by-tick, so there is no
      * "commanded" value to cache: while a cover task is in flight this
      * reports Moving directly (no need to ask the hardware, since we know a
-     * command is outstanding); once idle, it queries >S# live. See
-     * halt_cover() for why a halted move reports Unknown instead of a live
-     * read.
+     * command is outstanding, unless halted -- see halt_cover() for why a
+     * halted in-flight move reports Unknown instead); once idle, it always
+     * queries >S# live, regardless of a stale cover_halted_ latch, so the
+     * state self-heals as soon as the physical move actually finishes (or
+     * across a disconnect/reconnect) instead of sticking at Unknown until
+     * the next OpenCover/CloseCover call.
      */
     CoverState get_cover_state() const override {
         ensure_connected();
-        if (cover_halted_.load()) {
-            return CoverState::Unknown;
-        }
         if (cover_in_flight_.load()) {
-            return CoverState::Moving;
+            return cover_halted_.load() ? CoverState::Unknown : CoverState::Moving;
         }
         try {
             auto status = protocol_.get_status_rev2();
@@ -638,9 +638,15 @@ public:
      * Only latches cover_halted_ when a move is actually in flight. Setting
      * it unconditionally would permanently pin get_cover_state() to Unknown
      * for a client that calls HaltCover defensively while the cover is
-     * already stationary (a common pattern) -- cover_halted_ is only ever
-     * cleared by the NEXT start_cover_task() call, so with no move to halt
-     * there would be nothing to clear it until some future Open/Close.
+     * already stationary (a common pattern). cover_halted_ only affects
+     * get_cover_state()/get_cover_moving() while cover_in_flight_ is still
+     * true: once the background task's blocking wire call returns (motor
+     * reaches its end stop, or times out) and cover_in_flight_ goes back to
+     * false, get_cover_state() falls through to a live >S# read regardless
+     * of this latch, so the reported state self-heals on its own -- true to
+     * the WandererCover precedent cited above, which also always recovers
+     * via a live read rather than requiring an explicit next Open/Close to
+     * clear a stale "halted" flag.
      *
      * The check-then-act on cover_in_flight_/cover_halted_ must be atomic
      * with respect to start_cover_task(): without the shared lock, the
@@ -698,14 +704,22 @@ private:
         }
         cover_halted_.store(false);
         cover_in_flight_.store(true);
-        cover_task_thread_ = std::thread([this, fn]() {
-            try {
-                fn();
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("Gemini", "Flat panel v2 cover command failed: " + std::string(e.what()));
-            }
+        try {
+            cover_task_thread_ = std::thread([this, fn]() {
+                try {
+                    fn();
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("Gemini", "Flat panel v2 cover command failed: " + std::string(e.what()));
+                }
+                cover_in_flight_.store(false);
+            });
+        } catch (...) {
+            // std::thread ctor can throw (e.g. OS thread limit). Roll back or
+            // cover_in_flight_ stays true forever and every future
+            // Open/Close/HaltCover sees a phantom in-flight move.
             cover_in_flight_.store(false);
-        });
+            throw;
+        }
     }
 
     /**
@@ -749,31 +763,59 @@ private:
      * (review finding). Each thread increments the count for its own
      * command and decrements it on exit; NotReady is reported as long as
      * the count is above zero, i.e. until the LAST queued command finishes.
+     *
+     * previous is held via shared_ptr, not moved directly into the new
+     * thread's capture, for exception safety (review finding): std::thread's
+     * constructor decay-copies its callable into internal storage before
+     * attempting to create the OS thread, and destroys that storage if
+     * creation fails (e.g. OS thread-limit exhaustion). If previous were
+     * captured by move, that storage's destruction would run ~thread() on a
+     * still-joinable previous -> std::terminate(), crashing the process
+     * instead of throwing a normal AlpacaException. A shared_ptr copy into
+     * the capture is cheap and noexcept, and this function's own `previous`
+     * keeps a live reference throughout, so if construction below throws,
+     * the failed copy's destruction just drops a refcount rather than
+     * destroying the underlying std::thread -- leaving it here for the
+     * catch block to join safely on the caller's thread.
      */
     void start_calibrator_task(bool on, int brightness) {
         std::lock_guard<std::mutex> lock(calibrator_task_mutex_);
         calibrator_pending_count_.fetch_add(1);
-        std::thread previous = std::move(calibrator_task_thread_);
-        calibrator_task_thread_ = std::thread([this, on, brightness, previous = std::move(previous)]() mutable {
-            if (previous.joinable()) {
-                previous.join();  // off the caller's thread -- see doc comment above
-            }
-            try {
-                if (on) {
-                    protocol_.light_on();
-                    protocol_.set_brightness(brightness);
-                } else {
-                    protocol_.light_off();
-                    protocol_.set_brightness(0);
+        auto previous = std::make_shared<std::thread>(std::move(calibrator_task_thread_));
+        try {
+            calibrator_task_thread_ = std::thread([this, on, brightness, previous]() {
+                if (previous->joinable()) {
+                    previous->join();  // off the caller's thread -- see doc comment above
                 }
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                commanded_brightness_ = on ? brightness : 0;
-                calibrator_engaged_ = on;
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("Gemini", "Flat panel v2 calibrator command failed: " + std::string(e.what()));
+                try {
+                    if (on) {
+                        protocol_.light_on();
+                        protocol_.set_brightness(brightness);
+                    } else {
+                        protocol_.light_off();
+                        protocol_.set_brightness(0);
+                    }
+                    std::lock_guard<std::mutex> lock(state_mutex_);
+                    commanded_brightness_ = on ? brightness : 0;
+                    calibrator_engaged_ = on;
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("Gemini", "Flat panel v2 calibrator command failed: " + std::string(e.what()));
+                }
+                calibrator_pending_count_.fetch_sub(1);
+            });
+        } catch (...) {
+            // std::thread ctor can throw (e.g. OS thread limit). previous is
+            // still safely joinable here -- see the doc comment above -- so
+            // join it (this rare failure path already means the system is
+            // resource-starved; blocking briefly is an acceptable tradeoff
+            // against losing track of it or crashing) before rolling back
+            // the pending count and rethrowing.
+            if (previous->joinable()) {
+                previous->join();
             }
             calibrator_pending_count_.fetch_sub(1);
-        });
+            throw;
+        }
     }
 
     // Mirrors reap_cover_task(): wait=false (not currently used, kept for
