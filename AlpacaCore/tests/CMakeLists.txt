@@ -28,6 +28,9 @@ set(TEST_SOURCES
     test_poll_settle.cpp
     test_units.cpp
     test_version_format.cpp
+    test_video_ring_buffer.cpp
+    test_ser_writer.cpp
+    test_video_recorder.cpp
 )
 
 if(TARGET alpacacore_zwo)

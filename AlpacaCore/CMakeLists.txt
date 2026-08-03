@@ -70,6 +70,10 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/threading.cpp
     src/core/util/error_handling.cpp
     src/core/util/units.cpp
+    src/core/video/video_capture.cpp
+    src/core/video/frame_ring_buffer.cpp
+    src/core/video/ser_writer.cpp
+    src/core/video/video_recorder.cpp
 )
 
 # Driver sources

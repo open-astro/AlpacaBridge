@@ -54,6 +54,7 @@ if(ALPACACORE_ENABLE_ZWO)
 
     set(ZWO_SOURCES
         zwo_sdk_wrapper.cpp
+        zwo_video_capture.cpp
         zwo_camera_driver.cpp
         zwo_switch_driver.cpp
         zwo_asiair_protocol_wrapper.cpp

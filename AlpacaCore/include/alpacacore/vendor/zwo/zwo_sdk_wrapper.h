@@ -123,6 +123,13 @@ public:
     ZWOStartPos get_start_pos(int camera_id);
     void set_start_pos(int camera_id, int start_x, int start_y);
 
+    void start_video_capture(int camera_id);
+    void stop_video_capture(int camera_id);
+    // Blocks up to wait_ms for the next video frame; true = frame copied,
+    // false = timeout. Throws on any other SDK error.
+    bool get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms);
+    int get_dropped_frames(int camera_id);
+
     void start_exposure(int camera_id, bool is_dark);
     void stop_exposure(int camera_id);
     ZWOExposureStatus get_exposure_status(int camera_id);

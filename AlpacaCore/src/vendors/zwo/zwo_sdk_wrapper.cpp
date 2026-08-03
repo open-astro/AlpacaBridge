@@ -431,6 +431,37 @@ void ZWOSDKWrapper::set_start_pos(int camera_id, int start_x, int start_y) {
     throw_on_error(ASISetStartPos(camera_id, start_x, start_y), "ASISetStartPos");
 }
 
+void ZWOSDKWrapper::start_video_capture(int camera_id) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(ASIStartVideoCapture(camera_id), "ASIStartVideoCapture");
+}
+
+void ZWOSDKWrapper::stop_video_capture(int camera_id) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(ASIStopVideoCapture(camera_id), "ASIStopVideoCapture");
+}
+
+bool ZWOSDKWrapper::get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) {
+    // Do NOT hold the wrapper mutex — ASIGetVideoData blocks up to wait_ms
+    // waiting for the next frame, at 100+ fps this is the hot path, and
+    // holding the global lock across it would stall every other SDK call.
+    // Same exemption (and same racing-disconnect worst case) as
+    // get_data_after_exposure above.
+    const ASI_ERROR_CODE code = ASIGetVideoData(camera_id, buffer, buffer_size, wait_ms);
+    if (code == ASI_ERROR_TIMEOUT) {
+        return false;
+    }
+    throw_on_error(code, "ASIGetVideoData");
+    return true;
+}
+
+int ZWOSDKWrapper::get_dropped_frames(int camera_id) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    int dropped = 0;
+    throw_on_error(ASIGetDroppedFrames(camera_id, &dropped), "ASIGetDroppedFrames");
+    return dropped;
+}
+
 void ZWOSDKWrapper::start_exposure(int camera_id, bool is_dark) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     ASI_BOOL dark_flag = is_dark ? ASI_TRUE : ASI_FALSE;
