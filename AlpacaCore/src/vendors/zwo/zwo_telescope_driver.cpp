@@ -2546,7 +2546,7 @@ private:
             }
             // Active park, or the driver has inferred parked: leave the cache
             // alone so get_at_park() re-evaluates / the inferred state sticks.
-        } catch (const std::exception&) {
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
             // :Gps read failed during park warm — leave the cache stale so
             // get_at_park() re-evaluates; the next poll cycle retries.
         }
