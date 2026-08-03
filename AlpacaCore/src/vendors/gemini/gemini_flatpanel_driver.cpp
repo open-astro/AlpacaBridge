@@ -630,10 +630,19 @@ public:
      * command times out -- mirrors WandererCover's HaltCover, which also
      * sends no serial command and just clears the driver's own "moving"
      * signal rather than the hardware's.
+     *
+     * Only latches cover_halted_ when a move is actually in flight. Setting
+     * it unconditionally would permanently pin get_cover_state() to Unknown
+     * for a client that calls HaltCover defensively while the cover is
+     * already stationary (a common pattern) -- cover_halted_ is only ever
+     * cleared by the NEXT start_cover_task() call, so with no move to halt
+     * there would be nothing to clear it until some future Open/Close.
      */
     void halt_cover() override {
         ensure_connected();
-        cover_halted_.store(true);
+        if (cover_in_flight_.load()) {
+            cover_halted_.store(true);
+        }
     }
 
     // Deliberately NO per-vendor get_device_state() override -- see
