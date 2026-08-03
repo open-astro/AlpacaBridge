@@ -353,7 +353,7 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         return "";
     }
 
-    termios tty {};
+    termios tty{};
     if (tcgetattr(fd, &tty) != 0) {
         close(fd);
         return "";
@@ -385,9 +385,8 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
 
     std::string response;
     const auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::steady_clock::now() - start)
-               .count() < timeout_ms) {
+    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
+           timeout_ms) {
         char ch = '\0';
         const ssize_t n = ::read(fd, &ch, 1);
         if (n == 1) {
@@ -411,8 +410,7 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
     auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
     response.erase(response.begin(),
                    std::find_if(response.begin(), response.end(), [&](char c) { return !is_space(c); }));
-    response.erase(std::find_if(response.rbegin(), response.rend(),
-                                [&](char c) { return !is_space(c); }).base(),
+    response.erase(std::find_if(response.rbegin(), response.rend(), [&](char c) { return !is_space(c); }).base(),
                    response.end());
     return response;
 #endif
@@ -430,7 +428,7 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
         return "";
     }
 
-    sockaddr_in addr {};
+    sockaddr_in addr{};
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<u_short>(port));
@@ -452,7 +450,7 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     fd_set wfds;
     FD_ZERO(&wfds);
     FD_SET(sock, &wfds);
-    timeval tv {};
+    timeval tv{};
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
     if (select(sock + 1, nullptr, &wfds, nullptr, &tv) <= 0) {
@@ -476,9 +474,8 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
 
     std::string response;
     const auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::steady_clock::now() - start)
-               .count() < timeout_ms) {
+    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
+           timeout_ms) {
         char ch = '\0';
         const ssize_t n = ::recv(sock, &ch, 1, 0);
         if (n == 1) {
@@ -500,14 +497,13 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
     response.erase(response.begin(),
                    std::find_if(response.begin(), response.end(), [&](char c) { return !is_space(c); }));
-    response.erase(std::find_if(response.rbegin(), response.rend(),
-                                [&](char c) { return !is_space(c); }).base(),
+    response.erase(std::find_if(response.rbegin(), response.rend(), [&](char c) { return !is_space(c); }).base(),
                    response.end());
     return response;
 #endif
 }
 
-} // namespace
+}  // namespace
 
 std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
     std::vector<ZWODeviceInfo> results;
@@ -611,12 +607,11 @@ public:
                 candidate.host = dev.host;
                 candidate.tcp_port = dev.tcp_port;
                 if (connect(candidate)) {
-                    ALPACA_LOG_INFO("ZWO",
-                                    "Auto-connected to " + dev.model_name + " via " +
-                                        (dev.type == ConnectionType::Serial ? "USB serial" : "WiFi") +
-                                        (dev.type == ConnectionType::Serial ? " " + dev.port_path
-                                                                             : " " + dev.host + ":" +
-                                                                                   std::to_string(dev.tcp_port)));
+                    ALPACA_LOG_INFO("ZWO", "Auto-connected to " + dev.model_name + " via " +
+                                               (dev.type == ConnectionType::Serial ? "USB serial" : "WiFi") +
+                                               (dev.type == ConnectionType::Serial
+                                                    ? " " + dev.port_path
+                                                    : " " + dev.host + ":" + std::to_string(dev.tcp_port)));
                     return true;
                 }
             }
