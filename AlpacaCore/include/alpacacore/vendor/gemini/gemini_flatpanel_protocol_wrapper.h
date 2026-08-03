@@ -39,10 +39,11 @@ enum class FlatPanelConnectionType : std::uint8_t {
  *   - Rev2: adds a motorized cover. >S# replies "*S<id2digits><motor><light><cover>#"
  *     (see get_status_rev2()). Sourced from INDI's open-source
  *     GeminiFlatpanelRev2Adapter (indilib/indi, drivers/auxiliary/
- *     gemini_flatpanel_adapters.cpp) -- NOT confirmed against real Rev2
- *     hardware, unlike the Lite parsing which was reverse-engineered from
- *     traffic captures of the vendor's own app. Treat as provisional until
- *     validated with ConformU on real hardware.
+ *     gemini_flatpanel_adapters.cpp), unlike the Lite parsing which was
+ *     reverse-engineered from traffic captures of the vendor's own app.
+ *     ConformU 4.4.0 validated against a real Rev2 unit (firmware 408,
+ *     Linux arm64): 0 errors, 0 issues, 0 timing issues (see AGENTS.md and
+ *     AlpacaCore/conformu/Gemini/Astro Automatic FlatPanel v2/).
  */
 enum class FlatPanelModel : std::uint8_t { Lite, Rev2 };
 
@@ -136,11 +137,10 @@ bool is_flatpanel_handshake_reply(const std::string& reply);
  *
  * The Rev2 (motorized cover) commands are sourced from INDI's open-source
  * GeminiFlatpanelRev2Adapter (indilib/indi, drivers/auxiliary/
- * gemini_flatpanel_adapters.{h,cpp}), not from real hardware or a vendor
- * spec — no Rev2 unit was available to confirm wire behavior. Treat the
- * light/brightness commands (shared with Lite, confirmed above) as solid,
- * and the cover/status commands as provisional until ConformU validation
- * against real Rev2 hardware (see AGENTS.md).
+ * gemini_flatpanel_adapters.{h,cpp}), not from a vendor spec (none was
+ * published) — no Rev2 unit was available at implementation time, but the
+ * cover/status commands have since been ConformU-validated against real
+ * Rev2 hardware (firmware 408, see AGENTS.md).
  *
  * Supports USB serial connections only — no WiFi/network variant support yet.
  */

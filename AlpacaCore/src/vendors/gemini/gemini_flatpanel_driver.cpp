@@ -524,7 +524,7 @@ public:
 
     CalibratorState get_calibrator_state() const override {
         ensure_connected();
-        if (calibrator_changing_.load()) {
+        if (calibrator_pending_count_.load() > 0) {
             return CalibratorState::NotReady;
         }
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -532,12 +532,16 @@ public:
     }
 
     bool get_calibrator_changing() const override {
-        // Unlike the Lite model, this is a real transition flag, not a
+        // Unlike the Lite model, this is a real transition signal, not a
         // hardcoded false: see start_calibrator_task() for why CalibratorOn/
         // CalibratorOff must report NotReady/true here while their background
-        // task is in flight.
+        // task is in flight. A pending COUNT rather than a single bool: with
+        // queued commands chained behind each other (see start_calibrator_task()),
+        // an earlier one finishing and clearing a shared bool would report
+        // "not changing" while a later-queued command is still actually
+        // running its own wire command.
         ensure_connected();
-        return calibrator_changing_.load();
+        return calibrator_pending_count_.load() > 0;
     }
 
     void calibrator_on(int brightness) override {
@@ -726,10 +730,18 @@ private:
      * always return immediately, and successive commands still execute in
      * submission order (each thread joins its predecessor before running
      * its own wire command).
+     *
+     * calibrator_pending_count_ (not a single bool) tracks in-flight-ness:
+     * with commands chained behind each other, an earlier thread finishing
+     * and clearing a shared bool would report "not changing" while a
+     * later-queued thread is still actually running its own wire command
+     * (review finding). Each thread increments the count for its own
+     * command and decrements it on exit; NotReady is reported as long as
+     * the count is above zero, i.e. until the LAST queued command finishes.
      */
     void start_calibrator_task(bool on, int brightness) {
         std::lock_guard<std::mutex> lock(calibrator_task_mutex_);
-        calibrator_changing_.store(true);
+        calibrator_pending_count_.fetch_add(1);
         std::thread previous = std::move(calibrator_task_thread_);
         calibrator_task_thread_ = std::thread([this, on, brightness, previous = std::move(previous)]() mutable {
             if (previous.joinable()) {
@@ -749,7 +761,7 @@ private:
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini", "Flat panel v2 calibrator command failed: " + std::string(e.what()));
             }
-            calibrator_changing_.store(false);
+            calibrator_pending_count_.fetch_sub(1);
         });
     }
 
@@ -761,7 +773,7 @@ private:
         if (!calibrator_task_thread_.joinable()) {
             return;
         }
-        if (!wait && calibrator_changing_.load()) {
+        if (!wait && calibrator_pending_count_.load() > 0) {
             return;
         }
         calibrator_task_thread_.join();
@@ -788,7 +800,9 @@ private:
 
     std::mutex calibrator_task_mutex_;
     std::thread calibrator_task_thread_;
-    std::atomic<bool> calibrator_changing_{false};
+    // Count, not a bool: see start_calibrator_task()'s doc comment for why a
+    // single flag misreports "not changing" while queued commands remain.
+    std::atomic<int> calibrator_pending_count_{0};
 };
 
 std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_v2(int device_number, const std::string& serial_port,
