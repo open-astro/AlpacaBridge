@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-07-28
+## Updated 2026-08-03
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -144,6 +144,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | Astro Flat Panel Cover Lite | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro%20Flat%20Panel%20Cover%20Lite/) |
+| Astro Automatic FlatPanel v2 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro%20Automatic%20FlatPanel%20v2/) |
 
 <details>
 <summary><strong>Gemini CoverCalibrator Driver Notes</strong></summary>
@@ -152,6 +153,18 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB. The panel's controller is an ESP32-class board using Espressif's native USB-serial/JTAG stack (by-id name `usb-Espressif_USB_JTAG_serial_debug_unit_...`), not a CH340/CH341 adapter. Auto-detection scans `/dev/serial/by-id/` for CH340/CH341/generic USB-serial names as well as `Espressif`, then probes with the `>H#` identity handshake. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
 - **Cover**: no motorized cover on this model — `OpenCover`/`CloseCover`/`HaltCover` throw `MethodNotImplemented` unconditionally and `CoverState` always reports `NotPresent`.
 - **Tested model**: Gemini Astro Flat Panel Cover Lite (firmware 206) on Linux arm64.
+- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues.
+
+</details>
+
+<details>
+<summary><strong>Gemini Astro Automatic FlatPanel v2 Driver Notes</strong></summary>
+
+- **Protocol**: no vendor docs or hardware were available for this model — implemented entirely from INDI's open-source `GeminiFlatpanelRev2Adapter` (`indilib/indi`, `drivers/auxiliary/gemini_flatpanel_adapters.{h,cpp}`). Shares the `">X#"`/`">Xnnn#"` wire syntax and light/brightness commands (`>L#`/`>D#`/`>B<value>#`/`>J#`) with the Lite model above; adds a real motorized cover (`>O#`/`>C#`) and a different `>S#` status reply layout (`*S<2-digit id><motor><light><cover>#`).
+- **Connection**: USB, 9600 baud 8N1. Selected via a `flatPanelModel` config field (`"lite"`/`"v2"`) on the same `gemini`+`covercalibrator` router slot as the Lite model; shares port auto-detection with the Lite driver.
+- **Cover**: `OpenCover`/`CloseCover` block the wire for up to 30s until the hardware's exact completion reply (`*OOpened#`/`*CClosed#`) arrives, run on a background thread so the ASCOM async initiator returns immediately. `HaltCover` has no hardware equivalent on Rev2 — it stops the driver from *reporting* `Moving` but cannot interrupt the in-flight motor command.
+- **Calibrator/cover port contention**: `CalibratorOn`/`CalibratorOff` share the same physical serial link and port-level mutex as `OpenCover`/`CloseCover`. Calling `CalibratorOn` while a cover move is in flight can block behind the cover's up-to-30s wire wait; **fixed by running `CalibratorOn`/`CalibratorOff` on a background thread** (mirroring the cover task) so the ASCOM initiator still returns immediately, with `CalibratorChanging`/`CalibratorState` correctly reporting `NotReady` while the background command is in flight. Caught by ConformU: the first `CalibratorOn` call, issued right after a `HaltCover` on a cover that was still physically moving, blocked the HTTP thread for 6+ seconds before this fix.
+- **Tested model**: Gemini Astro Automatic FlatPanel v2 (firmware 408) on Linux arm64.
 - **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues.
 
 </details>
