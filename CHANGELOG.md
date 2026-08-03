@@ -18,6 +18,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Gemini Astro Automatic FlatPanel v2 validated** (ConformU 4.4.0, Linux arm64, USB, firmware 408): new `AlpacaCore/conformu/Gemini/Astro Automatic FlatPanel v2/` report — 0 errors, 0 issues, 0 timing issues.
 
 ### Changed
+- **CI: zeroastroboy added to the review workflow's trusted fork contributors** (.github/workflows/claude-review.yml): added to `allowed_non_write_users` so their pushes to a `safe-to-review`-labeled fork PR (e.g. PR #171) no longer fail the review job with "Actor does not have write permissions"; same onboarding path as Knetus56 below.
 - **CI: Knetus56 added to the review workflow's trusted fork contributors** (.github/workflows/claude-review.yml): added to `allowed_non_write_users` so their own pushes to a `safe-to-review`-labeled fork PR no longer fail the review job; the label remains the maintainer's per-PR trust gate, and AGENTS.md now documents this list as the onboarding path (instead of granting write access).
 
 ### Fixed
