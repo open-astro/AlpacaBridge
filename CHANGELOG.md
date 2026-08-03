@@ -13,6 +13,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ### Added
 - **ZWO AM5N mount validated** (ConformU 4.4.0, Linux arm64, USB): 0 errors, 0 issues, 0 timing issues. Report saved to `AlpacaCore/conformu/ZWO/AM5N/Linux-arm64.txt`; `SUPPORTED-DRIVERS.md` AM5N row updated from "pending arm64 re-validation" to ✓.
+- **ZWO mount auto-detection and auto-connect** (AlpacaCore + AlpacaHTTP): new `ConnectionType::Auto` and `enumerate_zwo_mounts()` — the driver probes USB serial ports (`/dev/serial/by-id` ZWO entries and `/dev/ttyACM*`) and the mount's WiFi access point (`192.168.4.1:4030`) with `:GVP`, discovering whichever ZWO mount answers (AM3, AM5, AM5N, AM7, ...) and its model name. A ZWO telescope registered with `connectionType: auto` connects to the first detected mount (USB preferred, WiFi fallback) on every Connect — robust against USB re-enumeration. Web UI adds the "Auto-detect (USB + WiFi)" connection-type option.
 
 ### Changed
 - **CI: Knetus56 added to the review workflow's trusted fork contributors** (.github/workflows/claude-review.yml): added to `allowed_non_write_users` so their own pushes to a `safe-to-review`-labeled fork PR no longer fail the review job; the label remains the maintainer's per-PR trust gate, and AGENTS.md now documents this list as the onboarding path (instead of granting write access).

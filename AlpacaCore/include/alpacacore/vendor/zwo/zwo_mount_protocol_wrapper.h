@@ -15,12 +15,27 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace alpacacore::vendor::zwo {
 
 enum class ConnectionType {
     Serial,
-    Network
+    Network,
+    // Auto-detect the transport: probe USB serial ports first, then the
+    // mount's WiFi access point, and connect to whatever ZWO mount answers.
+    Auto
+};
+
+// A ZWO mount discovered by enumerate_zwo_mounts(). Covers any model the
+// mount reports via :GVP (AM3, AM5, AM5N, AM7, ...) on either transport.
+struct ZWODeviceInfo {
+    ConnectionType type = ConnectionType::Serial;
+    std::string port_path;   // serial transport
+    std::string host;        // network transport
+    int tcp_port = 4030;     // network transport
+    std::string model_name;  // e.g. "AM5N" from :GVP
+    std::string label;       // by-id symlink name, or "WiFi"
 };
 
 struct ConnectionInfo {
@@ -37,6 +52,12 @@ struct ConnectionInfo {
     // Per-command timeout
     int response_timeout_ms = 5000;
 };
+
+// Enumerate ZWO mounts reachable on this host: USB serial (/dev/serial/by-id
+// entries naming ZWO, probed with :GVP) and the mount's WiFi access point
+// (192.168.4.1:4030 per the protocol docs). Returns the found devices with
+// their model names. Used by ConnectionType::Auto.
+std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms = 1500);
 
 enum class MountMode {
     Unknown,

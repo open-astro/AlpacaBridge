@@ -6854,7 +6854,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         alpacacore::vendor::zwo::ConnectionInfo conn_info;
         std::string conn_type = config.value("connectionType", "");
 
-        if (conn_type == "serial") {
+        if (conn_type == "auto") {
+            // Auto-detect the transport at connect time: probe USB serial ports
+            // and the mount's WiFi access point, connect to whatever ZWO mount
+            // answers. No port/host required.
+            conn_info.type = alpacacore::vendor::zwo::ConnectionType::Auto;
+        } else if (conn_type == "serial") {
             conn_info.type = alpacacore::vendor::zwo::ConnectionType::Serial;
             conn_info.port_path = config.value("portPath", "");
             conn_info.baud_rate = config.value("baudRate", 9600);
@@ -6873,7 +6878,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 return false;
             }
         } else {
-            error_message = "Invalid connection type. Use 'serial' or 'network'";
+            error_message = "Invalid connection type. Use 'serial', 'network', or 'auto'";
             return false;
         }
 

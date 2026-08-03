@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iomanip>
 #include <limits>
 #include <mutex>
@@ -333,7 +334,235 @@ std::string format_utc_minutes_to_protocol_timezone(int utc_offset_minutes) {
     return oss.str();
 }
 
+// ---- ZWO mount auto-detection (USB + WiFi) -------------------------------
+//
+// The probes below are self-contained (they open their own fd/socket and do
+// not touch the singleton's mutex), so enumerate_zwo_mounts() can run
+// independently of any live connection. Each probe sends :GVP and reads until
+// the '#' terminator or the probe timeout, returning the mount model string
+// (e.g. "AM5N") on success or empty on failure.
+
+std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
+#ifdef _WIN32
+    (void)port_path;
+    (void)timeout_ms;
+    return "";
+#else
+    const int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (fd < 0) {
+        return "";
+    }
+
+    termios tty {};
+    if (tcgetattr(fd, &tty) != 0) {
+        close(fd);
+        return "";
+    }
+    cfsetospeed(&tty, B9600);
+    cfsetispeed(&tty, B9600);
+    tty.c_cflag &= ~PARENB;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+    tty.c_cflag &= ~CRTSCTS;
+    tty.c_cflag |= CREAD | CLOCAL;
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
+    tty.c_oflag &= ~OPOST;
+    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 1;
+    if (tcsetattr(fd, TCSANOW, &tty) != 0 || !util::clear_nonblocking(fd)) {
+        close(fd);
+        return "";
+    }
+
+    const std::string cmd = ":GVP#";
+    if (!util::write_all(fd, cmd.c_str(), cmd.size())) {
+        close(fd);
+        return "";
+    }
+
+    std::string response;
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - start)
+               .count() < timeout_ms) {
+        char ch = '\0';
+        const ssize_t n = ::read(fd, &ch, 1);
+        if (n == 1) {
+            if (ch == '#') {
+                break;
+            }
+            if (ch != '\r' && ch != '\n') {
+                response.push_back(ch);
+            }
+        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            break;
+        }
+        if (!response.empty() && n == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    close(fd);
+
+    // Trim whitespace; the model is the non-empty body (e.g. "AM5N").
+    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+    response.erase(response.begin(),
+                   std::find_if(response.begin(), response.end(), [&](char c) { return !is_space(c); }));
+    response.erase(std::find_if(response.rbegin(), response.rend(),
+                                [&](char c) { return !is_space(c); }).base(),
+                   response.end());
+    return response;
+#endif
+}
+
+std::string probe_network_mount(const std::string& host, int port, int timeout_ms) {
+#ifdef _WIN32
+    (void)host;
+    (void)port;
+    (void)timeout_ms;
+    return "";
+#else
+    const int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return "";
+    }
+
+    sockaddr_in addr {};
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<u_short>(port));
+    hostent* host_entry = gethostbyname(host.c_str());
+    if (host_entry == nullptr) {
+        close(sock);
+        return "";
+    }
+    addr.sin_addr = *reinterpret_cast<in_addr*>(host_entry->h_addr);
+
+    // Non-blocking connect so an unreachable host fails within the probe timeout.
+    const int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    const int rc = ::connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
+        close(sock);
+        return "";
+    }
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(sock, &wfds);
+    timeval tv {};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    if (select(sock + 1, nullptr, &wfds, nullptr, &tv) <= 0) {
+        close(sock);
+        return "";
+    }
+    int so_error = 0;
+    socklen_t len = sizeof(so_error);
+    getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+    if (so_error != 0) {
+        close(sock);
+        return "";
+    }
+    fcntl(sock, F_SETFL, flags);  // back to blocking
+
+    const std::string cmd = ":GVP#";
+    if (!util::send_all(sock, cmd.c_str(), cmd.size(), MSG_NOSIGNAL)) {
+        close(sock);
+        return "";
+    }
+
+    std::string response;
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - start)
+               .count() < timeout_ms) {
+        char ch = '\0';
+        const ssize_t n = ::recv(sock, &ch, 1, 0);
+        if (n == 1) {
+            if (ch == '#') {
+                break;
+            }
+            if (ch != '\r' && ch != '\n') {
+                response.push_back(ch);
+            }
+        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            break;
+        } else if (n == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    close(sock);
+
+    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+    response.erase(response.begin(),
+                   std::find_if(response.begin(), response.end(), [&](char c) { return !is_space(c); }));
+    response.erase(std::find_if(response.rbegin(), response.rend(),
+                                [&](char c) { return !is_space(c); }).base(),
+                   response.end());
+    return response;
+#endif
+}
+
 } // namespace
+
+std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
+    std::vector<ZWODeviceInfo> results;
+
+#ifndef _WIN32
+    // USB: scan /dev/serial/by-id for symlinks naming ZWO (e.g.
+    // usb-ZWO_Systems_ZWO_Device_123456-if00), probe each with :GVP.
+    const std::filesystem::path serial_by_id("/dev/serial/by-id");
+    if (std::filesystem::exists(serial_by_id)) {
+        for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
+            if (!entry.is_symlink()) {
+                continue;
+            }
+            const std::string name = entry.path().filename().string();
+            if (name.find("ZWO") == std::string::npos) {
+                continue;
+            }
+            const std::string resolved = std::filesystem::canonical(entry.path()).string();
+            const std::string model = probe_serial_mount(resolved, probe_timeout_ms);
+            if (!model.empty()) {
+                ALPACA_LOG_INFO("ZWO", "Auto-detect: found " + model + " on USB " + resolved);
+                results.push_back({ConnectionType::Serial, resolved, "", 4030, model, name});
+            }
+        }
+    }
+
+    // Fallback when /dev/serial/by-id is unavailable or the entry does not
+    // name ZWO: probe /dev/ttyACM* directly.
+    if (results.empty()) {
+        for (int i = 0; i < 4; ++i) {
+            const std::string port = "/dev/ttyACM" + std::to_string(i);
+            if (!std::filesystem::exists(port)) {
+                continue;
+            }
+            const std::string model = probe_serial_mount(port, probe_timeout_ms);
+            if (!model.empty()) {
+                ALPACA_LOG_INFO("ZWO", "Auto-detect: found " + model + " on USB " + port);
+                results.push_back({ConnectionType::Serial, port, "", 4030, model, port});
+            }
+        }
+    }
+#endif
+
+    // WiFi: the mount's hand-controller access point (protocol docs:
+    // IP 192.168.4.1, port 4030). Reachable when this host is on the mount AP.
+    {
+        const std::string model = probe_network_mount("192.168.4.1", 4030, probe_timeout_ms);
+        if (!model.empty()) {
+            ALPACA_LOG_INFO("ZWO", "Auto-detect: found " + model + " on WiFi 192.168.4.1:4030");
+            results.push_back({ConnectionType::Network, "", "192.168.4.1", 4030, model, "WiFi AP"});
+        }
+    }
+
+    return results;
+}
 
 class ZWOMountProtocolWrapper::Impl {
 public:
@@ -364,6 +593,37 @@ public:
     }
 
     bool connect(const ConnectionInfo& info) {
+        if (info.type == ConnectionType::Auto) {
+            // Auto-detect the transport: probe USB serial ports and the mount's
+            // WiFi AP, then connect to the first ZWO mount that answers. The
+            // probe runs outside mutex_ so it never blocks a live connection.
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (connected_) {
+                    disconnect_locked();
+                }
+            }
+            const auto devices = enumerate_zwo_mounts(info.response_timeout_ms);
+            for (const auto& dev : devices) {
+                ConnectionInfo candidate = info;
+                candidate.type = dev.type;
+                candidate.port_path = dev.port_path;
+                candidate.host = dev.host;
+                candidate.tcp_port = dev.tcp_port;
+                if (connect(candidate)) {
+                    ALPACA_LOG_INFO("ZWO",
+                                    "Auto-connected to " + dev.model_name + " via " +
+                                        (dev.type == ConnectionType::Serial ? "USB serial" : "WiFi") +
+                                        (dev.type == ConnectionType::Serial ? " " + dev.port_path
+                                                                             : " " + dev.host + ":" +
+                                                                                   std::to_string(dev.tcp_port)));
+                    return true;
+                }
+            }
+            ALPACA_LOG_WARN("ZWO", "Auto-detect: no ZWO mount found on USB or WiFi");
+            return false;
+        }
+
         if (info.type == ConnectionType::Serial && info.port_path.empty()) {
             ALPACA_LOG_ERROR("ZWO", "Serial connection requested but port path is empty");
             return false;
