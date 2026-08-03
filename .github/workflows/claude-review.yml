@@ -86,7 +86,7 @@ jobs:
           # trusted fork contributors here (never '*') — the label remains
           # the per-PR trust decision, this list is the per-person one.
           # Requires the explicit github_token above.
-          allowed_non_write_users: "htly9981"
+          allowed_non_write_users: "htly9981,Knetus56"
           # Keep the whole review in ONE top-level comment that updates in place,
           # instead of posting a new comment on every push.
           use_sticky_comment: true

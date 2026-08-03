@@ -207,6 +207,12 @@ workflow runs with `pull_request_target` (definition always taken from `main`, s
 fork can't alter the bot's prompt/tools), and the residual risk of the bot *reading*
 hostile PR content is accepted per-PR by whoever applies the label.
 
+Trusted fork contributors are also listed in the workflow's `allowed_non_write_users`
+input (specific usernames, never `*`): without it, a fork contributor's own push to a
+labeled PR fails the review job in seconds ("Actor does not have write permissions").
+To onboard a new fork contributor, add their username to that list — do **not** grant
+them collaborator/write access; the `safe-to-review` label stays the per-PR trust gate.
+
 ### When fixing a review finding (avoid the regression treadmill)
 
 Across our driver PRs, most review rounds were spent on **regressions introduced by
