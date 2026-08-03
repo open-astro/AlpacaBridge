@@ -2547,6 +2547,8 @@ private:
             // Active park, or the driver has inferred parked: leave the cache
             // alone so get_at_park() re-evaluates / the inferred state sticks.
         } catch (const std::exception&) {
+            // :Gps read failed during park warm — leave the cache stale so
+            // get_at_park() re-evaluates; the next poll cycle retries.
         }
         // Compute pier side from current hour angle (same logic as get_side_of_pier).
         // :Gm# is not used because ZWO firmware's E/W response does not reliably map to the

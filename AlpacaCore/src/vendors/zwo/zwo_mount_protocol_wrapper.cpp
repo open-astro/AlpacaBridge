@@ -452,7 +452,7 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     FD_SET(sock, &wfds);
     timeval tv{};
     tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    tv.tv_usec = static_cast<suseconds_t>(timeout_ms % 1000) * 1000;
     if (select(sock + 1, nullptr, &wfds, nullptr, &tv) <= 0) {
         close(sock);
         return "";
@@ -485,9 +485,7 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
             if (ch != '\r' && ch != '\n') {
                 response.push_back(ch);
             }
-        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            break;
-        } else if (n == 0) {
+        } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -524,7 +522,11 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
             const std::string resolved = std::filesystem::canonical(entry.path()).string();
             const std::string model = probe_serial_mount(resolved, probe_timeout_ms);
             if (!model.empty()) {
-                ALPACA_LOG_INFO("ZWO", "Auto-detect: found " + model + " on USB " + resolved);
+                std::string found_msg = "Auto-detect: found ";
+                found_msg += model;
+                found_msg += " on USB ";
+                found_msg += resolved;
+                ALPACA_LOG_INFO("ZWO", found_msg);
                 results.push_back({ConnectionType::Serial, resolved, "", 4030, model, name});
             }
         }
@@ -540,7 +542,11 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
             }
             const std::string model = probe_serial_mount(port, probe_timeout_ms);
             if (!model.empty()) {
-                ALPACA_LOG_INFO("ZWO", "Auto-detect: found " + model + " on USB " + port);
+                std::string found_msg = "Auto-detect: found ";
+                found_msg += model;
+                found_msg += " on USB ";
+                found_msg += port;
+                ALPACA_LOG_INFO("ZWO", found_msg);
                 results.push_back({ConnectionType::Serial, port, "", 4030, model, port});
             }
         }
@@ -607,11 +613,20 @@ public:
                 candidate.host = dev.host;
                 candidate.tcp_port = dev.tcp_port;
                 if (connect(candidate)) {
-                    ALPACA_LOG_INFO("ZWO", "Auto-connected to " + dev.model_name + " via " +
-                                               (dev.type == ConnectionType::Serial ? "USB serial" : "WiFi") +
-                                               (dev.type == ConnectionType::Serial
-                                                    ? " " + dev.port_path
-                                                    : " " + dev.host + ":" + std::to_string(dev.tcp_port)));
+                    std::string connect_msg = "Auto-connected to ";
+                    connect_msg += dev.model_name;
+                    connect_msg += " via ";
+                    connect_msg += (dev.type == ConnectionType::Serial ? "USB serial" : "WiFi");
+                    if (dev.type == ConnectionType::Serial) {
+                        connect_msg += " ";
+                        connect_msg += dev.port_path;
+                    } else {
+                        connect_msg += " ";
+                        connect_msg += dev.host;
+                        connect_msg += ":";
+                        connect_msg += std::to_string(dev.tcp_port);
+                    }
+                    ALPACA_LOG_INFO("ZWO", connect_msg);
                     return true;
                 }
             }
