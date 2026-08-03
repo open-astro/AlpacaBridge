@@ -67,7 +67,7 @@ if(TARGET alpacacore_weewx)
     list(APPEND TEST_SOURCES test_weewx_observingconditions.cpp)
 endif()
 if(TARGET alpacacore_gemini)
-    list(APPEND TEST_SOURCES test_gemini_focuser.cpp test_gemini_flatpanel.cpp)
+    list(APPEND TEST_SOURCES test_gemini_focuser.cpp test_gemini_flatpanel.cpp test_gemini_flatpanel_v2.cpp)
 endif()
 if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp

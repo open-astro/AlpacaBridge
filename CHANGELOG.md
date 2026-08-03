@@ -9,11 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.1.2] - 2026-07-31
+## [3.2.0] - UNRELEASED
+
+### Added
+- **Gemini Astro Automatic FlatPanel v2 Driver** (AlpacaCore): CoverCalibrator driver for the second Gemini flat panel model — adds a real motorized cover on top of the light/brightness controls shared with the Astro Flat Panel Cover Lite. Implemented from INDI's open-source `GeminiFlatpanelRev2Adapter` (`indilib/indi`), since no vendor docs or hardware were available at the outset. Selected via a `flatPanelModel` config field (`"lite"`/`"v2"`) on the same `gemini`+`covercalibrator` router slot as the Lite driver; shares port auto-detection with it. `OpenCover`/`CloseCover` block the wire for up to 30s waiting for the hardware's exact completion reply (`*OOpened#`/`*CClosed#`) and run on a background thread so the ASCOM async initiator returns immediately. `HaltCover` has no hardware equivalent on this revision — it only stops the driver from *reporting* movement, since the in-flight wire command can't be interrupted.
+- **Gemini Astro Automatic FlatPanel v2 Support** (AlpacaHTTP): router registration, web UI model selector (`gemini-flatpanel-model`) toggling between Lite/v2 config sub-sections, shared `panelIndex` auto-detect index namespace with the Lite model.
+- **Gemini Astro Automatic FlatPanel v2 Unit Tests**: 9 test cases, 52 assertions covering defaults, metadata, connection-state contracts, and ASCOM value-range/state-machine/unsupported-method behavior.
+- **Gemini Astro Automatic FlatPanel v2 validated** (ConformU 4.4.0, Linux arm64, USB, firmware 408): new `AlpacaCore/conformu/Gemini/Astro Automatic FlatPanel v2/` report — 0 errors, 0 issues, 0 timing issues.
+
+### Fixed
+- **Gemini Astro Automatic FlatPanel v2: `CalibratorOn`/`CalibratorOff` could block for 6+ seconds behind an in-flight cover move** (AlpacaCore): the protocol wrapper serializes all wire commands — light/brightness and cover — behind one mutex, since there is only one physical serial link and interleaving bytes from two commands would corrupt both. `open_cover()`/`close_cover()` hold that mutex for up to 30s while blocked reading the motor's completion reply. `calibrator_on()`/`calibrator_off()` previously called the wrapper directly from the HTTP handler thread, so issuing `CalibratorOn` while a cover move was still physically in flight (e.g. right after `HaltCover`, which does not actually stop the wire-level move) blocked the caller until the cover command finished — caught by ConformU as a STANDARD (1s) timing violation. `CalibratorOn`/`CalibratorOff` now dispatch to a background thread, mirroring the existing cover-task pattern, so the ASCOM initiator returns immediately with `CalibratorChanging`/`CalibratorState` correctly reporting `NotReady` while the change is in flight.
+
+<details>
+<summary><strong>[3.1.2] - 2026-07-31</strong></summary>
 
 ### Fixed
 - **Per-client Connected registry: clients are now discriminated by peer address, not ClientID alone** (AlpacaHTTP, issue #163): the server stamps each request with the connection's peer address (`getpeername`, IPv4/IPv6) and the router keys Connected registrations by a length-prefixed (address, ClientID) composite — the prefix keeps an adversarial ClientID containing the delimiter from forging a collision with another client's key. Two clients that omit ClientID — or happen to reuse the same one — on different hosts now get distinct registry slots and can no longer shadow-disconnect each other (the last narrow recurrence of the issue #160 shared-device bug). Requests with no known peer address (unit tests, `getpeername` failure) degrade to the previous ClientID-only identity. Regression-tested with dual-host anonymous and same-ClientID scenarios.
 - **Per-device connection-op mutex map is now pruned on device removal** (AlpacaHTTP, issue #162): `handle_remove_device` reaps the device's registration and op-mutex entries after releasing the op lock (erasing under it would let a concurrent op mint a fresh mutex and bypass serialization), once the device can no longer be resolved from the registry — so repeated add/remove/reconfigure cycles no longer grow `connection_op_mutexes_` unboundedly over the process lifetime.
+
+</details>
 
 <details>
 <summary><strong>[3.1.1] - 2026-07-31</strong></summary>

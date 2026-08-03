@@ -49,4 +49,35 @@ std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel(int device_number
  */
 std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_by_index(int device_number, int panel_index = 0);
 
+/**
+ * @brief Create a Gemini Astro Automatic FlatPanel v2 (Rev2, USB) CoverCalibrator driver.
+ *
+ * Unlike the Cover Lite, this model has a motorized cover: CoverState
+ * reports Open/Closed/Moving/Error from live hardware status rather than
+ * always NotPresent, and OpenCover/CloseCover are functional. HaltCover has
+ * no native hardware equivalent on Rev2 (only the separate "Pro" hardware
+ * revision supports abort) -- see the driver's HaltCover doc comment for how
+ * it's handled instead of throwing.
+ *
+ * @param device_number Alpaca device number
+ * @param serial_port Serial port path (e.g., "/dev/ttyUSB0")
+ * @param baud_rate Serial baud rate (default 9600)
+ * @return Unique pointer to CoverCalibrator driver
+ */
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_v2(int device_number, const std::string& serial_port,
+                                                                  int baud_rate = 9600);
+
+/**
+ * @brief Create a Gemini Astro Automatic FlatPanel v2 driver by auto-detecting the serial port.
+ *
+ * Shares port enumeration with the Cover Lite (enumerate_gemini_flatpanel_ports()
+ * is model-agnostic -- both models answer the same >H# handshake family).
+ * panel_index selects which detected panel to use (0-based).
+ *
+ * @param device_number Alpaca device number
+ * @param panel_index 0-based index into the list of detected panels
+ * @return Unique pointer to CoverCalibrator driver
+ */
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_v2_by_index(int device_number, int panel_index = 0);
+
 }  // namespace alpacacore::vendor::gemini
