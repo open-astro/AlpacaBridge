@@ -11,8 +11,16 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ## [3.1.3] - UNRELEASED
 
+### Added
+- **ZWO AM5N mount validated** (ConformU 4.4.0, Linux arm64, USB): 0 errors, 0 issues, 0 timing issues. Report saved to `AlpacaCore/conformu/ZWO/AM5N/Linux-arm64.txt`; `SUPPORTED-DRIVERS.md` AM5N row updated from "pending arm64 re-validation" to ✓.
+
 ### Changed
 - **CI: Knetus56 added to the review workflow's trusted fork contributors** (.github/workflows/claude-review.yml): added to `allowed_non_write_users` so their own pushes to a `safe-to-review`-labeled fork PR no longer fail the review job; the label remains the maintainer's per-PR trust gate, and AGENTS.md now documents this list as the onboarding path (instead of granting write access).
+
+### Fixed
+- **ZWO mount: park-complete inference defeated by poll-thread cache pinning** (AlpacaCore): the park-state cache warming added to `refresh_cached_values()` set `park_state_cached_ = false` every poll cycle whenever `:Gps` reported NotParked — which defeated `get_at_park()`'s "stationary after :hP ⇒ park complete" inference on mounts that don't physically move on `:hP` (AM5N), so ConformU's Park test timed out and the Parked: suite saw the mount as unparked. The poll warm now leaves the cache alone during an active park command and never overwrites an inferred-parked state (`parked_cached_`), so the inference sticks until an explicit unpark. Also removed an unnecessary `:Sp01` (set-park-here) round-trip from `park()` that returned PARK_MOVING and pushed the Park method past the ASCOM STANDARD 1.0 s target.
+- **ZWO mount: Tracking=true while parked did not throw** (AlpacaCore): `set_tracking(true)` returned through its tracking-state fast path without the parked check, so ConformU's `Parked:Tracking = true` test failed (the CHANGELOG 3.0.2 fix for ITelescopeV4 parked-state errors missed the ZWO fast path). `set_tracking(true)` now calls `ensure_not_parked("Tracking")` before the fast path, throwing `InvalidWhileParked` like SynScan/iOptron.
+- **ZWO mount: FAST reads after connect raced the async warm-up** (AlpacaCore): `connected_` was published before the telemetry caches were warmed, so ConformU's first property reads (AlignmentMode, EquatorialSystem, SideOfPier) hit cold caches and did live serial reads that blew the FAST 0.1 s target on the AM5N's ~95 ms USB-ACM link. `connected_` is now published only after `refresh_cached_values()` completes; the initial warm-up call bypasses the `connected_` guard.
 
 ## [3.1.2] - 2026-07-31
 

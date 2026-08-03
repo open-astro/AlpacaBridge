@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-07-28
+## Updated 2026-08-03
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -563,7 +563,7 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | AM3 | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/AM3/) |
 | AM5 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
-| AM5N | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
+| AM5N | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/AM5N/) |
 | AM7 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
 
 <details>
@@ -572,6 +572,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Protocol**: ZWO Mount Serial Communication Protocol (see `AlpacaCore/external/ZWO/AM/ZWO_Mount_Protocol.md`)
 - **Connection**: Serial over USB or network (TCP). **Tested and working with USB and WiFi**. PulseGuide and slew behavior validated over both USB and WiFi; timing tuned for high-latency (WiFi) connections.
 - **Tested firmware**: Driver tested on ZWO **firmware 1.8.8\***. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
+- **AM5N validated** (ConformU 4.4.0, Linux arm64, USB): 0 errors, 0 issues, 0 timing issues. Park requires the mount to have been homed; the driver infers park completion from a stationary mount when :hP does not physically move it. Setting Tracking=true while parked throws `InvalidWhileParked`. The park-state cache in the poll thread is left un-pinned during active parks so the completion inference is not defeated.
 
 </details>
 
