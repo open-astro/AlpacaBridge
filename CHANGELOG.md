@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [3.1.3] - UNRELEASED
+
+### Changed
+- **CI: Knetus56 added to the review workflow's trusted fork contributors** (.github/workflows/claude-review.yml): added to `allowed_non_write_users` so their own pushes to a `safe-to-review`-labeled fork PR no longer fail the review job; the label remains the maintainer's per-PR trust gate, and AGENTS.md now documents this list as the onboarding path (instead of granting write access).
+
 ## [3.1.2] - 2026-07-31
 
 ### Fixed
