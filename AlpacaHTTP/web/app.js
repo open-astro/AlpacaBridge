@@ -327,6 +327,10 @@ const INDEX_FIELDS = [
     { fieldId: 'astroasis-focuser-index', vendor: 'astroasis', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'astroasis-hid-path' },
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
+    // Same configKey as the Lite field above: panelIndex is an index into
+    // enumerate_gemini_flatpanel_ports(), a scan shared by both models, so
+    // devices of either model correctly compete for the same index namespace.
+    { fieldId: 'gemini-flatpanel-v2-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
     { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
     { fieldId: 'wandererastro-rotator-index', vendor: 'wandererastro', deviceType: 'rotator', configKey: 'rotatorIndex' },
     { fieldId: 'wandererastro-filterwheel-index', vendor: 'wandererastro', deviceType: 'filterwheel', configKey: 'wandererFilterwheelIndex' },
@@ -902,17 +906,37 @@ function startEditDevice(device) {
         setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
         setFormValue('weewx-timeout', config.timeoutMs);
     } else if (vendor === 'gemini' && deviceType === 'covercalibrator') {
+        const model = config.flatPanelModel === 'v2' ? 'v2' : 'lite';
+        setFormValue('gemini-flatpanel-model', model);
         const connType = config.connectionType || 'auto';
-        setFormValue('gemini-flatpanel-connection-type', connType);
-        if (connType === 'auto') {
-            setFormValue('gemini-flatpanel-index', config.panelIndex);
-        } else if (connType === 'serial') {
-            setFormValue('gemini-flatpanel-port-path', config.portPath);
-            setFormValue('gemini-flatpanel-baud-rate', config.baudRate);
+        if (model === 'v2') {
+            setFormValue('gemini-flatpanel-v2-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('gemini-flatpanel-v2-index', config.panelIndex);
+            } else if (connType === 'serial') {
+                setFormValue('gemini-flatpanel-v2-port-path', config.portPath);
+                setFormValue('gemini-flatpanel-v2-baud-rate', config.baudRate);
+            }
+            const geminiFlatPanelV2ConnTypeEl = document.getElementById('gemini-flatpanel-v2-connection-type');
+            if (geminiFlatPanelV2ConnTypeEl) {
+                geminiFlatPanelV2ConnTypeEl.dispatchEvent(new Event('change'));
+            }
+        } else {
+            setFormValue('gemini-flatpanel-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('gemini-flatpanel-index', config.panelIndex);
+            } else if (connType === 'serial') {
+                setFormValue('gemini-flatpanel-port-path', config.portPath);
+                setFormValue('gemini-flatpanel-baud-rate', config.baudRate);
+            }
+            const geminiFlatPanelConnTypeEl = document.getElementById('gemini-flatpanel-connection-type');
+            if (geminiFlatPanelConnTypeEl) {
+                geminiFlatPanelConnTypeEl.dispatchEvent(new Event('change'));
+            }
         }
-        const geminiFlatPanelConnTypeEl = document.getElementById('gemini-flatpanel-connection-type');
-        if (geminiFlatPanelConnTypeEl) {
-            geminiFlatPanelConnTypeEl.dispatchEvent(new Event('change'));
+        const geminiFlatPanelModelEl = document.getElementById('gemini-flatpanel-model');
+        if (geminiFlatPanelModelEl) {
+            geminiFlatPanelModelEl.dispatchEvent(new Event('change'));
         }
     } else if (vendor === 'gemini') {
         const connType = config.connectionType || 'auto';
@@ -1921,6 +1945,27 @@ function updateGeminiConfigFields() {
     // (matches the QHY camera/filterwheel split from PR #142).
     setFieldGroupEnabled(focuserSection, !isCoverCalibrator);
     setFieldGroupEnabled(flatPanelSection, isCoverCalibrator);
+    if (isCoverCalibrator) {
+        updateGeminiFlatPanelModelFields();
+    }
+}
+
+// The CoverCalibrator sub-section itself covers two hardware models (Cover
+// Lite, light-only vs. Automatic FlatPanel v2, motorized cover) sharing one
+// vendor+deviceType slot. Show the relevant model's fields and disable the
+// other's inputs (same stale-value-leak rationale as updateGeminiConfigFields).
+function updateGeminiFlatPanelModelFields() {
+    const modelSelect = document.getElementById('gemini-flatpanel-model');
+    const liteSection = document.getElementById('gemini-flatpanel-lite-fields');
+    const v2Section = document.getElementById('gemini-flatpanel-v2-fields');
+    if (!modelSelect || !liteSection || !v2Section) {
+        return;
+    }
+    const isV2 = modelSelect.value === 'v2';
+    liteSection.style.display = isV2 ? 'none' : 'block';
+    v2Section.style.display = isV2 ? 'block' : 'none';
+    setFieldGroupEnabled(liteSection, !isV2);
+    setFieldGroupEnabled(v2Section, isV2);
 }
 
 // WandererAstro covers three device types from one vendor config block: the
@@ -2032,6 +2077,20 @@ if (geminiFlatPanelConnectionType) {
         const type = this.value;
         document.getElementById('gemini-flatpanel-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
         document.getElementById('gemini-flatpanel-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
+const geminiFlatPanelModel = document.getElementById('gemini-flatpanel-model');
+if (geminiFlatPanelModel) {
+    geminiFlatPanelModel.addEventListener('change', updateGeminiFlatPanelModelFields);
+}
+
+const geminiFlatPanelV2ConnectionType = document.getElementById('gemini-flatpanel-v2-connection-type');
+if (geminiFlatPanelV2ConnectionType) {
+    geminiFlatPanelV2ConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('gemini-flatpanel-v2-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('gemini-flatpanel-v2-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -2999,16 +3058,34 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.timeoutMs = timeoutMs;
         }
     } else if (deviceData.vendor === 'gemini' && normalizeDeviceType(deviceData.deviceType) === 'covercalibrator') {
-        const geminiFlatPanelConnType = document.getElementById('gemini-flatpanel-connection-type');
-        deviceData.connectionType = geminiFlatPanelConnType ? geminiFlatPanelConnType.value : 'auto';
-        if (deviceData.connectionType === 'auto') {
-            const panelIndex = readOptionalNumber(formData, 'geminiFlatPanelIndex');
-            deviceData.panelIndex = panelIndex !== null ? panelIndex : 0;
-        } else if (deviceData.connectionType === 'serial') {
-            deviceData.portPath = formData.get('geminiFlatPanelPortPath') || '';
-            const baudRate = readOptionalNumber(formData, 'geminiFlatPanelBaudRate');
-            if (baudRate !== null) {
-                deviceData.baudRate = baudRate;
+        const geminiFlatPanelModelEl = document.getElementById('gemini-flatpanel-model');
+        const isV2 = geminiFlatPanelModelEl ? geminiFlatPanelModelEl.value === 'v2' : false;
+        deviceData.flatPanelModel = isV2 ? 'v2' : 'lite';
+        if (isV2) {
+            const geminiFlatPanelV2ConnType = document.getElementById('gemini-flatpanel-v2-connection-type');
+            deviceData.connectionType = geminiFlatPanelV2ConnType ? geminiFlatPanelV2ConnType.value : 'auto';
+            if (deviceData.connectionType === 'auto') {
+                const panelIndex = readOptionalNumber(formData, 'geminiFlatPanelV2Index');
+                deviceData.panelIndex = panelIndex !== null ? panelIndex : 0;
+            } else if (deviceData.connectionType === 'serial') {
+                deviceData.portPath = formData.get('geminiFlatPanelV2PortPath') || '';
+                const baudRate = readOptionalNumber(formData, 'geminiFlatPanelV2BaudRate');
+                if (baudRate !== null) {
+                    deviceData.baudRate = baudRate;
+                }
+            }
+        } else {
+            const geminiFlatPanelConnType = document.getElementById('gemini-flatpanel-connection-type');
+            deviceData.connectionType = geminiFlatPanelConnType ? geminiFlatPanelConnType.value : 'auto';
+            if (deviceData.connectionType === 'auto') {
+                const panelIndex = readOptionalNumber(formData, 'geminiFlatPanelIndex');
+                deviceData.panelIndex = panelIndex !== null ? panelIndex : 0;
+            } else if (deviceData.connectionType === 'serial') {
+                deviceData.portPath = formData.get('geminiFlatPanelPortPath') || '';
+                const baudRate = readOptionalNumber(formData, 'geminiFlatPanelBaudRate');
+                if (baudRate !== null) {
+                    deviceData.baudRate = baudRate;
+                }
             }
         }
     } else if (deviceData.vendor === 'gemini') {

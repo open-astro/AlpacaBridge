@@ -1450,6 +1450,31 @@ int main() {
         EXPECT(cfg.value("panelIndex", -1) == 2);
         remove_device(router, "gemini", "covercalibrator", 9618);
     }
+    {
+        // gemini / covercalibrator (Astro Automatic FlatPanel v2, motorized
+        // cover) — same vendor+deviceType slot as the Lite case above,
+        // distinguished by flatPanelModel; guards that field's persistence
+        // through sanitize_device_config and that it actually selects the v2
+        // driver (registered device count/type is the same either way, so
+        // this only proves routing didn't reject the config).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "gemini"},
+                                           {"deviceType", "covercalibrator"},
+                                           {"deviceNumber", 9619},
+                                           {"flatPanelModel", "v2"},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB9"},
+                                           {"baudRate", 19200},
+                                           {"panelIndex", 3}},
+                                          "CoverCalibrator", 9619);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("flatPanelModel", "") == "v2");
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB9");
+        EXPECT(cfg.value("baudRate", -1) == 19200);
+        EXPECT(cfg.value("panelIndex", -1) == 3);
+        remove_device(router, "gemini", "covercalibrator", 9619);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_ASTROASIS

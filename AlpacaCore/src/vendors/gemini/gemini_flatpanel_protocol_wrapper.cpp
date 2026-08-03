@@ -41,6 +41,11 @@ constexpr int kMaxCommandLen = 32;  // ">Bnnn#" + nul fits comfortably
 constexpr int kHandshakeRetries = 3;
 constexpr int kHandshakeRetryDelayS = 1;
 constexpr int kHandshakeReadTimeoutS = 2;  // Shorter timeout during handshake
+// Cover travel is mechanical, not an instant ack -- INDI's Rev2 adapter uses
+// a long timeout for open/close specifically (vs. the short default used for
+// light/brightness/status queries). 30s matches INDI's move/calibration
+// timeout for the same hardware family; unconfirmed against real hardware.
+constexpr int kCoverMoveTimeoutS = 30;
 
 // Extract the trailing run of decimal digits from a '#'-terminated response
 // (e.g. "*V206#" -> 206, "*J50#" -> 50). Confirmed against real hardware:
@@ -80,6 +85,37 @@ bool parse_light_flag(const std::string& resp, bool& out) {
         return false;
     }
     out = (c != '0');
+    return true;
+}
+
+// Rev2 >S# reply layout, per INDI's GeminiFlatpanelRev2Adapter::getStatus()
+// (indilib/indi, gemini_flatpanel_adapters.cpp): "*S<id0><id1><motor><light><cover>#"
+// -- a 2-digit device ID (must be "19" or "99", the two IDs INDI's adapter
+// accepts) followed by three single-digit flags, 7 chars minimum before the
+// '#'. This is a DIFFERENT layout from the Lite's "*S<light><f2><f3>#" (see
+// parse_light_flag() above) -- do not reuse that parser here.
+bool parse_rev2_status(const std::string& resp, FlatPanelRev2Status& out) {
+    if (resp.size() < 7 || resp[0] != '*' || resp[1] != 'S') {
+        return false;
+    }
+    if (!std::isdigit(static_cast<unsigned char>(resp[2])) || !std::isdigit(static_cast<unsigned char>(resp[3]))) {
+        return false;
+    }
+    int id = (resp[2] - '0') * 10 + (resp[3] - '0');
+    if (id != 19 && id != 99) {
+        return false;
+    }
+    if (!std::isdigit(static_cast<unsigned char>(resp[4])) || !std::isdigit(static_cast<unsigned char>(resp[5])) ||
+        !std::isdigit(static_cast<unsigned char>(resp[6]))) {
+        return false;
+    }
+    out.motor_running = (resp[4] != '0');
+    out.light_on = (resp[5] != '0');
+    int cover = resp[6] - '0';
+    if (cover < 0 || cover > 3) {
+        return false;
+    }
+    out.cover_state = static_cast<FlatPanelCoverState>(cover);
     return true;
 }
 }  // namespace
@@ -324,6 +360,18 @@ public:
             ALPACA_LOG_WARN("Gemini", "Flat panel firmware query failed: " + std::string(e.what()));
         }
 
+        // INDI's Rev2 adapter rejects firmware < 402 outright; we only warn
+        // (not confirmed against real hardware whether older Rev2 units in
+        // the field would otherwise work fine for open/close/status).
+        if (config_.model == FlatPanelModel::Rev2 && !firmware.empty()) {
+            int ver = std::atoi(firmware.c_str());
+            if (ver < 402) {
+                ALPACA_LOG_WARN("Gemini", "Flat panel Rev2 firmware " + firmware +
+                                              " is older than the minimum (402) INDI's Rev2 adapter requires -- "
+                                              "cover commands may not behave as expected");
+            }
+        }
+
         connected_ = true;
         ALPACA_LOG_INFO("Gemini", "Flat panel connected" + (firmware.empty() ? "" : (", firmware: " + firmware)));
         return firmware;
@@ -379,6 +427,53 @@ public:
         char cmd[kMaxCommandLen];
         std::snprintf(cmd, sizeof(cmd), ">B%d#", value);
         send_command_locked(cmd);
+    }
+
+    FlatPanelRev2Status get_status_rev2() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
+        std::string resp = send_command_locked(">S#");
+        FlatPanelRev2Status status;
+        if (!parse_rev2_status(resp, status)) {
+            throw AlpacaException("Failed to parse Rev2 status: " + resp, AlpacaError::DriverException);
+        }
+        return status;
+    }
+
+    void open_cover() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
+        int saved_timeout = config_.serial_timeout_s;
+        config_.serial_timeout_s = kCoverMoveTimeoutS;
+        std::string resp;
+        try {
+            resp = send_command_locked(">O#");
+        } catch (...) {
+            config_.serial_timeout_s = saved_timeout;
+            throw;
+        }
+        config_.serial_timeout_s = saved_timeout;
+        if (resp != "*OOpened#") {
+            throw AlpacaException("Unexpected open cover reply: " + resp, AlpacaError::DriverException);
+        }
+    }
+
+    void close_cover() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
+        int saved_timeout = config_.serial_timeout_s;
+        config_.serial_timeout_s = kCoverMoveTimeoutS;
+        std::string resp;
+        try {
+            resp = send_command_locked(">C#");
+        } catch (...) {
+            config_.serial_timeout_s = saved_timeout;
+            throw;
+        }
+        config_.serial_timeout_s = saved_timeout;
+        if (resp != "*CClosed#") {
+            throw AlpacaException("Unexpected close cover reply: " + resp, AlpacaError::DriverException);
+        }
     }
 
 private:
@@ -632,5 +727,11 @@ void GeminiFlatPanelProtocolWrapper::light_on() { impl_->light_on(); }
 void GeminiFlatPanelProtocolWrapper::light_off() { impl_->light_off(); }
 
 void GeminiFlatPanelProtocolWrapper::set_brightness(int value) { impl_->set_brightness(value); }
+
+FlatPanelRev2Status GeminiFlatPanelProtocolWrapper::get_status_rev2() { return impl_->get_status_rev2(); }
+
+void GeminiFlatPanelProtocolWrapper::open_cover() { impl_->open_cover(); }
+
+void GeminiFlatPanelProtocolWrapper::close_cover() { impl_->close_cover(); }
 
 }  // namespace alpacacore::vendor::gemini
