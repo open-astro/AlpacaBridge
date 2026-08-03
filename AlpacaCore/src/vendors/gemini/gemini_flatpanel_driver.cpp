@@ -711,25 +711,30 @@ private:
      *
      * Deliberately asymmetric with start_cover_task(), which REJECTS a new
      * command (InvalidOperation) when one is already in flight rather than
-     * joining it: two overlapping Open/Close calls make no physical sense
-     * and joining could block the caller for the rest of a 30s motor move.
-     * A calibrator command, by contrast, is routinely re-issued in quick
+     * joining it: two overlapping Open/Close calls make no physical sense,
+     * whereas a calibrator command is routinely re-issued in quick
      * succession (e.g. a client ramping Brightness through several values --
-     * ConformU itself does this) and normally completes in well under a
-     * second, so joining the previous one here is the right default: it
-     * serializes back-to-back calls without rejecting a legitimate use case.
-     * The join is only unbounded in the rare case where a calibrator command
-     * is queued behind ANOTHER calibrator command that is itself blocked on
-     * protocol_'s port mutex by a concurrent cover move -- bounded by the
-     * same kCoverMoveTimeoutS (30s) as everything else sharing that mutex.
+     * ConformU itself does this), so rejecting it would break a legitimate
+     * use case. Instead the queued command is serialized behind the
+     * in-flight one -- but the join itself is deferred onto the NEW
+     * background thread (moving the previous std::thread handle into its
+     * capture) rather than run on the caller's thread: an earlier version
+     * joined inline here, which reintroduced exactly the bug class this PR
+     * fixes elsewhere whenever the previous calibrator command was itself
+     * still blocked on protocol_'s port mutex behind a concurrent cover
+     * move (up to kCoverMoveTimeoutS = 30s). This way calibrator_on()/off()
+     * always return immediately, and successive commands still execute in
+     * submission order (each thread joins its predecessor before running
+     * its own wire command).
      */
     void start_calibrator_task(bool on, int brightness) {
         std::lock_guard<std::mutex> lock(calibrator_task_mutex_);
-        if (calibrator_task_thread_.joinable()) {
-            calibrator_task_thread_.join();  // previous command already finished; reap it
-        }
         calibrator_changing_.store(true);
-        calibrator_task_thread_ = std::thread([this, on, brightness]() {
+        std::thread previous = std::move(calibrator_task_thread_);
+        calibrator_task_thread_ = std::thread([this, on, brightness, previous = std::move(previous)]() mutable {
+            if (previous.joinable()) {
+                previous.join();  // off the caller's thread -- see doc comment above
+            }
             try {
                 if (on) {
                     protocol_.light_on();
