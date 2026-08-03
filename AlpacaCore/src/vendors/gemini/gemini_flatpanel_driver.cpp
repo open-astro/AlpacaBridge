@@ -641,9 +641,20 @@ public:
      * already stationary (a common pattern) -- cover_halted_ is only ever
      * cleared by the NEXT start_cover_task() call, so with no move to halt
      * there would be nothing to clear it until some future Open/Close.
+     *
+     * The check-then-act on cover_in_flight_/cover_halted_ must be atomic
+     * with respect to start_cover_task(): without the shared lock, the
+     * in-flight move this call meant to halt could finish and a brand-new
+     * OpenCover/CloseCover could start (resetting cover_halted_ to false)
+     * between the load and the store below, so this call's delayed
+     * cover_halted_.store(true) would land on and incorrectly halt that new,
+     * unrelated move instead. Taking cover_task_mutex_ -- the same lock
+     * start_cover_task() holds across its own in_flight/halted transition --
+     * closes that window.
      */
     void halt_cover() override {
         ensure_connected();
+        std::lock_guard<std::mutex> lock(cover_task_mutex_);
         if (cover_in_flight_.load()) {
             cover_halted_.store(true);
         }
