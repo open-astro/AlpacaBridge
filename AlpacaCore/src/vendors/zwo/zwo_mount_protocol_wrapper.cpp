@@ -635,12 +635,13 @@ public:
         if (info.type == ConnectionType::Auto) {
             // Auto-detect the transport: probe USB serial ports and the mount's
             // WiFi AP, then connect to the first ZWO mount that answers. The
-            // probe runs outside mutex_ so it never blocks a live connection.
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (connected_) {
-                    disconnect_locked();
-                }
+            // whole sequence holds mutex_ so a concurrent explicit connect (or
+            // a second auto connect) cannot establish a link that this path
+            // silently tears down mid-probe — the probes open their own fds
+            // and do not touch the wrapper's connection state.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (connected_) {
+                disconnect_locked();
             }
             // Cap the probe timeout: response_timeout_ms defaults to 5000 ms,
             // which would make a negative auto-detect (no mount / stale serial
@@ -654,7 +655,7 @@ public:
                 candidate.port_path = dev.port_path;
                 candidate.host = dev.host;
                 candidate.tcp_port = dev.tcp_port;
-                if (connect(candidate)) {
+                if (connect_locked(candidate)) {
                     std::string connect_msg = "Auto-connected to ";
                     connect_msg += dev.model_name;
                     connect_msg += " via ";
@@ -676,6 +677,12 @@ public:
             return false;
         }
 
+        std::lock_guard<std::mutex> lock(mutex_);
+        return connect_locked(info);
+    }
+
+    // Actual connection logic; caller must hold mutex_.
+    bool connect_locked(const ConnectionInfo& info) {
         if (info.type == ConnectionType::Serial && info.port_path.empty()) {
             ALPACA_LOG_ERROR("ZWO", "Serial connection requested but port path is empty");
             return false;
@@ -684,8 +691,6 @@ public:
             ALPACA_LOG_ERROR("ZWO", "Network connection requested but host is empty");
             return false;
         }
-
-        std::lock_guard<std::mutex> lock(mutex_);
 
         if (connected_) {
             disconnect_locked();
