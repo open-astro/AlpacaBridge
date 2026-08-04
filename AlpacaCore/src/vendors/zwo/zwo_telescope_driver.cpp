@@ -499,12 +499,17 @@ public:
                 pulse_thread_stop_.store(false);
                 pulse_cancel_.store(false);
             }
-            parked_cached_ = false;
             park_command_active_ = false;
             park_command_started_ = std::chrono::steady_clock::time_point{};
             park_motion_seen_ = false;
             unpark_in_progress_ = false;
             if (!keep_telemetry_caches) {
+                // parked_cached_ is the sticky "inferred parked" flag — only
+                // clear it on a full (fresh) connect, never on a no-op
+                // reconnect, or a redundant Connected=true while parked would
+                // silently un-park the driver once the short park_state_cached_
+                // TTL elapses.
+                parked_cached_ = false;
                 park_state_cached_.reset();
                 park_state_at_ = std::chrono::steady_clock::time_point{};
                 tracking_state_valid_ = false;

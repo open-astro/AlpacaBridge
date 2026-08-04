@@ -469,7 +469,11 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
         close(sock);
         return "";
     }
-    fcntl(sock, F_SETFL, flags);  // back to blocking
+    // Restore blocking mode (SO_RCVTIMEO below bounds the read loop).
+    if (fcntl(sock, F_SETFL, flags) < 0) {
+        close(sock);
+        return "";
+    }
 
     // Bound the receive side so recv() cannot block past the probe timeout:
     // a peer that accepts the TCP connection but never answers :GVP (firewalled
