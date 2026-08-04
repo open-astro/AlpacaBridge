@@ -472,6 +472,14 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     }
     fcntl(sock, F_SETFL, flags);  // back to blocking
 
+    // Bound the receive side so recv() cannot block past the probe timeout:
+    // a peer that accepts the TCP connection but never answers :GVP (firewalled
+    // port, wrong device, flaky AP) must fail the probe, not hang it.
+    timeval rcv_timeout{};
+    rcv_timeout.tv_sec = timeout_ms / 1000;
+    rcv_timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout, sizeof(rcv_timeout));
+
     const std::string cmd = ":GVP#";
     if (!util::send_all(sock, cmd.c_str(), cmd.size(), MSG_NOSIGNAL)) {
         close(sock);
@@ -522,28 +530,40 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
 
 #ifndef _WIN32
     // USB: scan /dev/serial/by-id for symlinks naming ZWO (e.g.
-    // usb-ZWO_Systems_ZWO_Device_123456-if00), probe each with :GVP.
+    // usb-ZWO_Systems_ZWO_Device_123456-if00), probe each with :GVP. The whole
+    // scan is wrapped so a stale/dangling symlink or permission error (device
+    // unplugged mid-scan, restricted directory) skips that entry instead of
+    // aborting the auto-detect (including the WiFi fallback below).
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
-    if (std::filesystem::exists(serial_by_id)) {
-        for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
-            if (!entry.is_symlink()) {
-                continue;
-            }
-            const std::string name = entry.path().filename().string();
-            if (name.find("ZWO") == std::string::npos) {
-                continue;
-            }
-            const std::string resolved = std::filesystem::canonical(entry.path()).string();
-            const std::string model = probe_serial_mount(resolved, probe_timeout_ms);
-            if (!model.empty()) {
-                std::string found_msg = "Auto-detect: found ";
-                found_msg += model;
-                found_msg += " on USB ";
-                found_msg += resolved;
-                ALPACA_LOG_INFO("ZWO", found_msg);
-                results.push_back({ConnectionType::Serial, resolved, "", 4030, model, name});
+    try {
+        if (std::filesystem::exists(serial_by_id)) {
+            for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
+                try {
+                    if (!entry.is_symlink()) {
+                        continue;
+                    }
+                    const std::string name = entry.path().filename().string();
+                    if (name.find("ZWO") == std::string::npos) {
+                        continue;
+                    }
+                    const std::string resolved = std::filesystem::canonical(entry.path()).string();
+                    const std::string model = probe_serial_mount(resolved, probe_timeout_ms);
+                    if (!model.empty()) {
+                        std::string found_msg = "Auto-detect: found ";
+                        found_msg += model;
+                        found_msg += " on USB ";
+                        found_msg += resolved;
+                        ALPACA_LOG_INFO("ZWO", found_msg);
+                        results.push_back({ConnectionType::Serial, resolved, "", 4030, model, name});
+                    }
+                } catch (const std::filesystem::filesystem_error&) {
+                    // Skip this entry (dangling symlink / raced unplug).
+                    continue;
+                }
             }
         }
+    } catch (const std::filesystem::filesystem_error&) {
+        // /dev/serial/by-id unavailable or unreadable — fall through to ttyACM.
     }
 
     // Fallback when /dev/serial/by-id is unavailable or the entry does not

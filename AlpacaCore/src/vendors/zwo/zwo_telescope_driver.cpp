@@ -237,6 +237,7 @@ public:
           device_number_(device_number),
           connection_info_(connection_info),
           connected_(false),
+          caches_ready_(false),
           mount_info_(),
           target_ra_hours_(0.0),
           target_dec_degrees_(0.0),
@@ -360,7 +361,12 @@ public:
     int get_interface_version() const override { return 4; }
 
     bool get_connected() const override {
-        return connected_.load();
+        // Gate on caches_ready_ so clients (ConformU) only see Connected=true
+        // once the telemetry caches have been warmed after connect — the first
+        // property reads after connect then hit warm caches and stay under the
+        // ASCOM FAST 0.1 s target. connected_ itself is set early (inside the
+        // lock) to keep concurrent Connected=true requests on the no-op path.
+        return connected_.load() && caches_ready_.load();
     }
 
     void connect() override {
@@ -399,6 +405,7 @@ public:
             if (!connected_.exchange(false)) {
                 return;
             }
+            caches_ready_.store(false);
             poll_stop_.store(true);
             pulse_thread_stop_.store(true);
             pulse_cancel_.store(true);
@@ -604,8 +611,8 @@ public:
             try {
                 sync_mount_time_if_configured();
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " +
-                                           std::string(e.what()));
+                ALPACA_LOG_WARN(
+                    "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
             }
             lock.unlock();
             refresh_cached_values();
@@ -618,14 +625,15 @@ public:
             if (!protocol.connect(connection_info_)) {
                 throw AlpacaException("Failed to connect to ZWO mount", AlpacaError::NotConnected);
             }
-            // connected_ is intentionally NOT published yet. The mount link is
-            // up but the telemetry caches are still cold — publishing Connected
-            // here lets a client (ConformU polls GET /connected then reads
-            // properties immediately) start reading while the warm-up serial
-            // sequence below is still running, and the first reads pay live
-            // serial round-trips (~95 ms each on the AM5N's USB-ACM link) that
-            // blow the ASCOM FAST 0.1 s target. Connected=true is published
-            // only after refresh_cached_values() below has warmed every cache.
+            // Publish connected_ immediately (inside the lock) so a concurrent
+            // Connected=true request takes the no-op path below instead of
+            // re-entering protocol.connect() and tearing down this fresh link.
+            // get_connected() additionally gates on caches_ready_, so clients
+            // only observe Connected=true once the telemetry caches below are
+            // warm — preserving the FAST-target ordering (first property reads
+            // after connect hit warm caches, not live ~95 ms serial reads).
+            connected_.store(true);
+            caches_ready_.store(false);
             reset_session_state_for_connect();
 
             try {
@@ -657,9 +665,7 @@ public:
             if (!guide_rate_set) {
                 const double fallback_multiple = 1.00;
                 const double fallback_deg_per_sec = fallback_multiple * kSiderealRateDegPerSec;
-                ALPACA_LOG_WARN(
-                    "ZWO",
-                    "Unable to read guide rate; assuming 1.00x sidereal until updated");
+                ALPACA_LOG_WARN("ZWO", "Unable to read guide rate; assuming 1.00x sidereal until updated");
                 guide_rate_ = {fallback_deg_per_sec, fallback_deg_per_sec};
             }
 
@@ -671,21 +677,18 @@ public:
 
             sync_mount_time_if_configured();
             lock.unlock();
-            // Warm every telemetry cache BEFORE publishing Connected=true so a
-            // client that reads properties immediately after seeing Connected
-            // hits warm caches (see the comment at the top of this branch).
+            // Warm every telemetry cache before advertising Connected=true (via
+            // caches_ready_) so a client that reads properties immediately after
+            // seeing Connected hits warm caches instead of live serial reads.
             refresh_cached_values(/*require_connected=*/false);
-            connected_.store(true);
+            caches_ready_.store(true);
             start_poll_thread();
             start_pulse_thread();
             return;
         }
-
     }
 
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
 
     std::string action(std::string_view action_name, std::string_view) override {
         throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
@@ -2230,6 +2233,13 @@ public:
         parked_cached_ = false;
         park_command_active_ = false;
         park_motion_seen_ = false;
+        // Also drop the stale get_at_park() cache: ensure_not_parked() prefers
+        // a fresh park_state_cached_ over parked_cached_, so a recent AtPark
+        // read (true, within kFastParkTtl) would otherwise make operations like
+        // set_tracking(true)/slew throw InvalidWhileParked right after a
+        // successful unpark.
+        park_state_cached_.reset();
+        park_state_at_ = std::chrono::steady_clock::time_point{};
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     }
 
@@ -2835,6 +2845,10 @@ private:
     const ConnectionInfo connection_info_;
 
     std::atomic<bool> connected_;
+    // True once the telemetry caches are warm after connect. get_connected()
+    // gates on this so clients only see Connected=true when the first property
+    // reads will hit warm caches (ASCOM FAST 0.1 s target).
+    std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
 
