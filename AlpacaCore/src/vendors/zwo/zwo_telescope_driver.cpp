@@ -237,6 +237,7 @@ public:
           device_number_(device_number),
           connection_info_(connection_info),
           connected_(false),
+          caches_ready_(false),
           mount_info_(),
           target_ra_hours_(0.0),
           target_dec_degrees_(0.0),
@@ -292,6 +293,7 @@ public:
           park_command_active_(false),
           park_command_started_(std::chrono::steady_clock::time_point{}),
           park_motion_seen_(false),
+          unpark_in_progress_(false),
           pending_site_latitude_(site_latitude_deg),
           pending_site_longitude_(site_longitude_deg),
           pending_site_elevation_(site_elevation_m),
@@ -360,7 +362,12 @@ public:
     int get_interface_version() const override { return 4; }
 
     bool get_connected() const override {
-        return connected_.load();
+        // Gate on caches_ready_ so clients (ConformU) only see Connected=true
+        // once the telemetry caches have been warmed after connect — the first
+        // property reads after connect then hit warm caches and stay under the
+        // ASCOM FAST 0.1 s target. connected_ itself is set early (inside the
+        // lock) to keep concurrent Connected=true requests on the no-op path.
+        return connected_.load() && caches_ready_.load();
     }
 
     void connect() override {
@@ -399,6 +406,7 @@ public:
             if (!connected_.exchange(false)) {
                 return;
             }
+            caches_ready_.store(false);
             poll_stop_.store(true);
             pulse_thread_stop_.store(true);
             pulse_cancel_.store(true);
@@ -462,23 +470,27 @@ public:
 
         std::unique_lock<std::mutex> lock(mutex_);
         auto& protocol = ZWOMountProtocolWrapper::instance();
-        auto reset_session_state_for_connect = [&]() {
+        auto reset_session_state_for_connect = [&](bool keep_telemetry_caches = false) {
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             slew_force_until_ = std::chrono::steady_clock::time_point{};
             pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
-            cached_equatorial_.reset();
-            cached_horizontal_.reset();
-            cached_status_.reset();
-            cached_pier_side_.reset();
-            park_state_cached_.reset();
-            cached_equatorial_at_ = std::chrono::steady_clock::time_point{};
-            cached_horizontal_at_ = std::chrono::steady_clock::time_point{};
-            cached_status_at_ = std::chrono::steady_clock::time_point{};
-            cached_pier_side_at_ = std::chrono::steady_clock::time_point{};
-            park_state_at_ = std::chrono::steady_clock::time_point{};
+            if (!keep_telemetry_caches) {
+                cached_equatorial_.reset();
+                cached_horizontal_.reset();
+                cached_status_.reset();
+                cached_pier_side_.reset();
+                park_state_cached_.reset();
+                cached_equatorial_at_ = std::chrono::steady_clock::time_point{};
+                cached_horizontal_at_ = std::chrono::steady_clock::time_point{};
+                cached_status_at_ = std::chrono::steady_clock::time_point{};
+                cached_pier_side_at_ = std::chrono::steady_clock::time_point{};
+                park_state_at_ = std::chrono::steady_clock::time_point{};
+                tracking_state_valid_ = false;
+                tracking_state_at_ = std::chrono::steady_clock::time_point{};
+            }
             poll_pause_.store(false);
             {
                 std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
@@ -487,15 +499,23 @@ public:
                 pulse_thread_stop_.store(false);
                 pulse_cancel_.store(false);
             }
-            parked_cached_ = false;
             park_command_active_ = false;
             park_command_started_ = std::chrono::steady_clock::time_point{};
             park_motion_seen_ = false;
-            park_state_cached_.reset();
-            park_state_at_ = std::chrono::steady_clock::time_point{};
+            unpark_in_progress_ = false;
+            if (!keep_telemetry_caches) {
+                // parked_cached_ is the sticky "inferred parked" flag — only
+                // clear it on a full (fresh) connect, never on a no-op
+                // reconnect, or a redundant Connected=true while parked would
+                // silently un-park the driver once the short park_state_cached_
+                // TTL elapses.
+                parked_cached_ = false;
+                park_state_cached_.reset();
+                park_state_at_ = std::chrono::steady_clock::time_point{};
+                tracking_state_valid_ = false;
+                tracking_state_at_ = std::chrono::steady_clock::time_point{};
+            }
             tracking_rate_valid_ = false;
-            tracking_state_valid_ = false;
-            tracking_state_at_ = std::chrono::steady_clock::time_point{};
             pending_slew_adjust_ = false;
             pending_slew_ra_hours_ = 0.0;
             pending_slew_dec_degrees_ = 0.0;
@@ -584,7 +604,13 @@ public:
                 return;
             }
 
-            reset_session_state_for_connect();
+            // No-op reconnect (client sends Connected=true while already
+            // connected, e.g. the Platform 7 async /connect handshake). The
+            // mount never went away, so keep the telemetry caches warm —
+            // clearing them forces every first property read after connect to
+            // pay live serial round-trips (~95 ms each on the AM5N's USB-ACM
+            // link), which blows the ASCOM FAST 0.1 s target during ConformU.
+            reset_session_state_for_connect(/*keep_telemetry_caches=*/true);
             apply_or_load_site_info();
             if (pending_site_elevation_.has_value()) {
                 site_elevation_m_ = pending_site_elevation_.value();
@@ -592,8 +618,8 @@ public:
             try {
                 sync_mount_time_if_configured();
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " +
-                                           std::string(e.what()));
+                ALPACA_LOG_WARN(
+                    "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
             }
             lock.unlock();
             refresh_cached_values();
@@ -606,7 +632,15 @@ public:
             if (!protocol.connect(connection_info_)) {
                 throw AlpacaException("Failed to connect to ZWO mount", AlpacaError::NotConnected);
             }
+            // Publish connected_ immediately (inside the lock) so a concurrent
+            // Connected=true request takes the no-op path below instead of
+            // re-entering protocol.connect() and tearing down this fresh link.
+            // get_connected() additionally gates on caches_ready_, so clients
+            // only observe Connected=true once the telemetry caches below are
+            // warm — preserving the FAST-target ordering (first property reads
+            // after connect hit warm caches, not live ~95 ms serial reads).
             connected_.store(true);
+            caches_ready_.store(false);
             reset_session_state_for_connect();
 
             try {
@@ -638,9 +672,7 @@ public:
             if (!guide_rate_set) {
                 const double fallback_multiple = 1.00;
                 const double fallback_deg_per_sec = fallback_multiple * kSiderealRateDegPerSec;
-                ALPACA_LOG_WARN(
-                    "ZWO",
-                    "Unable to read guide rate; assuming 1.00x sidereal until updated");
+                ALPACA_LOG_WARN("ZWO", "Unable to read guide rate; assuming 1.00x sidereal until updated");
                 guide_rate_ = {fallback_deg_per_sec, fallback_deg_per_sec};
             }
 
@@ -650,19 +682,28 @@ public:
             } catch (const std::exception&) {
             }
 
-            sync_mount_time_if_configured();
+            // Guarded like the no-op reconnect path: a transient serial error
+            // during the time/site sync must not abort the connect after
+            // connected_ is already set — that would leave caches_ready_ stuck
+            // false and get_connected() reporting false forever.
+            try {
+                sync_mount_time_if_configured();
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("ZWO", "Unable to synchronize mount time/site on connect: " + std::string(e.what()));
+            }
             lock.unlock();
-            refresh_cached_values();
+            // Warm every telemetry cache before advertising Connected=true (via
+            // caches_ready_) so a client that reads properties immediately after
+            // seeing Connected hits warm caches instead of live serial reads.
+            refresh_cached_values(/*require_connected=*/false);
+            caches_ready_.store(true);
             start_poll_thread();
             start_pulse_thread();
             return;
         }
-
     }
 
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
 
     std::string action(std::string_view action_name, std::string_view) override {
         throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
@@ -963,6 +1004,13 @@ public:
 
     void set_tracking(bool tracking) override {
         check_connected();
+        if (tracking) {
+            // Per ITelescopeV4 / ConformU: enabling tracking while parked must
+            // throw InvalidWhileParked; disabling is allowed (harmless). Check
+            // BEFORE the tracking-state fast path below, which would otherwise
+            // return early without the parked validation.
+            ensure_not_parked("Tracking");
+        }
         auto& protocol = ZWOMountProtocolWrapper::instance();
         const auto now = std::chrono::steady_clock::now();
         {
@@ -2179,28 +2227,56 @@ public:
         check_connected();
         reset_position_offsets();
         auto& protocol = ZWOMountProtocolWrapper::instance();
-        if (!protocol.unpark()) {
-            std::optional<ParkStatus> park_status;
-            try {
-                park_status = protocol.get_park_status();
-            } catch (const std::exception&) {
-            }
-
-            if (!(park_status == ParkStatus::Unknown || park_status == ParkStatus::NotParked ||
-                  !park_status.has_value())) {
-                throw AlpacaException("Mount rejected unpark request", AlpacaError::InvalidOperation);
-            }
-
-            ALPACA_LOG_WARN(
-                "ZWO",
-                "Unpark returned 0 while :Gps is unavailable/not-parked; treating unpark as successful");
+        // Guard the poll thread's park-state warm against re-parking us: some
+        // firmware keeps reporting :Gps=Completed briefly after :Spu, and the
+        // warm logic's Completed branch would otherwise flip parked_cached_
+        // back to true (which then sticks, since the !parked_cached_ guard
+        // never self-corrects). Set the flag under the lock before the :Spu
+        // round-trip and clear it after the caches are reset below.
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            unpark_in_progress_ = true;
         }
+        try {
+            if (!protocol.unpark()) {
+                std::optional<ParkStatus> park_status;
+                try {
+                    park_status = protocol.get_park_status();
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                    // :Gps unavailable — the unpark is still treated as success below.
+                }
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        parked_cached_ = false;
-        park_command_active_ = false;
-        park_motion_seen_ = false;
-        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                if (!(park_status == ParkStatus::Unknown || park_status == ParkStatus::NotParked ||
+                      !park_status.has_value())) {
+                    throw AlpacaException("Mount rejected unpark request", AlpacaError::InvalidOperation);
+                }
+
+                ALPACA_LOG_WARN("ZWO",
+                                "Unpark returned 0 while :Gps is unavailable/not-parked; "
+                                "treating unpark as successful");
+            }
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            parked_cached_ = false;
+            park_command_active_ = false;
+            park_motion_seen_ = false;
+            unpark_in_progress_ = false;
+            // Also drop the stale get_at_park() cache: ensure_not_parked() prefers
+            // a fresh park_state_cached_ over parked_cached_, so a recent AtPark
+            // read (true, within kFastParkTtl) would otherwise make operations like
+            // set_tracking(true)/slew throw InvalidWhileParked right after a
+            // successful unpark.
+            park_state_cached_.reset();
+            park_state_at_ = std::chrono::steady_clock::time_point{};
+            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        } catch (...) {
+            // protocol.unpark()/get_park_status() can throw (serial/mount error):
+            // always clear the guard so the poll thread's park-state warm is not
+            // disabled permanently by a failed unpark.
+            std::lock_guard<std::mutex> guard(mutex_);
+            unpark_in_progress_ = false;
+            throw;
+        }
     }
 
 private:
@@ -2449,8 +2525,8 @@ private:
         }
     }
 
-    void refresh_cached_values() const {
-        if (!connected_.load()) {
+    void refresh_cached_values(bool require_connected = true) const {
+        if (require_connected && !connected_.load()) {
             return;
         }
         auto& protocol = ZWOMountProtocolWrapper::instance();
@@ -2483,6 +2559,44 @@ private:
             cached_horizontal_ = hor;
             cached_horizontal_at_ = now;
         } catch (const std::exception&) {
+        }
+        // Warm the park state so get_at_park() never falls through to a live
+        // :Gps read in steady state (keeps DeviceState under the ASCOM FAST
+        // 0.1 s target). Only the POSITIVE state is pinned: when the mount is
+        // parked we cache true; when it is genuinely not parked and no park
+        // command is active we cache false. During an ACTIVE park command we
+        // deliberately leave the cache alone so get_at_park() runs its full
+        // evaluation — including the "stationary ⇒ park complete" inference
+        // that some ZWO firmware relies on when :hP does not physically move
+        // the mount (AM5N). Once the driver has inferred parked (parked_cached_
+        // true), never overwrite it back to false from a raw :Gps=0 — that
+        // would make AtPark flap and break ConformU's Parked: tests (slew/
+        // sync while parked must throw, not silently unpark).
+        if (poll_pause_.load()) return;
+        try {
+            const auto park_status = protocol.get_park_status();
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (park_status == ParkStatus::InProgress) {
+                // Keep both caches untouched while the mount is moving: an
+                // in-flight park may have already inferred "stationary ⇒
+                // parked" (parked_cached_ true), and clearing it here would
+                // defeat that inference on firmware that keeps reporting
+                // InProgress after the mount stops (AM3/AM5/AM7).
+            } else if (park_status == ParkStatus::Completed && !unpark_in_progress_) {
+                park_state_cached_ = true;
+                parked_cached_ = true;
+                park_state_at_ = now;
+            } else if (!park_command_active_ && !parked_cached_) {
+                // NotParked / Error / Unknown, no active park, and the driver
+                // does not believe the mount is parked: safe to cache false.
+                park_state_cached_ = false;
+                park_state_at_ = now;
+            }
+            // Active park, or the driver has inferred parked: leave the cache
+            // alone so get_at_park() re-evaluates / the inferred state sticks.
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // :Gps read failed during park warm — leave the cache stale so
+            // get_at_park() re-evaluates; the next poll cycle retries.
         }
         // Compute pier side from current hour angle (same logic as get_side_of_pier).
         // :Gm# is not used because ZWO firmware's E/W response does not reliably map to the
@@ -2767,6 +2881,10 @@ private:
     const ConnectionInfo connection_info_;
 
     std::atomic<bool> connected_;
+    // True once the telemetry caches are warm after connect. get_connected()
+    // gates on this so clients only see Connected=true when the first property
+    // reads will hit warm caches (ASCOM FAST 0.1 s target).
+    std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
 
@@ -2859,6 +2977,9 @@ private:
     mutable bool park_command_active_;
     mutable std::chrono::steady_clock::time_point park_command_started_;
     mutable bool park_motion_seen_;
+    // Set while unpark() is issuing :Spu so the poll thread's park-state warm
+    // does not re-cache Completed from a stale :Gps read (mount firmware lag).
+    mutable bool unpark_in_progress_;
 
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;

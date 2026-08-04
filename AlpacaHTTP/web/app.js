@@ -2056,6 +2056,7 @@ const zwoMountConnectionType = document.getElementById('zwo-mount-connection-typ
 if (zwoMountConnectionType) {
     zwoMountConnectionType.addEventListener('change', function() {
         const type = this.value;
+        // Auto-detect needs no port/host; only show the config for an explicit transport.
         document.getElementById('zwo-mount-serial-config').style.display = type === 'serial' ? 'block' : 'none';
         document.getElementById('zwo-mount-network-config').style.display = type === 'network' ? 'block' : 'none';
     });

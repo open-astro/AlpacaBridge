@@ -175,3 +175,61 @@ TEST_CASE("ZWO Mount Telescope Driver - Axis Rate Ranges", "[zwo][telescope][uni
     const auto tertiary_ranges = driver->get_axis_rate_ranges(2);
     REQUIRE(tertiary_ranges.empty());
 }
+
+TEST_CASE("ZWO Mount Telescope Driver - ConnectionType::Auto and enumeration", "[zwo][telescope][unit]") {
+    using alpacacore::vendor::zwo::ConnectionType;
+    using alpacacore::vendor::zwo::ZWODeviceInfo;
+
+    // ConnectionType::Auto must be a valid transport value distinct from the
+    // explicit serial/network modes.
+    ConnectionType auto_type = ConnectionType::Auto;
+    CHECK(static_cast<int>(auto_type) != static_cast<int>(ConnectionType::Serial));
+    CHECK(static_cast<int>(auto_type) != static_cast<int>(ConnectionType::Network));
+
+    // ZWODeviceInfo defaults: serial type, empty port/host, protocol-default
+    // TCP port, empty model/label.
+    ZWODeviceInfo info;
+    CHECK(info.type == ConnectionType::Serial);
+    CHECK(info.port_path.empty());
+    CHECK(info.host.empty());
+    CHECK(info.tcp_port == 4030);
+    CHECK(info.model_name.empty());
+    CHECK(info.label.empty());
+
+    // enumerate_zwo_mounts with a short probe timeout must return without
+    // throwing or hanging. On a host with no ZWO device attached (CI runners),
+    // it returns an empty list; with a ZWO device present it returns at least
+    // one entry carrying a non-empty model name (probed via :GVP).
+    std::vector<ZWODeviceInfo> devices;
+    REQUIRE_NOTHROW(devices = alpacacore::vendor::zwo::enumerate_zwo_mounts(100));
+    for (const auto& dev : devices) {
+        CHECK_FALSE(dev.model_name.empty());
+        REQUIRE((dev.type == ConnectionType::Serial || dev.type == ConnectionType::Network));
+        if (dev.type == ConnectionType::Serial) {
+            CHECK_FALSE(dev.port_path.empty());
+        } else {
+            CHECK_FALSE(dev.host.empty());
+        }
+    }
+}
+
+TEST_CASE("ZWO Mount Telescope Driver - Auto connect on missing hardware", "[zwo][telescope][unit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Auto;
+    conn.response_timeout_ms = 100;
+
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(6, conn);
+    REQUIRE(driver != nullptr);
+
+    // With no ZWO mount reachable, connect() must fail cleanly (no crash,
+    // no hang) rather than throwing or leaving a half-open state.
+    try {
+        driver->set_connected(true);
+        // Some platforms (a host with a real ZWO device) may succeed; that is
+        // fine. Only assert that a failure surfaces as NotConnected/DriverException
+        // rather than corrupting the driver.
+    } catch (const alpacacore::AlpacaException&) {
+    }
+    // The driver must remain in a well-defined (disconnected) state afterwards.
+    CHECK(driver->get_connecting() == false);
+}
