@@ -2242,7 +2242,8 @@ public:
                 std::optional<ParkStatus> park_status;
                 try {
                     park_status = protocol.get_park_status();
-                } catch (const std::exception&) {
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                    // :Gps unavailable — the unpark is still treated as success below.
                 }
 
                 if (!(park_status == ParkStatus::Unknown || park_status == ParkStatus::NotParked ||
