@@ -432,12 +432,18 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<u_short>(port));
-    hostent* host_entry = gethostbyname(host.c_str());
-    if (host_entry == nullptr) {
+    // getaddrinfo (thread-safe, unlike gethostbyname's static buffer).
+    addrinfo hints{};
+    std::memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* result = nullptr;
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) {
         close(sock);
         return "";
     }
-    addr.sin_addr = *reinterpret_cast<in_addr*>(host_entry->h_addr);
+    addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
+    freeaddrinfo(result);
 
     // Non-blocking connect so an unreachable host fails within the probe timeout.
     const int flags = fcntl(sock, F_GETFL, 0);
@@ -504,6 +510,14 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
 }  // namespace
 
 std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
+    // The probes below open candidate ports/sockets directly and do NOT take
+    // the ZWOMountProtocolWrapper singleton's mutex. This is intentional: the
+    // wrapper is a process-wide singleton holding at most ONE physical ZWO
+    // connection at a time, and enumeration is called from connect() only
+    // after disconnecting any live link. A probe could still race an external
+    // open of the same port in another process, which is a pre-existing
+    // constraint of the serial auto-detect pattern shared with the other
+    // protocol drivers (iOptron, SynScan, ...).
     std::vector<ZWODeviceInfo> results;
 
 #ifndef _WIN32

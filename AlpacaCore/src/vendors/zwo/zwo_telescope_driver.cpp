@@ -2531,9 +2531,11 @@ private:
             const auto park_status = protocol.get_park_status();
             std::lock_guard<std::mutex> lock(mutex_);
             if (park_status == ParkStatus::InProgress) {
-                // Keep the cached value while the mount is moving; the next cycle
-                // resolves the final state once the park completes.
-                parked_cached_ = false;
+                // Keep both caches untouched while the mount is moving: an
+                // in-flight park may have already inferred "stationary ⇒
+                // parked" (parked_cached_ true), and clearing it here would
+                // defeat that inference on firmware that keeps reporting
+                // InProgress after the mount stops (AM3/AM5/AM7).
             } else if (park_status == ParkStatus::Completed) {
                 park_state_cached_ = true;
                 parked_cached_ = true;
