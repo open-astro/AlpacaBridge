@@ -477,7 +477,7 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     // port, wrong device, flaky AP) must fail the probe, not hang it.
     timeval rcv_timeout{};
     rcv_timeout.tv_sec = timeout_ms / 1000;
-    rcv_timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    rcv_timeout.tv_usec = static_cast<suseconds_t>(timeout_ms % 1000) * 1000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout, sizeof(rcv_timeout));
 
     const std::string cmd = ":GVP#";
@@ -562,7 +562,7 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
                 }
             }
         }
-    } catch (const std::filesystem::filesystem_error&) {
+    } catch (const std::filesystem::filesystem_error&) {  // NOLINT(bugprone-empty-catch)
         // /dev/serial/by-id unavailable or unreadable — fall through to ttyACM.
     }
 
