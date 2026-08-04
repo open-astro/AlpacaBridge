@@ -293,6 +293,7 @@ public:
           park_command_active_(false),
           park_command_started_(std::chrono::steady_clock::time_point{}),
           park_motion_seen_(false),
+          unpark_in_progress_(false),
           pending_site_latitude_(site_latitude_deg),
           pending_site_longitude_(site_longitude_deg),
           pending_site_elevation_(site_elevation_m),
@@ -502,6 +503,7 @@ public:
             park_command_active_ = false;
             park_command_started_ = std::chrono::steady_clock::time_point{};
             park_motion_seen_ = false;
+            unpark_in_progress_ = false;
             if (!keep_telemetry_caches) {
                 park_state_cached_.reset();
                 park_state_at_ = std::chrono::steady_clock::time_point{};
@@ -2212,6 +2214,16 @@ public:
         check_connected();
         reset_position_offsets();
         auto& protocol = ZWOMountProtocolWrapper::instance();
+        // Guard the poll thread's park-state warm against re-parking us: some
+        // firmware keeps reporting :Gps=Completed briefly after :Spu, and the
+        // warm logic's Completed branch would otherwise flip parked_cached_
+        // back to true (which then sticks, since the !parked_cached_ guard
+        // never self-corrects). Set the flag under the lock before the :Spu
+        // round-trip and clear it after the caches are reset below.
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            unpark_in_progress_ = true;
+        }
         if (!protocol.unpark()) {
             std::optional<ParkStatus> park_status;
             try {
@@ -2221,18 +2233,20 @@ public:
 
             if (!(park_status == ParkStatus::Unknown || park_status == ParkStatus::NotParked ||
                   !park_status.has_value())) {
+                std::lock_guard<std::mutex> guard(mutex_);
+                unpark_in_progress_ = false;
                 throw AlpacaException("Mount rejected unpark request", AlpacaError::InvalidOperation);
             }
 
-            ALPACA_LOG_WARN(
-                "ZWO",
-                "Unpark returned 0 while :Gps is unavailable/not-parked; treating unpark as successful");
+            ALPACA_LOG_WARN("ZWO",
+                            "Unpark returned 0 while :Gps is unavailable/not-parked; treating unpark as successful");
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
         parked_cached_ = false;
         park_command_active_ = false;
         park_motion_seen_ = false;
+        unpark_in_progress_ = false;
         // Also drop the stale get_at_park() cache: ensure_not_parked() prefers
         // a fresh park_state_cached_ over parked_cached_, so a recent AtPark
         // read (true, within kFastParkTtl) would otherwise make operations like
@@ -2546,7 +2560,7 @@ private:
                 // parked" (parked_cached_ true), and clearing it here would
                 // defeat that inference on firmware that keeps reporting
                 // InProgress after the mount stops (AM3/AM5/AM7).
-            } else if (park_status == ParkStatus::Completed) {
+            } else if (park_status == ParkStatus::Completed && !unpark_in_progress_) {
                 park_state_cached_ = true;
                 parked_cached_ = true;
                 park_state_at_ = now;
@@ -2941,6 +2955,9 @@ private:
     mutable bool park_command_active_;
     mutable std::chrono::steady_clock::time_point park_command_started_;
     mutable bool park_motion_seen_;
+    // Set while unpark() is issuing :Spu so the poll thread's park-state warm
+    // does not re-cache Completed from a stale :Gps read (mount firmware lag).
+    mutable bool unpark_in_progress_;
 
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;

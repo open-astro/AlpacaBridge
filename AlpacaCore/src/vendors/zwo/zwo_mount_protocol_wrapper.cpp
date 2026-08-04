@@ -465,8 +465,7 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     }
     int so_error = 0;
     socklen_t len = sizeof(so_error);
-    getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
-    if (so_error != 0) {
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) != 0 || so_error != 0) {
         close(sock);
         return "";
     }
@@ -639,7 +638,12 @@ public:
                     disconnect_locked();
                 }
             }
-            const auto devices = enumerate_zwo_mounts(info.response_timeout_ms);
+            // Cap the probe timeout: response_timeout_ms defaults to 5000 ms,
+            // which would make a negative auto-detect (no mount / stale serial
+            // entries) block ~5 s per candidate. 1500 ms is plenty for a local
+            // :GVP probe and keeps connectionType=auto responsive.
+            constexpr int kProbeTimeoutMs = 1500;
+            const auto devices = enumerate_zwo_mounts(std::min(info.response_timeout_ms, kProbeTimeoutMs));
             for (const auto& dev : devices) {
                 ConnectionInfo candidate = info;
                 candidate.type = dev.type;
