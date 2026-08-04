@@ -682,7 +682,15 @@ public:
             } catch (const std::exception&) {
             }
 
-            sync_mount_time_if_configured();
+            // Guarded like the no-op reconnect path: a transient serial error
+            // during the time/site sync must not abort the connect after
+            // connected_ is already set — that would leave caches_ready_ stuck
+            // false and get_connected() reporting false forever.
+            try {
+                sync_mount_time_if_configured();
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("ZWO", "Unable to synchronize mount time/site on connect: " + std::string(e.what()));
+            }
             lock.unlock();
             // Warm every telemetry cache before advertising Connected=true (via
             // caches_ready_) so a client that reads properties immediately after
@@ -2229,37 +2237,45 @@ public:
             std::lock_guard<std::mutex> guard(mutex_);
             unpark_in_progress_ = true;
         }
-        if (!protocol.unpark()) {
-            std::optional<ParkStatus> park_status;
-            try {
-                park_status = protocol.get_park_status();
-            } catch (const std::exception&) {
+        try {
+            if (!protocol.unpark()) {
+                std::optional<ParkStatus> park_status;
+                try {
+                    park_status = protocol.get_park_status();
+                } catch (const std::exception&) {
+                }
+
+                if (!(park_status == ParkStatus::Unknown || park_status == ParkStatus::NotParked ||
+                      !park_status.has_value())) {
+                    throw AlpacaException("Mount rejected unpark request", AlpacaError::InvalidOperation);
+                }
+
+                ALPACA_LOG_WARN("ZWO",
+                                "Unpark returned 0 while :Gps is unavailable/not-parked; "
+                                "treating unpark as successful");
             }
 
-            if (!(park_status == ParkStatus::Unknown || park_status == ParkStatus::NotParked ||
-                  !park_status.has_value())) {
-                std::lock_guard<std::mutex> guard(mutex_);
-                unpark_in_progress_ = false;
-                throw AlpacaException("Mount rejected unpark request", AlpacaError::InvalidOperation);
-            }
-
-            ALPACA_LOG_WARN("ZWO",
-                            "Unpark returned 0 while :Gps is unavailable/not-parked; treating unpark as successful");
+            std::lock_guard<std::mutex> lock(mutex_);
+            parked_cached_ = false;
+            park_command_active_ = false;
+            park_motion_seen_ = false;
+            unpark_in_progress_ = false;
+            // Also drop the stale get_at_park() cache: ensure_not_parked() prefers
+            // a fresh park_state_cached_ over parked_cached_, so a recent AtPark
+            // read (true, within kFastParkTtl) would otherwise make operations like
+            // set_tracking(true)/slew throw InvalidWhileParked right after a
+            // successful unpark.
+            park_state_cached_.reset();
+            park_state_at_ = std::chrono::steady_clock::time_point{};
+            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        } catch (...) {
+            // protocol.unpark()/get_park_status() can throw (serial/mount error):
+            // always clear the guard so the poll thread's park-state warm is not
+            // disabled permanently by a failed unpark.
+            std::lock_guard<std::mutex> guard(mutex_);
+            unpark_in_progress_ = false;
+            throw;
         }
-
-        std::lock_guard<std::mutex> lock(mutex_);
-        parked_cached_ = false;
-        park_command_active_ = false;
-        park_motion_seen_ = false;
-        unpark_in_progress_ = false;
-        // Also drop the stale get_at_park() cache: ensure_not_parked() prefers
-        // a fresh park_state_cached_ over parked_cached_, so a recent AtPark
-        // read (true, within kFastParkTtl) would otherwise make operations like
-        // set_tracking(true)/slew throw InvalidWhileParked right after a
-        // successful unpark.
-        park_state_cached_.reset();
-        park_state_at_ = std::chrono::steady_clock::time_point{};
-        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     }
 
 private:
