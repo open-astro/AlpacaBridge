@@ -356,7 +356,15 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
             std::string port = prefix + std::to_string(i);
             if (!std::filesystem::exists(port)) continue;
 
-            std::string resolved = std::filesystem::canonical(port).string();
+            // Hot-pluggable node: it can vanish between the exists() check
+            // above and here (or during the several-second probe_port() call
+            // below, widening the window further across this 10-port scan).
+            // Use the error_code overload so a mid-scan unplug skips this
+            // port instead of throwing filesystem_error out of the whole
+            // enumeration and stranding any real panel on a later slot.
+            std::error_code canon_ec;
+            std::string resolved = std::filesystem::canonical(port, canon_ec).string();
+            if (canon_ec) continue;
             if (probed.count(resolved) != 0) continue;
             if (!raw_port_looks_like_flatpanel_candidate(resolved)) continue;
             probed.insert(resolved);
