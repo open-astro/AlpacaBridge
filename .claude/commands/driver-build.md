@@ -650,7 +650,7 @@ Every driver must be validated on **arm64**:
 
 **arm64 only** — no amd64/x86_64, no 32-bit (x86, armv7, armhf).
 
-arm64 is not just Raspberry Pi — the project supports a growing range of arm64 SBCs and embedded astronomy computers. See the wiki for the current list: https://github.com/open-astro/AlpacaBridge/wiki
+arm64 is not just Raspberry Pi — the project supports a growing range of arm64 SBCs and embedded astronomy computers. See the OpenAstro docs for the current list: https://www.openastro.net/docs/sbc-install/overview
 
 ### Validation steps
 

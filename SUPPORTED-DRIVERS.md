@@ -1,6 +1,6 @@
 # AlpacaBridge Supported Drivers
 
-<img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
+<img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
 ## Updated 2026-08-03
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
