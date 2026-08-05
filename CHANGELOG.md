@@ -1,6 +1,6 @@
 # AlpacaBridge Changelog
 
-<img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
+<img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
 All notable changes to AlpacaBridge will be documented in this file.
 
@@ -20,6 +20,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **ZWO mount auto-detection and auto-connect** (AlpacaCore + AlpacaHTTP): new `ConnectionType::Auto` and `enumerate_zwo_mounts()` — the driver probes USB serial ports (`/dev/serial/by-id` ZWO entries and `/dev/ttyACM*`) and the mount's WiFi access point (`192.168.4.1:4030`) with `:GVP`, discovering whichever ZWO mount answers (AM3, AM5, AM5N, AM7, ...) and its model name. A ZWO telescope registered with `connectionType: auto` connects to the first detected mount (USB preferred, WiFi fallback) on every Connect — robust against USB re-enumeration. Web UI adds the "Auto-detect (USB + WiFi)" connection-type option.
 
 ### Changed
+- **Docs: logo served from the repo** (README, SUPPORTED-DRIVERS, CHANGELOG): the header image now loads from `docs/image/ab.png` instead of an external openastro.net URL that no longer resolves.
+- **Docs: all wiki links replaced with openastro.net docs links** (README, driver-build command): the GitHub wiki is deprecated; setup guides now point to `www.openastro.net/docs/sbc-install/`, and the platform badge was shortened to "Debian 13 arm64".
 - **CI: zeroastroboy added to the review workflow's trusted fork contributors** (.github/workflows/claude-review.yml): added to `allowed_non_write_users` so their pushes to a `safe-to-review`-labeled fork PR (e.g. PR #171) no longer fail the review job with "Actor does not have write permissions"; same onboarding path as Knetus56 below.
 - **CI: Knetus56 added to the review workflow's trusted fork contributors** (.github/workflows/claude-review.yml): added to `allowed_non_write_users` so their own pushes to a `safe-to-review`-labeled fork PR no longer fail the review job; the label remains the maintainer's per-PR trust gate, and AGENTS.md now documents this list as the onboarding path (instead of granting write access).
 

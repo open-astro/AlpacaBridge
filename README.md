@@ -1,10 +1,10 @@
 # AlpacaBridge
 
-<img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
+<img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
 [![CI](https://github.com/open-astro/AlpacaBridge/actions/workflows/ci.yml/badge.svg)](https://github.com/open-astro/AlpacaBridge/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Debian%2013%20arm64-Raspberry%20Pi%20%7C%20iMate%20%7C%20StellaVita%20%7C%20ASIAIR-orange.svg)](#supported-hardware)
+[![Platform](https://img.shields.io/badge/Platform-Debian%2013%20arm64-orange.svg)](#supported-hardware)
 [![ConformU](https://img.shields.io/badge/ConformU-validated%20on%20hardware-success.svg)](SUPPORTED-DRIVERS.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](docs/development.md)
 
@@ -32,22 +32,22 @@ Watch a full install on a ToupTek StellaVita: [Installing AlpacaBridge on a Toup
 
 ## Supported hardware
 
-AlpacaBridge runs on **Debian 13 (Trixie)** `arm64`. The [Wiki](https://github.com/open-astro/AlpacaBridge/wiki) has a step-by-step setup guide for every supported machine:
+AlpacaBridge runs on **Debian 13 (Trixie)** `arm64`. The [OpenAstro docs](https://www.openastro.net/docs/sbc-install/overview) have a step-by-step setup guide for every supported machine:
 
 | Machine | Setup guide |
 |---------|-------------|
-| iOptron iMate | [iOptron iMate](https://github.com/open-astro/AlpacaBridge/wiki/iOptron-iMate) |
-| ToupTek StellaVita (Pi CM4) | [ToupTek StellaVita](https://github.com/open-astro/AlpacaBridge/wiki/ToupTek-StellaVita-%28Pi-CM4%29) |
-| Raspberry Pi 3B+, 4 & 5 | [Raspberry Pi](https://github.com/open-astro/AlpacaBridge/wiki/Raspberry-Pi-%283,-4,-%26-5%29) |
-| ZWO ASIAIR Pro | [ZWO ASIAIR Pro](https://github.com/open-astro/AlpacaBridge/wiki/ZWO-ASIAIR-Pro) |
-| ZWO ASIAIR Plus (Pi CM4) | [ZWO ASIAIR Plus — CM4](https://github.com/open-astro/AlpacaBridge/wiki/ZWO-ASIAIR-Plus-%28Pi-CM4%29) |
-| ZWO ASIAIR Plus (RK3568) | [ZWO ASIAIR Plus — RK3568](https://github.com/open-astro/AlpacaBridge/wiki/ZWO-ASIAIR-Plus-%28RK3568%29) |
+| iOptron iMate | [iOptron iMate](https://www.openastro.net/docs/sbc-install/ioptron-imate) |
+| ToupTek StellaVita (Pi CM4) | [ToupTek StellaVita](https://www.openastro.net/docs/sbc-install/touptek-stellavita) |
+| Raspberry Pi 3B+, 4 & 5 | [Raspberry Pi](https://www.openastro.net/docs/sbc-install/raspberry-pi) |
+| ZWO ASIAIR Pro | [ZWO ASIAIR Pro](https://www.openastro.net/docs/sbc-install/zwo-asiair-pro) |
+| ZWO ASIAIR Plus (Pi CM4) | [ZWO ASIAIR Plus — CM4](https://www.openastro.net/docs/sbc-install/zwo-asiair-plus-cm4) |
+| ZWO ASIAIR Plus (RK3568) | [ZWO ASIAIR Plus — RK3568](https://www.openastro.net/docs/sbc-install/zwo-asiair-plus-rk3568) |
 
 Other Rockchip and OrangePi arm64 boards running Debian 13 work with the standard Raspberry Pi instructions.
 
 ## Learn more
 
-- [Wiki](https://github.com/open-astro/AlpacaBridge/wiki) — setup guides for Raspberry Pi, StellaVita, ASIAIR, iMate, and troubleshooting
+- [OpenAstro docs](https://www.openastro.net/docs/intro) — setup guides for Raspberry Pi, StellaVita, ASIAIR, iMate, plus the [FAQ](https://www.openastro.net/docs/faq)
 - [SUPPORTED-DRIVERS.md](SUPPORTED-DRIVERS.md) — validated driver matrix
 - [Development Guide](docs/development.md) — building from source, writing drivers, running tests
 
