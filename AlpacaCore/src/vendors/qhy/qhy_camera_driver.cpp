@@ -1302,7 +1302,7 @@ public:
             exposure_status_ = QHYExposureStatus::Working;
             exposure_deadline_ = std::chrono::steady_clock::now() +
                                  std::chrono::microseconds(static_cast<long long>(exposure_us)) +
-                                 std::chrono::seconds(300);
+                                 std::chrono::seconds(60);
             exposure_deadline_valid_ = true;
             exposure_buffer_.assign(mem_length, 0);
             exposure_width_ = 0;
