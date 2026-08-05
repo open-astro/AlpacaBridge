@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
 #include <thread>
@@ -232,6 +233,59 @@ static bool probe_port(const std::string& port_path) {
     return false;
 }
 
+#ifndef _WIN32
+namespace {
+// Read one line from a sysfs attribute file, trimmed of the trailing
+// newline. Returns "" if the file doesn't exist or can't be opened --
+// callers treat that the same as "doesn't match" rather than an error.
+std::string read_sysfs_attr(const std::filesystem::path& file) {
+    std::ifstream in(file);
+    std::string line;
+    std::getline(in, line);
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+    return line;
+}
+
+// The raw /dev/ttyUSB*//dev/ttyACM* fallback below has no by-id symlink name
+// to filter on, so without this check it would open (and DTR-reset, per
+// probe_port()'s doc comment) EVERY serial device on the box -- unrelated
+// FTDI dongles, GPS receivers, or a mount controller sharing the same
+// ttyUSB/ttyACM namespace -- not just flat-panel-shaped hardware. This walks
+// up from the tty's sysfs node to the physical USB device directory and
+// reads the same vendor/manufacturer/product descriptor fields udev uses to
+// build by-id names, so the raw fallback is filtered exactly as narrowly as
+// the by-id loop above (CH340/CH341/1a86/USB_Serial/Espressif). Returns
+// false -- never probe -- if the descriptor can't be read.
+bool raw_port_looks_like_flatpanel_candidate(const std::string& port_path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = fs::canonical(fs::path("/sys/class/tty") / fs::path(port_path).filename() / "device", ec);
+    if (ec) return false;
+
+    // The tty's immediate sysfs node is a USB interface directory; the
+    // physical device carrying idVendor/manufacturer/product is a couple of
+    // levels up. Bounded walk so a weird sysfs layout can't loop forever.
+    for (int hop = 0; hop < 6; ++hop) {
+        if (fs::exists(dir / "idVendor")) {
+            const std::string vendor_id = read_sysfs_attr(dir / "idVendor");
+            const std::string manufacturer = read_sysfs_attr(dir / "manufacturer");
+            const std::string product = read_sysfs_attr(dir / "product");
+            return vendor_id == "1a86" ||  // WCH CH340/CH341
+                   vendor_id == "303a" ||  // Espressif native USB
+                   manufacturer.find("CH340") != std::string::npos || manufacturer.find("CH341") != std::string::npos ||
+                   manufacturer.find("Espressif") != std::string::npos || product.find("CH340") != std::string::npos ||
+                   product.find("CH341") != std::string::npos || product.find("Espressif") != std::string::npos ||
+                   product.find("USB_Serial") != std::string::npos || product.find("USB Serial") != std::string::npos;
+        }
+        fs::path parent = dir.parent_path();
+        if (parent.empty() || parent == dir) break;
+        dir = parent;
+    }
+    return false;
+}
+}  // namespace
+#endif
+
 std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
     std::vector<GeminiFlatPanelPortInfo> results;
 
@@ -290,6 +344,13 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
     // naming schemes here too: classic USB-serial adapters enumerate as
     // /dev/ttyUSBn, while an Espressif native-USB-serial/JTAG panel
     // enumerates as /dev/ttyACMn via the kernel's cdc_acm driver.
+    //
+    // raw_port_looks_like_flatpanel_candidate() filters this to the same
+    // CH340/CH341/Espressif hardware class the by-id loop above matches by
+    // name -- without it, this loop would open (and DTR-reset) any serial
+    // device on the box, including unrelated hardware sharing the
+    // ttyUSB/ttyACM namespace (a mount controller especially, since this
+    // runs on every reconnect, not just once).
     for (const char* prefix : {"/dev/ttyUSB", "/dev/ttyACM"}) {
         for (int i = 0; i < 10; ++i) {
             std::string port = prefix + std::to_string(i);
@@ -297,6 +358,7 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
 
             std::string resolved = std::filesystem::canonical(port).string();
             if (probed.count(resolved) != 0) continue;
+            if (!raw_port_looks_like_flatpanel_candidate(resolved)) continue;
             probed.insert(resolved);
 
             ALPACA_LOG_INFO("Gemini", "Probing " + port + " for a flat panel...");
