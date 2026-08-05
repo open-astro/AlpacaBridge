@@ -9,7 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.2.0] - 2026-08-05
+## [3.2.1] - UNRELEASED
+
+### Fixed
+- **Gemini flat panel (Lite + v2) auto-detect could never find the panel when `/dev/serial/by-id` is unavailable** (AlpacaCore `gemini_flatpanel_protocol_wrapper.cpp`): `enumerate_gemini_flatpanel_ports()`'s fallback (used when `/dev/serial/by-id` doesn't exist — missing udev rule, minimal image, boot-order race) only probed `/dev/ttyUSB0..9`, but the panel's actually-tested controller is an Espressif native USB-serial/JTAG stack, which the kernel's `cdc_acm` driver exposes as `/dev/ttyACMn`, not `/dev/ttyUSBn`. On a system where `/dev/serial/by-id` never gets populated, auto-detect (and therefore reconnect) silently reported no panel found even with real hardware plugged in and working. The fallback now probes both `/dev/ttyUSB0..9` and `/dev/ttyACM0..9`, matching the existing pattern in `zwo_mount_protocol_wrapper.cpp`.
+
+<details>
+<summary><strong>[3.2.0] - 2026-08-05</strong></summary>
 
 ### Added
 - **Gemini Astro Automatic FlatPanel v2 Driver** (AlpacaCore): CoverCalibrator driver for the second Gemini flat panel model — adds a real motorized cover on top of the light/brightness controls shared with the Astro Flat Panel Cover Lite. Implemented from INDI's open-source `GeminiFlatpanelRev2Adapter` (`indilib/indi`), since no vendor docs or hardware were available at the outset. Selected via a `flatPanelModel` config field (`"lite"`/`"v2"`) on the same `gemini`+`covercalibrator` router slot as the Lite driver; shares port auto-detection with it. `OpenCover`/`CloseCover` block the wire for up to 30s waiting for the hardware's exact completion reply (`*OOpened#`/`*CClosed#`) and run on a background thread so the ASCOM async initiator returns immediately. `HaltCover` has no hardware equivalent on this revision — it only stops the driver from *reporting* movement, since the in-flight wire command can't be interrupted.
@@ -39,6 +45,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Gemini Astro Automatic FlatPanel v2: `CoverState` stuck at `Unknown` after `HaltCover`, even across a disconnect/reconnect** (AlpacaCore): `get_cover_state()` checked the `cover_halted_` latch *before* `cover_in_flight_` or a live status read, so once `HaltCover` set it, the reported state stayed `Unknown` forever — even after the physical move actually finished, and even across a `Disconnect`/`Reconnect` cycle, since `cover_halted_` is only ever cleared by the next `OpenCover`/`CloseCover` call. `get_cover_state()` now only consults `cover_halted_` while `cover_in_flight_` is still true; once the move completes, it always falls through to a live `>S#` read regardless of the latch, so the reported state self-heals on its own — matching the WandererCover precedent the original doc comment intended but didn't fully implement.
 - **Gemini Astro Automatic FlatPanel v2: a failed background-thread spawn could crash the process or wedge `Connected`-state tracking** (AlpacaCore): `std::thread`'s constructor can throw (e.g. OS thread-limit exhaustion), and neither `start_cover_task()` nor `start_calibrator_task()` handled that. `start_cover_task()` left `cover_in_flight_` stuck `true` forever, permanently blocking future `OpenCover`/`CloseCover`/`HaltCover` calls. `start_calibrator_task()` was worse: it moved the previous in-flight command's `std::thread` handle directly into the new thread's capture, so a failed construction destroyed that capture mid-unwind — calling `std::terminate()` (a hard process crash) on a still-joinable thread instead of throwing a normal `AlpacaException`. Both now roll back cleanly: `start_cover_task()` resets `cover_in_flight_` in a catch block before rethrowing, and `start_calibrator_task()` holds the previous thread via `shared_ptr` (a cheap, noexcept copy into the capture) instead of moving it, so a failed construction just drops a refcount and leaves the caller free to join it safely before rethrowing.
 - **Gemini Astro Automatic FlatPanel v2: web UI help text still said the cover/status command set was unconfirmed against real hardware** (AlpacaHTTP `web/index.html`): left over from before this driver was validated; updated to reflect the ConformU 4.4.0 pass on real hardware (firmware 408) documented elsewhere in this PR.
+
+</details>
 
 <details>
 <summary><strong>[3.1.2] - 2026-07-31</strong></summary>
