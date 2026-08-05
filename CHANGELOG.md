@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.2.0] - UNRELEASED
+## [3.2.0] - 2026-08-05
 
 ### Added
 - **Gemini Astro Automatic FlatPanel v2 Driver** (AlpacaCore): CoverCalibrator driver for the second Gemini flat panel model — adds a real motorized cover on top of the light/brightness controls shared with the Astro Flat Panel Cover Lite. Implemented from INDI's open-source `GeminiFlatpanelRev2Adapter` (`indilib/indi`), since no vendor docs or hardware were available at the outset. Selected via a `flatPanelModel` config field (`"lite"`/`"v2"`) on the same `gemini`+`covercalibrator` router slot as the Lite driver; shares port auto-detection with it. `OpenCover`/`CloseCover` block the wire for up to 30s waiting for the hardware's exact completion reply (`*OOpened#`/`*CClosed#`) and run on a background thread so the ASCOM async initiator returns immediately. `HaltCover` has no hardware equivalent on this revision — it only stops the driver from *reporting* movement, since the in-flight wire command can't be interrupted.
