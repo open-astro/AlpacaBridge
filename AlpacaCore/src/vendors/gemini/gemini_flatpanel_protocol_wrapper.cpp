@@ -255,10 +255,10 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
             // CH340/CH341 adapter like the Gemini focuser. Keep the CH340/CH341/
             // generic USB_Serial patterns too in case a different panel revision
             // uses an external USB-serial chip instead.
-            bool is_candidate =
-                (name.find("USB_Serial") != std::string::npos) || (name.find("CH340") != std::string::npos) ||
-                (name.find("CH341") != std::string::npos) || (name.find("1a86") != std::string::npos) ||
-                (name.find("Espressif") != std::string::npos);
+            bool is_candidate = (name.find("USB_Serial") != std::string::npos) ||
+                                (name.find("CH340") != std::string::npos) ||
+                                (name.find("CH341") != std::string::npos) || (name.find("1a86") != std::string::npos) ||
+                                (name.find("Espressif") != std::string::npos);
             if (!is_candidate) continue;
 
             std::string resolved = std::filesystem::canonical(entry.path()).string();
