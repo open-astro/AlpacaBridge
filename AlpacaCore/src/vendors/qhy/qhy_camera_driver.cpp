@@ -1290,7 +1290,10 @@ public:
             // mutex_) cannot pass during StartQHYCCDSingleFrame and write a
             // register into the starting frame. The catch below rolls back to
             // Failed if the start throws. Watchdog deadline: exposure time +
-            // a generous margin for SDK readout/transfer.
+            // a generous margin for SDK readout/transfer. miniCam8's full-res
+            // readout (Linearity HDR doubles the transferred data) can exceed
+            // the previous 15s margin on real hardware, false-failing an
+            // exposure that was still legitimately transferring.
             std::lock_guard<std::mutex> lock(mutex_);
             last_exposure_duration_ = duration;
             last_exposure_start_ = std::chrono::system_clock::now();
@@ -1299,7 +1302,7 @@ public:
             exposure_status_ = QHYExposureStatus::Working;
             exposure_deadline_ = std::chrono::steady_clock::now() +
                                  std::chrono::microseconds(static_cast<long long>(exposure_us)) +
-                                 std::chrono::seconds(15);
+                                 std::chrono::seconds(300);
             exposure_deadline_valid_ = true;
             exposure_buffer_.assign(mem_length, 0);
             exposure_width_ = 0;
