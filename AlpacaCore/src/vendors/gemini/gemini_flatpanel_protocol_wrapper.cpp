@@ -315,7 +315,16 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
                                 (name.find("Espressif") != std::string::npos);
             if (!is_candidate) continue;
 
-            std::string resolved = std::filesystem::canonical(entry.path()).string();
+            // Same hot-unplug race as the raw-node loop below: the physical
+            // device can vanish between directory_iterator() yielding this
+            // symlink and here. Use the error_code overload so a mid-scan
+            // unplug just skips this entry instead of throwing
+            // filesystem_error out of the whole enumeration -- which would
+            // discard any results already collected and skip the raw-node
+            // fallback entirely for this connection attempt.
+            std::error_code canon_ec;
+            std::string resolved = std::filesystem::canonical(entry.path(), canon_ec).string();
+            if (canon_ec) continue;
             probed.insert(resolved);
 
             std::string probe_msg = "Probing ";
