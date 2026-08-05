@@ -237,13 +237,25 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
 #ifndef _WIN32
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
     if (!std::filesystem::exists(serial_by_id)) {
-        for (int i = 0; i < 10; ++i) {
-            std::string port = "/dev/ttyUSB" + std::to_string(i);
-            if (std::filesystem::exists(port)) {
-                ALPACA_LOG_INFO("Gemini", "Probing " + port + " for a flat panel...");
-                if (probe_port(port)) {
-                    ALPACA_LOG_INFO("Gemini", "Found flat panel on " + port);
-                    results.push_back({port, ""});
+        // Fall back to probing raw device nodes directly. Cover BOTH naming
+        // schemes: classic USB-serial adapters (CH340/CH341/FTDI/CP210x)
+        // enumerate as /dev/ttyUSBn via the kernel's usbserial-style drivers,
+        // but the panel's actually-tested controller is an Espressif
+        // native-USB-serial/JTAG stack (see the by-id name check below),
+        // which the kernel's cdc_acm driver instead exposes as /dev/ttyACMn.
+        // Without this, a system where /dev/serial/by-id never gets
+        // populated (missing udev rule, minimal image, boot-order race)
+        // would silently never find a genuine Rev2 panel plugged in --
+        // ttyUSB-only fallback misses ttyACM* devices entirely.
+        for (const char* prefix : {"/dev/ttyUSB", "/dev/ttyACM"}) {
+            for (int i = 0; i < 10; ++i) {
+                std::string port = prefix + std::to_string(i);
+                if (std::filesystem::exists(port)) {
+                    ALPACA_LOG_INFO("Gemini", "Probing " + port + " for a flat panel...");
+                    if (probe_port(port)) {
+                        ALPACA_LOG_INFO("Gemini", "Found flat panel on " + port);
+                        results.push_back({port, ""});
+                    }
                 }
             }
         }
