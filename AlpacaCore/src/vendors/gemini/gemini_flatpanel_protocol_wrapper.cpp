@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -235,59 +236,74 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
     std::vector<GeminiFlatPanelPortInfo> results;
 
 #ifndef _WIN32
+    // Resolved (canonical) paths already probed, so the raw-node pass below
+    // never re-opens a port the by-id pass already tried. Re-opening a port
+    // is not just wasted time: these controllers (ESP32/CH340-class) reset
+    // on DTR toggle at open(), so probing the same physical device twice
+    // means it audibly reboots twice.
+    std::set<std::string> probed;
+
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
-    if (!std::filesystem::exists(serial_by_id)) {
-        // Fall back to probing raw device nodes directly. Cover BOTH naming
-        // schemes: classic USB-serial adapters (CH340/CH341/FTDI/CP210x)
-        // enumerate as /dev/ttyUSBn via the kernel's usbserial-style drivers,
-        // but the panel's actually-tested controller is an Espressif
-        // native-USB-serial/JTAG stack (see the by-id name check below),
-        // which the kernel's cdc_acm driver instead exposes as /dev/ttyACMn.
-        // Without this, a system where /dev/serial/by-id never gets
-        // populated (missing udev rule, minimal image, boot-order race)
-        // would silently never find a genuine Rev2 panel plugged in --
-        // ttyUSB-only fallback misses ttyACM* devices entirely.
-        for (const char* prefix : {"/dev/ttyUSB", "/dev/ttyACM"}) {
-            for (int i = 0; i < 10; ++i) {
-                std::string port = prefix + std::to_string(i);
-                if (std::filesystem::exists(port)) {
-                    ALPACA_LOG_INFO("Gemini", "Probing " + port + " for a flat panel...");
-                    if (probe_port(port)) {
-                        ALPACA_LOG_INFO("Gemini", "Found flat panel on " + port);
-                        results.push_back({port, ""});
-                    }
-                }
+    if (std::filesystem::exists(serial_by_id)) {
+        for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
+            if (!entry.is_symlink()) continue;
+            std::string name = entry.path().filename().string();
+
+            // Confirmed against real hardware: the panel's controller is an
+            // ESP32-class board using Espressif's native USB-serial/JTAG stack
+            // (by-id name "usb-Espressif_USB_JTAG_serial_debug_unit_..."), not a
+            // CH340/CH341 adapter like the Gemini focuser. Keep the CH340/CH341/
+            // generic USB_Serial patterns too in case a different panel revision
+            // uses an external USB-serial chip instead.
+            bool is_candidate =
+                (name.find("USB_Serial") != std::string::npos) || (name.find("CH340") != std::string::npos) ||
+                (name.find("CH341") != std::string::npos) || (name.find("1a86") != std::string::npos) ||
+                (name.find("Espressif") != std::string::npos);
+            if (!is_candidate) continue;
+
+            std::string resolved = std::filesystem::canonical(entry.path()).string();
+            probed.insert(resolved);
+
+            std::string probe_msg = "Probing ";
+            probe_msg += resolved;
+            probe_msg += " (";
+            probe_msg += name;
+            probe_msg += ") for a flat panel...";
+            ALPACA_LOG_INFO("Gemini", probe_msg);
+
+            if (probe_port(resolved)) {
+                ALPACA_LOG_INFO("Gemini", "Found flat panel on " + resolved);
+                results.push_back({resolved, name});
             }
         }
-        return results;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
-        if (!entry.is_symlink()) continue;
-        std::string name = entry.path().filename().string();
+    // Always also probe raw device nodes directly, not only when
+    // /dev/serial/by-id is absent. /dev/serial/by-id names entries from the
+    // USB descriptor's reported vendor/model/serial strings, and generic
+    // CH340/CH341 adapters (used by this panel, and commonly also by mount
+    // controllers on the same box) report identical strings with no
+    // per-device serial number. When two such adapters are plugged in at
+    // once, udev's by-id naming collides and only ONE of them gets a
+    // symlink -- the other is silently absent from by-id even though the
+    // directory itself exists, so the loop above never sees it. Cover BOTH
+    // naming schemes here too: classic USB-serial adapters enumerate as
+    // /dev/ttyUSBn, while an Espressif native-USB-serial/JTAG panel
+    // enumerates as /dev/ttyACMn via the kernel's cdc_acm driver.
+    for (const char* prefix : {"/dev/ttyUSB", "/dev/ttyACM"}) {
+        for (int i = 0; i < 10; ++i) {
+            std::string port = prefix + std::to_string(i);
+            if (!std::filesystem::exists(port)) continue;
 
-        // Confirmed against real hardware: the panel's controller is an
-        // ESP32-class board using Espressif's native USB-serial/JTAG stack
-        // (by-id name "usb-Espressif_USB_JTAG_serial_debug_unit_..."), not a
-        // CH340/CH341 adapter like the Gemini focuser. Keep the CH340/CH341/
-        // generic USB_Serial patterns too in case a different panel revision
-        // uses an external USB-serial chip instead.
-        bool is_candidate = (name.find("USB_Serial") != std::string::npos) ||
-                            (name.find("CH340") != std::string::npos) || (name.find("CH341") != std::string::npos) ||
-                            (name.find("1a86") != std::string::npos) || (name.find("Espressif") != std::string::npos);
-        if (!is_candidate) continue;
+            std::string resolved = std::filesystem::canonical(port).string();
+            if (probed.count(resolved) != 0) continue;
+            probed.insert(resolved);
 
-        std::string resolved = std::filesystem::canonical(entry.path()).string();
-        std::string probe_msg = "Probing ";
-        probe_msg += resolved;
-        probe_msg += " (";
-        probe_msg += name;
-        probe_msg += ") for a flat panel...";
-        ALPACA_LOG_INFO("Gemini", probe_msg);
-
-        if (probe_port(resolved)) {
-            ALPACA_LOG_INFO("Gemini", "Found flat panel on " + resolved);
-            results.push_back({resolved, name});
+            ALPACA_LOG_INFO("Gemini", "Probing " + port + " for a flat panel...");
+            if (probe_port(port)) {
+                ALPACA_LOG_INFO("Gemini", "Found flat panel on " + port);
+                results.push_back({port, ""});
+            }
         }
     }
 #endif
