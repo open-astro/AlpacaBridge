@@ -1595,6 +1595,29 @@ int main() {
     }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ONSTEP
+    {
+        // onstep / telescope — same mountIndex allowlist gap class as
+        // ioptron/synscan above; also asserts no "network" fields leak
+        // through (OnStep is serial-only for end users in this project).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "onstep"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9622},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyACM0"},
+                                           {"baudRate", 9600},
+                                           {"mountIndex", 1}},
+                                          "Telescope", 9622);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyACM0");
+        EXPECT(cfg.value("baudRate", -1) == 9600);
+        EXPECT(cfg.value("mountIndex", -1) == 1);
+        remove_device(router, "onstep", "telescope", 9622);
+    }
+#endif
+
 #ifdef ALPACACORE_ENABLE_BISQUE
     {
         // bisque / telescope (TheSkyX TCP)

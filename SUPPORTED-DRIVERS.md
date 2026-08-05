@@ -2,7 +2,7 @@
 
 <img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-08-03
+## Updated 2026-08-05
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -549,6 +549,24 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested firmware**: Driver tested on **HEM27** with main board firmware **V240121** and hand controller firmware **V241201**, and on **HAE29C EQ** (model code 0036, current firmware as of 2026-07-14). Other firmware versions and models may work but have not been individually verified.
 - **HAE29C firmware quirks**: The driver carries three hardware-verified workarounds gated strictly to model code 0036 (other models are unaffected): (1) `:MP1#` park slews complete physically but never report status 6 — the driver sends `:ST0#` to finalize once the mount is stationary at the park target; (2) a park issued while already at the park position wedges the same way and gets the same finalizer; (3) GOTO stops compensating sidereal motion during its final ~1 s approach, settling ~11–16 arcsec east in RA — the driver closes the residual with a duration-computed pulse-guide trim (up to 3 iterations).
 - **ConformU**: HEM27 validated with ConformU 4.3.0 (USB and Wi-Fi); HAE29C validated with ConformU 4.4.0 (USB) — 0 errors, 0 issues, 0 timing violations, on Linux arm64.
+
+</details>
+
+### OnStep
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Generic OnStep (DIY harmonic-drive mount) | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/OnStep/Generic%20OnStep/) |
+
+<details>
+<summary><strong>OnStep Driver Notes</strong></summary>
+
+- **Protocol**: LX200-derived serial protocol, per INDI's `lx200_OnStep` reference driver (no vendor SDK or protocol PDF — OnStep is open-source firmware for DIY/retrofit mounts, commonly run on Arduino Mega/Due, Teensy, or ESP32 boards).
+- **Connection**: USB/Serial only in this project (no Wi-Fi/network config exposed). Default 9600 baud, 8N1. Auto-detection scans `/dev/serial/by-id/` (common USB-serial chip vendor IDs plus `Arduino`/`Teensy` substrings) falling back to `/dev/ttyUSB0`–`9` **and** `/dev/ttyACM0`–`9` (OnStep boards commonly enumerate as ttyACM), probing each with the `:GVP#` identity command.
+- **Pulse guiding**: Native hardware pulse guide with mount-side timing (`:Mgn####`/`:Mgs####`/`:Mge####`/`:Mgw####`, milliseconds) — no software-timed stop thread required.
+- **SideOfPier**: Always computed from hour angle (same convention as iOptron/SynScan/Celestron) — `:GU#`'s `E`/`W` flag reports the mount's *physical* pier orientation, not ASCOM's hour-angle-defined pointing state, and using it directly failed ConformU's SideofPier check on real hardware (see AGENTS.md OnStep notes).
+- **Tested model**: Generic OnStep DIY harmonic-drive mount, firmware "On-Step" v10.23a, Linux arm64.
+- **ConformU**: 4.4.0 — 0 errors, 0 timing issues, 2 residual issues (PulseGuide ±9 East-West movement 0.07–0.08″ vs. 0.07″ tolerance). This residual is documented in AGENTS.md as inherent hardware noise at the tolerance boundary, root-caused via 4 independent tests, not a driver bug — accepted rather than chased with a tolerance/behavior change.
 
 </details>
 
