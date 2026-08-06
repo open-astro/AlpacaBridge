@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
 
@@ -19,7 +20,6 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <set>
 #include <string>
 #include <thread>
@@ -235,53 +235,20 @@ static bool probe_port(const std::string& port_path) {
 
 #ifndef _WIN32
 namespace {
-// Read one line from a sysfs attribute file, trimmed of the trailing
-// newline. Returns "" if the file doesn't exist or can't be opened --
-// callers treat that the same as "doesn't match" rather than an error.
-std::string read_sysfs_attr(const std::filesystem::path& file) {
-    std::ifstream in(file);
-    std::string line;
-    std::getline(in, line);
-    while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
-    return line;
-}
-
 // The raw /dev/ttyUSB*//dev/ttyACM* fallback below has no by-id symlink name
 // to filter on, so without this check it would open (and DTR-reset, per
 // probe_port()'s doc comment) EVERY serial device on the box -- unrelated
 // FTDI dongles, GPS receivers, or a mount controller sharing the same
-// ttyUSB/ttyACM namespace -- not just flat-panel-shaped hardware. This walks
-// up from the tty's sysfs node to the physical USB device directory and
-// reads the same vendor/manufacturer/product descriptor fields udev uses to
-// build by-id names, so the raw fallback is filtered exactly as narrowly as
-// the by-id loop above (CH340/CH341/1a86/USB_Serial/Espressif). Returns
-// false -- never probe -- if the descriptor can't be read.
+// ttyUSB/ttyACM namespace -- not just flat-panel-shaped hardware. Filters
+// the raw fallback exactly as narrowly as the by-id loop above
+// (CH340/CH341/1a86/USB_Serial/Espressif) via the shared sysfs
+// vendor-descriptor helper. Returns false -- never probe -- if the
+// descriptor can't be read.
 bool raw_port_looks_like_flatpanel_candidate(const std::string& port_path) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    fs::path dir = fs::canonical(fs::path("/sys/class/tty") / fs::path(port_path).filename() / "device", ec);
-    if (ec) return false;
-
-    // The tty's immediate sysfs node is a USB interface directory; the
-    // physical device carrying idVendor/manufacturer/product is a couple of
-    // levels up. Bounded walk so a weird sysfs layout can't loop forever.
-    for (int hop = 0; hop < 6; ++hop) {
-        if (fs::exists(dir / "idVendor")) {
-            const std::string vendor_id = read_sysfs_attr(dir / "idVendor");
-            const std::string manufacturer = read_sysfs_attr(dir / "manufacturer");
-            const std::string product = read_sysfs_attr(dir / "product");
-            return vendor_id == "1a86" ||  // WCH CH340/CH341
-                   vendor_id == "303a" ||  // Espressif native USB
-                   manufacturer.find("CH340") != std::string::npos || manufacturer.find("CH341") != std::string::npos ||
-                   manufacturer.find("Espressif") != std::string::npos || product.find("CH340") != std::string::npos ||
-                   product.find("CH341") != std::string::npos || product.find("Espressif") != std::string::npos ||
-                   product.find("USB_Serial") != std::string::npos || product.find("USB Serial") != std::string::npos;
-        }
-        fs::path parent = dir.parent_path();
-        if (parent.empty() || parent == dir) break;
-        dir = parent;
-    }
-    return false;
+    auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
+    if (!descriptor) return false;
+    return alpacacore::util::usb_tty_descriptor_matches(
+        *descriptor, {"1a86", "303a", "CH340", "CH341", "Espressif", "USB_Serial", "USB Serial"});
 }
 }  // namespace
 #endif
@@ -299,9 +266,8 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
 
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
     if (std::filesystem::exists(serial_by_id)) {
-        for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
-            if (!entry.is_symlink()) continue;
-            std::string name = entry.path().filename().string();
+        for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
+            const std::string& name = sym.name;
 
             // Confirmed against real hardware: the panel's controller is an
             // ESP32-class board using Espressif's native USB-serial/JTAG stack
@@ -316,14 +282,14 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
             if (!is_candidate) continue;
 
             // Same hot-unplug race as the raw-node loop below: the physical
-            // device can vanish between directory_iterator() yielding this
+            // device can vanish between list_serial_by_id() yielding this
             // symlink and here. Use the error_code overload so a mid-scan
             // unplug just skips this entry instead of throwing
             // filesystem_error out of the whole enumeration -- which would
             // discard any results already collected and skip the raw-node
             // fallback entirely for this connection attempt.
             std::error_code canon_ec;
-            std::string resolved = std::filesystem::canonical(entry.path(), canon_ec).string();
+            std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
 
