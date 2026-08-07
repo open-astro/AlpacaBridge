@@ -79,9 +79,12 @@ struct SerialByIdEntry {
  *
  * Callers that need to distinguish "directory absent" from "directory empty"
  * (e.g. to decide whether to run a raw /dev/ttyUSBn / ttyACMn fallback scan)
- * should check std::filesystem::exists(dir) themselves first, as they
- * already do for their own by-id/raw-fallback branching — this function
- * treats both cases the same way and simply returns an empty list.
+ * should check path_exists(dir) themselves first, as they already do for
+ * their own by-id/raw-fallback branching — this function treats both cases
+ * the same way and simply returns an empty list. Never use the throwing
+ * std::filesystem::exists(path) overload for that check: a traversal error
+ * would abort the whole auto-detect, the bug issue #181 fixed at every
+ * call site.
  */
 inline std::vector<SerialByIdEntry> list_serial_by_id(const std::filesystem::path& dir) {
     std::vector<SerialByIdEntry> results;
@@ -113,14 +116,20 @@ inline std::string read_sysfs_line(const std::filesystem::path& file) {
     return line;
 }
 
-// udev builds by-id names by replacing whitespace (and other unsafe
-// characters) in the raw descriptor strings with '_', so "USB Serial"
-// becomes "USB_Serial". Vendor pattern lists are written against those
-// udev-mangled names; mangling the raw sysfs string the same way lets one
-// pattern spelling match both.
+// udev builds by-id names by replacing every character outside its safe set
+// [A-Za-z0-9#+-.:=@_] in the raw descriptor strings with '_' (see udev's
+// util_replace_whitespace()/util_replace_chars()), so "USB Serial" becomes
+// "USB_Serial" and "Foo, Inc. (Bar)" becomes "Foo__Inc.__Bar_". Vendor
+// pattern lists are written against those udev-mangled names; mangling the
+// raw sysfs string the same way lets one pattern spelling match both
+// (issue #184 widened this from space/tab/'/' to the full udev set).
 inline std::string udev_mangle(std::string value) {
+    auto is_udev_safe = [](char ch) {
+        return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '#' ||
+               ch == '+' || ch == '-' || ch == '.' || ch == ':' || ch == '=' || ch == '@' || ch == '_';
+    };
     for (char& ch : value) {
-        if (ch == ' ' || ch == '\t' || ch == '/') ch = '_';
+        if (!is_udev_safe(ch)) ch = '_';
     }
     return value;
 }
