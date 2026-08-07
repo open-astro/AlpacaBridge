@@ -547,7 +547,7 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
     // stale/dangling symlink (device unplugged mid-scan) instead of aborting
     // the auto-detect (including the WiFi fallback below).
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
-    if (std::filesystem::exists(serial_by_id)) {
+    if (alpacacore::util::path_exists(serial_by_id)) {
         for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
             const std::string& name = sym.name;
             if (name.find("ZWO") == std::string::npos) {
@@ -573,7 +573,7 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
     if (results.empty()) {
         for (int i = 0; i < 4; ++i) {
             const std::string port = "/dev/ttyACM" + std::to_string(i);
-            if (!std::filesystem::exists(port)) {
+            if (!alpacacore::util::path_exists(port)) {
                 continue;
             }
             const std::string model = probe_serial_mount(port, probe_timeout_ms);

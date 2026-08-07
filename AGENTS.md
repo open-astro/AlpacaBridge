@@ -432,7 +432,18 @@ independently broken the same way, before it was centralised:
   from sysfs — the same fields udev uses to build by-id names. Required
   whenever the raw fallback can run unconditionally (see next point): without
   it, the fallback opens — and for CH340/CH341-class hardware, DTR-resets —
-  every serial device on the box, not just this vendor's.
+  every serial device on the box, not just this vendor's. Beware the udev
+  spelling trap (issue #181): by-id *names* carry udev's underscore mangling
+  (`USB_Serial`), but the raw sysfs strings keep their spaces (`USB Serial`) —
+  the helper matches patterns against both spellings, so udev-style patterns
+  copied from a by-id name filter are fine, but don't "simplify" that
+  double-match away.
+- **`alpacacore::util::path_exists(path)`** instead of bare
+  `std::filesystem::exists(path)` anywhere in an `enumerate_*` scan. The plain
+  overload throws `filesystem_error` on a traversal error (e.g. EACCES on a
+  parent directory), aborting the whole auto-detect including fallback passes
+  (issue #181 — every wrapper had this, and in ZWO it silently replaced a
+  `try`/`catch` that existed specifically to protect the WiFi fallback).
 - **Run the raw fallback unconditionally, not only when `by-id` is entirely
   absent, and dedupe by resolved canonical path.** Generic USB-serial adapters
   (CH340/CH341, Prolific, FTDI, CP210x) report identical descriptor strings

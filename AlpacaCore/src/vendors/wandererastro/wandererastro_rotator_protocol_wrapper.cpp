@@ -278,7 +278,7 @@ std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports() {
     std::set<std::string> probed;
 
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
-    if (std::filesystem::exists(serial_by_id)) {
+    if (alpacacore::util::path_exists(serial_by_id)) {
         for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
             const std::string& name = sym.name;
 
@@ -321,7 +321,7 @@ std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports() {
     // already tried via by-id isn't opened (and reset) a second time.
     for (int i = 0; i < 10; ++i) {
         std::string port = "/dev/ttyUSB" + std::to_string(i);
-        if (!std::filesystem::exists(port)) continue;
+        if (!alpacacore::util::path_exists(port)) continue;
 
         std::error_code ec;
         std::string resolved = std::filesystem::canonical(port, ec).string();
