@@ -265,7 +265,7 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
     std::set<std::string> probed;
 
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
-    if (std::filesystem::exists(serial_by_id)) {
+    if (alpacacore::util::path_exists(serial_by_id)) {
         for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
             const std::string& name = sym.name;
 
@@ -329,7 +329,7 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
     for (const char* prefix : {"/dev/ttyUSB", "/dev/ttyACM"}) {
         for (int i = 0; i < 10; ++i) {
             std::string port = prefix + std::to_string(i);
-            if (!std::filesystem::exists(port)) continue;
+            if (!alpacacore::util::path_exists(port)) continue;
 
             // Hot-pluggable node: it can vanish between the exists() check
             // above and here (or during the several-second probe_port() call

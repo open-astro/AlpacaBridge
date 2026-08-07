@@ -38,6 +38,21 @@
 
 namespace alpacacore::util {
 
+/**
+ * @brief Non-throwing std::filesystem::exists().
+ *
+ * The plain exists(path) overload throws filesystem_error on a traversal
+ * error (e.g. EACCES on a parent directory), which in enumerate_*_ports()
+ * would abort the whole auto-detect — including fallbacks the scan is
+ * expected to fall through to (issue #181; ZWO's WiFi fallback was the
+ * reported case, but every wrapper gates its scans on exists()). A path
+ * that can't be checked is treated as absent.
+ */
+inline bool path_exists(const std::filesystem::path& path) {
+    std::error_code ec;
+    return std::filesystem::exists(path, ec) && !ec;
+}
+
 /// One symlink found directly inside a /dev/serial/by-id-style directory.
 struct SerialByIdEntry {
     std::string name;            ///< Symlink filename, e.g. "usb-1a86_USB_Serial-if00-port0".
@@ -97,6 +112,18 @@ inline std::string read_sysfs_line(const std::filesystem::path& file) {
     while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
     return line;
 }
+
+// udev builds by-id names by replacing whitespace (and other unsafe
+// characters) in the raw descriptor strings with '_', so "USB Serial"
+// becomes "USB_Serial". Vendor pattern lists are written against those
+// udev-mangled names; mangling the raw sysfs string the same way lets one
+// pattern spelling match both.
+inline std::string udev_mangle(std::string value) {
+    for (char& ch : value) {
+        if (ch == ' ' || ch == '\t' || ch == '/') ch = '_';
+    }
+    return value;
+}
 }  // namespace detail
 
 /**
@@ -143,13 +170,24 @@ inline std::optional<UsbTtyDescriptor> read_raw_tty_usb_descriptor(const std::st
  * substring match against manufacturer/product -- the same two-level check
  * every vendor's by-id name filter already does, just against sysfs fields
  * instead of the by-id symlink's filename.
+ *
+ * Raw sysfs strings keep their spaces ("USB Serial", "Silicon Labs") while
+ * by-id names carry udev's underscore mangling ("USB_Serial"); pattern lists
+ * are shared with the by-id name filters and mostly written in the udev
+ * spelling, so manufacturer/product are matched in both the raw and the
+ * udev-mangled form (issue #181 -- the underscore patterns could never
+ * match otherwise).
  */
 inline bool usb_tty_descriptor_matches(const UsbTtyDescriptor& descriptor,
                                        std::initializer_list<std::string> patterns) {
+    const std::string mangled_manufacturer = detail::udev_mangle(descriptor.manufacturer);
+    const std::string mangled_product = detail::udev_mangle(descriptor.product);
     for (const auto& pattern : patterns) {
         if (descriptor.vendor_id == pattern) return true;
         if (descriptor.manufacturer.find(pattern) != std::string::npos) return true;
         if (descriptor.product.find(pattern) != std::string::npos) return true;
+        if (mangled_manufacturer.find(pattern) != std::string::npos) return true;
+        if (mangled_product.find(pattern) != std::string::npos) return true;
     }
     return false;
 }
