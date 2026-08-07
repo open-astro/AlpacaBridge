@@ -1,0 +1,116 @@
+{
+  "ErrorCount": 0,
+  "IssueCount": 0,
+  "ConfigurationAlertCount": 0,
+  "TimingIssuesCount": 4,
+  "TimingCount": 26,
+  "Errors": [],
+  "Issues": [],
+  "ConfigurationAlerts": [],
+  "Timings": [
+    {
+      "Key": "Connect",
+      "Value": "At 15:55:36.219 Connect              0.009 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "InterfaceVersion",
+      "Value": "At 15:56:02.787 InterfaceVersion     0.000 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Connected",
+      "Value": "At 15:56:02.793 Connected            0.005 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Description",
+      "Value": "At 15:56:02.815 Description          0.014 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "DriverInfo",
+      "Value": "At 15:56:02.821 DriverInfo           0.006 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "DriverVersion",
+      "Value": "At 15:56:02.827 DriverVersion        0.005 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "Name",
+      "Value": "At 15:56:02.832 Name                 0.005 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "SupportedActions",
+      "Value": "At 15:56:02.848 SupportedActions     0.015 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "DeviceState",
+      "Value": "At 15:56:02.971 DeviceState          0.122 seconds. OUTSIDE FAST RESPONSE TIME TARGET: 0.1 seconds."
+    },
+    {
+      "Key": "CalibratorState",
+      "Value": "At 15:56:03.135 CalibratorState      0.134 seconds. OUTSIDE FAST RESPONSE TIME TARGET: 0.1 seconds."
+    },
+    {
+      "Key": "CoverState",
+      "Value": "At 15:56:03.326 CoverState           0.190 seconds. OUTSIDE FAST RESPONSE TIME TARGET: 0.1 seconds."
+    },
+    {
+      "Key": "MaxBrightness",
+      "Value": "At 15:56:03.466 MaxBrightness        0.140 seconds. OUTSIDE FAST RESPONSE TIME TARGET: 0.1 seconds."
+    },
+    {
+      "Key": "Brightness",
+      "Value": "At 15:56:03.477 Brightness           0.006 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "CalibratorChanging",
+      "Value": "At 15:56:03.488 CalibratorChanging   0.006 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "CoverMoving",
+      "Value": "At 15:56:03.494 CoverMoving          0.006 seconds. \u2713 (FAST)"
+    },
+    {
+      "Key": "OpenCover",
+      "Value": "At 15:56:03.572 OpenCover            0.008 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "CloseCover",
+      "Value": "At 15:56:16.157 CloseCover           0.006 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "HaltCover",
+      "Value": "At 15:56:28.747 HaltCover            0.007 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "HaltCover",
+      "Value": "At 15:56:35.051 HaltCover            0.005 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "CalibratorOn",
+      "Value": "At 15:56:35.175 CalibratorOn         0.004 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "CalibratorOn",
+      "Value": "At 15:56:41.700 CalibratorOn         0.005 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "CalibratorOn",
+      "Value": "At 15:56:42.224 CalibratorOn         0.004 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "CalibratorOn",
+      "Value": "At 15:56:42.749 CalibratorOn         0.005 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "CalibratorOn",
+      "Value": "At 15:56:43.273 CalibratorOn         0.004 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "CalibratorOff",
+      "Value": "At 15:56:43.811 CalibratorOff        0.005 seconds. \u2713 (STANDARD)"
+    },
+    {
+      "Key": "Disconnect",
+      "Value": "At 15:56:57.437 Disconnect           0.007 seconds. \u2713 (STANDARD)"
+    }
+  ]
+}
