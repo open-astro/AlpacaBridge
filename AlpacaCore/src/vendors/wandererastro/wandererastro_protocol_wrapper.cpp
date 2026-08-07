@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_protocol_wrapper.h>
@@ -208,55 +209,88 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
     return false;
 }
 
+#ifndef _WIN32
+// The raw /dev/ttyUSBn fallback below has no by-id symlink name to filter
+// on, so without this check it would open EVERY serial device on the box --
+// unrelated FTDI dongles, GPS receivers, or a mount controller sharing the
+// ttyUSB namespace -- not just CH340/CH341-class cover hardware. Filters the
+// raw fallback exactly as narrowly as the by-id loop below.
+bool raw_port_looks_like_cover_candidate(const std::string& port_path) {
+    auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
+    if (!descriptor) return false;
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"});
+}
+#endif  // _WIN32
+
 }  // namespace
 
 std::vector<WandererPortInfo> enumerate_wanderer_ports() {
     std::vector<WandererPortInfo> results;
 
 #ifndef _WIN32
+    // Resolved (canonical) paths already probed via by-id, so the raw-node
+    // pass below never re-opens a port the by-id pass already tried.
+    std::set<std::string> probed;
+
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
-    if (!std::filesystem::exists(serial_by_id)) {
-        for (int i = 0; i < 10; ++i) {
-            std::string port = "/dev/ttyUSB" + std::to_string(i);
-            if (!std::filesystem::exists(port)) continue;
-            if (is_serial_port_in_use(port)) continue;  // already held by a connected WandererCover
-            ALPACA_LOG_INFO("WandererAstro", "Probing " + port + "...");
+    if (std::filesystem::exists(serial_by_id)) {
+        for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
+            const std::string& name = sym.name;
+
+            // WandererCover boards use a CH340/CH341 USB-serial adapter (vendor 1a86).
+            bool is_candidate = (name.find("USB_Serial") != std::string::npos) ||
+                                (name.find("CH340") != std::string::npos) ||
+                                (name.find("CH341") != std::string::npos) || (name.find("1a86") != std::string::npos);
+            if (!is_candidate) continue;
+
+            // Use the error_code overload: if the device is unplugged between the
+            // directory scan and here the by-id symlink dangles, and the throwing
+            // canonical() would abort the whole enumeration. Skip the stale entry.
+            std::error_code ec;
+            std::string resolved = std::filesystem::canonical(sym.path, ec).string();
+            if (ec) continue;
+            probed.insert(resolved);
+
+            // Don't probe a port another connected WandererCover is streaming on.
+            if (is_serial_port_in_use(resolved)) continue;
+            std::string probe_msg = "Probing ";
+            probe_msg.append(resolved).append(" (").append(name).append(")...");
+            ALPACA_LOG_INFO("WandererAstro", probe_msg);
+
             WandererPortInfo info;
-            if (probe_port(port, info)) {
-                ALPACA_LOG_INFO("WandererAstro", "Found " + info.model + " on " + port + " (firmware " +
+            if (probe_port(resolved, info)) {
+                info.device_id = name;
+                ALPACA_LOG_INFO("WandererAstro", "Found " + info.model + " on " + resolved + " (firmware " +
                                                      std::to_string(info.firmware_version) + ")");
                 results.push_back(info);
             }
         }
-        return results;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
-        if (!entry.is_symlink()) continue;
-        std::string name = entry.path().filename().string();
+    // Always also probe raw /dev/ttyUSB* nodes directly, not only when
+    // /dev/serial/by-id is absent. Generic CH340/CH341 adapters (used by
+    // this cover, and commonly also by other devices on the same box) report
+    // identical descriptor strings with no per-device serial number, so when
+    // two such adapters are plugged in at once, udev's by-id naming collides
+    // and only ONE of them gets a symlink -- the other is silently absent
+    // from by-id even though the directory itself exists, so the loop above
+    // never sees it. Deduplicated by resolved canonical path so a port
+    // already tried via by-id isn't opened (and reset) a second time.
+    for (int i = 0; i < 10; ++i) {
+        std::string port = "/dev/ttyUSB" + std::to_string(i);
+        if (!std::filesystem::exists(port)) continue;
 
-        // WandererCover boards use a CH340/CH341 USB-serial adapter (vendor 1a86).
-        bool is_candidate = (name.find("USB_Serial") != std::string::npos) ||
-                            (name.find("CH340") != std::string::npos) || (name.find("CH341") != std::string::npos) ||
-                            (name.find("1a86") != std::string::npos);
-        if (!is_candidate) continue;
-
-        // Use the error_code overload: if the device is unplugged between the
-        // directory scan and here the by-id symlink dangles, and the throwing
-        // canonical() would abort the whole enumeration. Skip the stale entry.
         std::error_code ec;
-        std::string resolved = std::filesystem::canonical(entry.path(), ec).string();
+        std::string resolved = std::filesystem::canonical(port, ec).string();
         if (ec) continue;
+        if (probed.count(resolved) != 0) continue;
+        if (!raw_port_looks_like_cover_candidate(resolved)) continue;
+        probed.insert(resolved);
 
-        // Don't probe a port another connected WandererCover is streaming on.
-        if (is_serial_port_in_use(resolved)) continue;
-        std::string probe_msg = "Probing ";
-        probe_msg.append(resolved).append(" (").append(name).append(")...");
-        ALPACA_LOG_INFO("WandererAstro", probe_msg);
-
+        if (is_serial_port_in_use(resolved)) continue;  // already held by a connected WandererCover
+        ALPACA_LOG_INFO("WandererAstro", "Probing " + resolved + "...");
         WandererPortInfo info;
         if (probe_port(resolved, info)) {
-            info.device_id = name;
             ALPACA_LOG_INFO("WandererAstro", "Found " + info.model + " on " + resolved + " (firmware " +
                                                  std::to_string(info.firmware_version) + ")");
             results.push_back(info);

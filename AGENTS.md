@@ -409,6 +409,41 @@ empty on Windows. When an auto-detect driver finds no ports, throw
 hard-coded "no device found" string, so the Windows path reports "auto-detect not
 supported on this platform" instead of implying missing hardware.
 
+### Serial auto-detect scan (`util/serial_by_id_scan.h`)
+
+Every auto-detect `enumerate_*_ports()` scans `/dev/serial/by-id` and, for most
+vendors, falls back to raw `/dev/ttyUSBn`/`ttyACMn` nodes when a device isn't
+covered by (or visible in) `by-id`. Use the shared helpers below instead of
+hand-rolling this — issue #179 found nine near-identical copies of the scan, each
+independently broken the same way, before it was centralised:
+
+- **`alpacacore::util::list_serial_by_id(dir)`** instead of a raw
+  `std::filesystem::directory_iterator` + `is_symlink()` loop. Built entirely on
+  the `std::error_code` overloads, so it never throws `filesystem_error` — a
+  device unplugged mid-scan just ends the scan with whatever was already
+  collected, instead of aborting the whole `enumerate_*_ports()` call and
+  discarding results already found. Still resolve each returned `.path` with
+  `std::filesystem::canonical(path, ec)` yourself using the `error_code`
+  overload (never the throwing one) — the by-id symlink can go stale between
+  the scan and that call too.
+- **`alpacacore::util::read_raw_tty_usb_descriptor(port_path)`** +
+  **`usb_tty_descriptor_matches(descriptor, {...})`** to filter a raw
+  `/dev/ttyUSBn` fallback by USB vendor/manufacturer/product, read straight
+  from sysfs — the same fields udev uses to build by-id names. Required
+  whenever the raw fallback can run unconditionally (see next point): without
+  it, the fallback opens — and for CH340/CH341-class hardware, DTR-resets —
+  every serial device on the box, not just this vendor's.
+- **Run the raw fallback unconditionally, not only when `by-id` is entirely
+  absent, and dedupe by resolved canonical path.** Generic USB-serial adapters
+  (CH340/CH341, Prolific, FTDI, CP210x) report identical descriptor strings
+  with no per-device serial number, so when two of the same chip are plugged
+  in at once, udev's by-id naming collides and only ONE gets a symlink — the
+  other silently vanishes from a `by-id`-only scan even though the directory
+  itself exists. Track already-probed canonical paths in a
+  `std::set<std::string>` (or `unordered_set`) populated as the `by-id` pass
+  resolves each candidate, and skip any raw-fallback port already in that set
+  — otherwise a port tried via `by-id` gets opened (and reset) a second time.
+
 ### Platform 7 InterfaceVersion + DeviceState
 
 - Drivers advertise ASCOM Platform 7 interface versions: Camera 4 (ICameraV4),

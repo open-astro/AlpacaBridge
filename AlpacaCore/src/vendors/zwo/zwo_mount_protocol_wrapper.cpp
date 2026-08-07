@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -388,6 +389,14 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
     while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
            timeout_ms) {
         char ch = '\0';
+        // This read() is reached via enumerate_zwo_mounts() called from
+        // Impl::connect(Auto), which deliberately holds mutex_ across the
+        // whole auto-detect probe sequence (see that function's doc comment)
+        // so a concurrent connect can't race it; that predates and is
+        // unrelated to the by-id scan fix in this change, just newly
+        // reachable to the analyzer now that the scan no longer routes
+        // through nested try/catch.
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
         const ssize_t n = ::read(fd, &ch, 1);
         if (n == 1) {
             if (ch == '#') {
@@ -533,40 +542,30 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
 
 #ifndef _WIN32
     // USB: scan /dev/serial/by-id for symlinks naming ZWO (e.g.
-    // usb-ZWO_Systems_ZWO_Device_123456-if00), probe each with :GVP. The whole
-    // scan is wrapped so a stale/dangling symlink or permission error (device
-    // unplugged mid-scan, restricted directory) skips that entry instead of
-    // aborting the auto-detect (including the WiFi fallback below).
+    // usb-ZWO_Systems_ZWO_Device_123456-if00), probe each with :GVP.
+    // list_serial_by_id() and canonical()'s error_code overload below skip a
+    // stale/dangling symlink (device unplugged mid-scan) instead of aborting
+    // the auto-detect (including the WiFi fallback below).
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
-    try {
-        if (std::filesystem::exists(serial_by_id)) {
-            for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
-                try {
-                    if (!entry.is_symlink()) {
-                        continue;
-                    }
-                    const std::string name = entry.path().filename().string();
-                    if (name.find("ZWO") == std::string::npos) {
-                        continue;
-                    }
-                    const std::string resolved = std::filesystem::canonical(entry.path()).string();
-                    const std::string model = probe_serial_mount(resolved, probe_timeout_ms);
-                    if (!model.empty()) {
-                        std::string found_msg = "Auto-detect: found ";
-                        found_msg += model;
-                        found_msg += " on USB ";
-                        found_msg += resolved;
-                        ALPACA_LOG_INFO("ZWO", found_msg);
-                        results.push_back({ConnectionType::Serial, resolved, "", 4030, model, name});
-                    }
-                } catch (const std::filesystem::filesystem_error&) {
-                    // Skip this entry (dangling symlink / raced unplug).
-                    continue;
-                }
+    if (std::filesystem::exists(serial_by_id)) {
+        for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
+            const std::string& name = sym.name;
+            if (name.find("ZWO") == std::string::npos) {
+                continue;
+            }
+            std::error_code canon_ec;
+            const std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
+            if (canon_ec) continue;
+            const std::string model = probe_serial_mount(resolved, probe_timeout_ms);
+            if (!model.empty()) {
+                std::string found_msg = "Auto-detect: found ";
+                found_msg += model;
+                found_msg += " on USB ";
+                found_msg += resolved;
+                ALPACA_LOG_INFO("ZWO", found_msg);
+                results.push_back({ConnectionType::Serial, resolved, "", 4030, model, name});
             }
         }
-    } catch (const std::filesystem::filesystem_error&) {  // NOLINT(bugprone-empty-catch)
-        // /dev/serial/by-id unavailable or unreadable — fall through to ttyACM.
     }
 
     // Fallback when /dev/serial/by-id is unavailable or the entry does not
