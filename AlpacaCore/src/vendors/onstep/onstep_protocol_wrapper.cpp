@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -33,6 +34,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -382,72 +384,118 @@ std::string probe_onstep_version(const std::string& port_path) {
 #endif
 }
 
+#ifndef _WIN32
+// The raw /dev/ttyUSB*//dev/ttyACM* fallback below has no by-id symlink name
+// to filter on, so without this check it would open EVERY serial device on
+// the box -- unrelated FTDI dongles, GPS receivers, or a flat panel/focuser
+// sharing the same ttyUSB/ttyACM namespace -- not just OnStep-shaped
+// hardware. Filters the raw fallback exactly as narrowly as the by-id loop
+// below via the shared sysfs vendor-descriptor helper. Returns false --
+// never probe -- if the descriptor can't be read.
+bool raw_port_looks_like_onstep_candidate(const std::string& port_path) {
+    auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
+    if (!descriptor) return false;
+    return alpacacore::util::usb_tty_descriptor_matches(
+        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "0403", "CP210", "10c6", "Silicon_Labs", "CH340",
+                      "CH341", "1a86", "USB_Serial", "USB Serial", "Arduino", "Teensy"});
+}
+#endif
+
 }  // namespace
 
 std::vector<OnStepPortInfo> enumerate_onstep_ports() {
     std::vector<OnStepPortInfo> results;
 
 #ifndef _WIN32
+    // Resolved (canonical) paths already probed via by-id, so the raw-node
+    // pass below never re-opens a port the by-id pass already tried.
+    std::set<std::string> probed;
+
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
-    if (!std::filesystem::exists(serial_by_id)) {
-        // Fallback: probe /dev/ttyUSB0-9 and /dev/ttyACM0-9 directly. Arduino
-        // Mega/Due/Teensy/ESP32 boards running OnStep commonly enumerate as
-        // ttyACM (native USB-CDC), not just ttyUSB (USB-serial bridge chip).
-        for (const char* prefix : {"/dev/ttyUSB", "/dev/ttyACM"}) {
-            for (int i = 0; i < 10; ++i) {
-                std::string port = prefix + std::to_string(i);
-                if (std::filesystem::exists(port)) {
-                    ALPACA_LOG_INFO("OnStep", "Probing " + port + "...");
-                    std::string identity = probe_onstep_port(port);
-                    if (!identity.empty()) {
-                        std::string version = probe_onstep_version(port);
-                        std::string message = "Found OnStep mount on ";
-                        message += port;
-                        message += " (";
-                        message += identity;
-                        message += ")";
-                        ALPACA_LOG_INFO("OnStep", message);
-                        results.push_back({port, "", version});
-                    }
-                }
+    if (alpacacore::util::path_exists(serial_by_id)) {
+        for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
+            const std::string& name = sym.name;
+
+            bool is_candidate =
+                (name.find("Prolific") != std::string::npos) || (name.find("PL2303") != std::string::npos) ||
+                (name.find("067b") != std::string::npos) || (name.find("FTDI") != std::string::npos) ||
+                (name.find("0403") != std::string::npos) || (name.find("CP210") != std::string::npos) ||
+                (name.find("10c6") != std::string::npos) || (name.find("Silicon_Labs") != std::string::npos) ||
+                (name.find("CH340") != std::string::npos) || (name.find("CH341") != std::string::npos) ||
+                (name.find("1a86") != std::string::npos) || (name.find("USB_Serial") != std::string::npos) ||
+                (name.find("USB-Serial") != std::string::npos) || (name.find("Arduino") != std::string::npos) ||
+                (name.find("Teensy") != std::string::npos);
+            if (!is_candidate) continue;
+
+            // error_code overload: a device unplugged after the directory
+            // scan leaves a dangling symlink; skip it instead of aborting
+            // the whole enumeration and discarding results already found.
+            std::error_code canon_ec;
+            std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
+            if (canon_ec) continue;
+            probed.insert(resolved);
+
+            std::string probe_message = "Probing ";
+            probe_message += resolved;
+            probe_message += " (";
+            probe_message += name;
+            probe_message += ")...";
+            ALPACA_LOG_INFO("OnStep", probe_message);
+
+            std::string identity = probe_onstep_port(resolved);
+            if (!identity.empty()) {
+                std::string version = probe_onstep_version(resolved);
+                std::string found_message = "Found OnStep mount on ";
+                found_message += resolved;
+                found_message += " (";
+                found_message += identity;
+                found_message += ")";
+                ALPACA_LOG_INFO("OnStep", found_message);
+                results.push_back({resolved, name, version});
             }
         }
-        return results;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
-        if (!entry.is_symlink()) continue;
-        std::string name = entry.path().filename().string();
+    // Always also probe raw device nodes directly, not only when
+    // /dev/serial/by-id is absent. Generic Prolific/FTDI/CP210x/CH340
+    // adapters (used by OnStep's serial cable, and commonly also by other
+    // devices on the same box) can report identical descriptor strings with
+    // no per-device serial number, so when two such adapters are plugged in
+    // at once, udev's by-id naming collides and only ONE of them gets a
+    // symlink -- the other is silently absent from by-id even though the
+    // directory itself exists, so the loop above never sees it. Cover BOTH
+    // naming schemes here too: classic USB-serial adapters enumerate as
+    // /dev/ttyUSBn, while Arduino Mega/Due/Teensy/ESP32 boards running
+    // OnStep commonly enumerate as /dev/ttyACMn (native USB-CDC).
+    for (const char* prefix : {"/dev/ttyUSB", "/dev/ttyACM"}) {
+        for (int i = 0; i < 10; ++i) {
+            std::string port = prefix + std::to_string(i);
+            if (!alpacacore::util::path_exists(port)) continue;
 
-        bool is_candidate =
-            (name.find("Prolific") != std::string::npos) || (name.find("PL2303") != std::string::npos) ||
-            (name.find("067b") != std::string::npos) || (name.find("FTDI") != std::string::npos) ||
-            (name.find("0403") != std::string::npos) || (name.find("CP210") != std::string::npos) ||
-            (name.find("10c6") != std::string::npos) || (name.find("Silicon_Labs") != std::string::npos) ||
-            (name.find("CH340") != std::string::npos) || (name.find("CH341") != std::string::npos) ||
-            (name.find("1a86") != std::string::npos) || (name.find("USB_Serial") != std::string::npos) ||
-            (name.find("USB-Serial") != std::string::npos) || (name.find("Arduino") != std::string::npos) ||
-            (name.find("Teensy") != std::string::npos);
-        if (!is_candidate) continue;
+            // Hot-pluggable node: it can vanish between the exists() check
+            // above and here (or during the probe below). Use the
+            // error_code overload so a mid-scan unplug skips this port
+            // instead of throwing filesystem_error out of the whole
+            // enumeration.
+            std::error_code canon_ec;
+            std::string resolved = std::filesystem::canonical(port, canon_ec).string();
+            if (canon_ec) continue;
+            if (probed.count(resolved) != 0) continue;
+            if (!raw_port_looks_like_onstep_candidate(resolved)) continue;
+            probed.insert(resolved);
 
-        std::string resolved = std::filesystem::canonical(entry.path()).string();
-        std::string probe_message = "Probing ";
-        probe_message += resolved;
-        probe_message += " (";
-        probe_message += name;
-        probe_message += ")...";
-        ALPACA_LOG_INFO("OnStep", probe_message);
-
-        std::string identity = probe_onstep_port(resolved);
-        if (!identity.empty()) {
-            std::string version = probe_onstep_version(resolved);
-            std::string found_message = "Found OnStep mount on ";
-            found_message += resolved;
-            found_message += " (";
-            found_message += identity;
-            found_message += ")";
-            ALPACA_LOG_INFO("OnStep", found_message);
-            results.push_back({resolved, name, version});
+            ALPACA_LOG_INFO("OnStep", "Probing " + resolved + "...");
+            std::string identity = probe_onstep_port(resolved);
+            if (!identity.empty()) {
+                std::string version = probe_onstep_version(resolved);
+                std::string found_message = "Found OnStep mount on ";
+                found_message += resolved;
+                found_message += " (";
+                found_message += identity;
+                found_message += ")";
+                ALPACA_LOG_INFO("OnStep", found_message);
+                results.push_back({resolved, "", version});
+            }
         }
     }
 #endif
