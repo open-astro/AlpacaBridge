@@ -44,6 +44,20 @@ TEST_CASE("usb_tty_descriptor_matches: udev-mangled patterns match raw sysfs str
     REQUIRE(usb_tty_descriptor_matches(cp210x, {"USB_to_UART"}));
 }
 
+TEST_CASE("usb_tty_descriptor_matches: full udev charset mangling beyond whitespace (issue #184)",
+          "[serial_by_id_scan]") {
+    // udev replaces every character outside [A-Za-z0-9#+-.:=@_] with '_',
+    // not just whitespace — parentheses, commas, etc.
+    const UsbTtyDescriptor punctuated{"beef", "Foo, Inc. (Shenzhen)", "Serial/JTAG debug unit!"};
+    REQUIRE(usb_tty_descriptor_matches(punctuated, {"Foo__Inc.__Shenzhen_"}));
+    REQUIRE(usb_tty_descriptor_matches(punctuated, {"Serial_JTAG"}));
+    REQUIRE(usb_tty_descriptor_matches(punctuated, {"debug_unit_"}));
+    // Raw spelling keeps matching too.
+    REQUIRE(usb_tty_descriptor_matches(punctuated, {"Foo, Inc."}));
+    // udev-safe characters are preserved, not mangled.
+    REQUIRE(usb_tty_descriptor_matches(punctuated, {"Inc."}));
+}
+
 TEST_CASE("usb_tty_descriptor_matches: empty pattern list matches nothing", "[serial_by_id_scan]") {
     const UsbTtyDescriptor descriptor{"1a86", "wch.cn", "USB Serial"};
     REQUIRE_FALSE(usb_tty_descriptor_matches(descriptor, {}));
