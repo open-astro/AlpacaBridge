@@ -396,7 +396,7 @@ bool raw_port_looks_like_onstep_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
     return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "0403", "CP210", "10c6", "Silicon_Labs", "CH340",
+        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "0403", "CP210", "10c4", "Silicon_Labs", "CH340",
                       "CH341", "1a86", "USB_Serial", "USB Serial", "Arduino", "Teensy"});
 }
 #endif
@@ -420,7 +420,7 @@ std::vector<OnStepPortInfo> enumerate_onstep_ports() {
                 (name.find("Prolific") != std::string::npos) || (name.find("PL2303") != std::string::npos) ||
                 (name.find("067b") != std::string::npos) || (name.find("FTDI") != std::string::npos) ||
                 (name.find("0403") != std::string::npos) || (name.find("CP210") != std::string::npos) ||
-                (name.find("10c6") != std::string::npos) || (name.find("Silicon_Labs") != std::string::npos) ||
+                (name.find("10c4") != std::string::npos) || (name.find("Silicon_Labs") != std::string::npos) ||
                 (name.find("CH340") != std::string::npos) || (name.find("CH341") != std::string::npos) ||
                 (name.find("1a86") != std::string::npos) || (name.find("USB_Serial") != std::string::npos) ||
                 (name.find("USB-Serial") != std::string::npos) || (name.find("Arduino") != std::string::npos) ||
