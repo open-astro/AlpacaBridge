@@ -1,5 +1,5 @@
 # ConformU Test Results
-<img src="https://www.openastro.net/wp-content/uploads/2026/01/AlpacaBridge.png" alt="AlpacaBridge logo" width="420">
+<img src="../../docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
 This folder contains ConformU test results for AlpacaCore drivers.
 

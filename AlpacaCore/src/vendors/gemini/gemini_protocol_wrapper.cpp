@@ -12,12 +12,14 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -144,49 +146,92 @@ static int probe_port(const std::string& port_path) {
     return 0;
 }
 
+#ifndef _WIN32
+namespace {
+// The raw /dev/ttyUSBn fallback below has no by-id symlink name to filter
+// on, so without this check it would open EVERY serial device on the box --
+// unrelated FTDI dongles, GPS receivers, or a mount controller sharing the
+// ttyUSB namespace -- not just CH340/CH341-class focuser hardware. Filters
+// the raw fallback exactly as narrowly as the by-id loop below.
+bool raw_port_looks_like_focuser_candidate(const std::string& port_path) {
+    auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
+    if (!descriptor) return false;
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor, {"1a86", "CH340", "CH341", "USB_Serial"});
+}
+}  // namespace
+#endif
+
 std::vector<GeminiPortInfo> enumerate_gemini_ports() {
     std::vector<GeminiPortInfo> results;
 
 #ifndef _WIN32
+    // Resolved (canonical) paths already probed via by-id, so the raw-node
+    // pass below never re-opens a port the by-id pass already tried.
+    std::set<std::string> probed;
+
     // Scan /dev/serial/by-id/ for USB-serial adapters
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
-    if (!std::filesystem::exists(serial_by_id)) {
-        // Fallback: try all /dev/ttyUSB* ports
-        for (int i = 0; i < 10; ++i) {
-            std::string port = "/dev/ttyUSB" + std::to_string(i);
-            if (std::filesystem::exists(port)) {
-                ALPACA_LOG_INFO("Gemini", "Probing " + port + "...");
-                int fw = probe_port(port);
-                if (fw > 0) {
-                    ALPACA_LOG_INFO("Gemini", "Found focuser on " + port +
-                                    " (firmware " + std::to_string(fw) + ")");
-                    results.push_back({port, "", fw});
-                }
+    if (alpacacore::util::path_exists(serial_by_id)) {
+        for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
+            const std::string& name = sym.name;
+
+            // CH340/CH341 USB-serial adapters commonly used by MyFocuserPro2 boards
+            // Also accept any USB_Serial device as a candidate
+            bool is_candidate = (name.find("USB_Serial") != std::string::npos) ||
+                                (name.find("CH340") != std::string::npos) ||
+                                (name.find("CH341") != std::string::npos) || (name.find("1a86") != std::string::npos);
+            if (!is_candidate) continue;
+
+            // error_code overload: a device unplugged after the directory scan
+            // leaves a dangling symlink; skip it instead of aborting the
+            // enumeration.
+            std::error_code canon_ec;
+            std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
+            if (canon_ec) continue;
+            probed.insert(resolved);
+            std::string probe_message = "Probing ";
+            probe_message.append(resolved).append(" (").append(name).append(")...");
+            ALPACA_LOG_INFO("Gemini", probe_message);
+
+            int fw = probe_port(resolved);
+            if (fw > 0) {
+                std::string found_message = "Found focuser on ";
+                found_message.append(resolved).append(" (firmware ").append(std::to_string(fw)).append(")");
+                ALPACA_LOG_INFO("Gemini", found_message);
+                results.push_back({resolved, name, fw});
             }
         }
-        return results;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
-        if (!entry.is_symlink()) continue;
-        std::string name = entry.path().filename().string();
+    // Always also probe raw /dev/ttyUSB* nodes directly, not only when
+    // /dev/serial/by-id is absent. Generic CH340/CH341 adapters (used by
+    // this focuser, and commonly also by mount controllers on the same box)
+    // report identical descriptor strings with no per-device serial number,
+    // so when two such adapters are plugged in at once, udev's by-id naming
+    // collides and only ONE of them gets a symlink -- the other is silently
+    // absent from by-id even though the directory itself exists, so the loop
+    // above never sees it. Deduplicated by resolved canonical path so a port
+    // already tried via by-id isn't opened (and reset) a second time.
+    for (int i = 0; i < 10; ++i) {
+        std::string port = "/dev/ttyUSB" + std::to_string(i);
+        if (!alpacacore::util::path_exists(port)) continue;
 
-        // CH340/CH341 USB-serial adapters commonly used by MyFocuserPro2 boards
-        // Also accept any USB_Serial device as a candidate
-        bool is_candidate = (name.find("USB_Serial") != std::string::npos) ||
-                            (name.find("CH340") != std::string::npos) ||
-                            (name.find("CH341") != std::string::npos) ||
-                            (name.find("1a86") != std::string::npos);
-        if (!is_candidate) continue;
+        std::error_code canon_ec;
+        std::string resolved = std::filesystem::canonical(port, canon_ec).string();
+        if (canon_ec) continue;
+        if (probed.count(resolved) != 0) continue;
+        if (!raw_port_looks_like_focuser_candidate(resolved)) continue;
+        probed.insert(resolved);
 
-        std::string resolved = std::filesystem::canonical(entry.path()).string();
-        ALPACA_LOG_INFO("Gemini", "Probing " + resolved + " (" + name + ")...");
-
+        std::string probe_message = "Probing ";
+        probe_message.append(resolved).append("...");
+        ALPACA_LOG_INFO("Gemini", probe_message);
         int fw = probe_port(resolved);
         if (fw > 0) {
-            ALPACA_LOG_INFO("Gemini", "Found focuser on " + resolved +
-                            " (firmware " + std::to_string(fw) + ")");
-            results.push_back({resolved, name, fw});
+            std::string found_message = "Found focuser on ";
+            found_message.append(resolved).append(" (firmware ").append(std::to_string(fw)).append(")");
+            ALPACA_LOG_INFO("Gemini", found_message);
+            results.push_back({resolved, "", fw});
         }
     }
 #endif
