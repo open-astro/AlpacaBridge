@@ -1355,6 +1355,20 @@ it is never reachable through `router.cpp` or the web UI.
   final reconnect that the live `:GA#/:GZ#/:GU#/:GRa#/:GDe#` round trips always land inside its
   measurement window regardless of what connect-time work has or hasn't finished. Treat this as
   an accepted, inherent one-time cold-start cost, not a bug to keep chasing.
+- **The same connect-adjacent cold-start window can land on other FAST members too, not just
+  `DeviceState`** (re-confirmed on real hardware, ConformU 4.5.0, after the driver-branch update
+  that ported this driver's auto-detect to the shared `serial_by_id_scan.h` helper): two
+  consecutive runs both showed `AlignmentMode` (~0.135s), `Declination` (~0.318s),
+  `EquatorialSystem` (~0.136s), and `SideOfPier Read` (~0.140s) OUTSIDE the 0.1s FAST target,
+  every time, at nearly identical values (±0.003s) — including `AlignmentMode`/`EquatorialSystem`,
+  which are compile-time constants with no wire I/O at all. This is the same phenomenon as the
+  `DeviceState` note above, not a regression from that auto-detect change (which only touches
+  `enumerate_onstep_ports()`, never called on this code path): manually repeating the same calls
+  a few seconds after `Connect()` (well outside ConformU's rapid-fire post-Connect property sweep)
+  answers in ~0.003s every time, confirming it's a transient connect-adjacent window, not a
+  permanent per-call cost. Which members land inside that window depends on ConformU's exact call
+  order/pacing for a given version, so don't be surprised if it isn't `DeviceState` specifically.
+  Same conclusion applies: treat as accepted, not a bug to chase-fix via caching.
 - **`PulseGuide` East/West shows 1-2 residual ConformU issues per run, right at the 0.07″
   tolerance boundary, and this is inherent hardware noise, not a driver bug**: root-caused via
   four independent tests, all on real hardware — (1) A/B test with OnStep's refraction
