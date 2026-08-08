@@ -245,7 +245,7 @@ std::string probe_onstep_port(const std::string& port_path) {
         return "";
     }
 
-    struct termios tty{};
+    struct termios tty {};
     if (tcgetattr(fd, &tty) != 0) {
         close(fd);
         return "";
@@ -342,7 +342,7 @@ std::string probe_onstep_version(const std::string& port_path) {
     if (fd < 0) {
         return "";
     }
-    struct termios tty{};
+    struct termios tty {};
     if (tcgetattr(fd, &tty) == 0) {
         tty.c_cc[VTIME] = 10;
         tcsetattr(fd, TCSANOW, &tty);
@@ -396,8 +396,8 @@ bool raw_port_looks_like_onstep_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
     return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "0403", "CP210", "10c4", "Silicon_Labs", "CH340",
-                      "CH341", "1a86", "USB_Serial", "USB Serial", "Arduino", "Teensy"});
+        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "0403", "CP210", "10c4", "Silicon_Labs", "CH340", "CH341",
+                      "1a86", "USB_Serial", "USB Serial", "Arduino", "Teensy"});
 }
 #endif
 
@@ -943,7 +943,7 @@ private:
             return false;
         }
 
-        struct termios tty{};
+        struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
@@ -1067,7 +1067,7 @@ private:
             return false;
         }
         if (rc < 0) {
-            struct pollfd pfd{};
+            struct pollfd pfd {};
             pfd.fd = socket_fd_;
             pfd.events = POLLOUT;
             int poll_rc = poll(&pfd, 1, kConnectTimeoutMs);
