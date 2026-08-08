@@ -1422,7 +1422,9 @@ async function refreshServerClockOffset() {
             serverClockOffsetMs = (result.Value * 1000) - midpoint;
         }
     } catch (e) {
-        serverClockOffsetMs = null;
+        // Keep the last known offset on a transient fetch failure — the clock
+        // keeps ticking locally rather than blanking to --:--:--. It only
+        // shows placeholders before the first successful fetch.
     }
     updateServerClock();
 }
