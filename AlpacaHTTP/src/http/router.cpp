@@ -53,6 +53,9 @@
 #ifdef ALPACACORE_ENABLE_SYNSCAN
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+#include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
@@ -6684,6 +6687,80 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "onstep" && device_type_str == "telescope") {
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::optional<double> site_latitude;
+        std::optional<double> site_longitude;
+        std::optional<double> site_elevation;
+        std::optional<bool> sync_time_on_connect;
+
+        if (config.contains("siteLatitude")) {
+            site_latitude = config.value("siteLatitude", 0.0);
+        }
+        if (config.contains("siteLongitude")) {
+            site_longitude = config.value("siteLongitude", 0.0);
+        }
+        if (config.contains("siteElevation")) {
+            site_elevation = config.value("siteElevation", 0.0);
+        }
+        if (config.contains("syncTimeOnConnect")) {
+            sync_time_on_connect = config.value("syncTimeOnConnect", false);
+        }
+
+        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
+
+        // OnStep is USB-serial only in this project — no "network" branch.
+        // (The protocol wrapper's ConnectionType::Network exists purely as an
+        // internal test seam; see AlpacaCore/tests/test_onstep_concurrency_stress.cpp.)
+        if (conn_type == "auto" || conn_type.empty()) {
+            int mount_index = config.value("mountIndex", 0);
+            telescope = alpacacore::vendor::onstep::create_onstep_telescope_auto(
+                device_number, mount_index, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
+        } else if (conn_type == "serial") {
+            alpacacore::vendor::onstep::ConnectionInfo conn_info;
+            conn_info.type = alpacacore::vendor::onstep::ConnectionType::Serial;
+            conn_info.port_path = config.value("portPath", "");
+            conn_info.baud_rate = config.value("baudRate", 9600);
+
+            if (conn_info.port_path.empty()) {
+                error_message = "Serial port path is required";
+                return false;
+            }
+
+            conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+
+            telescope = alpacacore::vendor::onstep::create_onstep_telescope_with_site(
+                device_number, conn_info, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
+        } else {
+            error_message = "Invalid connection type. Use 'auto' or 'serial'";
+            return false;
+        }
+
+        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+            telescope->set_aperture_diameter(aperture);
+        }
+        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+            telescope->set_focal_length(focal);
+        }
+        if (site_elevation.has_value()) {
+            telescope->set_site_elevation(site_elevation.value());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
+            util::log_info("Registered OnStep telescope");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "OnStep support not enabled. Rebuild with -DALPACACORE_ENABLE_ONSTEP=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "celestron" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_CELESTRON
         std::string conn_type = config.value("connectionType", "auto");
@@ -7859,6 +7936,17 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         } else if (connection_type == "network") {
             copy_if_present("host");
             copy_if_present("tcpPort");
+        }
+    } else if (vendor == "onstep") {
+        // OnStep is USB-serial only — no "network" branch (see the
+        // registration handler above for why the wrapper still carries one
+        // internally).
+        copy_if_present("connectionType");
+        copy_if_present("mountIndex");
+        std::string connection_type = config.value("connectionType", "");
+        if (connection_type == "serial") {
+            copy_if_present("portPath");
+            copy_if_present("baudRate");
         }
     } else if (vendor == "zwo") {
         if (device_type == "telescope") {
