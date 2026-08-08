@@ -12,6 +12,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 ## [3.3.0] - UNRELEASED
 
 ### Added
+- **Clock sync for internet-less SBCs** (docs + scripts): `scripts/sync-clock.sh` pushes a workstation's current time to an SBC over SSH (with optional `--rtc` persist), for deployments with no NTP reachable and a dead/unset hardware RTC — keeps Alpaca timestamps (and ConformU `LastExposureStartTime` checks) correct across reboots. Troubleshooting guide documents the full fix (set clock, install systemd-timesyncd/chrony, `hwclock -w`).
 - **ZWO ASI585MC Pro validated** (ConformU 4.5.0, Linux arm64, USB): confirms the existing generic SDK-enumerated ZWO camera driver correctly supports this model (cooled, IMX585) with no code changes — 0 errors, 0 issues, 0 timing issues. Report saved at `AlpacaCore/conformu/ZWO/ASI/ASI585MC Pro/Linux-arm64.txt`; `SUPPORTED-DRIVERS.md` gets a new table row and driver notes.
 - **Gemini Astro Automatic FlatPanel v2 re-validated** (ConformU 4.5.0, Linux arm64, USB, firmware 408): confirms the `ttyACM` auto-detect fallback fixes below don't regress conformance — 0 errors, 0 issues, 0 timing issues. Report refreshed at `AlpacaCore/conformu/Gemini/Astro Automatic FlatPanel v2/Linux-arm64.txt`.
 - **Player One Mars-C II camera validated** (ConformU 4.5.0, Linux arm64, USB): 0 errors, 0 issues, 0 timing issues. Uncooled guide camera (IMX290, 1936×1100). Report saved to `AlpacaCore/conformu/Player One/Mars-C II/Linux-arm64.txt`; `SUPPORTED-DRIVERS.md` Player One row added.
