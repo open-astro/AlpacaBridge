@@ -81,6 +81,31 @@ See [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) for driver-specific notes.
 2. Don't build in system directories — use a local `build/` directory
 3. For USB devices, add udev rules and join the `dialout` group
 
+### Device clock resets to a stale time after reboot
+
+**Symptom**: the SBC's clock shows an old date (e.g. 2017 or 2025) after a reboot, so Alpaca timestamps (and ConformU checks like `LastExposureStartTime`) are wrong even though the PC clock is fine.
+
+**Cause**: a headless SBC with no internet has no NTP source, and if its hardware RTC is unset or its battery is dead, the kernel boots with the stale RTC value.
+
+**Fix — set the clock and install an NTP client** (per the [OpenAstro SBC install guide](https://www.openastro.net/docs/sbc-install/)):
+
+```sh
+sudo date -u -s "YYYY-MM-DD HH:MM:SS"   # current time, UTC (-u: parse as UTC, not local)
+sudo apt install systemd-timesyncd -y    # or: sudo apt install chrony -y
+sudo timedatectl set-ntp true
+sudo apt install util-linux-extra -y     # provides hwclock
+sudo hwclock -w                          # persist the correct time to the RTC
+timedatectl status                       # expect: System clock synchronized: yes
+```
+
+**If the SBC has no internet at all**: use the **Sync Time** button in the AlpacaBridge web portal (`http://<sbc>:6800/` → top-right server actions) — it sets the SBC's clock from the browser's time. Or use `scripts/sync-clock.sh` from an internet-connected workstation (e.g. your laptop) whenever you connect over SSH — it pushes the workstation's current time to the SBC (and optionally persists it to the RTC with `--rtc`):
+
+```sh
+scripts/sync-clock.sh astro@192.168.168.1 --rtc
+```
+
+This keeps Alpaca timestamps correct even with no NTP reachable. The hardware RTC persists the time across reboots (as long as the RTC battery holds).
+
 ## Clean build
 
 If all else fails, try a clean build:

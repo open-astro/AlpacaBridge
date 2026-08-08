@@ -1859,6 +1859,33 @@ int main() {
         EXPECT(good_request.body() == "{}");
     }
 
+    // synctime management endpoint: GET reads the clock, POST validates the
+    // epoch range before touching it. The actual clock_settime() succeeds only
+    // with CAP_SYS_TIME, so the happy-path set is validated on hardware; here
+    // we pin the routing, the read path, and every rejection path.
+    {
+        alpacahttp::Router router;
+
+        const auto get_response = route_request(router, "GET", "/management/v1/synctime");
+        const auto get_json = nlohmann::json::parse(get_response.body(), nullptr, false);
+        EXPECT(!get_json.is_discarded() && get_json.value("ErrorNumber", -1) == 0);
+        // Value must be a plausible current epoch (build machines are NTP-synced).
+        EXPECT(get_json["Value"].is_number_integer());
+        EXPECT(get_json["Value"].get<std::int64_t>() > 1600000000);  // after 2020-09
+
+        // Out-of-range epochs are rejected without setting the clock.
+        for (const auto* body : {"{\"Epoch\": 100}", "{\"Epoch\": 5000000000}", "{\"Epoch\": -1}", "{}", "not json"}) {
+            const auto response = route_request(router, "POST", "/management/v1/synctime", body);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        }
+
+        // DELETE is not a supported method.
+        const auto del_response = route_request(router, "DELETE", "/management/v1/synctime");
+        const auto del_json = nlohmann::json::parse(del_response.body(), nullptr, false);
+        EXPECT(!del_json.is_discarded() && del_json.value("ErrorNumber", 0) != 0);
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }

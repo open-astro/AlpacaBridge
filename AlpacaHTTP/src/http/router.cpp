@@ -27,10 +27,12 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -1420,6 +1422,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "restart";
         return match;
     }
+    if (path == "/management/v1/synctime" || path == "/management/synctime") {
+        match.is_management = true;
+        match.management_endpoint = "synctime";
+        return match;
+    }
 
     // Device API: /api/v1/{devicetype}/{devicenumber}/{method}
     std::regex device_regex(R"(/api/v1/([^/]+)/(\d+)/([^/?]+))");
@@ -1460,6 +1467,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_shutdown(request, server_tx_id);
     } else if (match.management_endpoint == "restart") {
         return handle_restart(request, server_tx_id);
+    } else if (match.management_endpoint == "synctime") {
+        return handle_sync_time(request, server_tx_id);
     }
 
     Response response;
@@ -6396,6 +6405,94 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
         response.set_body(alpaca_response);
         return response;
     }
+}
+
+Response Router::handle_sync_time(const Request& request, std::uint32_t server_tx_id) {
+    // Note: like the restart/shutdown management endpoints, this is
+    // intentionally unauthenticated — the web UI is served on the LAN and the
+    // threat model assumes a trusted network. Setting the system clock has a
+    // wider blast radius than restart/shutdown (an incorrect clock can break
+    // TLS validation / log ordering elsewhere on the SBC), so the epoch is
+    // sanity-bounded to 2000-2100 UTC below. Deployments on untrusted networks
+    // should firewall the management port.
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // GET returns the server's current time (epoch seconds) without changing
+    // anything — the web UI polls this to display a live server clock and to
+    // detect drift against the browser's clock.
+    if (request.method() == HttpMethod::GET) {
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = static_cast<std::int64_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        response.set_body(alpaca_response);
+        return response;
+    }
+
+    // Only POST or PUT may set the clock.
+    if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                "Method not allowed. GET reads the server time; POST or PUT sets it.");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        return response;
+    }
+
+    // Parse the client's Unix epoch (seconds). Accept either {"Epoch": n} or
+    // {"Value": n} for compatibility with the other management endpoints.
+    std::int64_t epoch_seconds = -1;
+    try {
+        auto json_opt = parse_json(request.body());
+        if (json_opt) {
+            if (const auto* val = find_json_value(*json_opt, "Epoch")) {
+                if (val->is_number_integer() || val->is_number_unsigned()) {
+                    epoch_seconds = val->get<std::int64_t>();
+                }
+            } else if (const auto* val = find_json_value(*json_opt, "Value")) {
+                if (val->is_number_integer() || val->is_number_unsigned()) {
+                    epoch_seconds = val->get<std::int64_t>();
+                }
+            }
+        }
+    } catch (const std::exception&) {
+        epoch_seconds = -1;
+    }
+
+    // Sanity range: 2000-01-01 .. 2100-01-01 UTC. Reject anything outside —
+    // a bogus value (or a clock reset) would break Alpaca timestamps worse
+    // than not syncing at all.
+    constexpr std::int64_t kMinEpoch = 946684800;   // 2000-01-01T00:00:00Z
+    constexpr std::int64_t kMaxEpoch = 4102444800;  // 2100-01-01T00:00:00Z
+    if (epoch_seconds < kMinEpoch || epoch_seconds > kMaxEpoch) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                "Epoch must be a Unix timestamp in seconds between 2000-01-01 and 2100-01-01 UTC");
+        response.set_body(alpaca_response);
+        return response;
+    }
+
+    struct timespec ts {};
+    ts.tv_sec = static_cast<time_t>(epoch_seconds);
+    ts.tv_nsec = 0;
+    if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+                                std::string("clock_settime failed (requires CAP_SYS_TIME): ") + std::strerror(errno));
+        response.set_body(alpaca_response);
+        return response;
+    }
+
+    AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+    alpaca_response.value = epoch_seconds;
+    response.set_body(alpaca_response);
+    return response;
 }
 
 Response Router::handle_restart(const Request& request, std::uint32_t server_tx_id) {

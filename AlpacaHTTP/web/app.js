@@ -1361,6 +1361,91 @@ function refreshServerInfo() {
     loadLogFiles();
 }
 
+// Sync the SBC's system clock from the browser's clock. The browser machine
+// is assumed to have correct time (its OS NTP), which makes it a simple
+// time source for internet-less SBCs that cannot reach an NTP server.
+async function syncTime() {
+    if (!confirm('Sync the server\'s clock to this computer\'s time?\n\nThis is useful when the server has no internet (no NTP) and its clock drifts or resets after a reboot.')) {
+        return;
+    }
+
+    // Capture the epoch AFTER the user confirms — confirm() blocks, so an
+    // epoch taken before it would be stale by however long the dialog was
+    // open.
+    const epoch = Math.floor(Date.now() / 1000);
+    const t0 = Date.now();
+
+    try {
+        const response = await fetch(API_BASE + '/management/v1/synctime', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ Epoch: epoch })
+        });
+
+        let result = null;
+        try {
+            result = await response.json();
+        } catch (e) {
+            result = null;
+        }
+
+        if (result && result.ErrorNumber === 0) {
+            // Account for round-trip latency so the confirmation shows the
+            // server's adjusted time, not the browser's send time.
+            const roundTripMs = Date.now() - t0;
+            const serverTime = new Date((result.Value * 1000) + Math.floor(roundTripMs / 2));
+            refreshServerClockOffset();
+            alert('Time synced! Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
+        } else {
+            alert('Error syncing time: ' + (result ? result.ErrorMessage : 'unknown error'));
+        }
+    } catch (e) {
+        alert('Error syncing time: ' + e.message);
+    }
+}
+
+// Live server clock: fetch the SBC's time once, remember its offset from the
+// browser's clock, and tick the display locally every second — no per-second
+// network traffic. Re-synced every 60 s and after a Sync Time. If server and
+// browser disagree by more than 2 s the clock turns red as a "needs sync" hint.
+let serverClockOffsetMs = null;
+
+async function refreshServerClockOffset() {
+    try {
+        const t0 = Date.now();
+        const response = await fetch(API_BASE + '/management/v1/synctime');
+        const result = await response.json();
+        if (result && result.ErrorNumber === 0) {
+            // Value is whole seconds; assume the server read its clock halfway
+            // through the round trip.
+            const midpoint = t0 + (Date.now() - t0) / 2;
+            serverClockOffsetMs = (result.Value * 1000) - midpoint;
+        }
+    } catch (e) {
+        // Keep the last known offset on a transient fetch failure — the clock
+        // keeps ticking locally rather than blanking to --:--:--. It only
+        // shows placeholders before the first successful fetch.
+    }
+    updateServerClock();
+}
+
+function updateServerClock() {
+    const el = document.getElementById('server-clock');
+    if (!el) {
+        return;
+    }
+    if (serverClockOffsetMs === null) {
+        el.textContent = '--:--:--';
+        el.classList.remove('drift');
+        return;
+    }
+    const serverNow = new Date(Date.now() + serverClockOffsetMs);
+    el.textContent = serverNow.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+    // The GET returns whole seconds, so up to ±1 s of the offset is
+    // quantization, not drift; only flag beyond 2 s.
+    el.classList.toggle('drift', Math.abs(serverClockOffsetMs) > 2000);
+}
+
 // Shutdown server
 async function shutdownServer() {
     if (!confirm('Are you sure you want to shutdown the server? This will stop all services.')) {
@@ -3441,6 +3526,9 @@ function escapeHtml(text) {
 document.addEventListener('DOMContentLoaded', function() {
     loadDevices();
     loadServerInfo();
+    refreshServerClockOffset();
+    setInterval(updateServerClock, 1000);
+    setInterval(refreshServerClockOffset, 60000);
     loadLogSettings();
     loadLogFiles();
     updateVendorOptions();
