@@ -8,61 +8,62 @@
 [![ConformU](https://img.shields.io/badge/ConformU-validated%20on%20hardware-success.svg)](SUPPORTED-DRIVERS.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](docs/development.md)
 
-AlpacaBridge is a growing suite of native ASCOM Alpaca drivers for Linux, every one ConformU-verified, that turns any single-board computer into a gear-control server. There's no ASCOM Platform to install and no vendor COM drivers to chase down. Just flash it onto a Raspberry Pi, iOptron iMate, ToupTek StellaVita, or ZWO ASIAIR, connect your equipment once, and control gear like cameras, mounts, focusers, filter wheels, rotators, cover calibrators, switches, and weather stations over the network from any Alpaca-compatible app, including N.I.N.A., Sequence Generator Pro, and SharpCap.
+**The engine at the telescope.**
 
-#### [3.2.0] - 2026-08-05 &middot; [Changelog](CHANGELOG.md)
+AlpacaBridge turns a single-board computer into a control server for your entire rig. Native ASCOM Alpaca drivers, running right at the telescope. No ASCOM Platform. No Windows box. No vendor drivers to chase down.
 
-## Features
+Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., APT, CCDciel, Sequence Generator Pro, SharpCap, or [Ara](https://www.openastro.net).
 
-- **Native Alpaca drivers** — no ASCOM Platform, no Windows box, no vendor COM drivers to chase down; everything runs on the SBC at your telescope
-- **Vendor support** — manufacturers including iOptron, Player One Astronomy, QHY, and ToupTek Astro supply hardware directly for driver development
-- **[ConformU-verified](SUPPORTED-DRIVERS.md)** — every driver ships validated against the official ASCOM conformance suite, on the hardware it supports; see the full device matrix
-- **Eleven hardware brands** — iOptron, Player One Astronomy, ZWO, QHY, ToupTek Astro, Sky-Watcher, Celestron, Gemini, SVBONY, WandererAstro, and WeeWX weather stations
-- **Plug in and go** — bundled vendor SDKs and udev rules, with USB and Wi-Fi devices auto-detected; no port hunting, no driver installs
-- **Web management UI** — configure every device from a browser anywhere on your network
-- **Set-and-forget service** — installs from the OpenAstro APT repository, runs as a systemd service, starts on boot, updates with `apt upgrade`
+#### [3.3.0] - 2026-08-08 &middot; [Changelog](CHANGELOG.md)
 
-## In the news
+## Why AlpacaBridge
 
-ScopeTrader covered the project launch and what it means for the Alpaca ecosystem: [OpenAstro AlpacaBridge Launches and Why It Matters](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/).
-
-ScopeTrader on the manufacturer support rallying behind the project — iOptron, Player One, QHY, and ToupTek Astro are all supplying hardware for driver development: [Open Astro Project Expands Alpaca Bridge Astronomy Hardware Support](https://scopetrader.com/open-astro-project-expands-alpaca-bridge-astronomy-hardware-support/).
-
-Watch a full install on a ToupTek StellaVita: [Installing AlpacaBridge on a ToupTek StellaVita](https://youtu.be/nVAS45OTltA).
+- **Proven, not promised.** Every driver is [validated with ASCOM ConformU](SUPPORTED-DRIVERS.md), on the actual hardware it supports.
+- **50 drivers. Fourteen brands. One server.** Astroasis, Celestron, Gemini, iOptron, OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
+- **Plug in and go.** Vendor SDKs and udev rules come bundled. USB and Wi-Fi devices are auto-detected. No port hunting.
+- **Manage it from a browser.** Configure every device from the built-in web UI, from any machine on your network.
+- **Set it and forget it.** Installs from the OpenAstro APT repository, runs as a systemd service, starts on boot, updates with `apt upgrade`.
+- **Built with the manufacturers.** iOptron, Player One Astronomy, QHY, and ToupTek Astro supply hardware directly for driver development.
 
 ## Supported hardware
 
-AlpacaBridge runs on **Debian 13 (Trixie)** `arm64`. The [OpenAstro docs](https://www.openastro.net/docs/sbc-install/overview) have a step-by-step setup guide for every supported machine:
+AlpacaBridge runs on **Debian 13 (Trixie)** `arm64`. The [OpenAstro docs](https://www.openastro.net/docs/sbc-install/overview) have a step-by-step guide for every supported machine.
 
-| Machine | Setup guide |
-|---------|-------------|
-| iOptron iMate | [iOptron iMate](https://www.openastro.net/docs/sbc-install/ioptron-imate) |
-| ToupTek StellaVita (Pi CM4) | [ToupTek StellaVita](https://www.openastro.net/docs/sbc-install/touptek-stellavita) |
-| Raspberry Pi 3B+, 4 & 5 | [Raspberry Pi](https://www.openastro.net/docs/sbc-install/raspberry-pi) |
-| ZWO ASIAIR Pro | [ZWO ASIAIR Pro](https://www.openastro.net/docs/sbc-install/zwo-asiair-pro) |
-| ZWO ASIAIR Plus (Pi CM4) | [ZWO ASIAIR Plus — CM4](https://www.openastro.net/docs/sbc-install/zwo-asiair-plus-cm4) |
-| ZWO ASIAIR Plus (RK3568) | [ZWO ASIAIR Plus — RK3568](https://www.openastro.net/docs/sbc-install/zwo-asiair-plus-rk3568) |
+### Unlock your device.
 
-Other Rockchip and OrangePi arm64 boards running Debian 13 work with the standard Raspberry Pi instructions.
+Give commercial astro gear a second life:
 
-## Learn more
+| Machine | | Setup guide |
+|---------|---|-------------|
+| iOptron iMate | Built hand-in-hand with iOptron, ready for OpenAstro | [iOptron iMate](https://www.openastro.net/docs/sbc-install/ioptron-imate) |
+| ToupTek StellaVita | The same Pi CM4 inside, set free | [ToupTek StellaVita](https://www.openastro.net/docs/sbc-install/touptek-stellavita) |
+| ZWO ASIAIR Pro | Installs to a fresh card, leaves the stock card untouched | [ZWO ASIAIR Pro](https://www.openastro.net/docs/sbc-install/zwo-asiair-pro) |
+| ZWO ASIAIR Plus (Pi CM4) | Back up the eMMC, then flash | [ZWO ASIAIR Plus (CM4)](https://www.openastro.net/docs/sbc-install/zwo-asiair-plus-cm4) |
+| ZWO ASIAIR Plus (RK3568) | Backs up the stock software automatically | [ZWO ASIAIR Plus (RK3568)](https://www.openastro.net/docs/sbc-install/zwo-asiair-plus-rk3568) |
 
-- [OpenAstro docs](https://www.openastro.net/docs/intro) — setup guides for Raspberry Pi, StellaVita, ASIAIR, iMate, plus the [FAQ](https://www.openastro.net/docs/faq)
-- [SUPPORTED-DRIVERS.md](SUPPORTED-DRIVERS.md) — validated driver matrix
-- [Development Guide](docs/development.md) — building from source, writing drivers, running tests
+### Build your own.
+
+Start from a bare board and pair it with the gear you choose:
+
+| Machine | | Setup guide |
+|---------|---|-------------|
+| Raspberry Pi 3B+, 4 & 5 | Pair it with a power-port box to run your rig | [Raspberry Pi](https://www.openastro.net/docs/sbc-install/raspberry-pi) |
+| Orange Pi 4 Pro | Ready-made image; flash it to a microSD card and boot | [Orange Pi 4 Pro](https://www.openastro.net/docs/sbc-install/orange-pi-4-pro) |
+
+Other Rockchip and Orange Pi arm64 boards running Debian 13 work with the standard Raspberry Pi instructions.
 
 ## Installation
 
-AlpacaBridge is distributed via the OpenAstro APT repository at [apt.openastro.net](https://apt.openastro.net).
+Three commands from the [OpenAstro APT repository](https://apt.openastro.net), and it stays current with `apt upgrade`.
 
-### 1. Add the OpenAstro signing key
+**1. Add the OpenAstro signing key**
 
 ```sh
 sudo curl -fsSL https://apt.openastro.net/repo/openastro-archive-keyring.gpg \
     | sudo gpg --dearmor -o /usr/share/keyrings/openastro-archive-keyring.gpg
 ```
 
-### 2. Add the repository
+**2. Add the repository**
 
 ```sh
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/openastro-archive-keyring.gpg] \
@@ -70,36 +71,37 @@ https://apt.openastro.net trixie main" \
     | sudo tee /etc/apt/sources.list.d/openastro.list
 ```
 
-### 3. Install
+**3. Install**
 
 ```sh
 sudo apt update
 sudo apt install alpacabridge
 ```
 
-The service starts automatically and runs as the `alpacabridge` system user.
+The service starts automatically and runs as the `alpacabridge` system user. Then open **http://localhost:6800/** (or your server's hostname from any machine on the network) and set up your devices.
 
-## Using AlpacaBridge
-
-Once installed, open:
-
-- **Driver Setup:** http://localhost:6800/
-
-From another machine on your network, substitute the hostname or IP address of the server.
-
-### Updating
+<details>
+<summary>Updating and uninstalling</summary>
 
 ```sh
-sudo apt update
-sudo apt upgrade alpacabridge
+sudo apt update && sudo apt upgrade alpacabridge   # update
+sudo apt remove alpacabridge                       # uninstall
 ```
 
-### Uninstalling
+</details>
 
-```sh
-sudo apt remove alpacabridge
-```
+## In the news
+
+- ScopeTrader on the launch: [OpenAstro AlpacaBridge Launches and Why It Matters](https://scopetrader.com/openastro-alpacabridge-launches-and-why-it-matters/)
+- ScopeTrader on the manufacturers rallying behind the project: [Open Astro Project Expands Alpaca Bridge Astronomy Hardware Support](https://scopetrader.com/open-astro-project-expands-alpaca-bridge-astronomy-hardware-support/)
+- On video: [Installing AlpacaBridge on a ToupTek StellaVita](https://youtu.be/nVAS45OTltA)
+
+## Learn more
+
+- [OpenAstro docs](https://www.openastro.net/docs/intro): setup guides and the [FAQ](https://www.openastro.net/docs/faq)
+- [SUPPORTED-DRIVERS.md](SUPPORTED-DRIVERS.md): the validated driver matrix
+- [Development Guide](docs/development.md): building from source, writing drivers, running tests
 
 ## License
 
-AlpacaBridge is licensed under the [GNU AGPL v3 or later](LICENSE) — derived versions stay open even when the bridge is embedded in a device and served over the network rather than shipped. An additional permission appended to the license (the vendor-SDK linking exception) allows combining AlpacaBridge with the proprietary device-vendor SDKs it needs to operate hardware.
+AlpacaBridge is licensed under the [GNU AGPL v3 or later](LICENSE). Derived versions stay open even when the bridge is embedded in a device and served over the network rather than shipped. An additional permission appended to the license (the vendor-SDK linking exception) allows combining AlpacaBridge with the proprietary device-vendor SDKs it needs to operate hardware.

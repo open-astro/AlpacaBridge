@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.3.0] - UNRELEASED
+## [3.3.0] - 2026-08-08
 
 ### Added
 - **Clock sync for internet-less SBCs** (docs + scripts + web UI): `scripts/sync-clock.sh` pushes a workstation's current time to an SBC over SSH (with optional `--rtc` persist), and the web portal gains a **Sync Time** button (new `POST /management/v1/synctime` endpoint that sets the system clock via `clock_settime`, guarded by a 2000–2100 epoch range check; the `alpacabridge` systemd unit grants `CAP_SYS_TIME`). Both paths keep Alpaca timestamps (and ConformU `LastExposureStartTime` checks) correct on deployments with no NTP reachable and a dead/unset hardware RTC. Troubleshooting guide documents the full fix (set clock, install systemd-timesyncd/chrony, `hwclock -w`). The Server Info card also shows a **live server clock** (`GET /management/v1/synctime` returns the current epoch; the UI ticks it locally off a cached offset and turns it red when server and browser disagree by more than 2 s).
@@ -51,6 +51,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **ZWO mount auto-detection and auto-connect** (AlpacaCore + AlpacaHTTP): new `ConnectionType::Auto` and `enumerate_zwo_mounts()` — the driver probes USB serial ports (`/dev/serial/by-id` ZWO entries and `/dev/ttyACM*`) and the mount's WiFi access point (`192.168.4.1:4030`) with `:GVP`, discovering whichever ZWO mount answers (AM3, AM5, AM5N, AM7, ...) and its model name. A ZWO telescope registered with `connectionType: auto` connects to the first detected mount (USB preferred, WiFi fallback) on every Connect — robust against USB re-enumeration. Web UI adds the "Auto-detect (USB + WiFi)" connection-type option.
 
 ### Changed
+- **Docs: README aligned with openastro.net positioning**: intro leads with the site's "engine at the telescope" framing and the imaging-app list matches the docs (adds APT, CCDciel, and Ara); new "The OpenAstro platform" section introduces the ecosystem (AlpacaBridge / OpenAstro Linux / Ara) with the platform tagline; supported-hardware section adopts the site's "Unlock your device." / "Build your own." grouping with per-machine descriptions, and gains the new Orange Pi 4 Pro setup guide.
 - **Docs: logo served from the repo** (README, SUPPORTED-DRIVERS, CHANGELOG): the header image now loads from `docs/image/ab.png` instead of an external openastro.net URL that no longer resolves.
 - **Docs: all wiki links replaced with openastro.net docs links** (README, driver-build command): the GitHub wiki is deprecated; setup guides now point to `www.openastro.net/docs/sbc-install/`, and the platform badge was shortened to "Debian 13 arm64".
 - **CI: zeroastroboy added to the review workflow's trusted fork contributors** (.github/workflows/claude-review.yml): added to `allowed_non_write_users` so their pushes to a `safe-to-review`-labeled fork PR (e.g. PR #171) no longer fail the review job with "Actor does not have write permissions"; same onboarding path as Knetus56 below.
