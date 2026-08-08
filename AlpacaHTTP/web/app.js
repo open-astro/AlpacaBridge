@@ -1365,11 +1365,15 @@ function refreshServerInfo() {
 // is assumed to have correct time (its OS NTP), which makes it a simple
 // time source for internet-less SBCs that cannot reach an NTP server.
 async function syncTime() {
-    const epoch = Math.floor(Date.now() / 1000);
-    const t0 = Date.now();
     if (!confirm('Sync the server\'s clock to this computer\'s time?\n\nThis is useful when the server has no internet (no NTP) and its clock drifts or resets after a reboot.')) {
         return;
     }
+
+    // Capture the epoch AFTER the user confirms — confirm() blocks, so an
+    // epoch taken before it would be stale by however long the dialog was
+    // open.
+    const epoch = Math.floor(Date.now() / 1000);
+    const t0 = Date.now();
 
     try {
         const response = await fetch(API_BASE + '/management/v1/synctime', {

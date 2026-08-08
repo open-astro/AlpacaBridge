@@ -6407,6 +6407,13 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
 }
 
 Response Router::handle_sync_time(const Request& request, std::uint32_t server_tx_id) {
+    // Note: like the restart/shutdown management endpoints, this is
+    // intentionally unauthenticated — the web UI is served on the LAN and the
+    // threat model assumes a trusted network. Setting the system clock has a
+    // wider blast radius than restart/shutdown (an incorrect clock can break
+    // TLS validation / log ordering elsewhere on the SBC), so the epoch is
+    // sanity-bounded to 2000-2100 UTC below. Deployments on untrusted networks
+    // should firewall the management port.
     Response response;
     response.set_content_type("application/json");
 
