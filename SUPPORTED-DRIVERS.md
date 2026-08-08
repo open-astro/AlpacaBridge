@@ -97,6 +97,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | GPCMOS01200KPF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS01200KPF/) |
+| GPCMOS02000KPA | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS02000KPA/) |
 | ATR2600M (cooled, IMX571) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/ATR2600M/) |
 
 <details>
@@ -104,7 +105,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **SDK**: ToupTek toupcamsdk 2026-01-28 (build target)
 - **Connection**: USB (self-contained `libtoupcam.so`; no libusb/libudev link dependency)
-- **Tested models**: GPCMOS01200KPF (guide camera) and ATR2600M (cooled APS-C mono, IMX571) — both ConformU-validated on Linux arm64. Other ToupTek models sharing the same SDK are expected to work but have not been individually verified.
+- **Tested models**: GPCMOS01200KPF and GPCMOS02000KPA (guide cameras) and ATR2600M (cooled APS-C mono, IMX571) — all ConformU-validated on Linux arm64. Other ToupTek models sharing the same SDK are expected to work but have not been individually verified.
 - **ConformU**: 4.3.0 — ATR2600M: 0 errors, 0 issues, 0 timing issues (SDK 59.30701.20260128).
 - **Cooling (TEC)**: Capability-gated on `TOUPCAM_FLAG_TEC` / `TOUPCAM_FLAG_TEC_ONOFF`. Uncooled cameras report `CanSetCCDTemperature = false`. On cooled models (ATR2600M) `CoolerOn` / `SetCCDTemperature` / `CoolerPower` drive the TEC; verified reaching −10 °C on hardware.
 - **Readout modes (conversion gain + High Full Well)**: on sensors that support them, ASCOM `ReadoutModes` exposes the conversion-gain (`HCG` / `LCG`, plus `HDR` on HDR-capable models) and `High Full Well` hardware modes as a dropdown (e.g. NINA). On the IMX571 these trade read-noise vs full-well (HCG = low noise; LCG / High Full Well = larger full well, ~51 ke⁻ → ~100 ke⁻). Sensors without these keep a single `Normal` mode.

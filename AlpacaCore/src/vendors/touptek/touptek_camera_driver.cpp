@@ -1120,6 +1120,16 @@ public:
                 }
 
                 sdk_local.put_exposure_us(handle, exposure_us);
+                // Stamp LastExposureStartTime at the SDK trigger — the point the
+                // exposure actually begins — not at start_exposure() call time.
+                // Reconfiguring a dirty format/ROI (stop stream, re-configure,
+                // restart) can take ~2 s before the trigger, and a timestamp set
+                // at the call would read that much early, failing ConformU 4.5.0's
+                // LastExposureStartTime accuracy check.
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    last_exposure_start_ = std::chrono::system_clock::now();
+                }
                 sdk_local.trigger(handle, 1);
 
                 unsigned timeout_ms = (exposure_us / 1000) + 10000;
