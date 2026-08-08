@@ -44,13 +44,14 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | Ceres 462M | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Ceres%20462M/) |
 | Uranus-C PRO | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Uranus-C%20PRO/) |
+| Mars-C II | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Player%20One/Mars-C%20II/) |
 
 <details>
 <summary><strong>Player One Driver Notes</strong></summary>
 
 - **SDK**: Player One Camera SDK v3.10.0 (build target)
 - **Connection**: USB (requires udev rules `99-player_one_astronomy.rules`)
-- **Tested models**: Ceres 462M (uncooled) and Uranus-C PRO (cooled, IMX585) on Linux arm64.
+- **Tested models**: Ceres 462M (uncooled), Mars-C II (uncooled guide camera, IMX290), and Uranus-C PRO (cooled, IMX585) on Linux arm64.
 - **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) validated on Uranus-C PRO hardware: reaches and holds the target temperature with closed-loop power regulation.
 - **Dew Heater / Fan**: Cooled models expose the lens heater and radiator fan two ways — camera custom Actions (`GetHeaterPower`/`SetHeaterPower`/`GetFanPower`/`SetFanPower`, percent) and the **Player One Thermal Switch** device (see Switch Drivers below) for slider control in clients like NINA. Both are runtime-only by design; no setting persists across connects. Note the fan does not auto-vary with temperature — `CoolerOn` turns cooler + fan on and the fan runs at its set power.
 - **Pulse guiding**: Capability-gated on `isHasST4Port`. Driver times the pulse duration via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
