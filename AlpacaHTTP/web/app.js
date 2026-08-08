@@ -1394,6 +1394,7 @@ async function syncTime() {
             // server's adjusted time, not the browser's send time.
             const roundTripMs = Date.now() - t0;
             const serverTime = new Date((result.Value * 1000) + Math.floor(roundTripMs / 2));
+            refreshServerClockOffset();
             alert('Time synced! Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
         } else {
             alert('Error syncing time: ' + (result ? result.ErrorMessage : 'unknown error'));
@@ -1401,6 +1402,46 @@ async function syncTime() {
     } catch (e) {
         alert('Error syncing time: ' + e.message);
     }
+}
+
+// Live server clock: fetch the SBC's time once, remember its offset from the
+// browser's clock, and tick the display locally every second — no per-second
+// network traffic. Re-synced every 60 s and after a Sync Time. If server and
+// browser disagree by more than 2 s the clock turns red as a "needs sync" hint.
+let serverClockOffsetMs = null;
+
+async function refreshServerClockOffset() {
+    try {
+        const t0 = Date.now();
+        const response = await fetch(API_BASE + '/management/v1/synctime');
+        const result = await response.json();
+        if (result && result.ErrorNumber === 0) {
+            // Value is whole seconds; assume the server read its clock halfway
+            // through the round trip.
+            const midpoint = t0 + (Date.now() - t0) / 2;
+            serverClockOffsetMs = (result.Value * 1000) - midpoint;
+        }
+    } catch (e) {
+        serverClockOffsetMs = null;
+    }
+    updateServerClock();
+}
+
+function updateServerClock() {
+    const el = document.getElementById('server-clock');
+    if (!el) {
+        return;
+    }
+    if (serverClockOffsetMs === null) {
+        el.textContent = '--:--:--';
+        el.classList.remove('drift');
+        return;
+    }
+    const serverNow = new Date(Date.now() + serverClockOffsetMs);
+    el.textContent = serverNow.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+    // The GET returns whole seconds, so up to ±1 s of the offset is
+    // quantization, not drift; only flag beyond 2 s.
+    el.classList.toggle('drift', Math.abs(serverClockOffsetMs) > 2000);
 }
 
 // Shutdown server
@@ -3483,6 +3524,9 @@ function escapeHtml(text) {
 document.addEventListener('DOMContentLoaded', function() {
     loadDevices();
     loadServerInfo();
+    refreshServerClockOffset();
+    setInterval(updateServerClock, 1000);
+    setInterval(refreshServerClockOffset, 60000);
     loadLogSettings();
     loadLogFiles();
     updateVendorOptions();

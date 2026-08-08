@@ -619,6 +619,18 @@ input[type="range"] {
     color: #f08a7a;
 }
 
+.server-clock {
+    margin-left: auto;
+    margin-right: 12px;
+    color: var(--dim);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+
+.server-clock.drift {
+    color: #f08a7a;
+}
+
 .server-helper {
     color: var(--dim);
     font-size: 12.5px;

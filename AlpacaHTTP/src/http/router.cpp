@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -6422,10 +6423,23 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    // Only allow POST or PUT.
+    // GET returns the server's current time (epoch seconds) without changing
+    // anything — the web UI polls this to display a live server clock and to
+    // detect drift against the browser's clock.
+    if (request.method() == HttpMethod::GET) {
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = static_cast<std::int64_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        response.set_body(alpaca_response);
+        return response;
+    }
+
+    // Only POST or PUT may set the clock.
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
-        AlpacaResponse alpaca_response = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                                                             "Method not allowed. Use POST or PUT.");
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                "Method not allowed. GET reads the server time; POST or PUT sets it.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
         return response;
