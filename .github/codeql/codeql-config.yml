@@ -1,0 +1,12 @@
+# Custom CodeQL configuration for AlpacaBridge.
+#
+# cpp/cleartext-transmission is excluded as a false positive for this codebase:
+# it flags site latitude/longitude ("private location data") written through the
+# shared serial helpers in AlpacaCore/include/alpacacore/util/serial_io.h. Those
+# writes go to a local USB/serial port connected to mount hardware — LX200-style
+# protocols require sending site coordinates to the mount — not over a network,
+# so there is nothing to encrypt. Every telescope driver funnels coordinates
+# through serial_io.h, so the exclusion is repo-wide rather than per-alert.
+query-filters:
+  - exclude:
+      id: cpp/cleartext-transmission
