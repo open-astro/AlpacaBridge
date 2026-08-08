@@ -6424,11 +6424,8 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
 
     // Only allow POST or PUT.
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
-            "Method not allowed. Use POST or PUT."
-        );
+        AlpacaResponse alpaca_response = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                                             "Method not allowed. Use POST or PUT.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
         return response;
@@ -6457,14 +6454,12 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // Sanity range: 2000-01-01 .. 2100-01-01 UTC. Reject anything outside —
     // a bogus value (or a clock reset) would break Alpaca timestamps worse
     // than not syncing at all.
-    constexpr std::int64_t kMinEpoch = 946684800;      // 2000-01-01T00:00:00Z
-    constexpr std::int64_t kMaxEpoch = 4102444800;     // 2100-01-01T00:00:00Z
+    constexpr std::int64_t kMinEpoch = 946684800;   // 2000-01-01T00:00:00Z
+    constexpr std::int64_t kMaxEpoch = 4102444800;  // 2100-01-01T00:00:00Z
     if (epoch_seconds < kMinEpoch || epoch_seconds > kMaxEpoch) {
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
-            "Epoch must be a Unix timestamp in seconds between 2000-01-01 and 2100-01-01 UTC"
-        );
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                "Epoch must be a Unix timestamp in seconds between 2000-01-01 and 2100-01-01 UTC");
         response.set_body(alpaca_response);
         return response;
     }
@@ -6473,11 +6468,9 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     ts.tv_sec = static_cast<time_t>(epoch_seconds);
     ts.tv_nsec = 0;
     if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::DRIVER_ERROR,
-            std::string("clock_settime failed (requires CAP_SYS_TIME): ") + std::strerror(errno)
-        );
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+                                std::string("clock_settime failed (requires CAP_SYS_TIME): ") + std::strerror(errno));
         response.set_body(alpaca_response);
         return response;
     }
