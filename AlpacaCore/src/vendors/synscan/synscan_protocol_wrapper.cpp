@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -32,6 +33,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -197,50 +199,93 @@ std::string probe_synscan_port(const std::string& port_path) {
 #endif
 }
 
+#ifndef _WIN32
+// The raw /dev/ttyUSBn fallback below has no by-id symlink name to filter
+// on, so without this check it would open EVERY serial device on the box --
+// unrelated FTDI dongles, GPS receivers, or a mount controller sharing the
+// ttyUSB namespace -- not just SynScan-shaped USB-serial hardware. Filters
+// the raw fallback exactly as narrowly as the by-id loop below.
+bool raw_port_looks_like_synscan_candidate(const std::string& port_path) {
+    auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
+    if (!descriptor) return false;
+    return alpacacore::util::usb_tty_descriptor_matches(
+        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "USB_Serial", "USB-Serial"});
+}
+#endif  // _WIN32
+
 } // anonymous namespace
 
 std::vector<SynScanPortInfo> enumerate_synscan_ports() {
     std::vector<SynScanPortInfo> results;
 
 #ifndef _WIN32
+    // Resolved (canonical) paths already probed via by-id, so the raw-node
+    // pass below never re-opens a port the by-id pass already tried.
+    std::set<std::string> probed;
+
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
-    if (!std::filesystem::exists(serial_by_id)) {
-        for (int i = 0; i < 10; ++i) {
-            std::string port = "/dev/ttyUSB" + std::to_string(i);
-            if (std::filesystem::exists(port)) {
-                ALPACA_LOG_INFO("SynScan", "Probing " + port + "...");
-                std::string fw = probe_synscan_port(port);
-                if (!fw.empty()) {
-                    ALPACA_LOG_INFO("SynScan", "Found SynScan mount on " + port +
-                                    " (HC firmware " + fw + ")");
-                    results.push_back({port, "", fw});
-                }
+    if (alpacacore::util::path_exists(serial_by_id)) {
+        for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
+            const std::string& name = sym.name;
+
+            bool is_candidate =
+                (name.find("Prolific") != std::string::npos) || (name.find("PL2303") != std::string::npos) ||
+                (name.find("067b") != std::string::npos) || (name.find("FTDI") != std::string::npos) ||
+                (name.find("CP210") != std::string::npos) || (name.find("USB_Serial") != std::string::npos) ||
+                (name.find("USB-Serial") != std::string::npos);
+            if (!is_candidate) continue;
+
+            // error_code overload: a device unplugged after the directory scan
+            // leaves a dangling symlink; skip it instead of aborting the
+            // enumeration.
+            std::error_code canon_ec;
+            std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
+            if (canon_ec) continue;
+            probed.insert(resolved);
+            std::string probe_message = "Probing ";
+            probe_message.append(resolved).append(" (").append(name).append(")...");
+            ALPACA_LOG_INFO("SynScan", probe_message);
+
+            std::string fw = probe_synscan_port(resolved);
+            if (!fw.empty()) {
+                std::string found_message = "Found SynScan mount on ";
+                found_message.append(resolved).append(" (HC firmware ").append(fw).append(")");
+                ALPACA_LOG_INFO("SynScan", found_message);
+                results.push_back({resolved, name, fw});
             }
         }
-        return results;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(serial_by_id)) {
-        if (!entry.is_symlink()) continue;
-        std::string name = entry.path().filename().string();
+    // Always also probe raw /dev/ttyUSB* nodes directly, not only when
+    // /dev/serial/by-id is absent. Generic Prolific/FTDI/CP210x adapters
+    // (used by SynScan's serial cable, and commonly also by other devices on
+    // the same box) can report identical descriptor strings with no
+    // per-device serial number, so when two such adapters are plugged in at
+    // once, udev's by-id naming collides and only ONE of them gets a symlink
+    // -- the other is silently absent from by-id even though the directory
+    // itself exists, so the loop above never sees it. Deduplicated by
+    // resolved canonical path so a port already tried via by-id isn't opened
+    // a second time.
+    for (int i = 0; i < 10; ++i) {
+        std::string port = "/dev/ttyUSB" + std::to_string(i);
+        if (!alpacacore::util::path_exists(port)) continue;
 
-        bool is_candidate = (name.find("Prolific") != std::string::npos) ||
-                            (name.find("PL2303") != std::string::npos) ||
-                            (name.find("067b") != std::string::npos) ||
-                            (name.find("FTDI") != std::string::npos) ||
-                            (name.find("CP210") != std::string::npos) ||
-                            (name.find("USB_Serial") != std::string::npos) ||
-                            (name.find("USB-Serial") != std::string::npos);
-        if (!is_candidate) continue;
+        std::error_code canon_ec;
+        std::string resolved = std::filesystem::canonical(port, canon_ec).string();
+        if (canon_ec) continue;
+        if (probed.count(resolved) != 0) continue;
+        if (!raw_port_looks_like_synscan_candidate(resolved)) continue;
+        probed.insert(resolved);
 
-        std::string resolved = std::filesystem::canonical(entry.path()).string();
-        ALPACA_LOG_INFO("SynScan", "Probing " + resolved + " (" + name + ")...");
-
+        std::string probe_message = "Probing ";
+        probe_message.append(resolved).append("...");
+        ALPACA_LOG_INFO("SynScan", probe_message);
         std::string fw = probe_synscan_port(resolved);
         if (!fw.empty()) {
-            ALPACA_LOG_INFO("SynScan", "Found SynScan mount on " + resolved +
-                            " (HC firmware " + fw + ")");
-            results.push_back({resolved, name, fw});
+            std::string found_message = "Found SynScan mount on ";
+            found_message.append(resolved).append(" (HC firmware ").append(fw).append(")");
+            ALPACA_LOG_INFO("SynScan", found_message);
+            results.push_back({resolved, "", fw});
         }
     }
 #endif

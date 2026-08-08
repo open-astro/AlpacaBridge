@@ -42,6 +42,9 @@ jobs:
         with:
           languages: c-cpp
           build-mode: none
+          # Excludes cpp/cleartext-transmission (serial-port false positive);
+          # see the config file for rationale.
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38  # v4.37.4
