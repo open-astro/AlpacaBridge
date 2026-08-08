@@ -27,24 +27,36 @@
 
 set -euo pipefail
 
-TARGET="${1:-astro@192.168.168.1}"
-# --rtc may appear as $1 (default host) or later; never treat it as the host.
-if [ "${1:-}" = "--rtc" ]; then
-    TARGET="astro@192.168.168.1"
-fi
+# Arguments may come in any order: the first non-flag argument is the host,
+# --rtc may appear anywhere, anything else is an error (so a typo'd flag can't
+# be silently pushed to as a hostname).
+TARGET=""
 PERSIST_RTC=false
 for a in "$@"; do
-    [ "$a" = "--rtc" ] && PERSIST_RTC=true
+    case "$a" in
+        --rtc) PERSIST_RTC=true ;;
+        -*) echo "ERROR: unknown flag '$a'" >&2; exit 2 ;;
+        *)
+            if [ -n "$TARGET" ]; then
+                echo "ERROR: multiple hosts given ('$TARGET' and '$a')" >&2; exit 2
+            fi
+            TARGET="$a"
+            ;;
+    esac
 done
+TARGET="${TARGET:-astro@192.168.168.1}"
 
 NOW_UTC="$(date -u +'%Y-%m-%d %H:%M:%S')"
 echo "Pushing time ($NOW_UTC UTC) to ${TARGET} ..."
 # accept-new: auto-accept an unknown host key but reject a changed one, so a
 # MITM that swaps the host key is detected (full auto-accept would be silent).
+# date -u: the string is UTC, so it must also be *parsed* as UTC — without -u
+# the target interprets it in its local timezone and the clock ends up off by
+# the TZ offset on any non-UTC SBC.
 ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes "$TARGET" \
-    "sudo -n date -s '$NOW_UTC'" || {
+    "sudo -n date -u -s '$NOW_UTC'" || {
         echo "Direct passwordless sudo failed; retrying with password prompt."
-        ssh -o StrictHostKeyChecking=accept-new "$TARGET" "sudo date -s '$NOW_UTC'"
+        ssh -o StrictHostKeyChecking=accept-new "$TARGET" "sudo date -u -s '$NOW_UTC'"
     }
 
 if $PERSIST_RTC; then

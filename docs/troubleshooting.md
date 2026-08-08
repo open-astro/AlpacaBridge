@@ -90,7 +90,7 @@ See [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) for driver-specific notes.
 **Fix — set the clock and install an NTP client** (per the [OpenAstro SBC install guide](https://www.openastro.net/docs/sbc-install/)):
 
 ```sh
-sudo date -s "YYYY-MM-DD HH:MM:SS"      # current time, UTC
+sudo date -u -s "YYYY-MM-DD HH:MM:SS"   # current time, UTC (-u: parse as UTC, not local)
 sudo apt install systemd-timesyncd -y    # or: sudo apt install chrony -y
 sudo timedatectl set-ntp true
 sudo apt install util-linux-extra -y     # provides hwclock
