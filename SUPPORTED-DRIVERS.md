@@ -552,6 +552,24 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
+### OnStep
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Generic OnStep (DIY harmonic-drive mount) | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/OnStep/Generic%20OnStep/) |
+
+<details>
+<summary><strong>OnStep Driver Notes</strong></summary>
+
+- **Protocol**: LX200-derived serial protocol, per INDI's `lx200_OnStep` reference driver (no vendor SDK or protocol PDF — OnStep is open-source firmware for DIY/retrofit mounts, commonly run on Arduino Mega/Due, Teensy, or ESP32 boards).
+- **Connection**: USB/Serial only in this project (no Wi-Fi/network config exposed). Default 9600 baud, 8N1. Auto-detection scans `/dev/serial/by-id/` (common USB-serial chip vendor IDs plus `Arduino`/`Teensy` substrings) falling back to `/dev/ttyUSB0`–`9` **and** `/dev/ttyACM0`–`9` (OnStep boards commonly enumerate as ttyACM), probing each with the `:GVP#` identity command.
+- **Pulse guiding**: Native hardware pulse guide with mount-side timing (`:Mgn####`/`:Mgs####`/`:Mge####`/`:Mgw####`, milliseconds) — no software-timed stop thread required.
+- **SideOfPier**: Always computed from hour angle (same convention as iOptron/SynScan/Celestron) — `:GU#`'s `E`/`W` flag reports the mount's *physical* pier orientation, not ASCOM's hour-angle-defined pointing state, and using it directly failed ConformU's SideofPier check on real hardware (see AGENTS.md OnStep notes).
+- **Tested model**: Generic OnStep DIY harmonic-drive mount, firmware "On-Step" v10.23a, Linux arm64.
+- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing violations (clean run, 2026-08-08, re-validated on a freshly purged/reinstalled SBC after the auto-detect port-search refactor landed on `serial_by_id_scan.h`). PulseGuide ±9 East-West movement occasionally lands 1-2 residual issues right at the 0.07″ tolerance boundary on other runs — documented in AGENTS.md as inherent hardware noise, root-caused via 4 independent tests, not a driver bug — accepted rather than chased with a tolerance/behavior change.
+
+</details>
+
 ### SynScan V3/V4
 
 | Model Series | Connection | Linux<br>(arm64) | Status |

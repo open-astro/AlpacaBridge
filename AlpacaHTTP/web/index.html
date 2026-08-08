@@ -79,6 +79,7 @@
                         <option value="gemini">Gemini</option>
                         <option value="ioptron">iOptron</option>
                         <option value="playerone">Player One</option>
+                        <option value="onstep">OnStep</option>
                         <option value="qhy">QHY</option>
                         <option value="svbony">SVBONY</option>
                         <option value="synscan">SynScan V3/V4</option>
@@ -278,6 +279,50 @@
                     <div class="form-group">
                         <label for="synscan-focal-length">Focal Length (mm):</label>
                         <input type="number" id="synscan-focal-length" name="synscanFocalLength" min="0" step="1" placeholder="800">
+                        <small>Optional. Some clients may ignore this value.</small>
+                    </div>
+                </div>
+
+                <!-- OnStep Telescope Configuration -->
+                <div id="onstep-config" class="vendor-config" style="display: none;">
+                    <h3>OnStep Telescope Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="onstep-connection-type">Connection Type:</label>
+                        <select id="onstep-connection-type" name="onstepConnectionType" required>
+                            <option value="auto">Auto-Detect</option>
+                            <option value="serial">Serial/USB (Manual)</option>
+                        </select>
+                        <small>OnStep controllers connect over USB serial only.</small>
+                    </div>
+
+                    <!-- Serial Connection -->
+                    <div id="onstep-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="onstep-port-path">Serial Port:</label>
+                            <input type="text" id="onstep-port-path" name="onstepPortPath" placeholder="/dev/ttyACM0">
+                            <small>Linux: /dev/ttyACM0 or /dev/ttyUSB0</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="onstep-baud-rate">Baud Rate:</label>
+                            <input type="number" id="onstep-baud-rate" name="onstepBaudRate" value="9600" min="1200" max="230400">
+                        </div>
+                    </div>
+
+                    <h4>Optics</h4>
+                    <div class="form-group">
+                        <label for="onstep-aperture-diameter">Aperture Diameter (mm):</label>
+                        <input type="number" id="onstep-aperture-diameter" name="onstepApertureDiameter" min="0" step="1" placeholder="200">
+                        <small>Optional. Some clients may ignore this value.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="onstep-aperture-area">Aperture Area (m^2):</label>
+                        <input type="number" id="onstep-aperture-area" name="apertureArea" min="0" step="0.000001" placeholder="0.031416" readonly>
+                        <small>Optional. Derived from the aperture diameter; shown in m&sup2; as reported over Alpaca.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="onstep-focal-length">Focal Length (mm):</label>
+                        <input type="number" id="onstep-focal-length" name="onstepFocalLength" min="0" step="1" placeholder="1000">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                 </div>

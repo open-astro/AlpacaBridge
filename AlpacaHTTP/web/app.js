@@ -774,6 +774,20 @@ function startEditDevice(device) {
         if (synscanConnectionTypeEl) {
             synscanConnectionTypeEl.dispatchEvent(new Event('change'));
         }
+    } else if (vendor === 'onstep') {
+        const onstepConnectionType = config.connectionType || 'auto';
+        setFormValue('onstep-connection-type', onstepConnectionType);
+        if (onstepConnectionType === 'serial') {
+            setFormValue('onstep-port-path', config.portPath);
+            setFormValue('onstep-baud-rate', config.baudRate);
+        }
+        setFormValue('onstep-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
+        setFormValue('onstep-focal-length', opticsMetersToMm(config.focalLength));
+        updateApertureAreaFromDiameter('onstep-aperture-diameter', 'onstep-aperture-area');
+        const onstepConnectionTypeEl = document.getElementById('onstep-connection-type');
+        if (onstepConnectionTypeEl) {
+            onstepConnectionTypeEl.dispatchEvent(new Event('change'));
+        }
     } else if (vendor === 'celestron') {
         const celestronConnectionType = config.connectionType || 'auto';
         setFormValue('celestron-connection-type', celestronConnectionType);
@@ -1772,6 +1786,11 @@ function updateVendorOptions() {
         celestronOption.disabled = !isTelescope;
         celestronOption.hidden = !isTelescope;
     }
+    const onstepOption = vendorSelect.querySelector('option[value="onstep"]');
+    if (onstepOption) {
+        onstepOption.disabled = !isTelescope;
+        onstepOption.hidden = !isTelescope;
+    }
     const bisqueOption = vendorSelect.querySelector('option[value="bisque"]');
     if (bisqueOption) {
         bisqueOption.disabled = !isTelescope;
@@ -1847,6 +1866,9 @@ function updateVendorOptions() {
     if (!isTelescope && vendorSelect.value === 'celestron') {
         vendorSelect.value = '';
     }
+    if (!isTelescope && vendorSelect.value === 'onstep') {
+        vendorSelect.value = '';
+    }
     if (!isTelescope && vendorSelect.value === 'bisque') {
         vendorSelect.value = '';
     }
@@ -1895,6 +1917,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('synscan-config').style.display = 'block';
     } else if (vendor === 'celestron') {
         document.getElementById('celestron-config').style.display = 'block';
+    } else if (vendor === 'onstep') {
+        document.getElementById('onstep-config').style.display = 'block';
     } else if (vendor === 'bisque') {
         document.getElementById('bisque-config').style.display = 'block';
     } else if (vendor === 'zwo') {
@@ -2040,6 +2064,14 @@ if (synscanConnectionType) {
         const type = this.value;
         document.getElementById('synscan-serial-config').style.display = type === 'serial' ? 'block' : 'none';
         document.getElementById('synscan-network-config').style.display = type === 'network' ? 'block' : 'none';
+    });
+}
+
+const onstepConnectionType = document.getElementById('onstep-connection-type');
+if (onstepConnectionType) {
+    onstepConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('onstep-serial-config').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -2196,6 +2228,11 @@ const synscanApertureDiameterInput = document.getElementById('synscan-aperture-d
 if (synscanApertureDiameterInput) {
     synscanApertureDiameterInput.addEventListener('input', () =>
         updateApertureAreaFromDiameter('synscan-aperture-diameter', 'synscan-aperture-area'));
+}
+const onstepApertureDiameterInput = document.getElementById('onstep-aperture-diameter');
+if (onstepApertureDiameterInput) {
+    onstepApertureDiameterInput.addEventListener('input', () =>
+        updateApertureAreaFromDiameter('onstep-aperture-diameter', 'onstep-aperture-area'));
 }
 const zwoMountApertureDiameterInput = document.getElementById('zwo-mount-aperture-diameter');
 if (zwoMountApertureDiameterInput) {
@@ -2770,6 +2807,17 @@ document.getElementById('device-form').addEventListener('submit', async function
         // "auto" needs no connection fields — port is discovered at startup
 
         if (!applyOpticsMm(formData, deviceData, 'synscanApertureDiameter', 'synscanFocalLength')) {
+            return;
+        }
+    } else if (deviceData.vendor === 'onstep') {
+        deviceData.connectionType = formData.get('onstepConnectionType') || 'auto';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('onstepPortPath');
+            deviceData.baudRate = parseInt(formData.get('onstepBaudRate')) || 9600;
+        }
+        // "auto" needs no connection fields — port is discovered at startup
+
+        if (!applyOpticsMm(formData, deviceData, 'onstepApertureDiameter', 'onstepFocalLength')) {
             return;
         }
     } else if (deviceData.vendor === 'celestron') {
