@@ -252,7 +252,8 @@ public:
      *        continuous-motion commands.
      *
      * Sends :RS#. Called once at connect as a safe default; move_axis_start()
-     * selects the actual per-call rate via :RG#/:RC#/:RM#/:R9# instead.
+     * selects the actual per-call rate via :RA[n.n]#/:RE[n.n]# (an arbitrary
+     * custom rate) instead.
      */
     void select_max_slew_rate();
 

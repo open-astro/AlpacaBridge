@@ -1156,10 +1156,16 @@ private:
                 if (ch == '#') {
                     break;
                 }
-                if (ch == '\r' || ch == '\n') {
-                    continue;
+                // Deliberately NOT a `continue` back to the top of the loop:
+                // that would skip the elapsed/idle timeout checks below for
+                // this iteration, and a sustained run of only \r/\n bytes
+                // (line noise, a framing error, a firmware echo quirk) would
+                // then busy-spin forever with no timeout ever firing --
+                // hanging this call, and with it every other Alpaca call for
+                // this device, since read_response() runs under mutex_.
+                if (ch != '\r' && ch != '\n') {
+                    response.push_back(ch);
                 }
-                response.push_back(ch);
             }
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
