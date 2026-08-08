@@ -1361,6 +1361,44 @@ function refreshServerInfo() {
     loadLogFiles();
 }
 
+// Sync the SBC's system clock from the browser's clock. The browser machine
+// is assumed to have correct time (its OS NTP), which makes it a simple
+// time source for internet-less SBCs that cannot reach an NTP server.
+async function syncTime() {
+    const epoch = Math.floor(Date.now() / 1000);
+    const t0 = Date.now();
+    if (!confirm('Sync the server\'s clock to this computer\'s time?\n\nThis is useful when the server has no internet (no NTP) and its clock drifts or resets after a reboot.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(API_BASE + '/management/v1/synctime', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ Epoch: epoch })
+        });
+
+        let result = null;
+        try {
+            result = await response.json();
+        } catch (e) {
+            result = null;
+        }
+
+        if (result && result.ErrorNumber === 0) {
+            // Account for round-trip latency so the confirmation shows the
+            // server's adjusted time, not the browser's send time.
+            const roundTripMs = Date.now() - t0;
+            const serverTime = new Date((result.Value * 1000) + Math.floor(roundTripMs / 2));
+            alert('Time synced! Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
+        } else {
+            alert('Error syncing time: ' + (result ? result.ErrorMessage : 'unknown error'));
+        }
+    } catch (e) {
+        alert('Error syncing time: ' + e.message);
+    }
+}
+
 // Shutdown server
 async function shutdownServer() {
     if (!confirm('Are you sure you want to shutdown the server? This will stop all services.')) {

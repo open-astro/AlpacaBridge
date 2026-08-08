@@ -34,6 +34,13 @@ ReadWritePaths=/var/lib/alpacabridge
 ProtectKernelTunables=true
 ProtectKernelModules=true
 RestrictSUIDSGID=true
+# Allow the web UI's "Sync Time" management endpoint to set the system clock
+# (clock_settime). Granted as an ambient capability so the non-root
+# alpacabridge user can adjust the clock on internet-less SBCs where NTP is
+# unavailable; works with NoNewPrivileges=true because systemd grants it at
+# exec time.
+AmbientCapabilities=CAP_SYS_TIME
+CapabilityBoundingSet=CAP_SYS_TIME
 
 [Install]
 WantedBy=multi-user.target

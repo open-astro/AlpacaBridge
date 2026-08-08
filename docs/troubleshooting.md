@@ -98,7 +98,7 @@ sudo hwclock -w                          # persist the correct time to the RTC
 timedatectl status                       # expect: System clock synchronized: yes
 ```
 
-**If the SBC has no internet at all**: use `scripts/sync-clock.sh` from an internet-connected workstation (e.g. your laptop) whenever you connect over SSH — it pushes the workstation's current time to the SBC (and optionally persists it to the RTC with `--rtc`):
+**If the SBC has no internet at all**: use the **Sync Time** button in the AlpacaBridge web portal (`http://<sbc>:6800/` → top-right server actions) — it sets the SBC's clock from the browser's time. Or use `scripts/sync-clock.sh` from an internet-connected workstation (e.g. your laptop) whenever you connect over SSH — it pushes the workstation's current time to the SBC (and optionally persists it to the RTC with `--rtc`):
 
 ```sh
 scripts/sync-clock.sh astro@192.168.168.1 --rtc
