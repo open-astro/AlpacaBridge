@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.2.1] - UNRELEASED
+## [3.3.0] - UNRELEASED
 
 ### Fixed
 - **OnStep re-validated on real hardware after the auto-detect update** (Generic OnStep DIY harmonic-drive mount, Linux arm64, ConformU 4.5.0): 0 errors across two consecutive full runs. 1-2 residual PulseGuide East/West issues at the 0.07″ tolerance boundary (accepted inherent hardware noise, unchanged from the original validation) and 4 FAST-target timing warnings clustered in the first ~5s after `Connect()` (`AlignmentMode`, `Declination`, `EquatorialSystem`, `SideOfPier Read`) — confirmed via manual repeat calls to be the same accepted connect-adjacent cold-start window already documented for `DeviceState`, not a regression from this update (see AGENTS.md). Results in `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt`.
