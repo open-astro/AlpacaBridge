@@ -618,9 +618,15 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        // Populate longitude (and mark the pair valid) from the mount BEFORE
+        // overwriting just latitude below -- otherwise, if longitude was
+        // never cached yet, unconditionally setting site_info_valid_ = true
+        // here would silently promote a stale/default 0.0 longitude to
+        // "valid" alongside the freshly-set latitude. No-op (single flag
+        // check) once the pair is already cached.
+        ensure_site_info_cached_locked();
         OnStepProtocolWrapper::instance().set_latitude(latitude);
         site_latitude_cached_ = latitude;
-        site_info_valid_ = true;
     }
 
     double get_site_longitude() const override {
@@ -636,9 +642,12 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        // See set_site_latitude(): populate latitude from the mount first so
+        // marking the pair valid below never promotes a stale/default
+        // latitude alongside the freshly-set longitude.
+        ensure_site_info_cached_locked();
         OnStepProtocolWrapper::instance().set_longitude(longitude);
         site_longitude_cached_ = longitude;
-        site_info_valid_ = true;
     }
 
     bool get_slewing() const override {
@@ -771,9 +780,15 @@ public:
         // (:Mgn####/:Mgs####/:Mge####/:Mgw####), so unlike a software-timed
         // implementation there is no background stop thread to manage here —
         // is_pulse_guiding() just compares against the known end time.
+        // OnStepProtocolWrapper::pulse_guide() silently clamps duration_ms to
+        // [0, 9999] to fit the wire command's fixed 4-digit field; clamp the
+        // same way here so the cached end time matches what the mount
+        // actually pulses for, rather than IsPulseGuiding over-reporting for
+        // whatever a caller-supplied duration beyond 9999ms overshot by.
+        const int clamped_duration = std::clamp(duration, 0, 9999);
         OnStepProtocolWrapper::instance().pulse_guide(direction, duration);
         pulse_guiding_active_ = true;
-        pulse_guide_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
+        pulse_guide_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(clamped_duration);
         equatorial_cache_valid_ = false;
     }
 
