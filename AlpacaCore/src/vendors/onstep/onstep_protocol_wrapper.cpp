@@ -399,6 +399,29 @@ bool raw_port_looks_like_onstep_candidate(const std::string& port_path) {
         *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "0403", "CP210", "10c4", "Silicon_Labs", "CH340", "CH341",
                       "1a86", "USB_Serial", "USB Serial", "Arduino", "Teensy"});
 }
+
+// Lists /dev entries whose filename starts with prefix (e.g. "ttyUSB"),
+// sorted for deterministic probe order. Unlike a fixed `for (i = 0; i < N;
+// ++i)` loop over /dev/<prefix>0..N-1, this doesn't silently stop looking on
+// a box with N or more matching devices already enumerated -- there's no
+// hardware limit on how many USB-serial adapters can be plugged into a hub.
+// Built entirely on std::error_code overloads (matching
+// alpacacore::util::list_serial_by_id()'s pattern) so a mid-scan unplug ends
+// the scan with whatever entries were already found instead of throwing
+// filesystem_error out of the whole enumeration.
+std::vector<std::string> list_dev_nodes_with_prefix(const std::string& prefix) {
+    std::vector<std::string> results;
+    std::error_code dir_ec;
+    for (auto it = std::filesystem::directory_iterator("/dev", dir_ec);
+         !dir_ec && it != std::filesystem::directory_iterator(); it.increment(dir_ec)) {
+        const std::string name = it->path().filename().string();
+        if (name.compare(0, prefix.size(), prefix) == 0) {
+            results.push_back(it->path().string());
+        }
+    }
+    std::sort(results.begin(), results.end());
+    return results;
+}
 #endif
 
 }  // namespace
@@ -467,12 +490,9 @@ std::vector<OnStepPortInfo> enumerate_onstep_ports() {
     // naming schemes here too: classic USB-serial adapters enumerate as
     // /dev/ttyUSBn, while Arduino Mega/Due/Teensy/ESP32 boards running
     // OnStep commonly enumerate as /dev/ttyACMn (native USB-CDC).
-    for (const char* prefix : {"/dev/ttyUSB", "/dev/ttyACM"}) {
-        for (int i = 0; i < 10; ++i) {
-            std::string port = prefix + std::to_string(i);
-            if (!alpacacore::util::path_exists(port)) continue;
-
-            // Hot-pluggable node: it can vanish between the exists() check
+    for (const char* prefix : {"ttyUSB", "ttyACM"}) {
+        for (const std::string& port : list_dev_nodes_with_prefix(prefix)) {
+            // Hot-pluggable node: it can vanish between the directory scan
             // above and here (or during the probe below). Use the
             // error_code overload so a mid-scan unplug skips this port
             // instead of throwing filesystem_error out of the whole
