@@ -233,10 +233,25 @@ public:
                 }
             }
 
+            // site_info_valid_ must only be set from here when BOTH pending
+            // values were provided AND both writes succeeded -- it's a single
+            // flag covering both fields together (see the atomic :Gt#/:Gg#
+            // fetch in ensure_site_info_cached_locked()). Setting it after
+            // only one field actually landed (the mount can reject a site
+            // update depending on alignment state) would pin the other field
+            // at its stale/default 0.0 while callers trust it as valid --
+            // e.g. compute_alt_az_target_locked() feeding a wrong latitude
+            // into the Alt/Az->RA/Dec transform for SlewToAltAz. Leaving the
+            // flag false on any partial failure just falls through to
+            // ensure_site_info_cached_locked()'s atomic re-fetch on next
+            // access instead.
+            bool latitude_pushed = false;
+            bool longitude_pushed = false;
             if (pending_site_latitude_.has_value()) {
                 try {
                     protocol.set_latitude(pending_site_latitude_.value());
                     site_latitude_cached_ = pending_site_latitude_.value();
+                    latitude_pushed = true;
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
                     // TODO: Confirm OnStep accepts site updates in every alignment state.
                 }
@@ -245,10 +260,14 @@ public:
                 try {
                     protocol.set_longitude(pending_site_longitude_.value());
                     site_longitude_cached_ = pending_site_longitude_.value();
-                    site_info_valid_ = true;
+                    longitude_pushed = true;
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
                     // TODO: see above.
                 }
+            }
+            if (pending_site_latitude_.has_value() && pending_site_longitude_.has_value() && latitude_pushed &&
+                longitude_pushed) {
+                site_info_valid_ = true;
             }
             if (pending_site_elevation_.has_value()) {
                 site_elevation_m_ = pending_site_elevation_.value();
