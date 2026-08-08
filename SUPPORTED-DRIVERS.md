@@ -165,7 +165,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Cover**: `OpenCover`/`CloseCover` block the wire for up to 30s until the hardware's exact completion reply (`*OOpened#`/`*CClosed#`) arrives, run on a background thread so the ASCOM async initiator returns immediately. `HaltCover` has no hardware equivalent on Rev2 — it stops the driver from *reporting* `Moving` but cannot interrupt the in-flight motor command.
 - **Calibrator/cover port contention**: `CalibratorOn`/`CalibratorOff` share the same physical serial link and port-level mutex as `OpenCover`/`CloseCover`. Calling `CalibratorOn` while a cover move is in flight can block behind the cover's up-to-30s wire wait; **fixed by running `CalibratorOn`/`CalibratorOff` on a background thread** (mirroring the cover task) so the ASCOM initiator still returns immediately, with `CalibratorChanging`/`CalibratorState` correctly reporting `NotReady` while the background command is in flight. Caught by ConformU: the first `CalibratorOn` call, issued right after a `HaltCover` on a cover that was still physically moving, blocked the HTTP thread for 6+ seconds before this fix.
 - **Tested model**: Gemini Astro Automatic FlatPanel v2 (firmware 408) on Linux arm64.
-- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues.
+- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing issues.
 
 </details>
 

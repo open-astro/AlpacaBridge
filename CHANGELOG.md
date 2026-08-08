@@ -11,6 +11,9 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 
 ## [3.3.0] - UNRELEASED
 
+### Added
+- **Gemini Astro Automatic FlatPanel v2 re-validated** (ConformU 4.5.0, Linux arm64, USB, firmware 408): confirms the `ttyACM` auto-detect fallback fixes below don't regress conformance — 0 errors, 0 issues, 0 timing issues. Report refreshed at `AlpacaCore/conformu/Gemini/Astro Automatic FlatPanel v2/Linux-arm64.txt`.
+
 ### Fixed
 - **OnStep re-validated on real hardware after the auto-detect update** (Generic OnStep DIY harmonic-drive mount, Linux arm64, ConformU 4.5.0): 0 errors across two consecutive full runs. 1-2 residual PulseGuide East/West issues at the 0.07″ tolerance boundary (accepted inherent hardware noise, unchanged from the original validation) and 4 FAST-target timing warnings clustered in the first ~5s after `Connect()` (`AlignmentMode`, `Declination`, `EquatorialSystem`, `SideOfPier Read`) — confirmed via manual repeat calls to be the same accepted connect-adjacent cold-start window already documented for `DeviceState`, not a regression from this update (see AGENTS.md). Results in `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt`.
 - **OnStep re-validated end-to-end from a clean install** (2026-08-08, same mount, ConformU 4.5.0): SBC purged of the prior `alpacabridge` package/state and reinstalled from a fresh `.deb` built natively on-device, device registered and connected purely via the management/ASCOM HTTP APIs (`configuredevice` + `connected`), exercising `enumerate_onstep_ports()`'s auto-detect path end-to-end with no persisted config carried over: 0 errors, 0 issues, 0 timing violations. Report refreshed in place.
