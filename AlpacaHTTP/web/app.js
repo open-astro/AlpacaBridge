@@ -3532,6 +3532,8 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(refreshServerClockOffset, 60000);
     loadLogSettings();
     loadLogFiles();
+    wifiInitCountrySelect();
+    wifiRefresh();
     updateVendorOptions();
 
     document.querySelectorAll('.section-toggle').forEach(button => {
@@ -3569,6 +3571,19 @@ const WIFI_BASE = '/management/v1/wifi';
 const WIFI_COUNTRIES = ['', 'US', 'CA', 'MX', 'GB', 'IE', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'FI', 'DK', 'PL', 'CZ', 'PT', 'GR', 'AU', 'NZ', 'JP', 'KR', 'CN', 'TW', 'IN', 'BR', 'AR', 'CL', 'ZA'];
 
 function wifiEl(id) { return document.getElementById(id); }
+
+// Fill the country <select> with the common code list. Runs at page load so
+// the dropdown is usable even before (or without) a successful status fetch.
+function wifiInitCountrySelect() {
+    const countrySel = wifiEl('wifi-country');
+    if (!countrySel || countrySel.options.length > 0) return;
+    for (const cc of WIFI_COUNTRIES) {
+        const opt = document.createElement('option');
+        opt.value = cc;
+        opt.textContent = cc || '(not set)';
+        countrySel.appendChild(opt);
+    }
+}
 
 function wifiMessage(text, isError) {
     const el = wifiEl('wifi-message');
@@ -3633,14 +3648,7 @@ async function wifiRefresh() {
         }
 
         const countrySel = wifiEl('wifi-country');
-        if (countrySel && countrySel.options.length === 0) {
-            for (const cc of WIFI_COUNTRIES) {
-                const opt = document.createElement('option');
-                opt.value = cc;
-                opt.textContent = cc || '(not set)';
-                countrySel.appendChild(opt);
-            }
-        }
+        wifiInitCountrySelect();
         if (countrySel && status.Country !== undefined) {
             countrySel.value = status.Country || '';
         }
