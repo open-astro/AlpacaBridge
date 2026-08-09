@@ -3808,3 +3808,54 @@ async function wifiSetCountry() {
         wifiMessage('Setting country failed: ' + e.message, true);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Info buttons + bottom info sheet (shared pattern with OpenAstro Ara).
+// Markup-driven: any <button class="info-btn" data-info-title="..."
+// data-info-text="..."> opens the sheet. One sheet instance for the page.
+
+function ensureInfoSheet() {
+    let sheet = document.getElementById('info-sheet');
+    if (sheet) return sheet;
+    sheet = document.createElement('div');
+    sheet.id = 'info-sheet';
+    sheet.className = 'info-sheet';
+    sheet.innerHTML =
+        '<div class="info-sheet-header">' +
+        '<span class="info-sheet-icon">&#9432;</span>' +
+        '<span class="info-sheet-title" id="info-sheet-title"></span>' +
+        '<button class="info-sheet-close" type="button" aria-label="Close">&#10005;</button>' +
+        '</div>' +
+        '<div class="info-sheet-body" id="info-sheet-body"></div>';
+    document.body.appendChild(sheet);
+    sheet.querySelector('.info-sheet-close').addEventListener('click', closeInfoSheet);
+    document.addEventListener('click', (e) => {
+        if (sheet.classList.contains('open') && !sheet.contains(e.target) &&
+            !e.target.closest('.info-btn')) {
+            closeInfoSheet();
+        }
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeInfoSheet();
+    });
+    return sheet;
+}
+
+function openInfoSheet(title, text) {
+    const sheet = ensureInfoSheet();
+    document.getElementById('info-sheet-title').textContent = title;
+    document.getElementById('info-sheet-body').textContent = text;
+    sheet.classList.add('open');
+}
+
+function closeInfoSheet() {
+    const sheet = document.getElementById('info-sheet');
+    if (sheet) sheet.classList.remove('open');
+}
+
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.info-btn');
+    if (btn) {
+        openInfoSheet(btn.dataset.infoTitle || 'Info', btn.dataset.infoText || '');
+    }
+});
