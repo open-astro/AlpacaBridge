@@ -43,6 +43,24 @@ Companion to `wifi-manager-design.md`. Work list for a Claude session in the
 5. The AlpacaBridge polkit rule ships in the AlpacaBridge .deb (see
    wifi-manager-design.md Architecture) — nothing image-side beyond polkitd.
 
+## New-image verification (2026-08-09, second image build)
+
+A rebuilt image was verified on the rig: **the whole migration list above is
+done** — NM 1.52.1 + polkitd active; hostapd/dnsmasq/openastro-ap-up removed;
+AP is NM connection `OpenAstro-AP`, 5 GHz ch36 WPA2, `ipv4.method=shared`
+pinned to `172.24.1.1/24`; end0 on networkd; wifi powersave and MAC
+randomization disabled. Remaining items for the next build:
+
+1. **AlpacaBridge not installed** — add the apt repo + package if the image
+   should ship it.
+2. Regdom is unset (`country 00`) — intentionally left to AlpacaBridge's
+   `/management/v1/wifi/country` endpoint (see design doc); the 5 GHz AP
+   happens to start anyway on `aicwf` (driver doesn't enforce no-IR), so no
+   image action, but do NOT copy this assumption to the iMate where WORLD
+   regdom breaks AP init.
+3. SSID: imager stamps `OpenAstro-<last 4 hex of wlan0 MAC>` into the NM
+   connection at build time (current build still has static `OpenAstro`).
+
 ## Test-rig state left behind (2026-08-09)
 
 NM 1.52.1-1 + polkitd 126-2 installed but fully parked

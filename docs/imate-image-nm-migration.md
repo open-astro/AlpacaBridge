@@ -62,9 +62,13 @@ installed but inert per the conf above.
    - Keep hostapd as an iMate-only AP backend and have the WiFi manager use
      NM for client mode only on this board.
 2. `apt-get install network-manager polkitd` in the image build.
-3. **Persistent regdom**: e.g. `options cfg80211 ieee80211_regdom=US` in
-   `/etc/modprobe.d/` (or set per user country at first boot — needs a
-   decision for non-US users; hostapd conf hardcodes US today).
+3. **Regdom**: country is now owned by AlpacaBridge
+   (`/management/v1/wifi/country`, persisted and re-applied at daemon
+   startup — see design doc); ship the image location-neutral. iMate-specific
+   ordering caveat: this driver REFUSES 5 GHz AP init under the WORLD regdom,
+   so the AP connection must not autoconnect before the stored country is
+   applied — order the AP activation after alpacabridge.service, or have the
+   image fall back to a 2.4 GHz AP until a country is set.
 4. Hand wlan0 to NM: replace the parked conf above with one unmanaging only
    `end0`/`lo` (ethernet stays on systemd-networkd), or let NM manage
    ethernet too — decide once, consistently across images.

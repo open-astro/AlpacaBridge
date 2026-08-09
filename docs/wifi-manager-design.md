@@ -72,6 +72,7 @@ management endpoints), following the Sync Time pattern
 | DELETE | `/management/v1/wifi/profiles/{id}` | Remove a profile |
 | PUT | `/management/v1/wifi/connect` | Connect to a profile now `{Id}` |
 | GET/PUT | `/management/v1/wifi/ap` | Get/set AP config `{Enabled: "auto"\|"always"\|"off", Ssid, Passphrase, Band, Channel}` |
+| GET/PUT | `/management/v1/wifi/country` | Get/set regulatory country `{Alpha2}`. Applied in-process via nl80211 `NL80211_CMD_REQ_SET_REG` (what `iw reg set` does — no subprocess); persisted in `/var/lib/alpacabridge` and re-applied at daemon startup before any AP activation. Requires `AmbientCapabilities=CAP_NET_ADMIN` on the unit (Sync Time / CAP_SYS_TIME precedent). UI: country dropdown, prominent on first setup — some drivers refuse 5 GHz AP under the WORLD domain; AP channel list must refresh after a change (legal channels differ per country) |
 
 Notes:
 - Passphrases are write-only through the API; stored by NM in
@@ -156,9 +157,15 @@ says yes, and surface activation errors gracefully if an AP attempt fails.
 1. ~~iMate network stack~~ — answered 2026-08-09: no NM, same
    networkd/hostapd stack as OPi 4 Pro; all four board families now surveyed
    (see board matrix). Phase 0 = migrate OPi 4 Pro + iMate images to NM.
-2. AP subnet: accept NM's default `10.42.0.0/24` or pin a documented OpenAstro
-   subnet so mount-connection docs can give a fixed bridge IP?
+2. ~~AP subnet~~ — RESOLVED 2026-08-09: pinned `172.24.1.1/24` (the new OPi 4
+   Pro image sets `ipv4.addresses` on the shared connection; adopt on all
+   images) so mount docs can reference a fixed bridge IP.
 3. Should ethernet-connected users see the WiFi card at all when no WiFi
    adapter is present? (Proposal: hide card when NM reports no wifi device.)
-4. Default AP SSID/passphrase scheme — e.g. `OpenAstro-<serial suffix>` with a
-   per-image or first-boot-generated passphrase printed in the portal?
+4. ~~SSID scheme~~ — RESOLVED 2026-08-09: `OpenAstro-<last 4 hex of wlan0
+   MAC>`, stamped into the NM connection **at image build time by the imager**
+   (no runtime SSID service). Passphrase scheme still open.
+5. ~~Country selection~~ — RESOLVED 2026-08-09: owned by AlpacaBridge via
+   `/management/v1/wifi/country` (see API table). Images ship regdom unset /
+   location-neutral. Caveat: Broadcom nvram `ccode` (RK3568 has `ccode=DE`)
+   bounds channels regardless of the global regdom — that stays an image fix.
