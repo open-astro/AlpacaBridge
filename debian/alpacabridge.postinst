@@ -85,10 +85,19 @@ case "$1" in
         # Register bundled vendor shared libraries (QHY, ZWO) with the dynamic linker
         ldconfig
 
-        # Reload udev rules so newly installed rules take effect immediately
+        # Reload udev rules so newly installed rules take effect immediately.
+        # A bare `udevadm trigger` sends "change" events, but the vendor rules
+        # (ZWO eaf/efw/caa/asi, etc.) match ACTION=="add" only — so devices
+        # already plugged in at install time kept their root-only /dev nodes
+        # until a replug or reboot (issue #195: EAF_ERROR_REMOVED on first
+        # connect). Re-send "add" events for the device classes our rules
+        # cover so they apply immediately to already-connected hardware.
         if command -v udevadm > /dev/null 2>&1; then
             udevadm control --reload-rules || true
             udevadm trigger || true
+            udevadm trigger --action=add --subsystem-match=usb || true
+            udevadm trigger --action=add --subsystem-match=hidraw || true
+            udevadm trigger --action=add --subsystem-match=tty || true
         fi
         ;;
 esac
