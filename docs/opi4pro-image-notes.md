@@ -58,8 +58,9 @@ randomization disabled. Remaining items for the next build:
    happens to start anyway on `aicwf` (driver doesn't enforce no-IR), so no
    image action, but do NOT copy this assumption to the iMate where WORLD
    regdom breaks AP init.
-3. SSID: imager stamps `OpenAstro-<last 4 hex of wlan0 MAC>` into the NM
-   connection at build time (current build still has static `OpenAstro`).
+3. ~~SSID~~ — DONE in third build (verified 2026-08-09): imager stamps
+   `OpenAstro-<last 4 hex of wlan0 MAC>` (rig broadcasts `OpenAstro-915D`).
+   Only item 1 (AlpacaBridge install) remains.
 
 ## Test-rig state left behind (2026-08-09)
 
