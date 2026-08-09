@@ -123,13 +123,15 @@ Surveyed on real hardware 2026-08-09 (rc91.lan, astro.lan, openastro.lan).
 | Board | Chip / driver | 2.4 GHz | 5 GHz | Network stack today | AP mode | Notes |
 |---|---|---|---|---|---|---|
 | Pi 3B+/4/5, CM4 (StellaVita, ASIAIR Pro/Plus-CM4) | Broadcom `brcmfmac` | Yes | Yes | NetworkManager ✅ | Yes | Works with this design as-is; no image changes needed |
-| ASIAIR Plus RK3568 | AP6256 on ZWO vendor driver (`bcmsdh_sdmmc`, BSP kernel 4.19) | Yes | Chip is dual-band 802.11ac, but NM reports 2.4-only — likely vendor driver/firmware config; investigate whether 5 GHz is recoverable | NetworkManager ✅ | Yes — NM shared-mode hotspot validated live (10.42.0.1) | Vendor driver exposes a separate `uap0` AP interface (stock ASIAIR's AP+STA path) — possible post-v1 concurrency option on this board only |
+| ASIAIR Plus RK3568 | AP6256 on `bcmdhd_wifi6` vendor driver (rkwifi, BSP kernel 4.19; dual-band `fw_bcm43456c5_ag.bin` firmware) | Yes | **Yes — validated live 2026-08-09**: WPA2 NM hotspot on ch36/5180 MHz (`AP-ENABLED`), and scans see 5 GHz networks. NM's `WIFI-PROPERTIES.5GHZ: no` is a bogus bcmdhd capability report — NM doesn't enforce it. **Design note: never gate the UI on NM's capability flags alone on this driver; probe via scan results too** | NetworkManager ✅ | Yes — WPA2 works under NM (no iMate-style set_key bug) | No image changes required. Cleanups when touching the image: nvram `ccode=DE` → per-user country; missing `regulatory.db`; `iw` not installed; apt repos unreachable from the BSP image (apt update fails); RTC was ~1 yr stale (fixed manually 2026-08-09). Vendor driver also exposes `uap0` (stock ASIAIR's AP+STA path) — possible post-v1 concurrency option |
 | Orange Pi 4 Pro | AIC8800D80 (`aicwf_sdio`, speaks nl80211) | Yes — hostapd AP "OpenAstro" validated live | Chip is dual-band; unvalidated (config parked on 2.4) | systemd-networkd + hostapd + dnsmasq + wpa_supplicant — **no NM** | Yes (hostapd) | Image built by github.com/open-astro/openastro-orangepi4pro; NM migration happens there |
 | iMate (OrangePi 3 LTS, Allwinner H6) | AW859A / Unisoc UWE5822 (`unisoc_wifi`, Armbian mainline 6.18) | Yes | Yes — **AP runs on 5 GHz today** (hostapd `hw_mode=a` ch40 HT40+, validated live). Driver rejects VHT/80 MHz (802.11n rates only); non-DFS ch 36–48/149–165 | systemd-networkd + hostapd + dnsmasq + wpa_supplicant — **no NM**; `network-manager`/`polkitd` packages not installed (only missing pieces) | Yes (hostapd; MAC-derived SSID via openastro-ap-ssid.service) | OPi 3 **LTS** uses AW859A, not the original OPi 3's AP6256. Image = aw-flashtool. **NM migration tested live 2026-08-09**: NM+polkitd installed, open 5 GHz NM hotspot works, but **WPA2 fails** — `unisoc_wifi` returns EOPNOTSUPP to wpa_supplicant's group-key install (`set_key default failed; err=-95`), while hostapd's key sequence works. Fix in the image: patch the driver's set_key path (we build the kernel) or keep a hostapd backend exception for iMate. Regdom must be set to US before 5 GHz AP init (hostapd does it via country_code; NM path needs it set globally). NM/polkitd left installed on the test rig, all interfaces unmanaged |
 
-The RK3568 row is why capability probing (below) is load-bearing: a dual-band
-chip behind a vendor driver may still be 2.4-only in practice, and the UI must
-reflect what the driver reports, not the datasheet.
+The RK3568 row is why capability probing (below) must be smarter than trusting
+one source: bcmdhd under-reports its capabilities to NM (claims 2.4-only) while
+5 GHz APs work fine. Probe order: NM capability flags, cross-checked against
+scan results (any 5 GHz BSS seen ⇒ band supported); offer 5 GHz when either
+says yes, and surface activation errors gracefully if an AP attempt fails.
 
 ## Rollout plan
 
