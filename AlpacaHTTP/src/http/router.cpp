@@ -1427,6 +1427,19 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "synctime";
         return match;
     }
+    {
+        // WiFi manager: /management/v1/wifi/<sub>[/<arg>] — sub+arg travel in
+        // method_name ("status", "profiles", "profiles/<uuid>", ...).
+        static const std::regex kWifiRegex(
+            R"(^/management/(?:v1/)?wifi/([a-z]+(?:/[^/?]+)?)/?$)");
+        std::smatch wifi_match;
+        if (std::regex_match(path, wifi_match, kWifiRegex)) {
+            match.is_management = true;
+            match.management_endpoint = "wifi";
+            match.method_name = wifi_match[1].str();
+            return match;
+        }
+    }
 
     // Device API: /api/v1/{devicetype}/{devicenumber}/{method}
     std::regex device_regex(R"(/api/v1/([^/]+)/(\d+)/([^/?]+))");
@@ -1469,6 +1482,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_restart(request, server_tx_id);
     } else if (match.management_endpoint == "synctime") {
         return handle_sync_time(request, server_tx_id);
+    } else if (match.management_endpoint == "wifi") {
+        return handle_wifi(request, match, server_tx_id);
     }
 
     Response response;
@@ -6493,6 +6508,140 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     alpaca_response.value = epoch_seconds;
     response.set_body(alpaca_response);
     return response;
+}
+
+util::WifiManager& Router::wifi_manager() {
+    std::lock_guard<std::mutex> lock(wifi_manager_init_mutex_);
+    if (!wifi_manager_) {
+        // Same relative state dir as registered_devices.json — resolves to
+        // /var/lib/alpacabridge/config under the packaged service.
+        wifi_manager_ = std::make_unique<util::WifiManager>("config");
+        wifi_manager_->apply_persisted_country();
+    }
+    return *wifi_manager_;
+}
+
+Response Router::handle_wifi(const Request& request, const RouteMatch& match,
+                             std::uint32_t server_tx_id) {
+    // Unauthenticated like the other management endpoints (trusted-LAN threat
+    // model — see handle_sync_time). Privileged operations are bounded by the
+    // polkit rule (NetworkManager actions) and CAP_NET_ADMIN (country only).
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    const std::string& sub = match.method_name;
+    const bool is_get = request.method() == HttpMethod::GET;
+    const bool is_put = request.method() == HttpMethod::PUT || request.method() == HttpMethod::POST;
+    const bool is_delete = request.method() == HttpMethod::DELETE_;
+
+    auto body_json = [&]() -> nlohmann::json {
+        auto parsed = parse_json(request.body());
+        if (!parsed || !parsed->is_object()) {
+            throw util::WifiError("request body must be a JSON object");
+        }
+        return *parsed;
+    };
+    auto fail = [&](int code, const std::string& msg) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, code, msg);
+        response.set_body(alpaca_response);
+        return response;
+    };
+
+    try {
+        auto& wifi = wifi_manager();
+        AlpacaResponse ok(client_tx_id, server_tx_id);
+
+        if (sub == "status" && is_get) {
+            ok.value = wifi.status();
+        } else if (sub == "radio" && is_put) {
+            auto body = body_json();
+            const auto* v = find_json_value(body, "Enabled");
+            if (!v || !v->is_boolean()) throw util::WifiError("Enabled (bool) is required");
+            wifi.set_wireless_enabled(v->get<bool>());
+            ok.value = nlohmann::json{{"Enabled", v->get<bool>()}};
+        } else if (sub == "scan" && is_get) {
+            ok.value = wifi.scan();
+        } else if (sub == "profiles" && is_get) {
+            ok.value = wifi.profiles();
+        } else if (sub == "profiles" && is_put) {
+            auto body = body_json();
+            const auto* ssid = find_json_value(body, "Ssid");
+            if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) is required");
+            std::string passphrase;
+            if (const auto* p = find_json_value(body, "Passphrase"); p && p->is_string()) {
+                passphrase = p->get<std::string>();
+            }
+            bool autoconnect = true;
+            if (const auto* a = find_json_value(body, "Autoconnect"); a && a->is_boolean()) {
+                autoconnect = a->get<bool>();
+            }
+            int priority = 0;
+            if (const auto* pr = find_json_value(body, "Priority"); pr && pr->is_number_integer()) {
+                priority = pr->get<int>();
+            }
+            ok.value = wifi.save_profile(ssid->get<std::string>(), passphrase, autoconnect,
+                                         priority);
+        } else if (sub.rfind("profiles/", 0) == 0 && is_delete) {
+            wifi.delete_profile(sub.substr(std::string("profiles/").size()));
+            ok.value = nlohmann::json{{"Deleted", true}};
+        } else if (sub == "connect" && is_put) {
+            auto body = body_json();
+            const auto* uuid = find_json_value(body, "Uuid");
+            if (!uuid || !uuid->is_string()) throw util::WifiError("Uuid (string) is required");
+            // The response races the association: if the client reached us
+            // over this wifi link it may lose connectivity right after this
+            // returns. The web UI warns before calling.
+            wifi.connect_profile(uuid->get<std::string>());
+            ok.value = nlohmann::json{{"Connecting", true}};
+        } else if (sub == "ap" && is_get) {
+            ok.value = wifi.get_ap();
+        } else if (sub == "ap" && is_put) {
+            auto body = body_json();
+            const auto* ssid = find_json_value(body, "Ssid");
+            if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) is required");
+            std::string passphrase;
+            if (const auto* p = find_json_value(body, "Passphrase"); p && p->is_string()) {
+                passphrase = p->get<std::string>();
+            }
+            std::string band = "a";
+            if (const auto* b = find_json_value(body, "Band"); b && b->is_string()) {
+                band = b->get<std::string>();
+            }
+            std::uint32_t channel = 0;
+            if (const auto* c = find_json_value(body, "Channel"); c && c->is_number_unsigned()) {
+                channel = c->get<std::uint32_t>();
+            }
+            bool enabled = true;
+            if (const auto* e = find_json_value(body, "Enabled"); e && e->is_boolean()) {
+                enabled = e->get<bool>();
+            }
+            ok.value = wifi.set_ap(ssid->get<std::string>(), passphrase, band, channel, enabled);
+        } else if (sub == "country" && is_get) {
+            ok.value = wifi.get_country();
+        } else if (sub == "country" && is_put) {
+            auto body = body_json();
+            const auto* cc = find_json_value(body, "Alpha2");
+            if (!cc || !cc->is_string()) throw util::WifiError("Alpha2 (string) is required");
+            wifi.set_country(cc->get<std::string>());
+            ok.value = nlohmann::json{{"Alpha2", cc->get<std::string>()}};
+        } else {
+            return fail(util::ErrorCode::INVALID_VALUE,
+                        "Unknown wifi endpoint or method: " + sub);
+        }
+
+        response.set_body(ok);
+        return response;
+    } catch (const util::WifiError& e) {
+        return fail(util::ErrorCode::DRIVER_ERROR, std::string("WiFi: ") + e.what());
+    } catch (const std::exception& e) {
+        return fail(util::ErrorCode::DRIVER_ERROR, std::string("WiFi (internal): ") + e.what());
+    }
 }
 
 Response Router::handle_restart(const Request& request, std::uint32_t server_tx_id) {

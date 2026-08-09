@@ -159,6 +159,7 @@ set(ALPACAHTTP_SOURCES
     src/util/threading.cpp
     src/util/logging_adapter.cpp
     src/util/error_mapping.cpp
+    src/util/wifi_manager.cpp
 )
 
 if(ALPACAHTTP_ENABLE_DISCOVERY)
@@ -194,11 +195,16 @@ target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_VERSION=\"${PROJECT_VERS
 # zlib: gzip framing for the combined log download endpoint
 find_package(ZLIB REQUIRED)
 
+# libsystemd: sd-bus client for the NetworkManager-backed wifi endpoints
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+
 target_link_libraries(alpacahttp
     PUBLIC
         nlohmann_json::nlohmann_json
         AlpacaCore::alpacacore
         ZLIB::ZLIB
+        PkgConfig::SYSTEMD
 )
 
 # Both QHY and ZWO SDKs define isLeapYear() at file scope — silence the

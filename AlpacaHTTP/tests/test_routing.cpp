@@ -1886,6 +1886,46 @@ int main() {
         EXPECT(!del_json.is_discarded() && del_json.value("ErrorNumber", 0) != 0);
     }
 
+    // wifi management endpoints: routing + input validation. The happy paths
+    // need a running NetworkManager (validated on hardware); here we pin that
+    // the routes resolve, replies are well-formed Alpaca JSON, and invalid
+    // input is rejected regardless of whether NM is present on the build box.
+    {
+        alpacahttp::Router router;
+
+        // status always answers with valid Alpaca JSON (ErrorNumber 0 with a
+        // Value on NM boxes, or a WiFi error where the system bus/NM is absent).
+        const auto status_response = route_request(router, "GET", "/management/v1/wifi/status");
+        const auto status_json = nlohmann::json::parse(status_response.body(), nullptr, false);
+        EXPECT(!status_json.is_discarded() && status_json.contains("ErrorNumber"));
+
+        // Unknown sub-endpoint and wrong methods are rejected.
+        for (const auto& [method, path] : {
+                 std::pair{"GET", "/management/v1/wifi/bogus"},
+                 std::pair{"PUT", "/management/v1/wifi/status"},
+                 std::pair{"GET", "/management/v1/wifi/connect"},
+                 std::pair{"DELETE", "/management/v1/wifi/profiles"},
+             }) {
+            const auto response = route_request(router, method, path);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        }
+
+        // Body validation fires before any NM traffic.
+        for (const auto& [path, body] : {
+                 std::pair{"/management/v1/wifi/country", "{\"Alpha2\": \"usa\"}"},
+                 std::pair{"/management/v1/wifi/country", "{}"},
+                 std::pair{"/management/v1/wifi/profiles", "{\"Passphrase\": \"x\"}"},
+                 std::pair{"/management/v1/wifi/connect", "not json"},
+                 std::pair{"/management/v1/wifi/ap", "{\"Ssid\": \"x\", \"Band\": \"g\"}"},
+                 std::pair{"/management/v1/wifi/radio", "{\"Enabled\": \"yes\"}"},
+             }) {
+            const auto response = route_request(router, "PUT", path, body);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        }
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }

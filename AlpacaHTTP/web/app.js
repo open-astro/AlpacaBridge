@@ -1359,6 +1359,7 @@ function refreshServerInfo() {
     loadServerInfo();
     loadLogSettings();
     loadLogFiles();
+    wifiRefresh();
 }
 
 // Sync the SBC's system clock from the browser's clock. The browser machine
@@ -3557,3 +3558,245 @@ document.addEventListener('DOMContentLoaded', function() {
         closeLogViewer.addEventListener('click', clearLogFileViewer);
     }
 });
+
+// ---------------------------------------------------------------------------
+// WiFi manager (see docs/wifi-manager-design.md). Talks to
+// /management/v1/wifi/*; the card hides itself when the server reports no
+// wifi device (ethernet-only setups, or NetworkManager absent).
+
+const WIFI_BASE = '/management/v1/wifi';
+// Common ISO 3166-1 alpha-2 codes; the input also accepts any typed code.
+const WIFI_COUNTRIES = ['', 'US', 'CA', 'MX', 'GB', 'IE', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'FI', 'DK', 'PL', 'CZ', 'PT', 'GR', 'AU', 'NZ', 'JP', 'KR', 'CN', 'TW', 'IN', 'BR', 'AR', 'CL', 'ZA'];
+
+function wifiEl(id) { return document.getElementById(id); }
+
+function wifiMessage(text, isError) {
+    const el = wifiEl('wifi-message');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = isError ? '#c0392b' : '';
+}
+
+async function wifiApi(path, method, body) {
+    const options = { method: method || 'GET' };
+    if (body !== undefined) {
+        options.headers = { 'Content-Type': 'application/json' };
+        options.body = JSON.stringify(body);
+    }
+    const response = await fetch(WIFI_BASE + path, options);
+    const result = await response.json();
+    if (result.ErrorNumber !== 0) {
+        throw new Error(result.ErrorMessage || 'unknown error');
+    }
+    return result.Value;
+}
+
+async function wifiRefresh() {
+    const section = wifiEl('wifi-section');
+    if (!section) return;
+    try {
+        const status = await wifiApi('/status');
+        if (!status.Available) {
+            section.style.display = 'none';
+            return;
+        }
+        section.style.display = '';
+
+        const parts = [];
+        if (status.Ssid) {
+            const band = status.FrequencyMhz > 5000 ? '5 GHz' : '2.4 GHz';
+            const role = status.ConnectionId === 'OpenAstro-AP' ? 'Hotspot' : 'Connected';
+            parts.push(`${role}: ${status.Ssid} (${band}${status.Ip4Address ? ', ' + status.Ip4Address : ''})`);
+        } else if (!status.WirelessEnabled) {
+            parts.push('WiFi radio off');
+        } else {
+            parts.push('Not connected');
+        }
+        const summary = wifiEl('wifi-summary');
+        if (summary) summary.textContent = parts[0];
+        const line = wifiEl('wifi-status-line');
+        if (line) {
+            const caps = status.Capabilities || {};
+            const has5 = caps.Freq5GHz || status.ScanSees5GHz;
+            line.textContent = `${parts[0]} — device ${status.Device}, bands: 2.4 GHz${has5 ? ' + 5 GHz' : ' only'}` +
+                (status.Country ? `, country ${status.Country}` : ', country not set');
+        }
+
+        // 5 GHz option only where the hardware (or a scan) says it exists.
+        const caps = status.Capabilities || {};
+        const has5 = caps.Freq5GHz || status.ScanSees5GHz;
+        const bandSel = wifiEl('wifi-ap-band');
+        if (bandSel) {
+            const opt5 = bandSel.querySelector('option[value="a"]');
+            if (opt5) opt5.disabled = !has5;
+            if (!has5) bandSel.value = 'bg';
+        }
+
+        const countrySel = wifiEl('wifi-country');
+        if (countrySel && countrySel.options.length === 0) {
+            for (const cc of WIFI_COUNTRIES) {
+                const opt = document.createElement('option');
+                opt.value = cc;
+                opt.textContent = cc || '(not set)';
+                countrySel.appendChild(opt);
+            }
+        }
+        if (countrySel && status.Country !== undefined) {
+            countrySel.value = status.Country || '';
+        }
+
+        const ap = await wifiApi('/ap');
+        if (ap.Configured) {
+            const ssidInput = wifiEl('wifi-ap-ssid');
+            if (ssidInput && !ssidInput.value) ssidInput.value = ap.Ssid || '';
+            const bandSel2 = wifiEl('wifi-ap-band');
+            if (bandSel2 && ap.Band) bandSel2.value = ap.Band;
+        }
+
+        await wifiRenderProfiles();
+        wifiMessage('');
+    } catch (e) {
+        // Server without the wifi backend (old build) or transient failure:
+        // keep the card but show why it is empty.
+        const line = wifiEl('wifi-status-line');
+        if (line) line.textContent = 'WiFi status unavailable: ' + e.message;
+    }
+}
+
+async function wifiRenderProfiles() {
+    const list = wifiEl('wifi-profile-list');
+    if (!list) return;
+    const profiles = await wifiApi('/profiles');
+    list.innerHTML = '';
+    if (!profiles.length) {
+        list.textContent = 'No saved WiFi profiles.';
+        return;
+    }
+    for (const p of profiles) {
+        const row = document.createElement('div');
+        row.className = 'log-file-row';
+        const label = document.createElement('span');
+        label.textContent = `${p.Id}${p.Mode === 'ap' ? ' (hotspot)' : ''}${p.Active ? ' — active' : ''}` +
+            (p.Mode !== 'ap' ? ` (priority ${p.Priority}${p.Autoconnect ? '' : ', manual'})` : '');
+        row.appendChild(label);
+
+        if (!p.Active) {
+            const connectBtn = document.createElement('button');
+            connectBtn.className = 'btn btn-secondary';
+            connectBtn.textContent = 'Connect';
+            connectBtn.onclick = () => wifiConnect(p.Uuid, p.Id);
+            row.appendChild(connectBtn);
+        }
+        if (p.Mode !== 'ap') {
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'btn btn-danger';
+            deleteBtn.textContent = 'Forget';
+            deleteBtn.onclick = () => wifiForget(p.Uuid, p.Id);
+            row.appendChild(deleteBtn);
+        }
+        list.appendChild(row);
+    }
+}
+
+async function wifiScan() {
+    const list = wifiEl('wifi-scan-list');
+    if (!list) return;
+    list.textContent = 'Scanning...';
+    try {
+        const networks = await wifiApi('/scan');
+        list.innerHTML = '';
+        if (!networks.length) {
+            list.textContent = 'No networks found. Note: scanning while the hotspot is active is limited on some boards.';
+            return;
+        }
+        for (const n of networks) {
+            const row = document.createElement('div');
+            row.className = 'log-file-row';
+            const band = n.FrequencyMhz > 5000 ? '5 GHz' : '2.4 GHz';
+            const label = document.createElement('span');
+            label.textContent = `${n.Ssid} — ${band}, ${n.SignalPercent}%${n.Security !== 'Open' ? ', ' + n.Security : ', open'}`;
+            row.appendChild(label);
+            const joinBtn = document.createElement('button');
+            joinBtn.className = 'btn btn-secondary';
+            joinBtn.textContent = 'Join';
+            joinBtn.onclick = () => wifiJoin(n.Ssid, n.Security);
+            row.appendChild(joinBtn);
+            list.appendChild(row);
+        }
+    } catch (e) {
+        list.textContent = 'Scan failed: ' + e.message;
+    }
+}
+
+async function wifiJoin(ssid, security) {
+    let passphrase = '';
+    if (security !== 'Open') {
+        passphrase = prompt(`Passphrase for "${ssid}":`);
+        if (passphrase === null) return;
+    }
+    if (!confirm(`Join "${ssid}"?\n\nIf you are using the device's hotspot right now, it will drop and this page will lose connection. Reconnect via your network (or the hotspot when it returns).`)) {
+        return;
+    }
+    try {
+        const saved = await wifiApi('/profiles', 'PUT', { Ssid: ssid, Passphrase: passphrase, Autoconnect: true, Priority: 0 });
+        const profiles = await wifiApi('/profiles');
+        const match = profiles.find((p) => p.Ssid === ssid && p.Mode !== 'ap');
+        if (match) await wifiApi('/connect', 'PUT', { Uuid: match.Uuid });
+        wifiMessage(`Joining ${ssid}...`);
+        setTimeout(wifiRefresh, 8000);
+    } catch (e) {
+        wifiMessage('Join failed: ' + e.message, true);
+    }
+}
+
+async function wifiConnect(uuid, name) {
+    if (!confirm(`Switch WiFi to "${name}"?\n\nIf this page is loaded over WiFi the connection will drop while switching.`)) return;
+    try {
+        await wifiApi('/connect', 'PUT', { Uuid: uuid });
+        wifiMessage(`Connecting to ${name}...`);
+        setTimeout(wifiRefresh, 8000);
+    } catch (e) {
+        wifiMessage('Connect failed: ' + e.message, true);
+    }
+}
+
+async function wifiForget(uuid, name) {
+    if (!confirm(`Forget saved network "${name}"?`)) return;
+    try {
+        await wifiApi('/profiles/' + encodeURIComponent(uuid), 'DELETE');
+        await wifiRenderProfiles();
+    } catch (e) {
+        wifiMessage('Delete failed: ' + e.message, true);
+    }
+}
+
+async function wifiSaveAp(enabled) {
+    const ssid = (wifiEl('wifi-ap-ssid') || {}).value || '';
+    const passphrase = (wifiEl('wifi-ap-pass') || {}).value || '';
+    const band = (wifiEl('wifi-ap-band') || {}).value || 'a';
+    if (!ssid) { wifiMessage('Hotspot SSID is required', true); return; }
+    if (enabled && !confirm(`Start the hotspot "${ssid}"?\n\nIf this page is loaded over a WiFi network connection, the device will switch to hotspot mode and this page will drop. Reconnect to "${ssid}" and open http://172.24.1.1:6800/`)) {
+        return;
+    }
+    try {
+        await wifiApi('/ap', 'PUT', { Ssid: ssid, Passphrase: passphrase, Band: band, Channel: 0, Enabled: enabled });
+        wifiMessage(enabled ? 'Hotspot starting...' : 'Hotspot configuration saved (disabled).');
+        const passInput = wifiEl('wifi-ap-pass');
+        if (passInput) passInput.value = '';
+        setTimeout(wifiRefresh, 5000);
+    } catch (e) {
+        wifiMessage('Hotspot update failed: ' + e.message, true);
+    }
+}
+
+async function wifiSetCountry() {
+    const cc = (wifiEl('wifi-country') || {}).value || '';
+    if (!cc) { wifiMessage('Pick a country first', true); return; }
+    try {
+        await wifiApi('/country', 'PUT', { Alpha2: cc });
+        wifiMessage(`Regulatory country set to ${cc}.`);
+        wifiRefresh();
+    } catch (e) {
+        wifiMessage('Setting country failed: ' + e.message, true);
+    }
+}

@@ -11,6 +11,8 @@ Build-Depends: debhelper-compat (= 13),
                libhidapi-dev,
                nlohmann-json3-dev,
                zlib1g-dev,
+               libsystemd-dev,
+               pkgconf,
                libcurl4-openssl-dev | libcurl4-gnutls-dev
 Standards-Version: 4.6.2
 Homepage: https://github.com/open-astro/AlpacaBridge
@@ -24,6 +26,7 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
          libgpiod3,
          libhidapi-hidraw0,
          adduser
+Recommends: network-manager, polkitd
 Conflicts: fxload
 Replaces: fxload
 Description: ASCOM Alpaca HTTP server for astronomical devices

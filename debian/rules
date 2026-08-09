@@ -120,6 +120,10 @@ override_dh_auto_install:
 	  $(CURDIR)/AlpacaCore/external/oasisastro/99-astroasis-focuser.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
 
+	# --- Polkit rule: WiFi management via NetworkManager ---
+	install -D -m 644 $(CURDIR)/debian/alpacabridge.polkit-rules \
+	  $(STAGING)/usr/share/polkit-1/rules.d/50-alpacabridge-wifi.rules
+
 	# --- Web UI assets ---
 	install -d $(STAGING)/usr/share/alpacabridge/web
 	cp -a $(CURDIR)/AlpacaHTTP/web/. $(STAGING)/usr/share/alpacabridge/web/

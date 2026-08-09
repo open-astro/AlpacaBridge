@@ -1289,6 +1289,61 @@
                     <p id="server-info-status" class="server-status"></p>
                 </div>
             </div>
+            <div id="wifi-section" class="section-card collapsed">
+                <div class="section-card-header">
+                    <h3>WiFi</h3>
+                    <span id="wifi-summary" class="server-clock" title="Current WiFi state"></span>
+                    <button class="section-toggle" type="button" aria-expanded="false">
+                        <span class="section-toggle-icon" aria-hidden="true"></span>
+                        <span class="section-toggle-label">Details</span>
+                    </button>
+                </div>
+                <div class="section-card-body">
+                    <p id="wifi-status-line" class="log-status">Loading WiFi status...</p>
+
+                    <div class="form-group">
+                        <label for="wifi-country">Regulatory country:</label>
+                        <select id="wifi-country"></select>
+                        <button class="btn btn-secondary" type="button" onclick="wifiSetCountry()">Apply</button>
+                        <small>Required before 5&nbsp;GHz can be used in some regions. Set this to where the device is physically located.</small>
+                    </div>
+
+                    <h4>Hotspot</h4>
+                    <div class="form-group">
+                        <label for="wifi-ap-ssid">Hotspot name (SSID):</label>
+                        <input type="text" id="wifi-ap-ssid" maxlength="32">
+                    </div>
+                    <div class="form-group">
+                        <label for="wifi-ap-pass">Hotspot passphrase:</label>
+                        <input type="password" id="wifi-ap-pass" placeholder="(unchanged)" maxlength="63">
+                        <small>8&ndash;63 characters. Leave blank to keep the current passphrase.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="wifi-ap-band">Band:</label>
+                        <select id="wifi-ap-band">
+                            <option value="a">5 GHz</option>
+                            <option value="bg">2.4 GHz</option>
+                        </select>
+                        <small>2.4&nbsp;GHz has longer range and is required by some WiFi mounts; 5&nbsp;GHz is faster. Boards without working 5&nbsp;GHz only show 2.4.</small>
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-primary" type="button" onclick="wifiSaveAp(true)">Enable Hotspot</button>
+                        <button class="btn btn-secondary" type="button" onclick="wifiSaveAp(false)">Save Off</button>
+                    </div>
+
+                    <h4>Networks</h4>
+                    <div class="form-actions">
+                        <button class="btn btn-secondary" type="button" onclick="wifiScan()">Scan</button>
+                        <button class="btn btn-secondary" type="button" onclick="wifiRefresh()">Refresh</button>
+                    </div>
+                    <div id="wifi-scan-list" class="log-files-list"></div>
+
+                    <h4>Saved profiles</h4>
+                    <div id="wifi-profile-list" class="log-files-list"></div>
+
+                    <p id="wifi-message" class="log-status"></p>
+                </div>
+            </div>
             <div id="logging-section" class="section-card collapsed">
                 <div class="section-card-header">
                     <h3>Logging</h3>
@@ -1343,6 +1398,6 @@
         </div>
     </div>
 
-    <script src="/web/app.js?v=18"></script>
+    <script src="/web/app.js?v=19"></script>
 </body>
 </html>

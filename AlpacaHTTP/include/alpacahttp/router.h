@@ -38,6 +38,7 @@
 
 #include "request.h"
 #include "response.h"
+#include "wifi_manager.h"
 #include "version.h"
 
 namespace alpacahttp {
@@ -76,6 +77,14 @@ private:
     std::function<void()> shutdown_callback_;
     std::function<void()> restart_callback_;
 
+    // Lazily constructed on first /management/v1/wifi/* request so setups
+    // without NetworkManager (or without a wifi adapter) pay no cost.
+    // Persists its state (regulatory country) under the same relative
+    // "config" dir as registered_devices.json.
+    std::unique_ptr<util::WifiManager> wifi_manager_;
+    std::mutex wifi_manager_init_mutex_;
+    util::WifiManager& wifi_manager();
+
     // Parse route from path
     RouteMatch parse_route(const std::string& path);
 
@@ -93,6 +102,10 @@ private:
     Response handle_shutdown(const Request& request, std::uint32_t server_tx_id);
     Response handle_restart(const Request& request, std::uint32_t server_tx_id);
     Response handle_sync_time(const Request& request, std::uint32_t server_tx_id);
+    // WiFi manager (see docs/wifi-manager-design.md); match.method_name
+    // carries the sub-endpoint (status/scan/profiles/connect/ap/country/radio)
+    // and, for profile deletes, the UUID.
+    Response handle_wifi(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id);
     Response handle_log_level(const Request& request, std::uint32_t server_tx_id);
     Response handle_logs(const Request& request, std::uint32_t server_tx_id);
     Response handle_log_files_list(const Request& request, std::uint32_t server_tx_id);

@@ -39,8 +39,12 @@ RestrictSUIDSGID=true
 # alpacabridge user can adjust the clock on internet-less SBCs where NTP is
 # unavailable; works with NoNewPrivileges=true because systemd grants it at
 # exec time.
-AmbientCapabilities=CAP_SYS_TIME
-CapabilityBoundingSet=CAP_SYS_TIME
+# CAP_NET_ADMIN: the WiFi management endpoints set the wireless regulatory
+# domain in-process via nl80211 (equivalent of `iw reg set`). All other WiFi
+# operations go through NetworkManager's D-Bus API, authorized by the polkit
+# rule in /usr/share/polkit-1/rules.d/50-alpacabridge-wifi.rules.
+AmbientCapabilities=CAP_SYS_TIME CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_SYS_TIME CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target

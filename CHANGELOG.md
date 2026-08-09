@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [3.4.0] - UNRELEASED
+
+### Added
+- **WiFi manager** (AlpacaHTTP + web UI + packaging; design in `docs/wifi-manager-design.md`, hardware-validated on all 8 supported devices): the web portal gains a **WiFi card** (Server tab) for managing the SBC's wireless entirely from the browser — scan and join networks, saved profiles with priorities (connect/forget), hotspot configuration (SSID, passphrase, 2.4/5 GHz band, enable/disable), radio on/off, and a **regulatory country** selector. New management endpoints under `/management/v1/wifi/` (`status`, `scan`, `profiles` [GET/PUT/DELETE], `connect`, `ap`, `radio`, `country`), unauthenticated like the other management endpoints (trusted-LAN model). Backend is a new `WifiManager` (`AlpacaHTTP/src/util/wifi_manager.cpp`) speaking NetworkManager's D-Bus API in-process via sd-bus — no subprocesses — authorized by a packaged polkit rule (`/usr/share/polkit-1/rules.d/50-alpacabridge-wifi.rules`) scoped to exactly four NM actions for the `alpacabridge` user. The regulatory country is applied via nl80211 (`NL80211_CMD_REQ_SET_REG`, the `iw reg set` equivalent) under a new `CAP_NET_ADMIN` ambient capability (same mechanism as Sync Time's `CAP_SYS_TIME`), persisted in `/var/lib/alpacabridge/config/wifi_country`, and re-applied at first use after restart — required because some drivers (iMate `unisoc_wifi`) refuse 5 GHz AP init under the WORLD regdom. 5 GHz is offered only when the adapter supports it, probing BOTH NM's capability flags and live scan results (the ASIAIR Plus RK3568's `bcmdhd` under-reports 2.4-only while 5 GHz works). The card hides itself on setups with no wifi device. New build-deps `libsystemd-dev`/`pkgconf`; new package `Recommends: network-manager, polkitd`. The hotspot pins the OpenAstro fleet subnet `172.24.1.1/24`.
+
 ## [3.3.0] - 2026-08-08
 
 ### Added
