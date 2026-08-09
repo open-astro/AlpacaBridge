@@ -938,9 +938,10 @@ input[type="range"] {
     border-radius: 50%;
     background: transparent;
     color: var(--dim);
-    font-size: 12px;
-    font-style: italic;
-    font-family: Georgia, serif;
+    font-size: 11px;
+    font-weight: 600;
+    font-style: normal;
+    font-family: inherit;
     line-height: 1;
     cursor: pointer;
     vertical-align: middle;
