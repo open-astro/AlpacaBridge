@@ -27,9 +27,9 @@ per-board (see Hardware matrix).
 
 ### Backend: NetworkManager over D-Bus
 
-All OpenAstro images must run **NetworkManager** (Armbian images already do;
-Raspberry Pi Debian 13 images to be confirmed/standardized — tracked as a
-prerequisite in the rollout plan). The daemon talks to NM via the system D-Bus
+All OpenAstro images must run **NetworkManager**. Verified on hardware
+2026-08-09: Pi-family (CM4) and ASIAIR Plus RK3568 already do; the Orange Pi
+4 Pro image does not yet (see board matrix and Phase 0). The daemon talks to NM via the system D-Bus
 (`org.freedesktop.NetworkManager`) — no shelling out to `nmcli`, no sudo, no
 root helper, consistent with the project's no-subprocess policy.
 
@@ -117,16 +117,26 @@ including future boards.
 
 ## Hardware / board matrix
 
-| Board | Chip / driver | Bands | AP mode | Validation needed |
-|---|---|---|---|---|
-| Pi 3B+/4/5, CM4 (StellaVita, ASIAIR Pro/Plus-CM4) | Broadcom `brcmfmac` | 2.4 + 5 | Yes | Standard; confirm NM on Pi image |
-| iMate (OrangePi 3 LTS, Allwinner H6) | AW859A (mainline driver via Armbian) | 2.4 + 5 | To verify | AP mode on mainline driver; prior art in aw-flashtool AP recreation |
-| Orange Pi 4 Pro / other Rockchip | Varies per board | Varies (some 2.4-only) | Varies | Capability probing handles this; validate one reference board |
+Surveyed on real hardware 2026-08-09 (rc91.lan, astro.lan, openastro.lan).
+"5 GHz" = what NM/the driver actually reports, not the chip's datasheet.
+
+| Board | Chip / driver | 2.4 GHz | 5 GHz | Network stack today | AP mode | Notes |
+|---|---|---|---|---|---|---|
+| Pi 3B+/4/5, CM4 (StellaVita, ASIAIR Pro/Plus-CM4) | Broadcom `brcmfmac` | Yes | Yes | NetworkManager ✅ | Yes | Works with this design as-is; no image changes needed |
+| ASIAIR Plus RK3568 | AP6256 on ZWO vendor driver (`bcmsdh_sdmmc`, BSP kernel 4.19) | Yes | Chip is dual-band 802.11ac, but NM reports 2.4-only — likely vendor driver/firmware config; investigate whether 5 GHz is recoverable | NetworkManager ✅ | Yes — NM shared-mode hotspot validated live (10.42.0.1) | Vendor driver exposes a separate `uap0` AP interface (stock ASIAIR's AP+STA path) — possible post-v1 concurrency option on this board only |
+| Orange Pi 4 Pro | AIC8800D80 (`aicwf_sdio`, speaks nl80211) | Yes — hostapd AP "OpenAstro" validated live | Chip is dual-band; unvalidated (config parked on 2.4) | systemd-networkd + hostapd + dnsmasq + wpa_supplicant — **no NM** | Yes (hostapd) | Image built by github.com/open-astro/openastro-orangepi4pro; NM migration happens there |
+| iMate (OrangePi 3 LTS, Allwinner H6) | AW859A / Unisoc UWE5822 (`unisoc_wifi`, Armbian mainline 6.18) | Yes | Yes — **AP runs on 5 GHz today** (hostapd `hw_mode=a` ch40 HT40+, validated live). Driver rejects VHT/80 MHz (802.11n rates only); non-DFS ch 36–48/149–165 | systemd-networkd + hostapd + dnsmasq + wpa_supplicant — **no NM**; `network-manager`/`polkitd` packages not installed (only missing pieces) | Yes (hostapd; MAC-derived SSID via openastro-ap-ssid.service) | OPi 3 **LTS** uses AW859A, not the original OPi 3's AP6256. Image = aw-flashtool. **NM migration tested live 2026-08-09**: NM+polkitd installed, open 5 GHz NM hotspot works, but **WPA2 fails** — `unisoc_wifi` returns EOPNOTSUPP to wpa_supplicant's group-key install (`set_key default failed; err=-95`), while hostapd's key sequence works. Fix in the image: patch the driver's set_key path (we build the kernel) or keep a hostapd backend exception for iMate. Regdom must be set to US before 5 GHz AP init (hostapd does it via country_code; NM path needs it set globally). NM/polkitd left installed on the test rig, all interfaces unmanaged |
+
+The RK3568 row is why capability probing (below) is load-bearing: a dual-band
+chip behind a vendor driver may still be 2.4-only in practice, and the UI must
+reflect what the driver reports, not the datasheet.
 
 ## Rollout plan
 
-- **Phase 0 (prerequisite):** confirm/standardize NetworkManager on all
-  OpenAstro images (aw-flashtool / image-build concern, not this repo).
+- **Phase 0 (prerequisite):** standardize NetworkManager on all OpenAstro
+  images. Pi-family and RK3568 already run NM (verified); Orange Pi 4 Pro
+  (openastro-orangepi4pro repo) and iMate (aw-flashtool) need migrating off
+  networkd/hostapd — we build both images, so this is fully in our control.
 - **Phase 1:** status + scan + profiles + connect (client mode only).
   Endpoints, polkit rule, UI card, routing tests.
 - **Phase 2:** AP mode + auto-fallback watchdog + always-hotspot toggle.
@@ -137,7 +147,13 @@ including future boards.
 
 ## Open questions
 
-1. Pi image network stack today — NetworkManager or not? (Blocks Phase 0.)
+0. iMate WPA2-under-NM: patch `unisoc_wifi`'s set_key handling in the
+   aw-flashtool kernel, or ship a hostapd-backend exception for this board?
+   (Everything else about NM on the iMate is proven — see board matrix.)
+
+1. ~~iMate network stack~~ — answered 2026-08-09: no NM, same
+   networkd/hostapd stack as OPi 4 Pro; all four board families now surveyed
+   (see board matrix). Phase 0 = migrate OPi 4 Pro + iMate images to NM.
 2. AP subnet: accept NM's default `10.42.0.0/24` or pin a documented OpenAstro
    subnet so mount-connection docs can give a fixed bridge IP?
 3. Should ethernet-connected users see the WiFi card at all when no WiFi
