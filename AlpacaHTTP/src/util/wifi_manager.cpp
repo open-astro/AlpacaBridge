@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -57,7 +58,7 @@ void throw_bus(const char* what, int r, const sd_bus_error* err = nullptr) {
 
 // A tagged value for building a{sa{sv}} connection settings.
 struct SVal {
-    char type;  // 's', 'b', 'i', 'u', 'y' = byte-array
+    char type = 0;  // 's', 'b', 'i', 'u', 'y' = byte-array
     std::string s;
     std::int64_t i = 0;
     bool b = false;
@@ -436,6 +437,7 @@ struct WifiManager::BusHandle {
                 }
             } catch (const WifiError&) {
                 // Skip connections we cannot read (e.g. permission-scoped).
+                continue;
             }
         }
         return out;
@@ -552,7 +554,7 @@ void nl80211_set_regdom(const std::string& alpha2) {
             continue;
         }
         auto* genl = static_cast<genlmsghdr*>(NLMSG_DATA(nlh));
-        int len = static_cast<int>(nlh->nlmsg_len) - NLMSG_LENGTH(GENL_HDRLEN);
+        int len = static_cast<int>(nlh->nlmsg_len) - static_cast<int>(NLMSG_LENGTH(GENL_HDRLEN));
         auto* attr = reinterpret_cast<nlattr*>(reinterpret_cast<char*>(genl) + GENL_HDRLEN);
         while (len > 0 && attr->nla_len >= NLA_HDRLEN && static_cast<int>(attr->nla_len) <= len) {
             if (attr->nla_type == CTRL_ATTR_FAMILY_ID) {
@@ -956,8 +958,10 @@ void WifiManager::set_country(const std::string& alpha2) {
         !std::isupper(static_cast<unsigned char>(alpha2[1]))) {
         throw WifiError("Alpha2 must be a two-letter uppercase ISO country code");
     }
-    std::lock_guard<std::mutex> lock(mutex_);
+    // nl80211 touches no shared state, so run it before taking the lock:
+    // the netlink send/recv must not block other endpoints on mutex_.
     nl80211_set_regdom(alpha2);
+    std::lock_guard<std::mutex> lock(mutex_);
     std::error_code ec;
     std::filesystem::create_directories(state_dir_, ec);
     std::ofstream f(country_file(), std::ios::trunc);
@@ -966,17 +970,18 @@ void WifiManager::set_country(const std::string& alpha2) {
 }
 
 void WifiManager::apply_persisted_country() {
-    try {
-        std::string cc;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            std::ifstream f(country_file());
-            if (!f || !std::getline(f, cc) || cc.size() != 2) return;
-        }
+    std::string cc;
+    {
         std::lock_guard<std::mutex> lock(mutex_);
+        std::ifstream f(country_file());
+        if (!f || !std::getline(f, cc) || cc.size() != 2) return;
+    }
+    try {
         nl80211_set_regdom(cc);
-    } catch (...) {
+    } catch (const std::exception& e) {
         // Best-effort at startup; the user can re-apply from the UI.
+        std::fprintf(stderr, "wifi: could not re-apply persisted country %s: %s\n",
+                     cc.c_str(), e.what());
     }
 }
 
