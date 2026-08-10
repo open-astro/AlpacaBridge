@@ -1034,3 +1034,85 @@ input[type="range"] {
 #wifi-section .form-group > .btn {
     margin-top: 10px;
 }
+
+/* ---- WiFi card: Apple-Settings-style rows, toggles, network list ---- */
+.wifi-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 2px;
+    border-bottom: 1px solid var(--line);
+}
+.wifi-row-first { padding-top: 4px; }
+.wifi-row-label { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wifi-row-label small { color: var(--dim); }
+.wifi-substatus { color: var(--dim); font-size: 12.5px; margin: 8px 2px; }
+.wifi-hint { color: var(--dim); font-size: 12px; margin: 6px 2px 0; }
+
+.wifi-group-title {
+    margin: 20px 2px 6px;
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--dim);
+}
+
+/* iOS-style switch */
+.oa-switch { position: relative; display: inline-block; width: 44px; height: 26px; flex: none; }
+.oa-switch input { opacity: 0; width: 0; height: 0; }
+.oa-slider {
+    position: absolute; inset: 0;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+.oa-slider::before {
+    content: "";
+    position: absolute;
+    width: 20px; height: 20px;
+    left: 2px; top: 2px;
+    border-radius: 50%;
+    background: var(--dim);
+    transition: transform 0.15s, background 0.15s;
+}
+.oa-switch input:checked + .oa-slider { background: var(--ok); border-color: var(--ok); }
+.oa-switch input:checked + .oa-slider::before { transform: translateX(18px); background: #fff; }
+
+/* Network list */
+.wifi-list { margin: 2px 0 6px; }
+.wifi-net-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 6px;
+    border-bottom: 1px solid var(--line);
+    cursor: pointer;
+    border-radius: 6px;
+}
+.wifi-net-row:hover { background: var(--panel-2); }
+.wifi-net-row.active { cursor: default; }
+.wifi-net-row.dim .wifi-net-name { color: var(--dim); }
+.wifi-net-check { width: 16px; color: var(--accent-2); font-weight: 700; flex: none; }
+.wifi-net-name { flex: 1; }
+.wifi-net-name small { color: var(--dim); margin-left: 6px; }
+.wifi-net-meta { color: var(--dim); font-size: 12px; white-space: nowrap; }
+.wifi-signal { font-family: var(--mono); font-size: 10px; letter-spacing: 1px; }
+.wifi-actions-right { display: flex; justify-content: flex-end; margin: 6px 0 0; }
+
+/* Hotspot config fields */
+.wifi-config { padding: 4px 2px 0; }
+.wifi-field { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+.wifi-field > label { flex: 0 0 90px; color: var(--dim); }
+.wifi-field input { flex: 1; }
+.wifi-segment { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.wifi-segment button {
+    appearance: none; font: inherit; border: none; cursor: pointer;
+    background: var(--panel-2); color: var(--dim);
+    padding: 6px 14px;
+}
+.wifi-segment button.active { background: var(--accent-2); color: #fff; }
+.wifi-country-select { max-width: 140px; }
