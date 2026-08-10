@@ -1133,3 +1133,19 @@ input[type="range"] {
 }
 .wifi-segment button.active { background: var(--accent); color: #fff; }
 .wifi-country-select { max-width: 140px; }
+
+/* Native select popups: browsers only honor a subset of styling for the
+   OS-rendered option list, but Chromium respects accent-color and option
+   backgrounds well enough to replace the system-blue hover/selected row. */
+select { accent-color: var(--accent); }
+select option {
+    background: var(--panel-2);
+    color: var(--text);
+}
+select option:hover,
+select option:focus,
+select option:checked {
+    background: var(--accent);
+    color: #fff;
+}
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
