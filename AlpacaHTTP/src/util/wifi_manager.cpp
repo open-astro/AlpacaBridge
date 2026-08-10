@@ -534,6 +534,11 @@ void nl80211_set_regdom(const std::string& alpha2) {
         // the buffer, so truncation is detected instead of parsing a partial
         // message (PR #198 review).
         reply.resize(32768);
+        // Blocking recv under country_mutex_ is intentional: that mutex
+        // exists solely to serialize regdom apply+persist pairs, and only
+        // country operations ever take it - bus users on mutex_ are never
+        // blocked by this wait.
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
         ssize_t n = recv(fd, reply.data(), reply.size(), MSG_TRUNC);
         if (n < 0) throw WifiError(std::string("netlink recv: ") + std::strerror(errno));
         if (static_cast<size_t>(n) > reply.size()) {
