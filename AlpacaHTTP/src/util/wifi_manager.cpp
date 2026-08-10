@@ -611,6 +611,11 @@ void nl80211_set_regdom(const std::string& alpha2) {
 }
 
 std::string security_label(std::uint32_t wpa_flags, std::uint32_t rsn_flags) {
+    constexpr std::uint32_t kKeyMgmtPsk = 0x100;  // NM_802_11_AP_SEC_KEY_MGMT_PSK
+    constexpr std::uint32_t kKeyMgmtSae = 0x400;  // NM_802_11_AP_SEC_KEY_MGMT_SAE
+    if (rsn_flags & kKeyMgmtSae) {
+        return (rsn_flags & kKeyMgmtPsk) ? "WPA2/WPA3" : "WPA3";
+    }
     if (rsn_flags != 0) return "WPA2";
     if (wpa_flags != 0) return "WPA";
     return "Open";
@@ -995,10 +1000,12 @@ void WifiManager::set_country(const std::string& alpha2) {
         !std::isupper(static_cast<unsigned char>(alpha2[1]))) {
         throw WifiError("Alpha2 must be a two-letter uppercase ISO country code");
     }
-    // nl80211 touches no shared state, so run it before taking the lock:
-    // the netlink send/recv must not block other endpoints on mutex_.
+    // country_mutex_ (not mutex_) serializes the whole apply+persist pair:
+    // the netlink round-trip must not block bus users on mutex_, but two
+    // concurrent set_country calls must not interleave the kernel regdom and
+    // the persisted file either (PR #198 review round 6).
+    std::lock_guard<std::mutex> country_lock(country_mutex_);
     nl80211_set_regdom(alpha2);
-    std::lock_guard<std::mutex> lock(mutex_);
     std::error_code ec;
     std::filesystem::create_directories(state_dir_, ec);
     std::ofstream f(country_file(), std::ios::trunc);
@@ -1007,9 +1014,9 @@ void WifiManager::set_country(const std::string& alpha2) {
 }
 
 void WifiManager::apply_persisted_country() {
+    std::lock_guard<std::mutex> country_lock(country_mutex_);
     std::string cc;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
         std::ifstream f(country_file());
         if (!f || !std::getline(f, cc) || cc.size() != 2) return;
     }

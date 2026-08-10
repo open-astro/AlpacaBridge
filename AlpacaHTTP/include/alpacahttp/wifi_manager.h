@@ -128,6 +128,9 @@ private:
     // held and a bus connection is open.
     std::string state_dir_;
     std::mutex mutex_;
+    // Serializes regdom apply + country-file persist as one unit; separate
+    // from mutex_ so the netlink round-trip never blocks bus users.
+    std::mutex country_mutex_;
     BusHandle* bus_ = nullptr;
 
     void ensure_bus_locked();
