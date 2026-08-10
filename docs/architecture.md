@@ -161,6 +161,36 @@ The web UI (`web/index.html`, `web/app.js`, `web/style.css`) provides:
 
 Served as static files from the `web/` directory at `http://localhost:6800/management/`.
 
+### WiFi manager and privileged operations
+
+The WiFi card (3.4.0) is backed by `src/util/wifi_manager.cpp`, which drives
+NetworkManager over the system D-Bus using sd-bus (libsystemd) in-process:
+no subprocesses, no sudo. The API contract is documented in `wifi-api.md`;
+routes live under `/management/v1/wifi/` in the router.
+
+Privileged operations use two mechanisms, both scoped tightly:
+
+- **Polkit**: the .deb ships
+  `/usr/share/polkit-1/rules.d/50-alpacabridge-wifi.rules`, granting only the
+  `alpacabridge` service user exactly six NetworkManager actions
+  (`wifi.scan`, `settings.modify.system`, `network-control`,
+  `enable-disable-wifi`, `wifi.share.protected`, `wifi.share.open`). The
+  `wifi.share.*` pair is required for shared-mode (hotspot) activation.
+  Requires the `polkitd` package on the image.
+- **Ambient capabilities**: the systemd unit grants
+  `CAP_SYS_TIME` (synctime endpoint, `clock_settime`) and `CAP_NET_ADMIN`
+  (wifi country endpoint, nl80211 `REQ_SET_REG` — the `iw reg set`
+  equivalent). Ambient grants work despite `NoNewPrivileges=true` because
+  systemd applies them at exec; `CapabilityBoundingSet` is limited to the
+  same two.
+
+State-changing WiFi requests additionally carry a CSRF guard (browser
+`Origin` header must match `Host`, else 403); the management surface is
+otherwise unauthenticated per the trusted-LAN model. The persisted wifi
+country lives in `/var/lib/alpacabridge/config/wifi_country` and is
+re-applied at daemon startup in `main()` before NetworkManager's boot-time
+hotspot autoconnect.
+
 ## Workspace structure
 
 ```

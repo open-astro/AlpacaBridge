@@ -1403,6 +1403,40 @@ it is never reachable through `router.cpp` or the web UI.
   fixed), which is why that failure mode is documented even though the saved log is clean of it.
   See `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.
 
+### WiFi manager (AlpacaHTTP, 3.4.0)
+
+- NM D-Bus property types matter: `ActiveConnection`, `Ip4Config`, and
+  `ActiveAccessPoint` are object paths ("o"), not strings — reading them
+  with `sd_bus_get_property_string` fails sd-bus's type check silently
+  (empty result, no error), which presented as "hotspot shows off while
+  broadcasting". Use a dedicated "o"-typed reader.
+- Shared-mode (hotspot) activation needs polkit
+  `org.freedesktop.NetworkManager.wifi.share.protected`/`.share.open` in
+  addition to `network-control` — the failure ("Not authorized to share
+  connections via wifi") only appears at ActivateConnection time and was
+  found by live-testing the endpoint, not by review.
+- NM `Update()` with a `802-11-wireless-security` section declaring
+  `key-mgmt` but omitting `psk` PRESERVES the stored secret
+  (hardware-verified on the Pi 5 rig). `GetSettings()` never returns
+  secrets, so this cannot be confirmed from read-back — verify on hardware
+  when in doubt.
+- One `sd_bus*` connection is not thread-safe: every method serializes on
+  one mutex, and that mutex must stay held across any waits between bus
+  calls (a review round caught an unlock-during-sleep race). Blocking work
+  that touches no bus state (nl80211 netlink) belongs outside that mutex,
+  on its own serialization if ordering matters.
+- Vendor driver capability reports lie: RK3568 `bcmdhd` tells NM 2.4-only
+  while 5 GHz hotspots work; iMate `unisoc_wifi` returns nothing to
+  unprivileged `iw` and rejects wpa_supplicant's WPA2 group-key install
+  (hostapd's sequence works). Board matrix in `docs/wifi-manager-design.md`.
+- 5 GHz AP init fails under the WORLD/00 regdom on some drivers — the
+  persisted country must be applied at daemon startup (main.cpp), BEFORE
+  NM's boot-time AP autoconnect, not lazily on first request.
+- The review bot login is `github-actions`; every push restarts a full
+  review round — batch fixes. Test rig persisted-device state under
+  `AlpacaHTTP/build/config/` makes `test_routing` fail with "already
+  registered" — `rm -rf build/config` before local runs.
+
 ## General Notes
 
 - On Linux, ensure udev rules in `AlpacaCore/external/**/*.rules` are installed. Some vendor SDKs (e.g. QHY) ship multiple copies of the same rules file under different subdirectories — deduplicate by basename when installing so only one copy lands in `/etc/udev/rules.d/`. Keep `build_and_run.sh` and `install_alpaca_service.sh` in sync; both contain the udev/firmware install logic.
