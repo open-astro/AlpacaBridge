@@ -12,12 +12,11 @@
 
 #include "alpacahttp/wifi_manager.h"
 
-#include <systemd/sd-bus.h>
-
 #include <linux/genetlink.h>
 #include <linux/netlink.h>
 #include <linux/nl80211.h>
 #include <sys/socket.h>
+#include <systemd/sd-bus.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -52,8 +51,7 @@ constexpr std::uint32_t kCapFreq2 = 0x200;
 constexpr std::uint32_t kCapFreq5 = 0x400;
 
 void throw_bus(const char* what, int r, const sd_bus_error* err = nullptr) {
-    std::string msg = std::string(what) + ": " +
-                      (err && err->message ? err->message : std::strerror(-r));
+    std::string msg = std::string(what) + ": " + (err && err->message ? err->message : std::strerror(-r));
     throw WifiError(msg);
 }
 
@@ -65,12 +63,33 @@ struct SVal {
     bool b = false;
     std::vector<std::uint8_t> bytes;
 
-    static SVal str(std::string v) { SVal x; x.type = 's'; x.s = std::move(v); return x; }
-    static SVal boolean(bool v) { SVal x; x.type = 'b'; x.b = v; return x; }
-    static SVal i32(std::int32_t v) { SVal x; x.type = 'i'; x.i = v; return x; }
-    static SVal u32(std::uint32_t v) { SVal x; x.type = 'u'; x.i = v; return x; }
+    static SVal str(std::string v) {
+        SVal x;
+        x.type = 's';
+        x.s = std::move(v);
+        return x;
+    }
+    static SVal boolean(bool v) {
+        SVal x;
+        x.type = 'b';
+        x.b = v;
+        return x;
+    }
+    static SVal i32(std::int32_t v) {
+        SVal x;
+        x.type = 'i';
+        x.i = v;
+        return x;
+    }
+    static SVal u32(std::uint32_t v) {
+        SVal x;
+        x.type = 'u';
+        x.i = v;
+        return x;
+    }
     static SVal bytearr(const std::string& v) {
-        SVal x; x.type = 'y';
+        SVal x;
+        x.type = 'y';
         x.bytes.assign(v.begin(), v.end());
         return x;
     }
@@ -118,12 +137,11 @@ struct WifiManager::BusHandle {
         return out;
     }
 
-    std::uint64_t prop_trivial(const char* path, const char* iface, const char* prop,
-                               char type, std::uint64_t fallback = 0) {
+    std::uint64_t prop_trivial(const char* path, const char* iface, const char* prop, char type,
+                               std::uint64_t fallback = 0) {
         sd_bus_error err = SD_BUS_ERROR_NULL;
         std::uint64_t storage = 0;
-        int r = sd_bus_get_property_trivial(bus, kNmService, path, iface, prop, &err, type,
-                                            &storage);
+        int r = sd_bus_get_property_trivial(bus, kNmService, path, iface, prop, &err, type, &storage);
         if (r < 0) {
             sd_bus_error_free(&err);
             return fallback;
@@ -132,8 +150,7 @@ struct WifiManager::BusHandle {
         return storage;
     }
 
-    std::vector<std::string> prop_objpaths(const char* path, const char* iface,
-                                           const char* prop) {
+    std::vector<std::string> prop_objpaths(const char* path, const char* iface, const char* prop) {
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message* m = nullptr;
         std::vector<std::string> out;
@@ -172,8 +189,7 @@ struct WifiManager::BusHandle {
     }
 
     // Call a method with no in-args that returns "ao".
-    std::vector<std::string> call_objpaths(const char* path, const char* iface,
-                                           const char* method) {
+    std::vector<std::string> call_objpaths(const char* path, const char* iface, const char* method) {
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message* m = nullptr;
         std::vector<std::string> out;
@@ -198,8 +214,7 @@ struct WifiManager::BusHandle {
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message* m = nullptr;
         nlohmann::json out = nlohmann::json::object();
-        int r = sd_bus_call_method(bus, kNmService, conn_path.c_str(), kNmConnIface,
-                                   "GetSettings", &err, &m, "");
+        int r = sd_bus_call_method(bus, kNmService, conn_path.c_str(), kNmConnIface, "GetSettings", &err, &m, "");
         if (r < 0) {
             std::string msg = err.message ? err.message : std::strerror(-r);
             sd_bus_error_free(&err);
@@ -240,9 +255,7 @@ struct WifiManager::BusHandle {
                                 const void* data = nullptr;
                                 size_t n = 0;
                                 sd_bus_message_read_array(m, 'y', &data, &n);
-                                sec[key] = data && n
-                                               ? std::string(static_cast<const char*>(data), n)
-                                               : std::string();
+                                sec[key] = data && n ? std::string(static_cast<const char*>(data), n) : std::string();
                             } else {
                                 sd_bus_message_skip(m, ct.c_str());
                             }
@@ -264,8 +277,7 @@ struct WifiManager::BusHandle {
     // Append a SettingsSpec as a{sa{sv}} to an open message. pin_shared_ip4:
     // when true, an "ipv4" section with method=shared and address-data
     // 172.24.1.1/24 is appended (the OpenAstro fleet-wide AP subnet).
-    static void append_settings(sd_bus_message* m, const SettingsSpec& spec,
-                                bool pin_shared_ip4) {
+    static void append_settings(sd_bus_message* m, const SettingsSpec& spec, bool pin_shared_ip4) {
         sd_bus_message_open_container(m, 'a', "{sa{sv}}");
         for (const auto& [section, entries] : spec) {
             sd_bus_message_open_container(m, 'e', "sa{sv}");
@@ -345,8 +357,7 @@ struct WifiManager::BusHandle {
 
     void add_connection(const SettingsSpec& spec, bool pin_shared_ip4) {
         sd_bus_message* m = nullptr;
-        int r = sd_bus_message_new_method_call(bus, &m, kNmService, kNmSettingsPath,
-                                               kNmSettingsIface, "AddConnection");
+        int r = sd_bus_message_new_method_call(bus, &m, kNmService, kNmSettingsPath, kNmSettingsIface, "AddConnection");
         if (r < 0) throw_bus("AddConnection new_method_call", r);
         append_settings(m, spec, pin_shared_ip4);
         sd_bus_error err = SD_BUS_ERROR_NULL;
@@ -361,11 +372,9 @@ struct WifiManager::BusHandle {
         sd_bus_message_unref(reply);
     }
 
-    void update_connection(const std::string& conn_path, const SettingsSpec& spec,
-                           bool pin_shared_ip4) {
+    void update_connection(const std::string& conn_path, const SettingsSpec& spec, bool pin_shared_ip4) {
         sd_bus_message* m = nullptr;
-        int r = sd_bus_message_new_method_call(bus, &m, kNmService, conn_path.c_str(),
-                                               kNmConnIface, "Update");
+        int r = sd_bus_message_new_method_call(bus, &m, kNmService, conn_path.c_str(), kNmConnIface, "Update");
         if (r < 0) throw_bus("Update new_method_call", r);
         append_settings(m, spec, pin_shared_ip4);
         sd_bus_error err = SD_BUS_ERROR_NULL;
@@ -395,9 +404,8 @@ struct WifiManager::BusHandle {
     void activate(const std::string& conn_path, const std::string& device_path) {
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message* reply = nullptr;
-        int r = sd_bus_call_method(bus, kNmService, kNmPath, kNmIface, "ActivateConnection",
-                                   &err, &reply, "ooo", conn_path.c_str(),
-                                   device_path.c_str(), "/");
+        int r = sd_bus_call_method(bus, kNmService, kNmPath, kNmIface, "ActivateConnection", &err, &reply, "ooo",
+                                   conn_path.c_str(), device_path.c_str(), "/");
         if (r < 0) {
             std::string msg = err.message ? err.message : std::strerror(-r);
             sd_bus_error_free(&err);
@@ -420,12 +428,10 @@ struct WifiManager::BusHandle {
     // All saved wifi connections: (path, settings-json).
     std::vector<std::pair<std::string, nlohmann::json>> wifi_connections() {
         std::vector<std::pair<std::string, nlohmann::json>> out;
-        for (const auto& c : call_objpaths(kNmSettingsPath, kNmSettingsIface,
-                                           "ListConnections")) {
+        for (const auto& c : call_objpaths(kNmSettingsPath, kNmSettingsIface, "ListConnections")) {
             try {
                 auto s = get_settings(c);
-                if (s.contains("connection") &&
-                    s["connection"].value("type", "") == "802-11-wireless") {
+                if (s.contains("connection") && s["connection"].value("type", "") == "802-11-wireless") {
                     out.emplace_back(c, std::move(s));
                 }
             } catch (const WifiError&) {
@@ -449,8 +455,7 @@ struct WifiManager::BusHandle {
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message* m = nullptr;
         std::string out;
-        int r = sd_bus_get_property(bus, kNmService, cfg.c_str(), kNmIp4Iface, "AddressData",
-                                    &err, &m, "aa{sv}");
+        int r = sd_bus_get_property(bus, kNmService, cfg.c_str(), kNmIp4Iface, "AddressData", &err, &m, "aa{sv}");
         if (r < 0) {
             sd_bus_error_free(&err);
             return out;
@@ -464,8 +469,7 @@ struct WifiManager::BusHandle {
                     char type = 0;
                     sd_bus_message_peek_type(m, &type, &contents);
                     if (sd_bus_message_enter_container(m, 'v', contents) >= 0) {
-                        if (key && std::string(key) == "address" &&
-                            contents && std::string(contents) == "s") {
+                        if (key && std::string(key) == "address" && contents && std::string(contents) == "s") {
                             const char* v = nullptr;
                             sd_bus_message_read(m, "s", &v);
                             if (v) out = v;
@@ -510,8 +514,7 @@ void nl80211_set_regdom(const std::string& alpha2) {
         reply.resize(static_cast<size_t>(n));
     };
 
-    auto build = [](std::uint16_t nl_type, std::uint8_t genl_cmd,
-                    std::uint16_t attr_type, const void* attr_data,
+    auto build = [](std::uint16_t nl_type, std::uint8_t genl_cmd, std::uint16_t attr_type, const void* attr_data,
                     std::uint16_t attr_len) {
         size_t attr_space = NLA_HDRLEN + NLA_ALIGN(attr_len);
         size_t total = NLMSG_SPACE(GENL_HDRLEN) + attr_space;
@@ -533,8 +536,7 @@ void nl80211_set_regdom(const std::string& alpha2) {
 
     // Resolve the nl80211 family id.
     const char family_name[] = "nl80211";
-    auto req = build(GENL_ID_CTRL, CTRL_CMD_GETFAMILY, CTRL_ATTR_FAMILY_NAME, family_name,
-                     sizeof(family_name));
+    auto req = build(GENL_ID_CTRL, CTRL_CMD_GETFAMILY, CTRL_ATTR_FAMILY_NAME, family_name, sizeof(family_name));
     std::vector<char> reply;
     send_and_recv(req, reply);
 
@@ -545,19 +547,16 @@ void nl80211_set_regdom(const std::string& alpha2) {
         if (nlh->nlmsg_type == NLMSG_ERROR) {
             auto* e = static_cast<nlmsgerr*>(NLMSG_DATA(nlh));
             if (e->error != 0) {
-                throw WifiError(std::string("nl80211 family lookup: ") +
-                                std::strerror(-e->error));
+                throw WifiError(std::string("nl80211 family lookup: ") + std::strerror(-e->error));
             }
             continue;
         }
         auto* genl = static_cast<genlmsghdr*>(NLMSG_DATA(nlh));
         int len = static_cast<int>(nlh->nlmsg_len) - NLMSG_LENGTH(GENL_HDRLEN);
         auto* attr = reinterpret_cast<nlattr*>(reinterpret_cast<char*>(genl) + GENL_HDRLEN);
-        while (len > 0 && attr->nla_len >= NLA_HDRLEN &&
-               static_cast<int>(attr->nla_len) <= len) {
+        while (len > 0 && attr->nla_len >= NLA_HDRLEN && static_cast<int>(attr->nla_len) <= len) {
             if (attr->nla_type == CTRL_ATTR_FAMILY_ID) {
-                family_id = *reinterpret_cast<std::uint16_t*>(
-                    reinterpret_cast<char*>(attr) + NLA_HDRLEN);
+                family_id = *reinterpret_cast<std::uint16_t*>(reinterpret_cast<char*>(attr) + NLA_HDRLEN);
             }
             int step = NLA_ALIGN(attr->nla_len);
             len -= step;
@@ -568,8 +567,7 @@ void nl80211_set_regdom(const std::string& alpha2) {
 
     // Send REQ_SET_REG with the alpha2 (NUL-terminated).
     char cc[3] = {alpha2[0], alpha2[1], 0};
-    auto set_req = build(family_id, NL80211_CMD_REQ_SET_REG, NL80211_ATTR_REG_ALPHA2, cc,
-                         sizeof(cc));
+    auto set_req = build(family_id, NL80211_CMD_REQ_SET_REG, NL80211_ATTR_REG_ALPHA2, cc, sizeof(cc));
     std::vector<char> ack;
     send_and_recv(set_req, ack);
     size_t ack_remaining = ack.size();
@@ -578,8 +576,7 @@ void nl80211_set_regdom(const std::string& alpha2) {
         if (nlh->nlmsg_type == NLMSG_ERROR) {
             auto* e = static_cast<nlmsgerr*>(NLMSG_DATA(nlh));
             if (e->error != 0) {
-                throw WifiError(std::string("REQ_SET_REG failed (needs CAP_NET_ADMIN): ") +
-                                std::strerror(-e->error));
+                throw WifiError(std::string("REQ_SET_REG failed (needs CAP_NET_ADMIN): ") + std::strerror(-e->error));
             }
         }
     }
@@ -632,14 +629,12 @@ nlohmann::json WifiManager::status() {
     if (dev.empty()) return out;
 
     out["Device"] = ifname;
-    out["WirelessEnabled"] =
-        bus_->prop_trivial(kNmPath, kNmIface, "WirelessEnabled", 'b') != 0;
+    out["WirelessEnabled"] = bus_->prop_trivial(kNmPath, kNmIface, "WirelessEnabled", 'b') != 0;
 
-    auto caps = static_cast<std::uint32_t>(
-        bus_->prop_trivial(dev.c_str(), kNmWirelessIface, "WirelessCapabilities", 'u'));
-    out["Capabilities"] = {{"Freq2GHz", (caps & kCapFreq2) != 0},
-                           {"Freq5GHz", (caps & kCapFreq5) != 0},
-                           {"Ap", (caps & kCapAp) != 0}};
+    auto caps =
+        static_cast<std::uint32_t>(bus_->prop_trivial(dev.c_str(), kNmWirelessIface, "WirelessCapabilities", 'u'));
+    out["Capabilities"] = {
+        {"Freq2GHz", (caps & kCapFreq2) != 0}, {"Freq5GHz", (caps & kCapFreq5) != 0}, {"Ap", (caps & kCapAp) != 0}};
 
     auto state = bus_->prop_trivial(dev.c_str(), kNmDeviceIface, "State", 'u');
     std::string state_str = state == 100  ? "connected"
@@ -658,10 +653,8 @@ nlohmann::json WifiManager::status() {
     auto ap = bus_->prop_path(dev.c_str(), kNmWirelessIface, "ActiveAccessPoint");
     if (!ap.empty() && ap != "/") {
         out["Ssid"] = bus_->prop_bytes(ap.c_str(), kNmApIface, "Ssid");
-        out["FrequencyMhz"] = static_cast<std::uint32_t>(
-            bus_->prop_trivial(ap.c_str(), kNmApIface, "Frequency", 'u'));
-        out["SignalPercent"] = static_cast<std::uint32_t>(
-            bus_->prop_trivial(ap.c_str(), kNmApIface, "Strength", 'y'));
+        out["FrequencyMhz"] = static_cast<std::uint32_t>(bus_->prop_trivial(ap.c_str(), kNmApIface, "Frequency", 'u'));
+        out["SignalPercent"] = static_cast<std::uint32_t>(bus_->prop_trivial(ap.c_str(), kNmApIface, "Strength", 'y'));
     }
     out["Ip4Address"] = bus_->device_ip4(dev);
 
@@ -669,8 +662,7 @@ nlohmann::json WifiManager::status() {
     // WirelessCapabilities while 5 GHz works — if the last scan saw any BSS
     // above 5000 MHz the band is usable regardless of the flag.
     bool sees5 = false;
-    for (const auto& p :
-         bus_->call_objpaths(dev.c_str(), kNmWirelessIface, "GetAllAccessPoints")) {
+    for (const auto& p : bus_->call_objpaths(dev.c_str(), kNmWirelessIface, "GetAllAccessPoints")) {
         if (bus_->prop_trivial(p.c_str(), kNmApIface, "Frequency", 'u') > 5000) {
             sees5 = true;
             break;
@@ -680,8 +672,10 @@ nlohmann::json WifiManager::status() {
 
     std::ifstream f(country_file());
     std::string cc;
-    if (f && std::getline(f, cc)) out["Country"] = cc;
-    else out["Country"] = "";
+    if (f && std::getline(f, cc))
+        out["Country"] = cc;
+    else
+        out["Country"] = "";
     return out;
 }
 
@@ -689,8 +683,8 @@ void WifiManager::set_wireless_enabled(bool enabled) {
     std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
     sd_bus_error err = SD_BUS_ERROR_NULL;
-    int r = sd_bus_set_property(bus_->bus, kNmService, kNmPath, kNmIface, "WirelessEnabled",
-                                &err, "b", enabled ? 1 : 0);
+    int r =
+        sd_bus_set_property(bus_->bus, kNmService, kNmPath, kNmIface, "WirelessEnabled", &err, "b", enabled ? 1 : 0);
     if (r < 0) {
         std::string msg = err.message ? err.message : std::strerror(-r);
         sd_bus_error_free(&err);
@@ -710,12 +704,14 @@ nlohmann::json WifiManager::scan() {
     {
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message* reply = nullptr;
-        int r = sd_bus_call_method(bus_->bus, kNmService, dev.c_str(), kNmWirelessIface,
-                                   "RequestScan", &err, &reply, "a{sv}", 0);
+        int r = sd_bus_call_method(bus_->bus, kNmService, dev.c_str(), kNmWirelessIface, "RequestScan", &err, &reply,
+                                   "a{sv}", 0);
         if (r >= 0) {
             sd_bus_message_unref(reply);
             // Give the driver a moment; NM has no synchronous scan API.
-            struct timespec ts {1, 500000000};  // 1.5 s
+            struct timespec ts {
+                1, 500000000
+            };  // 1.5 s
             nanosleep(&ts, nullptr);
         }
         sd_bus_error_free(&err);
@@ -723,18 +719,13 @@ nlohmann::json WifiManager::scan() {
 
     // Deduplicate by SSID keeping the strongest signal.
     std::map<std::string, nlohmann::json> best;
-    for (const auto& p :
-         bus_->call_objpaths(dev.c_str(), kNmWirelessIface, "GetAllAccessPoints")) {
+    for (const auto& p : bus_->call_objpaths(dev.c_str(), kNmWirelessIface, "GetAllAccessPoints")) {
         auto ssid = bus_->prop_bytes(p.c_str(), kNmApIface, "Ssid");
         if (ssid.empty()) continue;  // hidden
-        auto freq = static_cast<std::uint32_t>(
-            bus_->prop_trivial(p.c_str(), kNmApIface, "Frequency", 'u'));
-        auto strength = static_cast<std::uint32_t>(
-            bus_->prop_trivial(p.c_str(), kNmApIface, "Strength", 'y'));
-        auto wpa = static_cast<std::uint32_t>(
-            bus_->prop_trivial(p.c_str(), kNmApIface, "WpaFlags", 'u'));
-        auto rsn = static_cast<std::uint32_t>(
-            bus_->prop_trivial(p.c_str(), kNmApIface, "RsnFlags", 'u'));
+        auto freq = static_cast<std::uint32_t>(bus_->prop_trivial(p.c_str(), kNmApIface, "Frequency", 'u'));
+        auto strength = static_cast<std::uint32_t>(bus_->prop_trivial(p.c_str(), kNmApIface, "Strength", 'y'));
+        auto wpa = static_cast<std::uint32_t>(bus_->prop_trivial(p.c_str(), kNmApIface, "WpaFlags", 'u'));
+        auto rsn = static_cast<std::uint32_t>(bus_->prop_trivial(p.c_str(), kNmApIface, "RsnFlags", 'u'));
         auto it = best.find(ssid);
         if (it == best.end() || it->second["SignalPercent"].get<std::uint32_t>() < strength) {
             best[ssid] = {{"Ssid", ssid},
@@ -747,8 +738,7 @@ nlohmann::json WifiManager::scan() {
     list.reserve(best.size());
     for (auto& [k, v] : best) list.push_back(std::move(v));
     std::sort(list.begin(), list.end(), [](const auto& a, const auto& b) {
-        return a["SignalPercent"].template get<std::uint32_t>() >
-               b["SignalPercent"].template get<std::uint32_t>();
+        return a["SignalPercent"].template get<std::uint32_t>() > b["SignalPercent"].template get<std::uint32_t>();
     });
     return nlohmann::json(list);
 }
@@ -780,8 +770,7 @@ nlohmann::json WifiManager::profiles() {
     return list;
 }
 
-nlohmann::json WifiManager::save_profile(const std::string& ssid,
-                                         const std::string& passphrase, bool autoconnect,
+nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::string& passphrase, bool autoconnect,
                                          int priority) {
     if (ssid.empty() || ssid.size() > 32) throw WifiError("Ssid must be 1-32 bytes");
     if (!passphrase.empty() && (passphrase.size() < 8 || passphrase.size() > 63)) {
@@ -794,8 +783,7 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid,
     std::string existing_path;
     nlohmann::json existing;
     for (const auto& [path, s] : bus_->wifi_connections()) {
-        if (s.contains("802-11-wireless") &&
-            s["802-11-wireless"].value("ssid", "") == ssid &&
+        if (s.contains("802-11-wireless") && s["802-11-wireless"].value("ssid", "") == ssid &&
             s["802-11-wireless"].value("mode", "infrastructure") == "infrastructure") {
             existing_path = path;
             existing = s;
@@ -813,11 +801,10 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid,
     Section wifi{{"ssid", SVal::bytearr(ssid)}, {"mode", SVal::str("infrastructure")}};
     SettingsSpec spec{{"connection", conn}, {"802-11-wireless", wifi}};
 
-    bool had_security =
-        !existing.empty() && existing.contains("802-11-wireless-security");
+    bool had_security = !existing.empty() && existing.contains("802-11-wireless-security");
     if (!passphrase.empty()) {
-        spec.push_back({"802-11-wireless-security",
-                        {{"key-mgmt", SVal::str("wpa-psk")}, {"psk", SVal::str(passphrase)}}});
+        spec.push_back(
+            {"802-11-wireless-security", {{"key-mgmt", SVal::str("wpa-psk")}, {"psk", SVal::str(passphrase)}}});
     } else if (had_security) {
         // Keep WPA with the stored secret: declare key-mgmt but omit psk —
         // NM retains secrets that are not part of an Update payload.
@@ -833,8 +820,7 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid,
         bus_->update_connection(existing_path, spec, /*pin_shared_ip4=*/false);
     }
 
-    return {{"Id", ssid}, {"Ssid", ssid}, {"Autoconnect", autoconnect},
-            {"Priority", priority}};
+    return {{"Id", ssid}, {"Ssid", ssid}, {"Autoconnect", autoconnect}, {"Priority", priority}};
 }
 
 void WifiManager::delete_profile(const std::string& uuid) {
@@ -888,9 +874,8 @@ nlohmann::json WifiManager::get_ap() {
     return {{"Configured", false}};
 }
 
-nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& passphrase,
-                                   const std::string& band, std::uint32_t channel,
-                                   bool enabled) {
+nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& passphrase, const std::string& band,
+                                   std::uint32_t channel, bool enabled) {
     if (ssid.empty() || ssid.size() > 32) throw WifiError("Ssid must be 1-32 bytes");
     if (!passphrase.empty() && (passphrase.size() < 8 || passphrase.size() > 63)) {
         throw WifiError("Passphrase must be 8-63 characters");
@@ -917,14 +902,12 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
     if (!existing_path.empty()) {
         conn.push_back({"uuid", SVal::str(existing["connection"].value("uuid", ""))});
     }
-    Section wifi{{"ssid", SVal::bytearr(ssid)},
-                 {"mode", SVal::str("ap")},
-                 {"band", SVal::str(band)}};
+    Section wifi{{"ssid", SVal::bytearr(ssid)}, {"mode", SVal::str("ap")}, {"band", SVal::str(band)}};
     if (channel != 0) wifi.push_back({"channel", SVal::u32(channel)});
     SettingsSpec spec{{"connection", conn}, {"802-11-wireless", wifi}};
     if (!passphrase.empty()) {
-        spec.push_back({"802-11-wireless-security",
-                        {{"key-mgmt", SVal::str("wpa-psk")}, {"psk", SVal::str(passphrase)}}});
+        spec.push_back(
+            {"802-11-wireless-security", {{"key-mgmt", SVal::str("wpa-psk")}, {"psk", SVal::str(passphrase)}}});
     } else if (!existing.empty() && existing.contains("802-11-wireless-security")) {
         spec.push_back({"802-11-wireless-security", {{"key-mgmt", SVal::str("wpa-psk")}}});
     }
@@ -942,16 +925,13 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
             if (enabled) {
                 bus_->activate(path, dev);
             } else {
-                auto active = bus_->prop_path(dev.c_str(), kNmDeviceIface,
-                                              "ActiveConnection");
+                auto active = bus_->prop_path(dev.c_str(), kNmDeviceIface, "ActiveConnection");
                 if (!active.empty() && active != "/" &&
-                    bus_->prop_string(active.c_str(), kNmActiveIface, "Id") ==
-                        kApProfileId) {
+                    bus_->prop_string(active.c_str(), kNmActiveIface, "Id") == kApProfileId) {
                     sd_bus_error err = SD_BUS_ERROR_NULL;
                     sd_bus_message* reply = nullptr;
-                    int r = sd_bus_call_method(bus_->bus, kNmService, kNmPath, kNmIface,
-                                               "DeactivateConnection", &err, &reply, "o",
-                                               active.c_str());
+                    int r = sd_bus_call_method(bus_->bus, kNmService, kNmPath, kNmIface, "DeactivateConnection", &err,
+                                               &reply, "o", active.c_str());
                     if (r >= 0) sd_bus_message_unref(reply);
                     sd_bus_error_free(&err);
                 }

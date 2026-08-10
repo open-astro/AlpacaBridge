@@ -28,10 +28,9 @@
 // router can map failures onto Alpaca error responses uniformly.
 
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
-
-#include <nlohmann/json.hpp>
 
 namespace alpacahttp::util {
 
@@ -84,10 +83,7 @@ public:
     // Add or update a client (infrastructure) profile. Passphrase may be
     // empty for open networks; omit to keep the existing secret when
     // updating. Returns the profile as in profiles().
-    nlohmann::json save_profile(const std::string& ssid,
-                                const std::string& passphrase,
-                                bool autoconnect,
-                                int priority);
+    nlohmann::json save_profile(const std::string& ssid, const std::string& passphrase, bool autoconnect, int priority);
 
     // Delete a saved profile by UUID. Refuses to delete the AP profile.
     void delete_profile(const std::string& uuid);
@@ -103,11 +99,8 @@ public:
     // set: creates or updates the AP profile (id kApProfileId). Empty
     // passphrase keeps the existing secret; band "a"/"bg"; channel 0 lets NM
     // pick. enabled maps to autoconnect + immediate activate/deactivate.
-    nlohmann::json set_ap(const std::string& ssid,
-                          const std::string& passphrase,
-                          const std::string& band,
-                          std::uint32_t channel,
-                          bool enabled);
+    nlohmann::json set_ap(const std::string& ssid, const std::string& passphrase, const std::string& band,
+                          std::uint32_t channel, bool enabled);
 
     // Regulatory country. get returns {"Alpha2":str} ("" if never set).
     // set validates [A-Z]{2}, applies via nl80211 REQ_SET_REG (needs

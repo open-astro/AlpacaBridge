@@ -1430,8 +1430,7 @@ RouteMatch Router::parse_route(const std::string& path) {
     {
         // WiFi manager: /management/v1/wifi/<sub>[/<arg>] — sub+arg travel in
         // method_name ("status", "profiles", "profiles/<uuid>", ...).
-        static const std::regex kWifiRegex(
-            R"(^/management/(?:v1/)?wifi/([a-z]+(?:/[^/?]+)?)/?$)");
+        static const std::regex kWifiRegex(R"(^/management/(?:v1/)?wifi/([a-z]+(?:/[^/?]+)?)/?$)");
         std::smatch wifi_match;
         if (std::regex_match(path, wifi_match, kWifiRegex)) {
             match.is_management = true;
@@ -6521,8 +6520,7 @@ util::WifiManager& Router::wifi_manager() {
     return *wifi_manager_;
 }
 
-Response Router::handle_wifi(const Request& request, const RouteMatch& match,
-                             std::uint32_t server_tx_id) {
+Response Router::handle_wifi(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id) {
     // Unauthenticated like the other management endpoints (trusted-LAN threat
     // model — see handle_sync_time). Privileged operations are bounded by the
     // polkit rule (NetworkManager actions) and CAP_NET_ADMIN (country only).
@@ -6547,8 +6545,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match,
         return *parsed;
     };
     auto fail = [&](int code, const std::string& msg) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, code, msg);
+        AlpacaResponse alpaca_response = make_error_response(client_tx_id, server_tx_id, code, msg);
         response.set_body(alpaca_response);
         return response;
     };
@@ -6585,8 +6582,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match,
             if (const auto* pr = find_json_value(body, "Priority"); pr && pr->is_number_integer()) {
                 priority = pr->get<int>();
             }
-            ok.value = wifi.save_profile(ssid->get<std::string>(), passphrase, autoconnect,
-                                         priority);
+            ok.value = wifi.save_profile(ssid->get<std::string>(), passphrase, autoconnect, priority);
         } else if (sub.rfind("profiles/", 0) == 0 && is_delete) {
             wifi.delete_profile(sub.substr(std::string("profiles/").size()));
             ok.value = nlohmann::json{{"Deleted", true}};
@@ -6631,8 +6627,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match,
             wifi.set_country(cc->get<std::string>());
             ok.value = nlohmann::json{{"Alpha2", cc->get<std::string>()}};
         } else {
-            return fail(util::ErrorCode::INVALID_VALUE,
-                        "Unknown wifi endpoint or method: " + sub);
+            return fail(util::ErrorCode::INVALID_VALUE, "Unknown wifi endpoint or method: " + sub);
         }
 
         response.set_body(ok);

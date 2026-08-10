@@ -38,8 +38,8 @@
 
 #include "request.h"
 #include "response.h"
-#include "wifi_manager.h"
 #include "version.h"
+#include "wifi_manager.h"
 
 namespace alpacahttp {
 
