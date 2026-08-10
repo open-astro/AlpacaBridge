@@ -89,6 +89,23 @@ struct WifiManager::BusHandle {
         return out;
     }
 
+    // Object-path-typed property ("o") — ActiveConnection, Ip4Config,
+    // ActiveAccessPoint. Reading these as "s" fails sd-bus's type check.
+    std::string prop_path(const char* path, const char* iface, const char* prop) {
+        sd_bus_error err = SD_BUS_ERROR_NULL;
+        sd_bus_message* m = nullptr;
+        std::string out;
+        int r = sd_bus_get_property(bus, kNmService, path, iface, prop, &err, &m, "o");
+        if (r < 0) {
+            sd_bus_error_free(&err);
+            return out;
+        }
+        const char* p = nullptr;
+        if (sd_bus_message_read(m, "o", &p) > 0 && p) out = p;
+        sd_bus_message_unref(m);
+        return out;
+    }
+
     std::uint64_t prop_trivial(const char* path, const char* iface, const char* prop,
                                char type, std::uint64_t fallback = 0) {
         sd_bus_error err = SD_BUS_ERROR_NULL;
@@ -408,13 +425,13 @@ struct WifiManager::BusHandle {
 
     // Uuid of the active connection on a device ("" if none).
     std::string active_uuid(const std::string& device_path) {
-        auto active = prop_string(device_path.c_str(), kNmDeviceIface, "ActiveConnection");
+        auto active = prop_path(device_path.c_str(), kNmDeviceIface, "ActiveConnection");
         if (active.empty() || active == "/") return "";
         return prop_string(active.c_str(), kNmActiveIface, "Uuid");
     }
 
     std::string device_ip4(const std::string& device_path) {
-        auto cfg = prop_string(device_path.c_str(), kNmDeviceIface, "Ip4Config");
+        auto cfg = prop_path(device_path.c_str(), kNmDeviceIface, "Ip4Config");
         if (cfg.empty() || cfg == "/") return "";
         // AddressData is aa{sv}; read the first "address" string.
         sd_bus_error err = SD_BUS_ERROR_NULL;
@@ -621,12 +638,12 @@ nlohmann::json WifiManager::status() {
     out["State"] = state_str;
 
     // Active connection details (client association or our own AP).
-    auto active = bus_->prop_string(dev.c_str(), kNmDeviceIface, "ActiveConnection");
+    auto active = bus_->prop_path(dev.c_str(), kNmDeviceIface, "ActiveConnection");
     if (!active.empty() && active != "/") {
         out["ConnectionId"] = bus_->prop_string(active.c_str(), kNmActiveIface, "Id");
         out["ConnectionUuid"] = bus_->prop_string(active.c_str(), kNmActiveIface, "Uuid");
     }
-    auto ap = bus_->prop_string(dev.c_str(), kNmWirelessIface, "ActiveAccessPoint");
+    auto ap = bus_->prop_path(dev.c_str(), kNmWirelessIface, "ActiveAccessPoint");
     if (!ap.empty() && ap != "/") {
         out["Ssid"] = bus_->prop_bytes(ap.c_str(), kNmApIface, "Ssid");
         out["FrequencyMhz"] = static_cast<std::uint32_t>(
@@ -913,8 +930,8 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
             if (enabled) {
                 bus_->activate(path, dev);
             } else {
-                auto active = bus_->prop_string(dev.c_str(), kNmDeviceIface,
-                                                "ActiveConnection");
+                auto active = bus_->prop_path(dev.c_str(), kNmDeviceIface,
+                                              "ActiveConnection");
                 if (!active.empty() && active != "/" &&
                     bus_->prop_string(active.c_str(), kNmActiveIface, "Id") ==
                         kApProfileId) {
