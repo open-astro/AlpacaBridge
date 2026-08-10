@@ -1,7 +1,8 @@
 # WiFi Manager — Design Document
 
-Status: **DRAFT** — design only, no implementation yet.
-Branch: `feature/wifi-manager`
+Status: **SHIPPED in 3.4.0** (PR #198, 2026-08-10). This document is the
+design record; the implemented API contract (which supersedes the endpoint
+sketch below where they differ) is `wifi-api.md`.
 
 ## Goal
 
@@ -79,8 +80,9 @@ management endpoints), following the Sync Time pattern
 | GET | `/management/v1/wifi/profiles` | Saved profiles (never returns passphrases) |
 | PUT | `/management/v1/wifi/profiles` | Add/update a profile `{Ssid, Passphrase, Autoconnect, Priority}` |
 | DELETE | `/management/v1/wifi/profiles/{id}` | Remove a profile |
-| PUT | `/management/v1/wifi/connect` | Connect to a profile now `{Id}` |
-| GET/PUT | `/management/v1/wifi/ap` | Get/set AP config `{Enabled: "auto"\|"always"\|"off", Ssid, Passphrase, Band, Channel}` |
+| PUT | `/management/v1/wifi/connect` | Connect to a profile now `{Uuid}` (shipped; design draft said `{Id}`) |
+| GET/PUT | `/management/v1/wifi/ap` | Get/set AP config. Shipped shape: `{Ssid, Passphrase, Band: "a"\|"bg", Channel, Enabled: bool}` — the draft's `"auto"\|"always"\|"off"` tri-state was simplified to a bool (Enabled = active + autoconnect); the auto-fallback watchdog remains future work (Phase 2) |
+| PUT | `/management/v1/wifi/radio` | `{Enabled: bool}` — WiFi radio on/off (added during implementation; some images ship the radio soft-disabled) |
 | GET/PUT | `/management/v1/wifi/country` | Get/set regulatory country `{Alpha2}`. Applied in-process via nl80211 `NL80211_CMD_REQ_SET_REG` (what `iw reg set` does — no subprocess); persisted in `/var/lib/alpacabridge` and re-applied at daemon startup before any AP activation. Requires `AmbientCapabilities=CAP_NET_ADMIN` on the unit (Sync Time / CAP_SYS_TIME precedent). UI: country dropdown, prominent on first setup — some drivers refuse 5 GHz AP under the WORLD domain; AP channel list must refresh after a change (legal channels differ per country) |
 
 Notes:
