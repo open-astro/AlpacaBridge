@@ -304,7 +304,7 @@ function getNextDeviceNumberForType(deviceType) {
 // client addresses a device. A vendor *index* is different: it selects which
 // physical unit a vendor SDK enumerates on the bus (camera 0, 1, 2 ...). Each
 // SDK counts from 0 independently, so the index is scoped per (vendor,
-// deviceType) — a ZWO camera and a Player One camera can both be index 0.
+// deviceType) - a ZWO camera and a Player One camera can both be index 0.
 // Vendors that connect by serial port or network (iOptron, SynScan, Celestron,
 // Bisque) identify the device by path/host and have no index field, so they
 // aren't listed here. `idFieldId`, when present, is a serial/ID input that pins
@@ -511,7 +511,7 @@ async function loadDevices() {
         currentDevices = sortedDevices;
         devicesList.innerHTML = sortedDevices.map((device, index) => {
             const config = device.Config || device.config || null;
-            const vendor = (device.Vendor || (config && config.vendor) || '—').toString();
+            const vendor = (device.Vendor || (config && config.vendor) || 'N/A').toString();
             const settingsHtml = renderDeviceSettings(config);
             const deviceName = device.DeviceName || device.Name || 'Unknown Device';
             const hasLoadError = device.LoadError === true;
@@ -718,7 +718,7 @@ function startEditDevice(device) {
     // (updateZwoConfigFields / updateTouptekConfigFields /
     // updatePlayerOneConfigFields), so device-type-aware blocks like
     // playerone-filterwheel-fields are shown for edits through this
-    // dispatch — no explicit toggler calls are needed here.
+    // dispatch - no explicit toggler calls are needed here.
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
     if (vendor === 'ioptron' && deviceType === 'switch') {
@@ -1082,7 +1082,7 @@ function startEditDevice(device) {
         }
         // pwmFrequencyHz was previously surfaced here as a user-editable
         // field. It's now auto-managed by the wrapper (defaults to 50 Hz,
-        // matching what ZWO's stock zwoair_imager daemon actually uses —
+        // matching what ZWO's stock zwoair_imager daemon actually uses -
         // see the comment block in default_asiair_plus_rk3568_config())
         // and intentionally not shown in the UI. The persisted value, if
         // any, is still passed through by the router so power users can
@@ -1197,16 +1197,16 @@ async function loadServerInfo() {
         }
 
         const desc = parseResponseValue(data.Value) || {};
-        const serverName = resolveDescriptionValue(desc, ['ServerName', 'serverName']) || '—';
-        const manufacturer = resolveDescriptionValue(desc, ['Manufacturer', 'manufacturer']) || '—';
-        const manufacturerVersion = resolveDescriptionValue(desc, ['ManufacturerVersion', 'manufacturerVersion', 'Version', 'version']) || '—';
+        const serverName = resolveDescriptionValue(desc, ['ServerName', 'serverName']) || 'N/A';
+        const manufacturer = resolveDescriptionValue(desc, ['Manufacturer', 'manufacturer']) || 'N/A';
+        const manufacturerVersion = resolveDescriptionValue(desc, ['ManufacturerVersion', 'manufacturerVersion', 'Version', 'version']) || 'N/A';
         const location = resolveDescriptionValue(desc, ['Location', 'location']) || '';
 
         // Mirror the server-reported version (sourced from the VERSION file at
         // build time) into the header badge.
         const headerVersion = document.getElementById('header-version');
         if (headerVersion) {
-            headerVersion.textContent = manufacturerVersion !== '—' ? 'v' + manufacturerVersion : '';
+            headerVersion.textContent = manufacturerVersion !== 'N/A' ? 'v' + manufacturerVersion : '';
         }
 
         serverInfo.innerHTML = `
@@ -1259,7 +1259,7 @@ async function loadServerInfo() {
 }
 
 function renderServerInfoRow(label, value) {
-    const displayValue = value !== undefined && value !== null && value !== '' ? value : '—';
+    const displayValue = value !== undefined && value !== null && value !== '' ? value : 'N/A';
     return `
         <div class="server-info-row">
             <span class="info-label">${escapeHtml(label)}</span>
@@ -1370,7 +1370,7 @@ async function syncTime() {
         return;
     }
 
-    // Capture the epoch AFTER the user confirms — confirm() blocks, so an
+    // Capture the epoch AFTER the user confirms - confirm() blocks, so an
     // epoch taken before it would be stale by however long the dialog was
     // open.
     const epoch = Math.floor(Date.now() / 1000);
@@ -1406,7 +1406,7 @@ async function syncTime() {
 }
 
 // Live server clock: fetch the SBC's time once, remember its offset from the
-// browser's clock, and tick the display locally every second — no per-second
+// browser's clock, and tick the display locally every second - no per-second
 // network traffic. Re-synced every 60 s and after a Sync Time. If server and
 // browser disagree by more than 2 s the clock turns red as a "needs sync" hint.
 let serverClockOffsetMs = null;
@@ -1423,7 +1423,7 @@ async function refreshServerClockOffset() {
             serverClockOffsetMs = (result.Value * 1000) - midpoint;
         }
     } catch (e) {
-        // Keep the last known offset on a transient fetch failure — the clock
+        // Keep the last known offset on a transient fetch failure - the clock
         // keeps ticking locally rather than blanking to --:--:--. It only
         // shows placeholders before the first successful fetch.
     }
@@ -1687,7 +1687,7 @@ function renderLogFiles(directory, files) {
     listEl.innerHTML = '';
     if (!files.length) {
         setLogFilesStatus(directory
-            ? 'No log files yet — they appear here once the server writes some.'
+            ? 'No log files yet - they appear here once the server writes some.'
             : 'No log files (file logging is disabled).');
         return;
     }
@@ -1745,7 +1745,7 @@ async function viewLogFile(filename, sizeBytes = null) {
     if (Number.isFinite(sizeBytes) && sizeBytes > INLINE_VIEW_MAX_BYTES) {
         clearLogFileViewer();
         setLogFilesStatus(
-            `${filename} is ${formatLogFileSize(sizeBytes)} — too large to view inline. Use Download instead.`
+            `${filename} is ${formatLogFileSize(sizeBytes)} - too large to view inline. Use Download instead.`
         );
         return;
     }
@@ -2367,7 +2367,7 @@ function applyOpticsMm(formData, deviceData, apertureField, focalField) {
     ];
     for (const [formName, configKey, label, minMm] of fields) {
         const mm = readOptionalNumber(formData, formName);
-        // null (empty field) and an explicit 0 both mean "unset" — the router
+        // null (empty field) and an explicit 0 both mean "unset" - the router
         // only injects values > 0 into the drivers, so don't store a 0.
         if (mm === null || mm === 0) {
             continue;
@@ -2377,7 +2377,7 @@ function applyOpticsMm(formData, deviceData, apertureField, focalField) {
             return false;
         }
         if (mm < minMm) {
-            alert(`${label} of ${mm} mm looks too small — this field is in millimetres ` +
+            alert(`${label} of ${mm} mm looks too small - this field is in millimetres ` +
                 `(e.g. a 480 mm focal length is entered as 480). Please re-enter the value in mm.`);
             return false;
         }
@@ -2875,7 +2875,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                 deviceData.tcpPort = parseInt(formData.get('ioptronTcpPort')) || 4030;
             }
         }
-        // "auto" needs no connection fields — port is discovered at startup
+        // "auto" needs no connection fields - port is discovered at startup
 
         if (!applyOpticsMm(formData, deviceData, 'apertureDiameter', 'focalLength')) {
             return;
@@ -2890,7 +2890,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.host = formData.get('synscanHost');
             deviceData.tcpPort = parseInt(formData.get('synscanTcpPort')) || 11880;
         }
-        // "auto" needs no connection fields — port is discovered at startup
+        // "auto" needs no connection fields - port is discovered at startup
 
         if (!applyOpticsMm(formData, deviceData, 'synscanApertureDiameter', 'synscanFocalLength')) {
             return;
@@ -2901,7 +2901,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.portPath = formData.get('onstepPortPath');
             deviceData.baudRate = parseInt(formData.get('onstepBaudRate')) || 9600;
         }
-        // "auto" needs no connection fields — port is discovered at startup
+        // "auto" needs no connection fields - port is discovered at startup
 
         if (!applyOpticsMm(formData, deviceData, 'onstepApertureDiameter', 'onstepFocalLength')) {
             return;
@@ -2915,7 +2915,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.host = formData.get('celestronHost');
             deviceData.tcpPort = parseInt(formData.get('celestronTcpPort')) || 2000;
         }
-        // "auto" needs no connection fields — port is discovered at startup
+        // "auto" needs no connection fields - port is discovered at startup
 
         if (!applyOpticsMm(formData, deviceData, 'celestronApertureDiameter', 'celestronFocalLength')) {
             return;
@@ -3001,7 +3001,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (devicePath) {
                     deviceData.devicePath = devicePath;
                 }
-                // pwmFrequencyHz is no longer collected from the form — the
+                // pwmFrequencyHz is no longer collected from the form - the
                 // driver auto-sets it to 50 Hz (matching what ZWO's stock
                 // daemon actually uses) for soft-PWM. Any value already in
                 // the persisted config still takes effect via the router,
@@ -3043,7 +3043,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                 }
             }
             const filterNamesRaw = formData.get('filterNames');
-            // Submit: don't expand shorthand client-side — send the raw token and
+            // Submit: don't expand shorthand client-side - send the raw token and
             // let the slot-count-aware C++ expansion handle it (see parseFilterNamesInput).
             const names = parseFilterNamesInput(filterNamesRaw, false);
             if (names.length > 0) {
@@ -3384,7 +3384,7 @@ function parseResponseValue(value) {
     }
     // The server returns the Alpaca "Value" as structured JSON, so an object or
     // array arrives ready to use. Only attempt to parse a string when it clearly
-    // encodes a JSON object/array — this keeps backward compatibility with an
+    // encodes a JSON object/array - this keeps backward compatibility with an
     // older server that double-encoded structured payloads as a string, while
     // never coercing a plain scalar string (e.g. a "12345" serial or "true"
     // text property) into a number/boolean.
@@ -3633,7 +3633,7 @@ async function wifiRefresh() {
         if (line) {
             const caps = status.Capabilities || {};
             const has5 = caps.Freq5GHz || status.ScanSees5GHz;
-            line.textContent = `${parts[0]} — device ${status.Device}, bands: 2.4 GHz${has5 ? ' + 5 GHz' : ' only'}` +
+            line.textContent = `${parts[0]} - device ${status.Device}, bands: 2.4 GHz${has5 ? ' + 5 GHz' : ' only'}` +
                 (status.Country ? `, country ${status.Country}` : ', country not set');
         }
 
@@ -3684,7 +3684,7 @@ async function wifiRenderProfiles() {
         const row = document.createElement('div');
         row.className = 'log-file-row';
         const label = document.createElement('span');
-        label.textContent = `${p.Id}${p.Mode === 'ap' ? ' (hotspot)' : ''}${p.Active ? ' — active' : ''}` +
+        label.textContent = `${p.Id}${p.Mode === 'ap' ? ' (hotspot)' : ''}${p.Active ? ' - active' : ''}` +
             (p.Mode !== 'ap' ? ` (priority ${p.Priority}${p.Autoconnect ? '' : ', manual'})` : '');
         row.appendChild(label);
 
@@ -3722,7 +3722,7 @@ async function wifiScan() {
             row.className = 'log-file-row';
             const band = n.FrequencyMhz > 5000 ? '5 GHz' : '2.4 GHz';
             const label = document.createElement('span');
-            label.textContent = `${n.Ssid} — ${band}, ${n.SignalPercent}%${n.Security !== 'Open' ? ', ' + n.Security : ', open'}`;
+            label.textContent = `${n.Ssid} - ${band}, ${n.SignalPercent}%${n.Security !== 'Open' ? ', ' + n.Security : ', open'}`;
             row.appendChild(label);
             const joinBtn = document.createElement('button');
             joinBtn.className = 'btn btn-secondary';

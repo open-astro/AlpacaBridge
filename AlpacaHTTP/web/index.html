@@ -19,7 +19,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=5">
+    <link rel="stylesheet" href="/web/style.css?v=6">
 </head>
 <body>
     <div class="container">
@@ -951,7 +951,7 @@
                             <label for="gemini-connection-type">Connection Type:</label>
                             <select id="gemini-connection-type" name="connectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
-                                <option value="serial">Serial (USB) — manual port</option>
+                                <option value="serial">Serial (USB) - manual port</option>
                             </select>
                             <small>Auto-detect scans USB serial ports and probes for the focuser automatically.</small>
                         </div>
@@ -994,7 +994,7 @@
 
                         <div id="gemini-flatpanel-lite-fields">
                             <h3>Gemini Astro Flat Panel Cover Lite</h3>
-                            <p><small>Light-only flat panel (no motorized cover). USB serial only — no protocol
+                            <p><small>Light-only flat panel (no motorized cover). USB serial only - no protocol
                                documentation was published by the vendor, so this driver's ASCII command set was
                                reverse-engineered from the vendor's Windows control app and confirmed against
                                real hardware (ConformU-validated).</small></p>
@@ -1003,7 +1003,7 @@
                                 <label for="gemini-flatpanel-connection-type">Connection Type:</label>
                                 <select id="gemini-flatpanel-connection-type" name="geminiFlatPanelConnectionType">
                                     <option value="auto" selected>Auto-detect (recommended)</option>
-                                    <option value="serial">Serial (USB) — manual port</option>
+                                    <option value="serial">Serial (USB) - manual port</option>
                                 </select>
                                 <small>Auto-detect scans USB serial ports and probes for the flat panel automatically.</small>
                             </div>
@@ -1040,7 +1040,7 @@
                             <p><small>Motorized-cover flat panel (OpenCover/CloseCover supported; HaltCover stops
                                reporting movement rather than issuing a hardware stop, since this hardware
                                revision has no native abort command). No vendor SDK or protocol spec exists for
-                               this model either — the cover/status command set is sourced from INDI's
+                               this model either - the cover/status command set is sourced from INDI's
                                open-source Rev2 adapter, ConformU-validated against real hardware (firmware 408).
                                USB serial only.</small></p>
 
@@ -1048,7 +1048,7 @@
                                 <label for="gemini-flatpanel-v2-connection-type">Connection Type:</label>
                                 <select id="gemini-flatpanel-v2-connection-type" name="geminiFlatPanelV2ConnectionType">
                                     <option value="auto" selected>Auto-detect (recommended)</option>
-                                    <option value="serial">Serial (USB) — manual port</option>
+                                    <option value="serial">Serial (USB) - manual port</option>
                                 </select>
                                 <small>Auto-detect scans USB serial ports and probes for the flat panel automatically.</small>
                             </div>
@@ -1094,7 +1094,7 @@
                             <label for="wandererastro-connection-type">Connection Type:</label>
                             <select id="wandererastro-connection-type" name="wandererastroConnectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
-                                <option value="serial">Serial (USB) — manual port</option>
+                                <option value="serial">Serial (USB) - manual port</option>
                             </select>
                             <small>Auto-detect scans USB serial ports for the WandererCover status stream automatically.</small>
                         </div>
@@ -1132,7 +1132,7 @@
                             <label for="wandererastro-rotator-connection-type">Connection Type:</label>
                             <select id="wandererastro-rotator-connection-type" name="wandererastroRotatorConnectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
-                                <option value="serial">Serial (USB) — manual port</option>
+                                <option value="serial">Serial (USB) - manual port</option>
                             </select>
                             <small>Auto-detect scans USB serial ports and probes for the rotator automatically.</small>
                         </div>
@@ -1170,7 +1170,7 @@
                             <label for="wandererastro-filterwheel-connection-type">Connection Type:</label>
                             <select id="wandererastro-filterwheel-connection-type" name="wandererastroFilterwheelConnectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
-                                <option value="serial">Serial (USB) — manual port</option>
+                                <option value="serial">Serial (USB) - manual port</option>
                             </select>
                             <small>Auto-detect scans USB serial ports and listens for the wheel's status stream automatically.</small>
                         </div>
@@ -1231,7 +1231,7 @@
                             <label for="wandererastro-box-connection-type">Connection Type:</label>
                             <select id="wandererastro-box-connection-type" name="wandererastroBoxConnectionType">
                                 <option value="auto" selected>Auto-detect (recommended)</option>
-                                <option value="serial">Serial (USB) — manual port</option>
+                                <option value="serial">Serial (USB) - manual port</option>
                             </select>
                             <small>Auto-detect scans USB serial ports and listens for the box's status stream automatically.</small>
                         </div>
@@ -1302,14 +1302,14 @@
                     <p id="wifi-status-line" class="log-status">Loading WiFi status...</p>
 
                     <div class="form-group">
-                        <label for="wifi-country">Regulatory country:<button class="info-btn" type="button" aria-label="About regulatory country" data-info-title="Regulatory country" data-info-text="WiFi channels and power limits are regulated per country. Set this to where the device is physically located — it unlocks the correct 5 GHz channels for your region and is required before the 5 GHz hotspot can start on some boards. The setting is remembered across reboots.">i</button></label>
+                        <label for="wifi-country">Regulatory country:<button class="info-btn" type="button" aria-label="About regulatory country" data-info-title="Regulatory country" data-info-text="WiFi channels and power limits are regulated per country. Set this to where the device is physically located - it unlocks the correct 5 GHz channels for your region and is required before the 5 GHz hotspot can start on some boards. The setting is remembered across reboots.">i</button></label>
                         <select id="wifi-country"></select>
                         <button class="btn btn-secondary" type="button" onclick="wifiSetCountry()">Apply</button>
                     </div>
 
                     <h4>Hotspot</h4>
                     <div class="form-group">
-                        <label for="wifi-ap-ssid">Hotspot name (SSID):<button class="info-btn" type="button" aria-label="About the hotspot" data-info-title="Hotspot" data-info-text="The device broadcasts its own WiFi network so you can reach this portal in the field with no router — and so WiFi-controlled gear (e.g. a mount) can connect to the device. Join the hotspot from your phone, tablet, or the mount's WiFi settings, then open http://172.24.1.1:6800/. Note the radio does one thing at a time: while the hotspot runs, the device is not connected to your home WiFi (ethernet keeps working).">i</button></label>
+                        <label for="wifi-ap-ssid">Hotspot name (SSID):<button class="info-btn" type="button" aria-label="About the hotspot" data-info-title="Hotspot" data-info-text="The device broadcasts its own WiFi network so you can reach this portal in the field with no router - and so WiFi-controlled gear (e.g. a mount) can connect to the device. Join the hotspot from your phone, tablet, or the mount's WiFi settings, then open http://172.24.1.1:6800/. Note the radio does one thing at a time: while the hotspot runs, the device is not connected to your home WiFi (ethernet keeps working).">i</button></label>
                         <input type="text" id="wifi-ap-ssid" maxlength="32">
                     </div>
                     <div class="form-group">
@@ -1318,7 +1318,7 @@
                         <small>8&ndash;63 characters. Leave blank to keep the current passphrase.</small>
                     </div>
                     <div class="form-group">
-                        <label for="wifi-ap-band">Band:<button class="info-btn" type="button" aria-label="About WiFi bands" data-info-title="2.4 GHz vs 5 GHz" data-info-text="2.4 GHz reaches further and penetrates obstacles better, and most WiFi mounts and older devices only speak 2.4 GHz. 5 GHz is faster and less congested — best for image transfer to a phone or laptop standing nearby. One radio, one band: the hotspot runs on the selected band only. If 5 GHz is greyed out, this board's WiFi hardware (or its driver) doesn't support hosting on 5 GHz.">i</button></label>
+                        <label for="wifi-ap-band">Band:<button class="info-btn" type="button" aria-label="About WiFi bands" data-info-title="2.4 GHz vs 5 GHz" data-info-text="2.4 GHz reaches further and penetrates obstacles better, and most WiFi mounts and older devices only speak 2.4 GHz. 5 GHz is faster and less congested - best for image transfer to a phone or laptop standing nearby. One radio, one band: the hotspot runs on the selected band only. If 5 GHz is greyed out, this board's WiFi hardware (or its driver) doesn't support hosting on 5 GHz.">i</button></label>
                         <select id="wifi-ap-band">
                             <option value="a">5 GHz</option>
                             <option value="bg">2.4 GHz</option>
@@ -1329,14 +1329,14 @@
                         <button class="btn btn-secondary" type="button" onclick="wifiSaveAp(false)">Save Off</button>
                     </div>
 
-                    <h4>Networks<button class="info-btn" type="button" aria-label="About networks" data-info-title="Networks" data-info-text="Scan lists the WiFi networks the device can see. Join one (e.g. your home WiFi) to give the device internet access — it saves the network and reconnects automatically on every boot while in range. Joining a network stops the hotspot (one radio), and vice versa; a wired ethernet connection is never affected.">i</button></h4>
+                    <h4>Networks<button class="info-btn" type="button" aria-label="About networks" data-info-title="Networks" data-info-text="Scan lists the WiFi networks the device can see. Join one (e.g. your home WiFi) to give the device internet access - it saves the network and reconnects automatically on every boot while in range. Joining a network stops the hotspot (one radio), and vice versa; a wired ethernet connection is never affected.">i</button></h4>
                     <div class="form-actions">
                         <button class="btn btn-secondary" type="button" onclick="wifiScan()">Scan</button>
                         <button class="btn btn-secondary" type="button" onclick="wifiRefresh()">Refresh</button>
                     </div>
                     <div id="wifi-scan-list" class="log-files-list"></div>
 
-                    <h4>Saved profiles<button class="info-btn" type="button" aria-label="About saved profiles" data-info-title="Saved profiles" data-info-text="Networks this device remembers — like the saved WiFi list on your phone. Each profile stores the network name, passphrase, and priority; at boot the device joins the highest-priority saved network in range, falling back to the hotspot (priority -10) when none is found. Connect switches to a profile now; Forget removes it. The hotspot profile cannot be deleted, so the device always has a way to be reached.">i</button></h4>
+                    <h4>Saved profiles<button class="info-btn" type="button" aria-label="About saved profiles" data-info-title="Saved profiles" data-info-text="Networks this device remembers - like the saved WiFi list on your phone. Each profile stores the network name, passphrase, and priority; at boot the device joins the highest-priority saved network in range, falling back to the hotspot (priority -10) when none is found. Connect switches to a profile now; Forget removes it. The hotspot profile cannot be deleted, so the device always has a way to be reached.">i</button></h4>
                     <div id="wifi-profile-list" class="log-files-list"></div>
 
                     <p id="wifi-message" class="log-status"></p>
@@ -1396,6 +1396,6 @@
         </div>
     </div>
 
-    <script src="/web/app.js?v=21"></script>
+    <script src="/web/app.js?v=22"></script>
 </body>
 </html>
