@@ -384,8 +384,8 @@ h2 {
 .form-group input:focus,
 .form-group select:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(232, 93, 74, 0.2);
+    border-color: var(--accent-2);
+    box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
 }
 
 .form-group small {
@@ -445,8 +445,8 @@ input[type="range"] {
 .filterwheel-slot-row select:focus,
 .filterwheel-slot-row input:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(232, 93, 74, 0.2);
+    border-color: var(--accent-2);
+    box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
 }
 
 .filterwheel-slot-row input[type="text"] {
@@ -605,8 +605,8 @@ input[type="range"] {
 
 .server-location input:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(232, 93, 74, 0.2);
+    border-color: var(--accent-2);
+    box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
 }
 
 .server-status {
@@ -1116,7 +1116,7 @@ input[type="range"] {
     font: inherit;
     padding: 7px 10px;
 }
-.wifi-field input:focus { outline: none; border-color: var(--accent); }
+.wifi-field input:focus { outline: none; border-color: var(--accent-2); }
 .wifi-country-select {
     background: var(--panel-2);
     border: 1px solid var(--line);
