@@ -1911,6 +1911,36 @@ int main() {
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
         }
 
+        // CSRF guard: a cross-origin mutating request (browser-attached
+        // Origin header not matching Host) is rejected with 403; a
+        // same-origin one passes the guard (and proceeds to validation).
+        {
+            alpacahttp::Request request;
+            std::string body = "{\"Alpha2\": \"US\"}";
+            std::ostringstream raw;
+            raw << "PUT /management/v1/wifi/country HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n"
+                << "Content-Type: application/json\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() == 403);
+
+            alpacahttp::Request same_origin;
+            std::ostringstream raw2;
+            raw2 << "PUT /management/v1/wifi/country HTTP/1.1\r\n"
+                 << "Host: localhost\r\n"
+                 << "Origin: http://localhost\r\n"
+                 << "Content-Type: application/json\r\n"
+                 << "Content-Length: 2\r\n\r\n{}";
+            EXPECT(same_origin.parse(raw2.str()));
+            const auto ok_response = router.route(same_origin, 1);
+            // Passes the guard; fails body validation (Alpha2 missing), not 403.
+            EXPECT(ok_response.status_code() != 403);
+        }
+
         // Body validation fires before any NM traffic.
         for (const auto& [path, body] : {
                  std::pair{"/management/v1/wifi/country", "{\"Alpha2\": \"usa\"}"},

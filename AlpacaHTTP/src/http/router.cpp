@@ -6532,6 +6532,31 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
+    // CSRF guard for state-changing operations (PR #198 follow-up): a
+    // malicious website open in a browser on the LAN can fire cross-origin
+    // requests at this unauthenticated endpoint. Browsers always attach an
+    // Origin header to cross-origin mutating requests; reject any whose
+    // Origin host does not match the Host the request was addressed to.
+    // Non-browser clients (curl, native apps) send no Origin and are
+    // unaffected, as is the same-origin web portal.
+    if (request.method() != HttpMethod::GET && request.has_header("Origin")) {
+        std::string origin = request.get_header("Origin");
+        std::string host = request.get_header("Host");
+        // Strip scheme from Origin, then compare host[:port] exactly.
+        auto scheme_end = origin.find("://");
+        std::string origin_host = scheme_end == std::string::npos ? origin : origin.substr(scheme_end + 3);
+        if (host.empty() || origin_host != host) {
+            AlpacaResponse alpaca_response =
+                make_error_response(0, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                    "Cross-origin WiFi management requests are not allowed");
+            Response resp;
+            resp.set_content_type("application/json");
+            resp.set_status(403, "Forbidden");
+            resp.set_body(alpaca_response);
+            return resp;
+        }
+    }
+
     const std::string& sub = match.method_name;
     const bool is_get = request.method() == HttpMethod::GET;
     const bool is_put = request.method() == HttpMethod::PUT || request.method() == HttpMethod::POST;

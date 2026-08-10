@@ -844,9 +844,6 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::str
     }
 
     if (existing_path.empty()) {
-        if (passphrase.empty() && !had_security) {
-            // New open-network profile: nothing to add — spec as built.
-        }
         bus_->add_connection(spec, /*pin_shared_ip4=*/false);
     } else {
         bus_->update_connection(existing_path, spec, /*pin_shared_ip4=*/false);

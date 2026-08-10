@@ -52,7 +52,12 @@ allowing (only) for user `alpacabridge`:
   network-control; without them ActivateConnection on the AP profile fails
   with "Not authorized to share connections via wifi")
 
-No other hardening relaxation on the unit is needed. This is a new mechanism
+No other hardening relaxation on the unit is needed. State-changing wifi
+requests additionally carry a CSRF guard: a browser-attached `Origin` header
+that does not match the request `Host` is rejected (403), so a malicious
+website open on a LAN browser cannot drive these endpoints. Full
+authentication remains an accepted-tradeoff discussion for the management
+surface as a whole. This is a new mechanism
 for the repo (the precedent, Sync Time, used an ambient capability); document
 it in `docs/architecture.md` when implemented.
 
