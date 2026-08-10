@@ -510,9 +510,16 @@ void nl80211_set_regdom(const std::string& alpha2) {
         if (send(fd, msg.data(), msg.size(), 0) < 0) {
             throw WifiError(std::string("netlink send: ") + std::strerror(errno));
         }
-        reply.resize(8192);
-        ssize_t n = recv(fd, reply.data(), reply.size(), 0);
+        // The GETFAMILY descriptor can be large on some drivers. MSG_TRUNC
+        // makes recv() return the real datagram length even when it exceeds
+        // the buffer, so truncation is detected instead of parsing a partial
+        // message (PR #198 review).
+        reply.resize(32768);
+        ssize_t n = recv(fd, reply.data(), reply.size(), MSG_TRUNC);
         if (n < 0) throw WifiError(std::string("netlink recv: ") + std::strerror(errno));
+        if (static_cast<size_t>(n) > reply.size()) {
+            throw WifiError("netlink reply truncated (" + std::to_string(n) + " bytes)");
+        }
         reply.resize(static_cast<size_t>(n));
     };
 
@@ -695,7 +702,7 @@ void WifiManager::set_wireless_enabled(bool enabled) {
 }
 
 nlohmann::json WifiManager::scan() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     ensure_bus_locked();
     auto [dev, ifname] = bus_->wifi_device();
     if (dev.empty()) throw WifiError("no wifi device");
@@ -711,10 +718,15 @@ nlohmann::json WifiManager::scan() {
         if (r >= 0) {
             sd_bus_message_unref(reply);
             // Give the driver a moment; NM has no synchronous scan API.
+            // Drop the instance mutex while settling so concurrent status and
+            // profiles calls from the UI are not blocked behind the scan
+            // (PR #198 review).
+            lock.unlock();
             struct timespec ts {
                 1, 500000000
             };  // 1.5 s
             nanosleep(&ts, nullptr);
+            lock.lock();
         }
         sd_bus_error_free(&err);
     }
