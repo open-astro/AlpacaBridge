@@ -69,8 +69,10 @@ jobs:
             build-essential \
             cmake \
             g++ \
+            pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
+            libsystemd-dev \
             libgpiod-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -109,6 +111,7 @@ jobs:
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
+            libsystemd-dev \
             libhidapi-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -186,8 +189,10 @@ jobs:
             build-essential \
             cmake \
             g++ \
+            pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
+            libsystemd-dev \
             libgpiod-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -230,6 +235,7 @@ jobs:
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
+            libsystemd-dev \
             libhidapi-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -374,6 +380,7 @@ jobs:
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
+            libsystemd-dev \
             libhidapi-dev \
             nlohmann-json3-dev \
             zlib1g-dev \

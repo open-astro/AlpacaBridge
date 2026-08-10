@@ -1,0 +1,23 @@
+// Allow the alpacabridge service user to manage WiFi through NetworkManager
+// for the web UI's WiFi card (/management/v1/wifi/*). Scoped to exactly the
+// NM actions the feature uses — no modem, no VPN, no global networking
+// enable/disable. See docs/wifi-manager-design.md.
+polkit.addRule(function(action, subject) {
+    if (subject.user !== "alpacabridge") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    switch (action.id) {
+        case "org.freedesktop.NetworkManager.wifi.scan":
+        case "org.freedesktop.NetworkManager.enable-disable-wifi":
+        case "org.freedesktop.NetworkManager.network-control":
+        case "org.freedesktop.NetworkManager.settings.modify.system":
+        // Activating a shared-mode (hotspot) connection additionally checks
+        // wifi.share.*: without these, ActivateConnection on the AP profile
+        // fails with "Not authorized to share connections via wifi"
+        // (found live on the Pi 5 rig, PR #198).
+        case "org.freedesktop.NetworkManager.wifi.share.protected":
+        case "org.freedesktop.NetworkManager.wifi.share.open":
+            return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

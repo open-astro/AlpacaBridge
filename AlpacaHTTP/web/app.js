@@ -304,7 +304,7 @@ function getNextDeviceNumberForType(deviceType) {
 // client addresses a device. A vendor *index* is different: it selects which
 // physical unit a vendor SDK enumerates on the bus (camera 0, 1, 2 ...). Each
 // SDK counts from 0 independently, so the index is scoped per (vendor,
-// deviceType) — a ZWO camera and a Player One camera can both be index 0.
+// deviceType) - a ZWO camera and a Player One camera can both be index 0.
 // Vendors that connect by serial port or network (iOptron, SynScan, Celestron,
 // Bisque) identify the device by path/host and have no index field, so they
 // aren't listed here. `idFieldId`, when present, is a serial/ID input that pins
@@ -511,7 +511,7 @@ async function loadDevices() {
         currentDevices = sortedDevices;
         devicesList.innerHTML = sortedDevices.map((device, index) => {
             const config = device.Config || device.config || null;
-            const vendor = (device.Vendor || (config && config.vendor) || '—').toString();
+            const vendor = (device.Vendor || (config && config.vendor) || 'N/A').toString();
             const settingsHtml = renderDeviceSettings(config);
             const deviceName = device.DeviceName || device.Name || 'Unknown Device';
             const hasLoadError = device.LoadError === true;
@@ -718,7 +718,7 @@ function startEditDevice(device) {
     // (updateZwoConfigFields / updateTouptekConfigFields /
     // updatePlayerOneConfigFields), so device-type-aware blocks like
     // playerone-filterwheel-fields are shown for edits through this
-    // dispatch — no explicit toggler calls are needed here.
+    // dispatch - no explicit toggler calls are needed here.
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
     if (vendor === 'ioptron' && deviceType === 'switch') {
@@ -1082,7 +1082,7 @@ function startEditDevice(device) {
         }
         // pwmFrequencyHz was previously surfaced here as a user-editable
         // field. It's now auto-managed by the wrapper (defaults to 50 Hz,
-        // matching what ZWO's stock zwoair_imager daemon actually uses —
+        // matching what ZWO's stock zwoair_imager daemon actually uses -
         // see the comment block in default_asiair_plus_rk3568_config())
         // and intentionally not shown in the UI. The persisted value, if
         // any, is still passed through by the router so power users can
@@ -1197,16 +1197,16 @@ async function loadServerInfo() {
         }
 
         const desc = parseResponseValue(data.Value) || {};
-        const serverName = resolveDescriptionValue(desc, ['ServerName', 'serverName']) || '—';
-        const manufacturer = resolveDescriptionValue(desc, ['Manufacturer', 'manufacturer']) || '—';
-        const manufacturerVersion = resolveDescriptionValue(desc, ['ManufacturerVersion', 'manufacturerVersion', 'Version', 'version']) || '—';
+        const serverName = resolveDescriptionValue(desc, ['ServerName', 'serverName']) || 'N/A';
+        const manufacturer = resolveDescriptionValue(desc, ['Manufacturer', 'manufacturer']) || 'N/A';
+        const manufacturerVersion = resolveDescriptionValue(desc, ['ManufacturerVersion', 'manufacturerVersion', 'Version', 'version']) || 'N/A';
         const location = resolveDescriptionValue(desc, ['Location', 'location']) || '';
 
         // Mirror the server-reported version (sourced from the VERSION file at
         // build time) into the header badge.
         const headerVersion = document.getElementById('header-version');
         if (headerVersion) {
-            headerVersion.textContent = manufacturerVersion !== '—' ? 'v' + manufacturerVersion : '';
+            headerVersion.textContent = manufacturerVersion !== 'N/A' ? 'v' + manufacturerVersion : '';
         }
 
         serverInfo.innerHTML = `
@@ -1259,7 +1259,7 @@ async function loadServerInfo() {
 }
 
 function renderServerInfoRow(label, value) {
-    const displayValue = value !== undefined && value !== null && value !== '' ? value : '—';
+    const displayValue = value !== undefined && value !== null && value !== '' ? value : 'N/A';
     return `
         <div class="server-info-row">
             <span class="info-label">${escapeHtml(label)}</span>
@@ -1359,6 +1359,7 @@ function refreshServerInfo() {
     loadServerInfo();
     loadLogSettings();
     loadLogFiles();
+    wifiRefresh();
 }
 
 // Sync the SBC's system clock from the browser's clock. The browser machine
@@ -1369,7 +1370,7 @@ async function syncTime() {
         return;
     }
 
-    // Capture the epoch AFTER the user confirms — confirm() blocks, so an
+    // Capture the epoch AFTER the user confirms - confirm() blocks, so an
     // epoch taken before it would be stale by however long the dialog was
     // open.
     const epoch = Math.floor(Date.now() / 1000);
@@ -1405,7 +1406,7 @@ async function syncTime() {
 }
 
 // Live server clock: fetch the SBC's time once, remember its offset from the
-// browser's clock, and tick the display locally every second — no per-second
+// browser's clock, and tick the display locally every second - no per-second
 // network traffic. Re-synced every 60 s and after a Sync Time. If server and
 // browser disagree by more than 2 s the clock turns red as a "needs sync" hint.
 let serverClockOffsetMs = null;
@@ -1422,7 +1423,7 @@ async function refreshServerClockOffset() {
             serverClockOffsetMs = (result.Value * 1000) - midpoint;
         }
     } catch (e) {
-        // Keep the last known offset on a transient fetch failure — the clock
+        // Keep the last known offset on a transient fetch failure - the clock
         // keeps ticking locally rather than blanking to --:--:--. It only
         // shows placeholders before the first successful fetch.
     }
@@ -1686,7 +1687,7 @@ function renderLogFiles(directory, files) {
     listEl.innerHTML = '';
     if (!files.length) {
         setLogFilesStatus(directory
-            ? 'No log files yet — they appear here once the server writes some.'
+            ? 'No log files yet - they appear here once the server writes some.'
             : 'No log files (file logging is disabled).');
         return;
     }
@@ -1744,7 +1745,7 @@ async function viewLogFile(filename, sizeBytes = null) {
     if (Number.isFinite(sizeBytes) && sizeBytes > INLINE_VIEW_MAX_BYTES) {
         clearLogFileViewer();
         setLogFilesStatus(
-            `${filename} is ${formatLogFileSize(sizeBytes)} — too large to view inline. Use Download instead.`
+            `${filename} is ${formatLogFileSize(sizeBytes)} - too large to view inline. Use Download instead.`
         );
         return;
     }
@@ -2366,7 +2367,7 @@ function applyOpticsMm(formData, deviceData, apertureField, focalField) {
     ];
     for (const [formName, configKey, label, minMm] of fields) {
         const mm = readOptionalNumber(formData, formName);
-        // null (empty field) and an explicit 0 both mean "unset" — the router
+        // null (empty field) and an explicit 0 both mean "unset" - the router
         // only injects values > 0 into the drivers, so don't store a 0.
         if (mm === null || mm === 0) {
             continue;
@@ -2376,7 +2377,7 @@ function applyOpticsMm(formData, deviceData, apertureField, focalField) {
             return false;
         }
         if (mm < minMm) {
-            alert(`${label} of ${mm} mm looks too small — this field is in millimetres ` +
+            alert(`${label} of ${mm} mm looks too small - this field is in millimetres ` +
                 `(e.g. a 480 mm focal length is entered as 480). Please re-enter the value in mm.`);
             return false;
         }
@@ -2874,7 +2875,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                 deviceData.tcpPort = parseInt(formData.get('ioptronTcpPort')) || 4030;
             }
         }
-        // "auto" needs no connection fields — port is discovered at startup
+        // "auto" needs no connection fields - port is discovered at startup
 
         if (!applyOpticsMm(formData, deviceData, 'apertureDiameter', 'focalLength')) {
             return;
@@ -2889,7 +2890,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.host = formData.get('synscanHost');
             deviceData.tcpPort = parseInt(formData.get('synscanTcpPort')) || 11880;
         }
-        // "auto" needs no connection fields — port is discovered at startup
+        // "auto" needs no connection fields - port is discovered at startup
 
         if (!applyOpticsMm(formData, deviceData, 'synscanApertureDiameter', 'synscanFocalLength')) {
             return;
@@ -2900,7 +2901,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.portPath = formData.get('onstepPortPath');
             deviceData.baudRate = parseInt(formData.get('onstepBaudRate')) || 9600;
         }
-        // "auto" needs no connection fields — port is discovered at startup
+        // "auto" needs no connection fields - port is discovered at startup
 
         if (!applyOpticsMm(formData, deviceData, 'onstepApertureDiameter', 'onstepFocalLength')) {
             return;
@@ -2914,7 +2915,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.host = formData.get('celestronHost');
             deviceData.tcpPort = parseInt(formData.get('celestronTcpPort')) || 2000;
         }
-        // "auto" needs no connection fields — port is discovered at startup
+        // "auto" needs no connection fields - port is discovered at startup
 
         if (!applyOpticsMm(formData, deviceData, 'celestronApertureDiameter', 'celestronFocalLength')) {
             return;
@@ -3000,7 +3001,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (devicePath) {
                     deviceData.devicePath = devicePath;
                 }
-                // pwmFrequencyHz is no longer collected from the form — the
+                // pwmFrequencyHz is no longer collected from the form - the
                 // driver auto-sets it to 50 Hz (matching what ZWO's stock
                 // daemon actually uses) for soft-PWM. Any value already in
                 // the persisted config still takes effect via the router,
@@ -3042,7 +3043,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                 }
             }
             const filterNamesRaw = formData.get('filterNames');
-            // Submit: don't expand shorthand client-side — send the raw token and
+            // Submit: don't expand shorthand client-side - send the raw token and
             // let the slot-count-aware C++ expansion handle it (see parseFilterNamesInput).
             const names = parseFilterNamesInput(filterNamesRaw, false);
             if (names.length > 0) {
@@ -3383,7 +3384,7 @@ function parseResponseValue(value) {
     }
     // The server returns the Alpaca "Value" as structured JSON, so an object or
     // array arrives ready to use. Only attempt to parse a string when it clearly
-    // encodes a JSON object/array — this keeps backward compatibility with an
+    // encodes a JSON object/array - this keeps backward compatibility with an
     // older server that double-encoded structured payloads as a string, while
     // never coercing a plain scalar string (e.g. a "12345" serial or "true"
     // text property) into a number/boolean.
@@ -3531,6 +3532,7 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(refreshServerClockOffset, 60000);
     loadLogSettings();
     loadLogFiles();
+    wifiInit();
     updateVendorOptions();
 
     document.querySelectorAll('.section-toggle').forEach(button => {
@@ -3557,3 +3559,384 @@ document.addEventListener('DOMContentLoaded', function() {
         closeLogViewer.addEventListener('click', clearLogFileViewer);
     }
 });
+
+// ---------------------------------------------------------------------------
+// Info buttons + bottom info sheet (shared pattern with OpenAstro Ara).
+// Markup-driven: any <button class="info-btn" data-info-title="..."
+// data-info-text="..."> opens the sheet. One sheet instance for the page.
+
+function ensureInfoSheet() {
+    let sheet = document.getElementById('info-sheet');
+    if (sheet) return sheet;
+    sheet = document.createElement('div');
+    sheet.id = 'info-sheet';
+    sheet.className = 'info-sheet';
+    sheet.innerHTML =
+        '<div class="info-sheet-header">' +
+        '<span class="info-sheet-icon">&#9432;</span>' +
+        '<span class="info-sheet-title" id="info-sheet-title"></span>' +
+        '<button class="info-sheet-close" type="button" aria-label="Close">&#10005;</button>' +
+        '</div>' +
+        '<div class="info-sheet-body" id="info-sheet-body"></div>';
+    document.body.appendChild(sheet);
+    sheet.querySelector('.info-sheet-close').addEventListener('click', closeInfoSheet);
+    document.addEventListener('click', (e) => {
+        if (sheet.classList.contains('open') && !sheet.contains(e.target) &&
+            !e.target.closest('.info-btn')) {
+            closeInfoSheet();
+        }
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeInfoSheet();
+    });
+    return sheet;
+}
+
+function openInfoSheet(title, text) {
+    const sheet = ensureInfoSheet();
+    document.getElementById('info-sheet-title').textContent = title;
+    document.getElementById('info-sheet-body').textContent = text;
+    sheet.classList.add('open');
+}
+
+function closeInfoSheet() {
+    const sheet = document.getElementById('info-sheet');
+    if (sheet) sheet.classList.remove('open');
+}
+
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.info-btn');
+    if (btn) {
+        openInfoSheet(btn.dataset.infoTitle || 'Info', btn.dataset.infoText || '');
+    }
+});
+
+// ---------------------------------------------------------------------------
+// WiFi (see docs/wifi-manager-design.md). Apple-Settings-style interaction:
+// toggles take effect immediately, the network list is tappable, and hotspot
+// settings save themselves on change. No explicit save buttons.
+
+const WIFI_BASE = '/management/v1/wifi';
+const WIFI_COUNTRIES = ['', 'US', 'CA', 'MX', 'GB', 'IE', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'FI', 'DK', 'PL', 'CZ', 'PT', 'GR', 'AU', 'NZ', 'JP', 'KR', 'CN', 'TW', 'IN', 'BR', 'AR', 'CL', 'ZA'];
+
+let wifiState = { status: null, ap: null, profiles: [], busy: false };
+
+function wifiEl(id) { return document.getElementById(id); }
+
+function wifiMessage(text, isError) {
+    const el = wifiEl('wifi-message');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = isError ? '#f08a7a' : '';
+}
+
+async function wifiApi(path, method, body) {
+    const options = { method: method || 'GET' };
+    if (body !== undefined) {
+        options.headers = { 'Content-Type': 'application/json' };
+        options.body = JSON.stringify(body);
+    }
+    const response = await fetch(WIFI_BASE + path, options);
+    const result = await response.json();
+    if (result.ErrorNumber !== 0) throw new Error(result.ErrorMessage || 'unknown error');
+    return result.Value;
+}
+
+function wifiSignalIcon(percent) {
+    if (percent >= 66) return '███';
+    if (percent >= 33) return '██░';
+    return '█░░';
+}
+
+async function wifiRefresh() {
+    const section = wifiEl('wifi-section');
+    if (!section) return;
+    try {
+        const status = await wifiApi('/status');
+        wifiState.status = status;
+        if (!status.Available) { section.style.display = 'none'; return; }
+        section.style.display = '';
+
+        const radioToggle = wifiEl('wifi-radio-toggle');
+        if (radioToggle) radioToggle.checked = !!status.WirelessEnabled;
+
+        const apActive = !!status.ApActive;
+        let summary;
+        if (!status.WirelessEnabled) summary = 'Off';
+        else if (apActive) summary = 'Hotspot: ' + (status.Ssid || 'on');
+        else if (status.Ssid) summary = status.Ssid;
+        else summary = 'Not Connected';
+        const summaryEl = wifiEl('wifi-summary');
+        if (summaryEl) summaryEl.textContent = summary;
+
+        const line = wifiEl('wifi-status-line');
+        if (line) {
+            if (!status.WirelessEnabled) {
+                line.textContent = 'WiFi is off. The hotspot and network connections are unavailable.';
+            } else if (apActive) {
+                line.textContent = 'Hotspot "' + status.Ssid + '" is on. Join it and open http://172.24.1.1:6800/';
+            } else if (status.Ssid) {
+                const band = status.FrequencyMhz > 5000 ? '5 GHz' : '2.4 GHz';
+                line.textContent = 'Connected to ' + status.Ssid + ' (' + band +
+                    (status.Ip4Address ? ', ' + status.Ip4Address : '') + ')';
+            } else {
+                line.textContent = 'Not connected to any network.';
+            }
+        }
+
+        const apState = wifiEl('wifi-ap-substate');
+        if (apState) apState.textContent = apActive ? 'On' : 'Off';
+        const apToggle = wifiEl('wifi-ap-toggle');
+        if (apToggle) apToggle.checked = apActive;
+
+        const has5 = (status.Capabilities || {}).Freq5GHz || status.ScanSees5GHz;
+        const btn5 = document.querySelector('#wifi-ap-band button[data-band="a"]');
+        if (btn5) btn5.style.display = has5 ? '' : 'none';
+
+        const countrySel = wifiEl('wifi-country');
+        if (countrySel && status.Country !== undefined) countrySel.value = status.Country || '';
+
+        try {
+            const ap = await wifiApi('/ap');
+            wifiState.ap = ap;
+            if (ap.Configured) {
+                const ssidInput = wifiEl('wifi-ap-ssid');
+                if (ssidInput && document.activeElement !== ssidInput) ssidInput.value = ap.Ssid || '';
+                wifiSetBandUi(ap.Band || 'a');
+            }
+        } catch (e) { /* ap config is optional */ }
+
+        wifiState.profiles = await wifiApi('/profiles');
+        await wifiRenderNetworks(false);
+    } catch (e) {
+        const line = wifiEl('wifi-status-line');
+        if (line) line.textContent = 'WiFi status unavailable: ' + e.message;
+    }
+}
+
+// Render the network list from the last scan + saved profiles. rescan=true
+// triggers a fresh scan first (slower).
+async function wifiRenderNetworks(rescan) {
+    const list = wifiEl('wifi-networks');
+    if (!list) return;
+    const status = wifiState.status || {};
+    if (!status.WirelessEnabled) {
+        list.innerHTML = '<p class="wifi-substatus">Turn WiFi on to see networks.</p>';
+        return;
+    }
+    if (rescan) list.innerHTML = '<p class="wifi-substatus">Scanning...</p>';
+    let networks = [];
+    try {
+        networks = await wifiApi('/scan');
+    } catch (e) {
+        list.innerHTML = '<p class="wifi-substatus">Scan failed: ' + e.message + '</p>';
+        return;
+    }
+    const profiles = wifiState.profiles || [];
+    const savedBySsid = {};
+    for (const p of profiles) {
+        if (p.Mode !== 'ap') savedBySsid[p.Ssid] = p;
+    }
+    const activeSsid = (!status.ApActive && status.Ssid) ? status.Ssid : null;
+
+    list.innerHTML = '';
+    const inRange = new Set();
+    for (const n of networks) {
+        if (n.Ssid === (wifiState.ap && wifiState.ap.Ssid)) continue;  // own hotspot
+        inRange.add(n.Ssid);
+        const saved = savedBySsid[n.Ssid];
+        const isActive = n.Ssid === activeSsid;
+        const row = document.createElement('div');
+        row.className = 'wifi-net-row' + (isActive ? ' active' : '');
+        row.innerHTML =
+            '<span class="wifi-net-check">' + (isActive ? '✓' : '') + '</span>' +
+            '<span class="wifi-net-name">' + escapeHtml(n.Ssid) + (saved && !isActive ? ' <small>saved</small>' : '') + '</span>' +
+            '<span class="wifi-net-meta">' + (n.Security !== 'Open' ? '🔒 ' : '') +
+            (n.FrequencyMhz > 5000 ? '5' : '2.4') + ' GHz <span class="wifi-signal">' + wifiSignalIcon(n.SignalPercent) + '</span></span>';
+        if (!isActive) {
+            row.addEventListener('click', () => saved ? wifiConnectSaved(saved) : wifiJoinNew(n));
+        }
+        list.appendChild(row);
+    }
+
+    // Saved networks that are not in range right now: manageable (forget).
+    const outOfRange = profiles.filter((p) => p.Mode !== 'ap' && !inRange.has(p.Ssid));
+    if (outOfRange.length) {
+        const title = document.createElement('p');
+        title.className = 'wifi-substatus';
+        title.textContent = 'Saved, not in range:';
+        list.appendChild(title);
+        for (const p of outOfRange) {
+            const row = document.createElement('div');
+            row.className = 'wifi-net-row dim';
+            row.innerHTML = '<span class="wifi-net-check"></span><span class="wifi-net-name">' + escapeHtml(p.Ssid) + '</span>';
+            const forget = document.createElement('button');
+            forget.className = 'btn btn-secondary btn-small';
+            forget.textContent = 'Forget';
+            forget.addEventListener('click', (e) => { e.stopPropagation(); wifiForget(p); });
+            row.appendChild(forget);
+            list.appendChild(row);
+        }
+    }
+    if (!list.children.length) {
+        list.innerHTML = '<p class="wifi-substatus">No networks found.</p>';
+    }
+}
+
+function wifiScanClicked() { wifiRenderNetworks(true); }
+
+async function wifiJoinNew(network) {
+    let passphrase = '';
+    if (network.Security !== 'Open') {
+        passphrase = prompt('Password for "' + network.Ssid + '":');
+        if (passphrase === null) return;
+    }
+    if (!wifiConfirmSwitch('join "' + network.Ssid + '"')) return;
+    try {
+        await wifiApi('/profiles', 'PUT', { Ssid: network.Ssid, Passphrase: passphrase, Autoconnect: true, Priority: 0 });
+        const profiles = await wifiApi('/profiles');
+        const match = profiles.find((p) => p.Ssid === network.Ssid && p.Mode !== 'ap');
+        if (match) await wifiApi('/connect', 'PUT', { Uuid: match.Uuid });
+        wifiMessage('Joining ' + network.Ssid + '...');
+        setTimeout(wifiRefresh, 8000);
+    } catch (e) {
+        wifiMessage('Could not join: ' + e.message, true);
+    }
+}
+
+async function wifiConnectSaved(profile) {
+    if (!wifiConfirmSwitch('switch to "' + profile.Ssid + '"')) return;
+    try {
+        await wifiApi('/connect', 'PUT', { Uuid: profile.Uuid });
+        wifiMessage('Connecting to ' + profile.Ssid + '...');
+        setTimeout(wifiRefresh, 8000);
+    } catch (e) {
+        wifiMessage('Could not connect: ' + e.message, true);
+    }
+}
+
+async function wifiForget(profile) {
+    if (!confirm('Forget "' + profile.Ssid + '"?')) return;
+    try {
+        await wifiApi('/profiles/' + encodeURIComponent(profile.Uuid), 'DELETE');
+        wifiState.profiles = await wifiApi('/profiles');
+        await wifiRenderNetworks(false);
+    } catch (e) {
+        wifiMessage('Could not forget: ' + e.message, true);
+    }
+}
+
+// One shared "this may drop your connection" warning, only when it can.
+function wifiConfirmSwitch(action) {
+    const status = wifiState.status || {};
+    const onWifi = status.Ssid && location.hostname !== 'localhost';
+    if (!onWifi) return true;
+    return confirm('The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection while it switches.');
+}
+
+function wifiSetBandUi(band) {
+    document.querySelectorAll('#wifi-ap-band button').forEach((b) => {
+        b.classList.toggle('active', b.dataset.band === band);
+    });
+}
+
+function wifiSelectedBand() {
+    const active = document.querySelector('#wifi-ap-band button.active');
+    return active ? active.dataset.band : 'a';
+}
+
+// Apply the hotspot config. Called by the toggle and by field changes; field
+// changes keep whatever on/off state the toggle shows (auto-save).
+async function wifiApplyAp(enabled, fromToggle) {
+    if (wifiState.busy) return;
+    const ssid = (wifiEl('wifi-ap-ssid') || {}).value || '';
+    const passphrase = (wifiEl('wifi-ap-pass') || {}).value || '';
+    if (!ssid) { wifiMessage('The hotspot needs a name.', true); return; }
+    const configured = wifiState.ap && wifiState.ap.Configured;
+    if (!configured && !passphrase) {
+        wifiMessage('Set a hotspot password first (8-63 characters).', true);
+        if (fromToggle) { const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = false; }
+        return;
+    }
+    if (enabled && fromToggle && !wifiConfirmSwitch('start the hotspot "' + ssid + '"')) {
+        const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = false;
+        return;
+    }
+    wifiState.busy = true;
+    try {
+        await wifiApi('/ap', 'PUT', { Ssid: ssid, Passphrase: passphrase, Band: wifiSelectedBand(), Channel: 0, Enabled: enabled });
+        const passInput = wifiEl('wifi-ap-pass');
+        if (passInput) passInput.value = '';
+        wifiMessage(fromToggle ? (enabled ? 'Hotspot starting...' : 'Hotspot turned off.') : 'Saved.');
+        setTimeout(wifiRefresh, enabled && fromToggle ? 5000 : 2000);
+    } catch (e) {
+        wifiMessage('Hotspot: ' + e.message, true);
+        if (fromToggle) { const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = !enabled; }
+    } finally {
+        wifiState.busy = false;
+    }
+}
+
+function wifiInit() {
+    const section = wifiEl('wifi-section');
+    if (!section) return;
+
+    const countrySel = wifiEl('wifi-country');
+    if (countrySel && countrySel.options.length === 0) {
+        for (const cc of WIFI_COUNTRIES) {
+            const opt = document.createElement('option');
+            opt.value = cc;
+            opt.textContent = cc || 'Not set';
+            countrySel.appendChild(opt);
+        }
+        countrySel.addEventListener('change', async () => {
+            if (!countrySel.value) return;
+            try {
+                await wifiApi('/country', 'PUT', { Alpha2: countrySel.value });
+                wifiMessage('Country set to ' + countrySel.value + '.');
+            } catch (e) {
+                wifiMessage('Country: ' + e.message, true);
+            }
+        });
+    }
+
+    const radioToggle = wifiEl('wifi-radio-toggle');
+    if (radioToggle) {
+        radioToggle.addEventListener('change', async () => {
+            try {
+                await wifiApi('/radio', 'PUT', { Enabled: radioToggle.checked });
+                setTimeout(wifiRefresh, 2000);
+            } catch (e) {
+                wifiMessage('WiFi: ' + e.message, true);
+                radioToggle.checked = !radioToggle.checked;
+            }
+        });
+    }
+
+    const apToggle = wifiEl('wifi-ap-toggle');
+    if (apToggle) {
+        apToggle.addEventListener('change', () => wifiApplyAp(apToggle.checked, true));
+    }
+    for (const id of ['wifi-ap-ssid', 'wifi-ap-pass']) {
+        const el = wifiEl(id);
+        if (el) el.addEventListener('change', () => wifiApplyAp((wifiEl('wifi-ap-toggle') || {}).checked || false, false));
+    }
+    document.querySelectorAll('#wifi-ap-band button').forEach((b) => {
+        b.addEventListener('click', () => {
+            wifiSetBandUi(b.dataset.band);
+            wifiApplyAp((wifiEl('wifi-ap-toggle') || {}).checked || false, false);
+        });
+    });
+    const passToggle = wifiEl('wifi-ap-pass-toggle');
+    if (passToggle) {
+        passToggle.addEventListener('click', () => {
+            const input = wifiEl('wifi-ap-pass');
+            if (!input) return;
+            const showing = input.type === 'text';
+            input.type = showing ? 'password' : 'text';
+            passToggle.textContent = showing ? 'Show' : 'Hide';
+        });
+    }
+
+    wifiRefresh();
+}

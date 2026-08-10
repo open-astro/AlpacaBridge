@@ -10,18 +10,20 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacahttp/server.h>
-#include <alpacahttp/config.h>
-#include <alpacahttp/discovery.h>
-#include <alpacahttp/util/logging_adapter.h>
 #include <alpacacore/device_registry.h>
 #include <alpacacore/managementdriver.h>
-#include <iostream>
-#include <csignal>
+#include <alpacahttp/config.h>
+#include <alpacahttp/discovery.h>
+#include <alpacahttp/server.h>
+#include <alpacahttp/util/logging_adapter.h>
+#include <alpacahttp/wifi_manager.h>
+
 #include <atomic>
-#include <thread>
 #include <chrono>
+#include <csignal>
+#include <iostream>
 #include <memory>
+#include <thread>
 
 std::atomic<bool> g_running{true};
 
@@ -45,7 +47,15 @@ int main(int argc, char* argv[]) {
 
     // Initialize logging - connect to AlpacaCore logging system
     alpacahttp::util::init_logging(config);
-    
+
+    // Re-apply the persisted WiFi regulatory country BEFORE anything else
+    // brings the radio up. NetworkManager autoconnects the hotspot profile
+    // during boot, and some drivers (iMate unisoc_wifi) refuse 5 GHz AP init
+    // under the default WORLD regdom - applying lazily on the first wifi
+    // HTTP request would lose that race (PR #198 review). No-op when no
+    // country has been persisted.
+    alpacahttp::util::WifiManager("config").apply_persisted_country();
+
     // Optionally set a custom log sink
     alpacahttp::util::set_external_log_sink([](alpacacore::logging::LogLevel level,
                                                std::string_view component,
