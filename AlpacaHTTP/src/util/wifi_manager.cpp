@@ -980,8 +980,7 @@ void WifiManager::apply_persisted_country() {
         nl80211_set_regdom(cc);
     } catch (const std::exception& e) {
         // Best-effort at startup; the user can re-apply from the UI.
-        std::fprintf(stderr, "wifi: could not re-apply persisted country %s: %s\n",
-                     cc.c_str(), e.what());
+        std::fprintf(stderr, "wifi: could not re-apply persisted country %s: %s\n", cc.c_str(), e.what());
     }
 }
 
