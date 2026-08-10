@@ -3660,7 +3660,7 @@ async function wifiRefresh() {
         const radioToggle = wifiEl('wifi-radio-toggle');
         if (radioToggle) radioToggle.checked = !!status.WirelessEnabled;
 
-        const apActive = status.ConnectionId === 'OpenAstro-AP';
+        const apActive = !!status.ApActive;
         let summary;
         if (!status.WirelessEnabled) summary = 'Off';
         else if (apActive) summary = 'Hotspot: ' + (status.Ssid || 'on');
@@ -3737,7 +3737,7 @@ async function wifiRenderNetworks(rescan) {
     for (const p of profiles) {
         if (p.Mode !== 'ap') savedBySsid[p.Ssid] = p;
     }
-    const activeSsid = (status.ConnectionId !== 'OpenAstro-AP' && status.Ssid) ? status.Ssid : null;
+    const activeSsid = (!status.ApActive && status.Ssid) ? status.Ssid : null;
 
     list.innerHTML = '';
     const inRange = new Set();

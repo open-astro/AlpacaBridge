@@ -674,10 +674,22 @@ nlohmann::json WifiManager::status() {
 
     // Active connection details (client association or our own AP).
     auto active = bus_->prop_path(dev.c_str(), kNmDeviceIface, "ActiveConnection");
+    bool ap_active = false;
     if (!active.empty() && active != "/") {
         out["ConnectionId"] = bus_->prop_string(active.c_str(), kNmActiveIface, "Id");
-        out["ConnectionUuid"] = bus_->prop_string(active.c_str(), kNmActiveIface, "Uuid");
+        std::string active_uuid = bus_->prop_string(active.c_str(), kNmActiveIface, "Uuid");
+        out["ConnectionUuid"] = active_uuid;
+        // Explicit hotspot flag so clients never have to compare connection
+        // ids against the well-known name - a renamed hotspot profile must
+        // still be recognized (PR #198 review round 5).
+        for (const auto& [cpath, cs] : bus_->wifi_connections()) {
+            if (cs["connection"].value("uuid", "") == active_uuid) {
+                ap_active = cs.contains("802-11-wireless") && cs["802-11-wireless"].value("mode", "") == "ap";
+                break;
+            }
+        }
     }
+    out["ApActive"] = ap_active;
     auto ap = bus_->prop_path(dev.c_str(), kNmWirelessIface, "ActiveAccessPoint");
     if (!ap.empty() && ap != "/") {
         out["Ssid"] = bus_->prop_bytes(ap.c_str(), kNmApIface, "Ssid");
@@ -951,8 +963,11 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
                 bus_->activate(path, dev);
             } else {
                 auto active = bus_->prop_path(dev.c_str(), kNmDeviceIface, "ActiveConnection");
+                // Compare by the resolved profile's uuid, not the literal
+                // well-known id: ap_profile() may have fallen back to a
+                // renamed hotspot profile (PR #198 review round 5).
                 if (!active.empty() && active != "/" &&
-                    bus_->prop_string(active.c_str(), kNmActiveIface, "Id") == kApProfileId) {
+                    bus_->prop_string(active.c_str(), kNmActiveIface, "Uuid") == s["connection"].value("uuid", "")) {
                     sd_bus_error err = SD_BUS_ERROR_NULL;
                     sd_bus_message* reply = nullptr;
                     int r = sd_bus_call_method(bus_->bus, kNmService, kNmPath, kNmIface, "DeactivateConnection", &err,
