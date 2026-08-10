@@ -443,6 +443,25 @@ struct WifiManager::BusHandle {
         return out;
     }
 
+    // The hotspot profile: prefer the well-known id (kApProfileId, created by
+    // the OpenAstro imagers), falling back to the first ap-mode profile so a
+    // renamed hotspot is still manageable. Used by get_ap/set_ap/delete so
+    // they can never disagree about which profile is "the" hotspot
+    // (PR #198 review round 2).
+    std::pair<std::string, nlohmann::json> ap_profile() {
+        std::pair<std::string, nlohmann::json> fallback;
+        for (auto& [path, s] : wifi_connections()) {
+            if (!s.contains("802-11-wireless") || s["802-11-wireless"].value("mode", "") != "ap") {
+                continue;
+            }
+            if (s["connection"].value("id", "") == WifiManager::kApProfileId) {
+                return {path, s};
+            }
+            if (fallback.first.empty()) fallback = {path, s};
+        }
+        return fallback;
+    }
+
     // Uuid of the active connection on a device ("" if none).
     std::string active_uuid(const std::string& device_path) {
         auto active = prop_path(device_path.c_str(), kNmDeviceIface, "ActiveConnection");
@@ -842,8 +861,8 @@ void WifiManager::delete_profile(const std::string& uuid) {
     ensure_bus_locked();
     for (const auto& [path, s] : bus_->wifi_connections()) {
         if (s["connection"].value("uuid", "") == uuid) {
-            if (s["connection"].value("id", "") == kApProfileId) {
-                throw WifiError("refusing to delete the hotspot profile; use the AP settings");
+            if (s.contains("802-11-wireless") && s["802-11-wireless"].value("mode", "") == "ap") {
+                throw WifiError("refusing to delete a hotspot profile; use the AP settings");
             }
             bus_->simple_call(path.c_str(), kNmConnIface, "Delete");
             return;
@@ -872,9 +891,9 @@ nlohmann::json WifiManager::get_ap() {
     auto [dev, ifname] = bus_->wifi_device();
     std::string active = dev.empty() ? "" : bus_->active_uuid(dev);
 
-    for (const auto& [path, s] : bus_->wifi_connections()) {
-        if (!s.contains("802-11-wireless")) continue;
-        if (s["802-11-wireless"].value("mode", "") != "ap") continue;
+    auto [ap_path, ap_settings] = bus_->ap_profile();
+    if (!ap_path.empty()) {
+        const auto& s = ap_settings;
         const auto& wifi = s["802-11-wireless"];
         std::string uuid = s["connection"].value("uuid", "");
         return {{"Configured", true},
@@ -900,15 +919,7 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
     auto [dev, ifname] = bus_->wifi_device();
     if (dev.empty()) throw WifiError("no wifi device");
 
-    std::string existing_path;
-    nlohmann::json existing;
-    for (const auto& [path, s] : bus_->wifi_connections()) {
-        if (s.contains("802-11-wireless") && s["802-11-wireless"].value("mode", "") == "ap") {
-            existing_path = path;
-            existing = s;
-            break;
-        }
-    }
+    auto [existing_path, existing] = bus_->ap_profile();
 
     Section conn{{"id", SVal::str(kApProfileId)},
                  {"type", SVal::str("802-11-wireless")},
@@ -923,6 +934,9 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
         spec.push_back(
             {"802-11-wireless-security", {{"key-mgmt", SVal::str("wpa-psk")}, {"psk", SVal::str(passphrase)}}});
     } else if (!existing.empty() && existing.contains("802-11-wireless-security")) {
+        // Declaring key-mgmt without a psk preserves the stored secret.
+        // Hardware-verified 2026-08-09 on the Pi 5 rig: Update() with this
+        // payload left psk= untouched in the NM keyfile (PR #198 review).
         spec.push_back({"802-11-wireless-security", {{"key-mgmt", SVal::str("wpa-psk")}}});
     }
 
@@ -934,8 +948,9 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
 
     // Re-resolve (AddConnection does not return the path through our helper)
     // and apply the enable state immediately.
-    for (const auto& [path, s] : bus_->wifi_connections()) {
-        if (s.contains("802-11-wireless") && s["802-11-wireless"].value("mode", "") == "ap") {
+    {
+        auto [path, s] = bus_->ap_profile();
+        if (!path.empty()) {
             if (enabled) {
                 bus_->activate(path, dev);
             } else {
@@ -950,7 +965,6 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
                     sd_bus_error_free(&err);
                 }
             }
-            break;
         }
     }
 

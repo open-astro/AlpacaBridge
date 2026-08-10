@@ -47,6 +47,10 @@ allowing (only) for user `alpacabridge`:
 - `org.freedesktop.NetworkManager.settings.modify.system`
 - `org.freedesktop.NetworkManager.network-control`
 - `org.freedesktop.NetworkManager.enable-disable-wifi`
+- `org.freedesktop.NetworkManager.wifi.share.protected` / `.share.open`
+  (shared-mode/hotspot activation checks these in addition to
+  network-control; without them ActivateConnection on the AP profile fails
+  with "Not authorized to share connections via wifi")
 
 No other hardening relaxation on the unit is needed. This is a new mechanism
 for the repo (the precedent, Sync Time, used an ambient capability); document

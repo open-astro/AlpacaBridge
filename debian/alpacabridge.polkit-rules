@@ -11,6 +11,12 @@ polkit.addRule(function(action, subject) {
         case "org.freedesktop.NetworkManager.enable-disable-wifi":
         case "org.freedesktop.NetworkManager.network-control":
         case "org.freedesktop.NetworkManager.settings.modify.system":
+        // Activating a shared-mode (hotspot) connection additionally checks
+        // wifi.share.*: without these, ActivateConnection on the AP profile
+        // fails with "Not authorized to share connections via wifi"
+        // (found live on the Pi 5 rig, PR #198).
+        case "org.freedesktop.NetworkManager.wifi.share.protected":
+        case "org.freedesktop.NetworkManager.wifi.share.open":
             return polkit.Result.YES;
     }
     return polkit.Result.NOT_HANDLED;
