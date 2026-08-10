@@ -1029,3 +1029,8 @@ input[type="range"] {
 #wifi-section .info-btn {
     margin-left: 8px;
 }
+
+/* Country row: the Apply button sits directly under the full-width select */
+#wifi-section .form-group > .btn {
+    margin-top: 10px;
+}
