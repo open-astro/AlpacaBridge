@@ -1079,7 +1079,7 @@ input[type="range"] {
     background: var(--dim);
     transition: transform 0.15s, background 0.15s;
 }
-.oa-switch input:checked + .oa-slider { background: var(--ok); border-color: var(--ok); }
+.oa-switch input:checked + .oa-slider { background: var(--accent); border-color: var(--accent); }
 .oa-switch input:checked + .oa-slider::before { transform: translateX(18px); background: #fff; }
 
 /* Network list */
@@ -1107,12 +1107,29 @@ input[type="range"] {
 .wifi-config { padding: 4px 2px 0; }
 .wifi-field { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
 .wifi-field > label { flex: 0 0 90px; color: var(--dim); }
-.wifi-field input { flex: 1; }
+.wifi-field input {
+    flex: 1;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--text);
+    font: inherit;
+    padding: 7px 10px;
+}
+.wifi-field input:focus { outline: none; border-color: var(--accent-2); }
+.wifi-country-select {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--text);
+    font: inherit;
+    padding: 7px 10px;
+}
 .wifi-segment { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .wifi-segment button {
     appearance: none; font: inherit; border: none; cursor: pointer;
     background: var(--panel-2); color: var(--dim);
     padding: 6px 14px;
 }
-.wifi-segment button.active { background: var(--accent-2); color: #fff; }
+.wifi-segment button.active { background: var(--accent); color: #fff; }
 .wifi-country-select { max-width: 140px; }
