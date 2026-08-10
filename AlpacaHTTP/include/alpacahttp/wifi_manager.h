@@ -80,9 +80,13 @@ public:
     // Passphrases are never returned.
     nlohmann::json profiles();
 
-    // Add or update a client (infrastructure) profile. Passphrase may be
-    // empty for open networks; omit to keep the existing secret when
-    // updating. Returns the profile as in profiles().
+    // Add or update a client (infrastructure) profile. An empty passphrase
+    // means "open network" for a NEW profile, and "keep the existing secret"
+    // when updating an already-secured one - converting a secured profile to
+    // open is deliberately not expressible (delete and re-add instead), so a
+    // blank password field in the UI can never strip encryption
+    // (PR #198 review round 3: intended contract). Returns the profile as in
+    // profiles().
     nlohmann::json save_profile(const std::string& ssid, const std::string& passphrase, bool autoconnect, int priority);
 
     // Delete a saved profile by UUID. Refuses to delete the AP profile.

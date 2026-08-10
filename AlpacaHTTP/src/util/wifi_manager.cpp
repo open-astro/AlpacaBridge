@@ -721,7 +721,7 @@ void WifiManager::set_wireless_enabled(bool enabled) {
 }
 
 nlohmann::json WifiManager::scan() {
-    std::unique_lock<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
     auto [dev, ifname] = bus_->wifi_device();
     if (dev.empty()) throw WifiError("no wifi device");
@@ -737,15 +737,14 @@ nlohmann::json WifiManager::scan() {
         if (r >= 0) {
             sd_bus_message_unref(reply);
             // Give the driver a moment; NM has no synchronous scan API.
-            // Drop the instance mutex while settling so concurrent status and
-            // profiles calls from the UI are not blocked behind the scan
-            // (PR #198 review).
-            lock.unlock();
+            // The mutex stays held: it is the only thing serializing use of
+            // the shared sd_bus* (not thread-safe), so concurrent status
+            // calls block ~1.5 s behind a scan rather than racing the bus
+            // (PR #198 review round 3).
             struct timespec ts {
                 1, 500000000
             };  // 1.5 s
             nanosleep(&ts, nullptr);
-            lock.lock();
         }
         sd_bus_error_free(&err);
     }
