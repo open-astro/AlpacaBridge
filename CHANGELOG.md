@@ -9,7 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.4.0] - 2026-08-09
+## [3.4.1] - UNRELEASED
+
+### Fixed
+- **QHY Camera: exposures could hang indefinitely with no error, sometimes taking the camera offline** (AlpacaCore): `GetQHYCCDSingleFrame` was called from a different thread than `ExpQHYCCDSingleFrame` (the download ran on a background worker; the arm call ran on the HTTP handler thread). On real miniCam8M hardware this reproduced as `GetQHYCCDSingleFrame` never returning — confirmed NOT a concurrency issue (every other SDK call in the process was already serialized against it) and NOT an SDK/USB/firmware issue (QHY's own `SingleFrameMode.cpp` sample, built and run standalone against the same camera, completed cleanly) — the one thing the sample does that this driver didn't was keep both calls on the SAME thread. `start_exposure()` now runs the whole Exp→Get sequence on one worker thread, matches the sample's call order (`SetQHYCCDResolution` before `SetQHYCCDBinMode`, `GetQHYCCDMemLength` fetched after arming rather than before), and adds the sample's 1s settle delay before the download read. Also: every QHY SDK call (temp control, telemetry, CFW position/move, gain/offset, etc.) is now serialized against the SAME physical handle via a per-handle mutex in `QHYSDKWrapper` (previously only the wrapper's own bookkeeping lock was held, not the calls themselves), and the exposure worker's join is now bounded with a 2s timeout + detach fallback so a wedged download can no longer hang `StartExposure`/`StopExposure`/`Disconnect` forever. Separately, the camera's "Linearity HDR" readout mode reliably takes ~64s to download a frame regardless of exposure duration or `USBTRAFFIC`/`CONTROL_HDR` settings (an SDK-internal ~100ms-per-USB-transfer pacing specific to that mode, confirmed via `strace` and unaffected by any parameter this driver can set) — the previous fixed-margin watchdog (bumped 15s→60s in `a4ff59e`) still killed that download as "stuck" when it was still legitimately in progress; the deadline is now re-derived from the actual buffer size once `GetQHYCCDMemLength` returns, so it scales with the readout mode instead of assuming every mode transfers at the same rate.
+
+<details>
+<summary><strong>[3.4.0] - 2026-08-09</strong></summary>
 
 ### Added
 - **WiFi + clock-sync API reference** (`docs/wifi-api.md`): stable HTTP/JSON contract for client apps (OpenAstro Ara) covering every `/management/v1/wifi/*` endpoint with exact request/response shapes, the CSRF guard behavior, the connection-drop client pattern, 5 GHz gating rule, and the `synctime` API; `docs/architecture.md` documents the polkit + ambient-capability privilege model.
@@ -20,6 +26,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 ### Changed
 - **WiFi card redesigned in Apple Settings style** (AlpacaHTTP web UI): immediate-effect toggles for the WiFi radio and Personal Hotspot, tappable network list with active-network checkmark and saved/out-of-range grouping, auto-saving hotspot fields (name, password with reveal, 2.4/5 GHz band segmented control), and an auto-applying country dropdown under Advanced. Replaces the Enable Hotspot / Save Off buttons. Card theming follows the dark palette: dark inputs, accent-orange toggles and band segment.
 - **Em dashes removed portal-wide** (AlpacaHTTP web UI): all user-facing copy uses plain punctuation; empty values display "N/A".
+
+</details>
 
 <details>
 <summary><strong>[3.3.0] - 2026-08-08</strong></summary>
