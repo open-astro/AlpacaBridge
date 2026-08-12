@@ -94,6 +94,8 @@ public:
           camera_info_valid_(false),
           readout_modes_{},
           readout_mode_(0),
+          cached_gain_{},
+          cached_offset_{},
           bin_x_(1),
           bin_y_(1),
           num_x_(0),
@@ -310,6 +312,8 @@ private:
             }
             readout_modes_.clear();
             readout_mode_ = 0;
+            cached_gain_.reset();
+            cached_offset_.reset();
             telemetry_temp_valid_ = false;
             telemetry_power_valid_ = false;
             reset_exposure_state_locked();
@@ -782,6 +786,7 @@ public:
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
         QHYSDKWrapper::instance().set_param(id, control::GAIN, static_cast<double>(gain));
+        cached_gain_ = gain;
     }
 
     int get_gain_max() const override {
@@ -954,6 +959,7 @@ public:
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
         QHYSDKWrapper::instance().set_param(id, control::OFFSET, static_cast<double>(offset));
+        cached_offset_ = offset;
     }
 
     int get_offset_max() const override {
@@ -1035,6 +1041,42 @@ public:
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
         QHYSDKWrapper::instance().set_readout_mode(id, static_cast<uint32_t>(mode));
+
+        // set_readout_mode() re-runs InitQHYCCD on the same handle to fix
+        // "Linearity HDR"'s slow download (see its own comment). Switching
+        // modes can also change Gain/Offset out from under the client
+        // (confirmed on real hardware); re-push whatever was last explicitly
+        // set so a switch between two otherwise-independent modes doesn't
+        // quietly change exposure calibration.
+        //
+        // Known SDK/firmware limitation, NOT something this fix caused: on
+        // real miniCam8M hardware, Gain/Offset writes silently no-op (return
+        // QHYCCD_SUCCESS but the readback never changes) while readout mode
+        // 1 ("Linearity HDR") is active -- confirmed with BOTH the old
+        // single-InitQHYCCD call order (pre-dating this whole investigation,
+        // no re-init involved at all) AND a full CloseQHYCCD+OpenQHYCCD
+        // cycle (not just a second InitQHYCCD on the same handle), so it is
+        // not an artifact of the re-init trick above. HDR mode likely
+        // requires fixed gain/offset internally to combine its multiple
+        // capture stages, and the SDK just doesn't expose that as an error.
+        // This re-push is therefore a no-op while in HDR mode (same as it
+        // always silently was before this driver ever touched read modes at
+        // all) and only meaningfully restores Gain/Offset when switching
+        // between modes where the SDK actually honors them.
+        if (cached_gain_.has_value()) {
+            try {
+                QHYSDKWrapper::instance().set_param(id, control::GAIN, static_cast<double>(*cached_gain_));
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "Failed to restore gain after readout mode change: " + std::string(e.what()));
+            }
+        }
+        if (cached_offset_.has_value()) {
+            try {
+                QHYSDKWrapper::instance().set_param(id, control::OFFSET, static_cast<double>(*cached_offset_));
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "Failed to restore offset after readout mode change: " + std::string(e.what()));
+            }
+        }
 
         // After changing readout mode, refresh chip info as dimensions may change
         QHYCameraInfo updated_info;
@@ -1536,6 +1578,16 @@ private:
 
     std::vector<std::string> readout_modes_;
     int readout_mode_;
+    // Last value the client explicitly set via set_gain()/set_offset().
+    // set_readout_mode() re-pushes these after its re-InitQHYCCD() call,
+    // which resets Gain/Offset to hardware defaults (review finding on
+    // PR #201, confirmed on real miniCam8M hardware: Gain 77->9, Offset
+    // 55->100 after a plain mode switch with no error or indication).
+    // Unset (nullopt) until the client sets one explicitly -- with nothing
+    // cached there's nothing meaningful to restore, so re-init's default is
+    // left alone exactly as before this fix.
+    std::optional<int> cached_gain_;
+    std::optional<int> cached_offset_;
 
     int bin_x_;
     int bin_y_;
