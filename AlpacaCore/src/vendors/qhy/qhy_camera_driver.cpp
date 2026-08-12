@@ -235,7 +235,12 @@ private:
             // the join→close gap (same shape as the ToupTek camera). Lock
             // order: exposure_lifecycle_mutex_ -> mutex_.
             std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-            if (exposure_thread_.joinable()) {
+            // See the matching comment in start_exposure(): joinable() alone
+            // misses a worker that a prior reap already detach()ed but which
+            // may still be alive and stuck in GetQHYCCDSingleFrame -- retry
+            // cancel_exposure() while exposure_thread_running_ says so.
+            bool worker_may_still_be_running = exposure_thread_running_ && exposure_thread_running_->load();
+            if (exposure_thread_.joinable() || worker_may_still_be_running) {
                 std::string cancel_id;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -248,7 +253,9 @@ private:
                         ALPACA_LOG_WARN("QHY", "cancel_exposure failed during disconnect: " + std::string(e.what()));
                     }
                 }
-                join_exposure_thread();
+                if (exposure_thread_.joinable()) {
+                    join_exposure_thread();
+                }
             }
             // Join the cooler-off worker before taking mutex_ below: it takes
             // mutex_ itself and joins the temp thread.
@@ -1246,13 +1253,34 @@ public:
         // mutexed setter before this reap would block this StartExposure on
         // that same call_mutex forever, never reaching the cancel that's
         // supposed to break the hang (review finding on PR #201).
-        if (exposure_thread_.joinable()) {
+        //
+        // exposure_thread_.joinable() alone is NOT enough to decide whether
+        // to retry: std::thread::detach() (inside join_exposure_thread()'s
+        // 2s-timeout path) makes joinable() false immediately, even though
+        // the detached worker may still be alive and stuck in
+        // GetQHYCCDSingleFrame, still holding call_mutex. Gating solely on
+        // joinable() would then skip cancel_exposure() on every StartExposure
+        // after the first timeout, reproducing exactly the hang this reorder
+        // was meant to fix once the zombie is holding the mutex instead of
+        // just its own call (second review finding on PR #201).
+        // exposure_thread_running_ is the shared flag the RunningGuard in
+        // launch_exposure_worker_locked() clears on actual return from the
+        // worker lambda -- it stays true for as long as that lambda (and
+        // whatever call_mutex-guarded SDK call it's blocked in) is still
+        // running, independent of whether the std::thread object itself was
+        // detached. Retrying cancel_exposure() while it's still true gives a
+        // wedged-but-not-permanently-unresponsive handle another chance to
+        // unblock before the mutexed setters below would otherwise hang.
+        bool worker_may_still_be_running = exposure_thread_running_ && exposure_thread_running_->load();
+        if (exposure_thread_.joinable() || worker_may_still_be_running) {
             try {
                 sdk.cancel_exposure(id);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "cancel_exposure before re-arm failed: " + std::string(e.what()));
             }
-            join_exposure_thread();
+            if (exposure_thread_.joinable()) {
+                join_exposure_thread();
+            }
         }
 
         // Apply exposure time (microseconds)
@@ -1395,8 +1423,8 @@ public:
                 try {
                     sdk.cancel_exposure(id);
                 } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("QHY", "cancel_exposure after get_mem_length failure failed: " +
-                                     std::string(e.what()));
+                    ALPACA_LOG_WARN("QHY",
+                                    "cancel_exposure after get_mem_length failure failed: " + std::string(e.what()));
                 }
                 if (exposure_superseded->load()) {
                     return;
