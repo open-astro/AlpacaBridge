@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-08-08
+## Updated 2026-08-12
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -75,7 +75,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Cooler/temp SDK calls**: `ControlQHYCCDTemp` and `SetQHYCCDParam` have no SDK-side timeout and can occasionally run well past their typical duration on real hardware. The driver bounds how long disconnect waits on their background workers and detaches rather than blocking indefinitely; the QHY SDK handle is reference-counted so a detached worker can never use a handle after it's been closed.
 - **Readout mode "Linearity HDR" (index 1)**: downloads take a fixed ~64s regardless of exposure duration — confirmed via `strace` to be an SDK-internal ~100ms-per-USB-transfer pacing specific to this mode, unaffected by `CONTROL_USBTRAFFIC` or `CONTROL_HDR` parameter settings. This is expected SDK behavior, not a driver bug; the exposure watchdog deadline is derived from the actual buffer size (`GetQHYCCDMemLength`) once known, so it scales with the readout mode instead of killing a legitimate in-progress HDR download. Reported to QHY in case an undocumented parameter exists to control this pacing — if you find one, please open an issue.
 - **Tested model**: miniCam8M on Linux arm64
-- **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues
+- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing issues
 
 </details>
 
