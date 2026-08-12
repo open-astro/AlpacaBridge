@@ -1234,6 +1234,27 @@ public:
             }
         }
 
+        // Reap the previous worker FIRST, before any other SDK call in this
+        // function. cancel_exposure() deliberately does not take the SDK
+        // wrapper's per-handle call_mutex (see its definition) specifically
+        // so it can interrupt a wedged GetQHYCCDSingleFrame that's holding
+        // that mutex; every setter below (set_param, is_control_available,
+        // set_resolution, set_bin_mode, set_bits_mode) DOES take it. If a
+        // prior download is genuinely stuck and its worker was detached by
+        // join_exposure_thread()'s timeout, that detached thread is still
+        // holding call_mutex from inside GetQHYCCDSingleFrame -- calling any
+        // mutexed setter before this reap would block this StartExposure on
+        // that same call_mutex forever, never reaching the cancel that's
+        // supposed to break the hang (review finding on PR #201).
+        if (exposure_thread_.joinable()) {
+            try {
+                sdk.cancel_exposure(id);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "cancel_exposure before re-arm failed: " + std::string(e.what()));
+            }
+            join_exposure_thread();
+        }
+
         // Apply exposure time (microseconds)
         double exposure_us = duration * 1'000'000.0;
         sdk.set_param(id, control::EXPOSURE, exposure_us);
@@ -1267,19 +1288,6 @@ public:
         sdk.set_resolution(id, start_x_u, start_y_u, num_x_u, num_y_u);
         sdk.set_bin_mode(id, bin_x_u, bin_y_u);
         sdk.set_bits_mode(id, bits_u);
-
-        // Reap the previous worker BEFORE arming the new frame (a cancel after
-        // start_single_frame would kill the exposure we just started). Wake a
-        // worker still parked from a previous (e.g. watchdog-failed) exposure
-        // first, or this join could block on a hung GetQHYCCDSingleFrame.
-        if (exposure_thread_.joinable()) {
-            try {
-                sdk.cancel_exposure(id);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("QHY", "cancel_exposure before re-arm failed: " + std::string(e.what()));
-            }
-            join_exposure_thread();
-        }
 
         {
             // Publish Working BEFORE the SDK exposure start so a concurrent
@@ -1378,6 +1386,18 @@ public:
                 ALPACA_LOG_WARN("QHY", "get_mem_length failed: " + std::string(e.what()));
             }
             if (mem_length == 0) {
+                // Unlike the start_single_frame failure above, ExpQHYCCDSingleFrame
+                // DID succeed to get here -- the SDK is armed with nothing left to
+                // read it back out. Cancel so this failure doesn't leave an
+                // armed-but-abandoned exposure behind (review finding on PR #201);
+                // the next start_exposure()/disconnect() would otherwise be the
+                // first thing to notice and clean it up.
+                try {
+                    sdk.cancel_exposure(id);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("QHY", "cancel_exposure after get_mem_length failure failed: " +
+                                     std::string(e.what()));
+                }
                 if (exposure_superseded->load()) {
                     return;
                 }
