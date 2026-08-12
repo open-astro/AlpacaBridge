@@ -1486,15 +1486,37 @@ public:
             // readout mode. It doesn't: confirmed on real miniCam8M
             // hardware (both through this driver and via a standalone,
             // single-threaded repro completely outside it) that a 71MB
-            // "Linearity HDR" frame reliably takes ~64s to transfer via
+            // "Linearity HDR" frame could reliably take ~64s to transfer via
             // GetQHYCCDSingleFrame regardless of USBTRAFFIC pacing, while a
-            // 36MB "Full Resolution" frame completes in a few seconds. The
-            // flat 15s margin only covers the latter; without this, the
-            // watchdog was killing HDR downloads that were still correctly
-            // in progress. 500,000 B/s is roughly half the ~1.1 MB/s
-            // measured for HDR -- a floor, not a target, so it only
-            // EXTENDS (never shortens) the deadline already set at arm time.
-            {
+            // 36MB "Full Resolution" frame completes in a few seconds (the
+            // separate readout-mode/InitQHYCCD-ordering fix elsewhere in
+            // this file made that ~64s case rare rather than eliminating
+            // the theoretical risk entirely, so the floor below stays as a
+            // safety net rather than being removed). The flat 15s margin
+            // only covers Full-Resolution-sized transfers; without this
+            // extension the watchdog was killing HDR downloads that were
+            // still correctly in progress. 500,000 B/s is roughly half the
+            // ~1.1 MB/s measured for HDR -- a floor, not a target, so it
+            // only EXTENDS (never shortens) the deadline already set at arm
+            // time.
+            //
+            // Gated on readout_mode_ != 0: index 0 is the SDK's default/
+            // fastest mode on every QHY camera examined during this
+            // investigation and has never shown this slow-transfer
+            // behavior, so applying the same buffer-size floor to it would
+            // only over-extend its watchdog for no benefit -- e.g. its own
+            // 36MB buffer computes to an ~87s floor, letting a genuine hang
+            // on that mode go undetected far longer than the flat 60s
+            // margin already covers it for (review finding on PR #201).
+            //
+            // Read without mutex_: safe because set_readout_mode() calls
+            // ensure_not_exposing_locked() under mutex_ before it ever
+            // writes readout_mode_, and exposure_status_ was published as
+            // Working (also under mutex_) before this worker was spawned --
+            // so a concurrent set_readout_mode() call can't succeed while
+            // this worker is running, and readout_mode_ can't change out
+            // from under this read for the life of this exposure.
+            if (readout_mode_ != 0) {
                 constexpr double kMinTransferBytesPerSecond = 500'000.0;
                 auto min_transfer = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(static_cast<double>(mem_length) / kMinTransferBytesPerSecond));
