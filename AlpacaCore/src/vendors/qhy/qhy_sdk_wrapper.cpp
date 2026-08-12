@@ -638,6 +638,22 @@ void QHYSDKWrapper::set_readout_mode(const std::string& camera_id, uint32_t mode
     auto ref = pimpl_->get_handle_ref(camera_id);
     std::lock_guard<std::mutex> call_lock(*ref.call_mutex);
     check_result(SetQHYCCDReadMode(ref.handle.get(), mode_index), "SetQHYCCDReadMode");
+    // Re-run InitQHYCCD on the SAME already-open handle (no Close/Open cycle
+    // -- this handle may be shared with the CFW driver via open_count, so
+    // tearing it down here isn't an option). QHY's own official
+    // VS2022_Basic_Single sample calls SetQHYCCDReadMode BEFORE
+    // SetQHYCCDStreamMode/InitQHYCCD; our driver (and every other client
+    // examined during this investigation -- INDIGO's ccd_qhy/ccd_qhy2
+    // included) only ever calls SetQHYCCDReadMode AFTER the handle's initial
+    // Init, since the mode is a client-driven property set well after
+    // connect. On real miniCam8M hardware this ordering difference is the
+    // ENTIRE root cause of "Linearity HDR" taking ~60-75s to download
+    // instead of under a second: re-calling InitQHYCCD right after
+    // SetQHYCCDReadMode (still on the original handle, no reopen needed)
+    // reproduces the fast path exactly like calling ReadMode-then-Init from
+    // a cold handle does. Confirmed via a from-scratch standalone repro,
+    // A/B/A across three back-to-back runs.
+    check_result(InitQHYCCD(ref.handle.get()), "InitQHYCCD (post-ReadMode)");
 }
 
 // ────────────────────────────────────────────────────────────────────────────
