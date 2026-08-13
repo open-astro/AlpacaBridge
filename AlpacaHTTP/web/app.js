@@ -3756,6 +3756,13 @@ async function wifiRenderNetworks(rescan) {
         if (!isActive) {
             row.addEventListener('click', () => saved ? wifiConnectSaved(saved) : wifiJoinNew(n));
         }
+        if (saved && !isActive) {
+            const forget = document.createElement('button');
+            forget.className = 'btn btn-secondary btn-small';
+            forget.textContent = 'Forget';
+            forget.addEventListener('click', (e) => { e.stopPropagation(); wifiForget(saved); });
+            row.appendChild(forget);
+        }
         list.appendChild(row);
     }
 
@@ -3829,6 +3836,9 @@ async function wifiForget(profile) {
 // One shared "this may drop your connection" warning, only when it can.
 function wifiConfirmSwitch(action) {
     const status = wifiState.status || {};
+    // Dual-interface boards keep the hotspot up while the client interface
+    // switches, so a browser connected via the hotspot never drops.
+    if (status.DeviceCount > 1 && status.ApActive) return true;
     const onWifi = status.Ssid && location.hostname !== 'localhost';
     if (!onWifi) return true;
     return confirm('The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection while it switches.');

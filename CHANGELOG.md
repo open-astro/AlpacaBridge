@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.4.0] - 2026-08-09
+## [3.4.1] - 2026-08-13
+
+### Fixed
+- **WiFi manager: joining a network no longer kills the hotspot on dual-interface boards** (AlpacaHTTP): `WifiManager` used the first NM wifi device for everything, so on boards with a dedicated AP-type virtual interface (Orange Pi 4 Pro `ap0`, ASIAIR `uap0`) a portal join could activate the client profile on the AP interface, displacing the hotspot even though the chipset supports concurrent AP+STA (observed on OPi 4 Pro, AIC8800D80, NM 1.52.1). The manager now resolves device roles - client operations (status, scan, join) target the managed-type interface, hotspot operations target the AP-type interface (detected via the hotspot profile's `interface-name` pin, the active hotspot, or the nl80211 iftype - by type, never by name) - and pins `connection.interface-name` on the profiles it creates so NM cannot re-place them (connecting a pre-existing unpinned client profile back-fills the pin too, so nmcli joins and boot-time autoconnect can never land it on the AP interface). Status gains `ApDevice` and `DeviceCount`, `ApActive` is now computed across all wifi devices (previously wrong on the ASIAIR where the hotspot sits on `wlan0` while `uap0` enumerates first), and the portal skips the connection-drop warning when the hotspot stays up on its own interface during a join. Hardware-validated on the OPi 4 Pro (AIC8800D80): device roles, unpinned-profile join, pin back-fill with secret preservation, concurrent AP+STA with NAT.
+- **WiFi card: saved in-range networks can now be forgotten** (AlpacaHTTP web UI): a network saved with a wrong password had no recovery path while in range - the Forget button only appeared in the "Saved, not in range" group, and tapping the row just retried the stored bad password. In-range saved networks now show a Forget button too, so the profile can be removed and rejoined with the correct password.
+
+<details>
+<summary><strong>[3.4.0] - 2026-08-09</strong></summary>
 
 ### Added
 - **WiFi + clock-sync API reference** (`docs/wifi-api.md`): stable HTTP/JSON contract for client apps (OpenAstro Ara) covering every `/management/v1/wifi/*` endpoint with exact request/response shapes, the CSRF guard behavior, the connection-drop client pattern, 5 GHz gating rule, and the `synctime` API; `docs/architecture.md` documents the polkit + ambient-capability privilege model.
@@ -20,6 +27,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 ### Changed
 - **WiFi card redesigned in Apple Settings style** (AlpacaHTTP web UI): immediate-effect toggles for the WiFi radio and Personal Hotspot, tappable network list with active-network checkmark and saved/out-of-range grouping, auto-saving hotspot fields (name, password with reveal, 2.4/5 GHz band segmented control), and an auto-applying country dropdown under Advanced. Replaces the Enable Hotspot / Save Off buttons. Card theming follows the dark palette: dark inputs, accent-orange toggles and band segment.
 - **Em dashes removed portal-wide** (AlpacaHTTP web UI): all user-facing copy uses plain punctuation; empty values display "N/A".
+
+</details>
 
 <details>
 <summary><strong>[3.3.0] - 2026-08-08</strong></summary>

@@ -54,7 +54,17 @@ public:
     // when false so ethernet-only setups don't show a dead card.
     bool available();
 
+    // Device roles: boards with a dedicated AP-type virtual interface (OPi 4
+    // Pro ap0, ASIAIR uap0) run the hotspot and the client association on
+    // separate interfaces concurrently. All client operations (status, scan,
+    // join) target the managed-type device; hotspot operations target the
+    // AP-type device; profiles the manager creates are pinned via
+    // connection.interface-name so NM can never re-place them. Detection is
+    // by interface type (hotspot profile pin > active hotspot > nl80211
+    // iftype), never by name. Single-radio boards behave as before.
+    //
     // {"Available":bool, "WirelessEnabled":bool, "Device":str,
+    //  "ApDevice":str, "DeviceCount":u32,
     //  "State":str, "ConnectionId":str, "Ssid":str, "Mode":"infrastructure"|"ap",
     //  "FrequencyMhz":u32, "SignalPercent":u8, "Ip4Address":str,
     //  "Capabilities":{"Freq2GHz":bool,"Freq5GHz":bool,"Ap":bool},
