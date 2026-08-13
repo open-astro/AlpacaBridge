@@ -405,6 +405,81 @@ struct WifiManager::BusHandle {
         sd_bus_message_unref(reply);
     }
 
+    // Set connection.interface-name on an existing profile, copying every
+    // other section and key VERBATIM at the sd-bus message level. A JSON
+    // round-trip cannot do this: get_settings() drops nested containers
+    // (static IP config, 802.1x, bssid locks...), and NM's Update() replaces
+    // the whole settings dict, so a rebuilt minimal spec would silently strip
+    // those settings from profiles the app didn't create (PR #202 review).
+    // GetSettings omits secrets; NM retains secrets absent from an Update
+    // payload, so the psk survives.
+    void pin_interface_name(const std::string& conn_path, const std::string& ifname) {
+        sd_bus_error err = SD_BUS_ERROR_NULL;
+        sd_bus_message* src = nullptr;
+        int r = sd_bus_call_method(bus, kNmService, conn_path.c_str(), kNmConnIface, "GetSettings", &err, &src, "");
+        if (r < 0) {
+            std::string msg = err.message ? err.message : std::strerror(-r);
+            sd_bus_error_free(&err);
+            throw WifiError("GetSettings failed: " + msg);
+        }
+        sd_bus_message* m = nullptr;
+        r = sd_bus_message_new_method_call(bus, &m, kNmService, conn_path.c_str(), kNmConnIface, "Update");
+        if (r < 0) {
+            sd_bus_message_unref(src);
+            throw_bus("Update new_method_call", r);
+        }
+        sd_bus_message_open_container(m, 'a', "{sa{sv}}");
+        sd_bus_message_enter_container(src, 'a', "{sa{sv}}");
+        while (sd_bus_message_enter_container(src, 'e', "sa{sv}") > 0) {
+            const char* section = nullptr;
+            sd_bus_message_read(src, "s", &section);
+            bool is_conn = section && std::strcmp(section, "connection") == 0;
+            sd_bus_message_open_container(m, 'e', "sa{sv}");
+            sd_bus_message_append(m, "s", section);
+            sd_bus_message_open_container(m, 'a', "{sv}");
+            sd_bus_message_enter_container(src, 'a', "{sv}");
+            while (sd_bus_message_enter_container(src, 'e', "sv") > 0) {
+                const char* key = nullptr;
+                sd_bus_message_read(src, "s", &key);
+                if (is_conn && key && std::strcmp(key, "interface-name") == 0) {
+                    sd_bus_message_skip(src, "v");
+                } else {
+                    sd_bus_message_open_container(m, 'e', "sv");
+                    sd_bus_message_append(m, "s", key);
+                    // Copies the variant as one complete type, however nested.
+                    sd_bus_message_copy(m, src, 0);
+                    sd_bus_message_close_container(m);
+                }
+                sd_bus_message_exit_container(src);
+            }
+            sd_bus_message_exit_container(src);
+            if (is_conn) {
+                sd_bus_message_open_container(m, 'e', "sv");
+                sd_bus_message_append(m, "s", "interface-name");
+                sd_bus_message_open_container(m, 'v', "s");
+                sd_bus_message_append(m, "s", ifname.c_str());
+                sd_bus_message_close_container(m);
+                sd_bus_message_close_container(m);
+            }
+            sd_bus_message_close_container(m);  // a{sv}
+            sd_bus_message_close_container(m);  // e
+            sd_bus_message_exit_container(src);
+        }
+        sd_bus_message_exit_container(src);
+        sd_bus_message_close_container(m);  // a{sa{sv}}
+        sd_bus_message_unref(src);
+
+        sd_bus_message* reply = nullptr;
+        r = sd_bus_call(bus, m, 0, &err, &reply);
+        sd_bus_message_unref(m);
+        if (r < 0) {
+            std::string msg = err.message ? err.message : std::strerror(-r);
+            sd_bus_error_free(&err);
+            throw WifiError("Update (interface-name pin) failed: " + msg);
+        }
+        sd_bus_message_unref(reply);
+    }
+
     void simple_call(const char* path, const char* iface, const char* method) {
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message* reply = nullptr;
@@ -1074,27 +1149,13 @@ void WifiManager::connect_profile(const std::string& uuid) {
             bool is_ap = s.contains("802-11-wireless") && s["802-11-wireless"].value("mode", "") == "ap";
             // Pre-fix client profiles lack the interface-name pin; add it on
             // connect so a later nmcli join or a boot-time autoconnect race
-            // cannot land them on the AP interface either (OPi retest nit).
+            // cannot land them on the AP interface either. Message-level
+            // rewrite preserves every other setting verbatim (PR #202
+            // review: a rebuilt minimal spec would strip static IPs, 802.1x,
+            // hidden-ssid flags... from profiles the app didn't create).
             if (!is_ap && roles.count > 1 && !roles.client_if.empty() &&
                 s["connection"].value("interface-name", "").empty()) {
-                Section conn{{"id", SVal::str(s["connection"].value("id", ""))},
-                             {"type", SVal::str("802-11-wireless")},
-                             {"autoconnect", SVal::boolean(s["connection"].value("autoconnect", true))},
-                             {"autoconnect-priority", SVal::i32(s["connection"].value("autoconnect-priority", 0))},
-                             {"uuid", SVal::str(uuid)},
-                             {"interface-name", SVal::str(roles.client_if)}};
-                Section wifi{{"ssid", SVal::bytearr(s["802-11-wireless"].value("ssid", ""))},
-                             {"mode", SVal::str("infrastructure")}};
-                SettingsSpec spec{{"connection", conn}, {"802-11-wireless", wifi}};
-                if (s.contains("802-11-wireless-security")) {
-                    // Declaring key-mgmt without a psk preserves the stored
-                    // secret (same contract as save_profile/set_ap). Keep the
-                    // profile's own key-mgmt (could be sae on WPA3 networks).
-                    spec.push_back(
-                        {"802-11-wireless-security",
-                         {{"key-mgmt", SVal::str(s["802-11-wireless-security"].value("key-mgmt", "wpa-psk"))}}});
-                }
-                bus_->update_connection(path, spec, /*pin_shared_ip4=*/false);
+                bus_->pin_interface_name(path, roles.client_if);
             }
             bus_->activate(path, is_ap ? roles.ap_path : roles.client_path);
             return;

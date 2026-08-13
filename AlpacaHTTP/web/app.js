@@ -3837,8 +3837,10 @@ async function wifiForget(profile) {
 function wifiConfirmSwitch(action) {
     const status = wifiState.status || {};
     // Dual-interface boards keep the hotspot up while the client interface
-    // switches, so a browser connected via the hotspot never drops.
-    if (status.DeviceCount > 1 && status.ApActive) return true;
+    // switches, so skip the warning only when the browser is provably ON the
+    // hotspot: the page served from the fleet-wide AP address. A browser on
+    // the client network still drops (PR #202 review).
+    if (status.DeviceCount > 1 && status.ApActive && location.hostname === '172.24.1.1') return true;
     const onWifi = status.Ssid && location.hostname !== 'localhost';
     if (!onWifi) return true;
     return confirm('The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection while it switches.');
