@@ -15,12 +15,14 @@
 #include <linux/genetlink.h>
 #include <linux/netlink.h>
 #include <linux/nl80211.h>
+#include <net/if.h>
 #include <sys/socket.h>
 #include <systemd/sd-bus.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -97,6 +99,19 @@ struct SVal {
 };
 using Section = std::vector<std::pair<std::string, SVal>>;
 using SettingsSpec = std::vector<std::pair<std::string, Section>>;
+
+// Defined with the other nl80211 helpers below.
+std::uint32_t nl80211_iftype(const std::string& ifname);
+
+// Which wifi device handles client (infrastructure) operations and which
+// hosts the hotspot. On single-radio boards both name the same device; on
+// boards with a dedicated AP-type virtual interface (OPi 4 Pro ap0, ASIAIR
+// uap0) they differ.
+struct DeviceRoles {
+    std::string client_path, client_if;
+    std::string ap_path, ap_if;
+    std::size_t count = 0;
+};
 
 }  // namespace
 
@@ -390,6 +405,81 @@ struct WifiManager::BusHandle {
         sd_bus_message_unref(reply);
     }
 
+    // Set connection.interface-name on an existing profile, copying every
+    // other section and key VERBATIM at the sd-bus message level. A JSON
+    // round-trip cannot do this: get_settings() drops nested containers
+    // (static IP config, 802.1x, bssid locks...), and NM's Update() replaces
+    // the whole settings dict, so a rebuilt minimal spec would silently strip
+    // those settings from profiles the app didn't create (PR #202 review).
+    // GetSettings omits secrets; NM retains secrets absent from an Update
+    // payload, so the psk survives.
+    void pin_interface_name(const std::string& conn_path, const std::string& ifname) {
+        sd_bus_error err = SD_BUS_ERROR_NULL;
+        sd_bus_message* src = nullptr;
+        int r = sd_bus_call_method(bus, kNmService, conn_path.c_str(), kNmConnIface, "GetSettings", &err, &src, "");
+        if (r < 0) {
+            std::string msg = err.message ? err.message : std::strerror(-r);
+            sd_bus_error_free(&err);
+            throw WifiError("GetSettings failed: " + msg);
+        }
+        sd_bus_message* m = nullptr;
+        r = sd_bus_message_new_method_call(bus, &m, kNmService, conn_path.c_str(), kNmConnIface, "Update");
+        if (r < 0) {
+            sd_bus_message_unref(src);
+            throw_bus("Update new_method_call", r);
+        }
+        sd_bus_message_open_container(m, 'a', "{sa{sv}}");
+        sd_bus_message_enter_container(src, 'a', "{sa{sv}}");
+        while (sd_bus_message_enter_container(src, 'e', "sa{sv}") > 0) {
+            const char* section = nullptr;
+            sd_bus_message_read(src, "s", &section);
+            bool is_conn = section && std::strcmp(section, "connection") == 0;
+            sd_bus_message_open_container(m, 'e', "sa{sv}");
+            sd_bus_message_append(m, "s", section);
+            sd_bus_message_open_container(m, 'a', "{sv}");
+            sd_bus_message_enter_container(src, 'a', "{sv}");
+            while (sd_bus_message_enter_container(src, 'e', "sv") > 0) {
+                const char* key = nullptr;
+                sd_bus_message_read(src, "s", &key);
+                if (is_conn && key && std::strcmp(key, "interface-name") == 0) {
+                    sd_bus_message_skip(src, "v");
+                } else {
+                    sd_bus_message_open_container(m, 'e', "sv");
+                    sd_bus_message_append(m, "s", key);
+                    // Copies the variant as one complete type, however nested.
+                    sd_bus_message_copy(m, src, 0);
+                    sd_bus_message_close_container(m);
+                }
+                sd_bus_message_exit_container(src);
+            }
+            sd_bus_message_exit_container(src);
+            if (is_conn) {
+                sd_bus_message_open_container(m, 'e', "sv");
+                sd_bus_message_append(m, "s", "interface-name");
+                sd_bus_message_open_container(m, 'v', "s");
+                sd_bus_message_append(m, "s", ifname.c_str());
+                sd_bus_message_close_container(m);
+                sd_bus_message_close_container(m);
+            }
+            sd_bus_message_close_container(m);  // a{sv}
+            sd_bus_message_close_container(m);  // e
+            sd_bus_message_exit_container(src);
+        }
+        sd_bus_message_exit_container(src);
+        sd_bus_message_close_container(m);  // a{sa{sv}}
+        sd_bus_message_unref(src);
+
+        sd_bus_message* reply = nullptr;
+        r = sd_bus_call(bus, m, 0, &err, &reply);
+        sd_bus_message_unref(m);
+        if (r < 0) {
+            std::string msg = err.message ? err.message : std::strerror(-r);
+            sd_bus_error_free(&err);
+            throw WifiError("Update (interface-name pin) failed: " + msg);
+        }
+        sd_bus_message_unref(reply);
+    }
+
     void simple_call(const char* path, const char* iface, const char* method) {
         sd_bus_error err = SD_BUS_ERROR_NULL;
         sd_bus_message* reply = nullptr;
@@ -415,15 +505,16 @@ struct WifiManager::BusHandle {
         sd_bus_message_unref(reply);
     }
 
-    // First wifi device (path, interface-name); empty path if none.
-    std::pair<std::string, std::string> wifi_device() {
+    // All wifi devices (path, interface-name), in NM enumeration order.
+    std::vector<std::pair<std::string, std::string>> wifi_devices() {
+        std::vector<std::pair<std::string, std::string>> out;
         for (const auto& dev : call_objpaths(kNmPath, kNmIface, "GetDevices")) {
             auto type = prop_trivial(dev.c_str(), kNmDeviceIface, "DeviceType", 'u');
             if (type == kDeviceTypeWifi) {
-                return {dev, prop_string(dev.c_str(), kNmDeviceIface, "Interface")};
+                out.emplace_back(dev, prop_string(dev.c_str(), kNmDeviceIface, "Interface"));
             }
         }
-        return {"", ""};
+        return out;
     }
 
     // All saved wifi connections: (path, settings-json).
@@ -460,6 +551,92 @@ struct WifiManager::BusHandle {
             if (fallback.first.empty()) fallback = {path, s};
         }
         return fallback;
+    }
+
+    // Assign wifi devices to roles. Boards with a dedicated AP-type virtual
+    // interface run hotspot and client on separate interfaces concurrently;
+    // NM will otherwise happily activate a client profile on the AP
+    // interface, displacing the hotspot (OPi 4 Pro field bug, 2026-08-13).
+    // AP device preference: the hotspot profile's pinned interface-name >
+    // the device currently hosting the hotspot > nl80211 iftype AP > the
+    // client device (single radio). Client device: first non-AP-type device
+    // that is not the AP device > any other device > the AP device.
+    DeviceRoles device_roles() {
+        DeviceRoles out;
+        auto devs = wifi_devices();
+        out.count = devs.size();
+        if (devs.empty()) return out;
+
+        std::string pinned, ap_uuid;
+        {
+            auto [ap_prof_path, ap_prof] = ap_profile();
+            if (!ap_prof_path.empty()) {
+                pinned = ap_prof["connection"].value("interface-name", "");
+                ap_uuid = ap_prof["connection"].value("uuid", "");
+            }
+        }
+
+        const std::pair<std::string, std::string>* ap = nullptr;
+        if (!pinned.empty()) {
+            for (const auto& d : devs) {
+                if (d.second == pinned) {
+                    ap = &d;
+                    break;
+                }
+            }
+        }
+        if (!ap && !ap_uuid.empty()) {
+            for (const auto& d : devs) {
+                if (active_uuid(d.first) == ap_uuid) {
+                    ap = &d;
+                    break;
+                }
+            }
+        }
+        if (!ap) {
+            for (const auto& d : devs) {
+                if (nl80211_iftype(d.second) == NL80211_IFTYPE_AP) {
+                    ap = &d;
+                    break;
+                }
+            }
+        }
+
+        const std::pair<std::string, std::string>* client = nullptr;
+        for (const auto& d : devs) {
+            if (ap && d.first == ap->first) continue;
+            if (nl80211_iftype(d.second) != NL80211_IFTYPE_AP) {
+                client = &d;
+                break;
+            }
+        }
+        if (!client) {
+            for (const auto& d : devs) {
+                if (!ap || d.first != ap->first) {
+                    client = &d;
+                    break;
+                }
+            }
+        }
+        if (!client) client = ap;
+        if (!client) client = &devs.front();
+        if (!ap) ap = client;
+
+        out.client_path = client->first;
+        out.client_if = client->second;
+        out.ap_path = ap->first;
+        out.ap_if = ap->second;
+        return out;
+    }
+
+    // Uuids of the active connections across all wifi devices.
+    std::vector<std::string> active_uuids() {
+        std::vector<std::string> out;
+        for (const auto& d : wifi_devices()) {
+            auto u = active_uuid(d.first);
+            if (!u.empty()) out.push_back(u);
+        }
+        return out;
     }
 
     // Uuid of the active connection on a device ("" if none).
@@ -510,68 +687,61 @@ struct WifiManager::BusHandle {
     }
 };
 
-// ---- nl80211 regulatory domain ---------------------------------------------
+// ---- nl80211 helpers ---------------------------------------------------------
 
 namespace {
 
-// Equivalent of `iw reg set <alpha2>` — a single generic-netlink request.
-// Needs CAP_NET_ADMIN (granted to the service as an ambient capability).
-void nl80211_set_regdom(const std::string& alpha2) {
-    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC);
-    if (fd < 0) throw WifiError(std::string("netlink socket: ") + std::strerror(errno));
+struct FdGuard {
+    int fd;
+    ~FdGuard() { close(fd); }
+};
 
-    struct Guard {
-        int fd;
-        ~Guard() { close(fd); }
-    } guard{fd};
+std::vector<char> genl_build(std::uint16_t nl_type, std::uint8_t genl_cmd, std::uint16_t attr_type,
+                             const void* attr_data, std::uint16_t attr_len) {
+    size_t attr_space = NLA_HDRLEN + NLA_ALIGN(attr_len);
+    size_t total = NLMSG_SPACE(GENL_HDRLEN) + attr_space;
+    std::vector<char> buf(total, 0);
+    auto* nlh = reinterpret_cast<nlmsghdr*>(buf.data());
+    nlh->nlmsg_len = static_cast<std::uint32_t>(total);
+    nlh->nlmsg_type = nl_type;
+    nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    nlh->nlmsg_seq = 1;
+    auto* genl = reinterpret_cast<genlmsghdr*>(NLMSG_DATA(nlh));
+    genl->cmd = genl_cmd;
+    genl->version = 1;
+    auto* attr = reinterpret_cast<nlattr*>(reinterpret_cast<char*>(genl) + GENL_HDRLEN);
+    attr->nla_type = attr_type;
+    attr->nla_len = static_cast<std::uint16_t>(NLA_HDRLEN + attr_len);
+    std::memcpy(reinterpret_cast<char*>(attr) + NLA_HDRLEN, attr_data, attr_len);
+    return buf;
+}
 
-    auto send_and_recv = [&](std::vector<char>& msg, std::vector<char>& reply) {
-        if (send(fd, msg.data(), msg.size(), 0) < 0) {
-            throw WifiError(std::string("netlink send: ") + std::strerror(errno));
-        }
-        // The GETFAMILY descriptor can be large on some drivers. MSG_TRUNC
-        // makes recv() return the real datagram length even when it exceeds
-        // the buffer, so truncation is detected instead of parsing a partial
-        // message (PR #198 review).
-        reply.resize(32768);
-        // Blocking recv under country_mutex_ is intentional: that mutex
-        // exists solely to serialize regdom apply+persist pairs, and only
-        // country operations ever take it - bus users on mutex_ are never
-        // blocked by this wait.
-        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-        ssize_t n = recv(fd, reply.data(), reply.size(), MSG_TRUNC);
-        if (n < 0) throw WifiError(std::string("netlink recv: ") + std::strerror(errno));
-        if (static_cast<size_t>(n) > reply.size()) {
-            throw WifiError("netlink reply truncated (" + std::to_string(n) + " bytes)");
-        }
-        reply.resize(static_cast<size_t>(n));
-    };
+void genl_send_recv(int fd, std::vector<char>& msg, std::vector<char>& reply) {
+    if (send(fd, msg.data(), msg.size(), 0) < 0) {
+        throw WifiError(std::string("netlink send: ") + std::strerror(errno));
+    }
+    // The GETFAMILY descriptor can be large on some drivers. MSG_TRUNC
+    // makes recv() return the real datagram length even when it exceeds
+    // the buffer, so truncation is detected instead of parsing a partial
+    // message (PR #198 review).
+    reply.resize(32768);
+    // Blocking recv under a WifiManager mutex is intentional: netlink
+    // round-trips are local and fast, and the mutexes exist to serialize
+    // whole operations, not to bound their latency.
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+    ssize_t n = recv(fd, reply.data(), reply.size(), MSG_TRUNC);
+    if (n < 0) throw WifiError(std::string("netlink recv: ") + std::strerror(errno));
+    if (static_cast<size_t>(n) > reply.size()) {
+        throw WifiError("netlink reply truncated (" + std::to_string(n) + " bytes)");
+    }
+    reply.resize(static_cast<size_t>(n));
+}
 
-    auto build = [](std::uint16_t nl_type, std::uint8_t genl_cmd, std::uint16_t attr_type, const void* attr_data,
-                    std::uint16_t attr_len) {
-        size_t attr_space = NLA_HDRLEN + NLA_ALIGN(attr_len);
-        size_t total = NLMSG_SPACE(GENL_HDRLEN) + attr_space;
-        std::vector<char> buf(total, 0);
-        auto* nlh = reinterpret_cast<nlmsghdr*>(buf.data());
-        nlh->nlmsg_len = static_cast<std::uint32_t>(total);
-        nlh->nlmsg_type = nl_type;
-        nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
-        nlh->nlmsg_seq = 1;
-        auto* genl = reinterpret_cast<genlmsghdr*>(NLMSG_DATA(nlh));
-        genl->cmd = genl_cmd;
-        genl->version = 1;
-        auto* attr = reinterpret_cast<nlattr*>(reinterpret_cast<char*>(genl) + GENL_HDRLEN);
-        attr->nla_type = attr_type;
-        attr->nla_len = static_cast<std::uint16_t>(NLA_HDRLEN + attr_len);
-        std::memcpy(reinterpret_cast<char*>(attr) + NLA_HDRLEN, attr_data, attr_len);
-        return buf;
-    };
-
-    // Resolve the nl80211 family id.
+std::uint16_t nl80211_family_id(int fd) {
     const char family_name[] = "nl80211";
-    auto req = build(GENL_ID_CTRL, CTRL_CMD_GETFAMILY, CTRL_ATTR_FAMILY_NAME, family_name, sizeof(family_name));
+    auto req = genl_build(GENL_ID_CTRL, CTRL_CMD_GETFAMILY, CTRL_ATTR_FAMILY_NAME, family_name, sizeof(family_name));
     std::vector<char> reply;
-    send_and_recv(req, reply);
+    genl_send_recv(fd, req, reply);
 
     std::uint16_t family_id = 0;
     size_t remaining = reply.size();
@@ -588,7 +758,7 @@ void nl80211_set_regdom(const std::string& alpha2) {
         int len = static_cast<int>(nlh->nlmsg_len) - static_cast<int>(NLMSG_LENGTH(GENL_HDRLEN));
         auto* attr = reinterpret_cast<nlattr*>(reinterpret_cast<char*>(genl) + GENL_HDRLEN);
         while (len > 0 && attr->nla_len >= NLA_HDRLEN && static_cast<int>(attr->nla_len) <= len) {
-            if (attr->nla_type == CTRL_ATTR_FAMILY_ID) {
+            if ((attr->nla_type & NLA_TYPE_MASK) == CTRL_ATTR_FAMILY_ID) {
                 family_id = *reinterpret_cast<std::uint16_t*>(reinterpret_cast<char*>(attr) + NLA_HDRLEN);
             }
             int step = NLA_ALIGN(attr->nla_len);
@@ -597,12 +767,64 @@ void nl80211_set_regdom(const std::string& alpha2) {
         }
     }
     if (family_id == 0) throw WifiError("nl80211 family not found (no wireless stack?)");
+    return family_id;
+}
+
+// Interface operating type via nl80211 GET_INTERFACE (the in-process
+// equivalent of `iw dev <ifname> info` "type"). Unprivileged. Returns an
+// NL80211_IFTYPE_* value, or UINT32_MAX when it cannot be determined —
+// callers must treat that as "not an AP interface" rather than failing,
+// so boards without nl80211 quirks keep working.
+std::uint32_t nl80211_iftype(const std::string& ifname) {
+    unsigned idx = if_nametoindex(ifname.c_str());
+    if (idx == 0) return UINT32_MAX;
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC);
+    if (fd < 0) return UINT32_MAX;
+    FdGuard guard{fd};
+    try {
+        auto family_id = nl80211_family_id(fd);
+        std::uint32_t ifindex = idx;
+        auto req = genl_build(family_id, NL80211_CMD_GET_INTERFACE, NL80211_ATTR_IFINDEX, &ifindex, sizeof(ifindex));
+        std::vector<char> reply;
+        genl_send_recv(fd, req, reply);
+        size_t remaining = reply.size();
+        for (auto* nlh = reinterpret_cast<nlmsghdr*>(reply.data()); NLMSG_OK(nlh, remaining);
+             nlh = NLMSG_NEXT(nlh, remaining)) {
+            if (nlh->nlmsg_type != family_id) continue;
+            auto* genl = static_cast<genlmsghdr*>(NLMSG_DATA(nlh));
+            int len = static_cast<int>(nlh->nlmsg_len) - static_cast<int>(NLMSG_LENGTH(GENL_HDRLEN));
+            auto* attr = reinterpret_cast<nlattr*>(reinterpret_cast<char*>(genl) + GENL_HDRLEN);
+            while (len > 0 && attr->nla_len >= NLA_HDRLEN && static_cast<int>(attr->nla_len) <= len) {
+                if ((attr->nla_type & NLA_TYPE_MASK) == NL80211_ATTR_IFTYPE) {
+                    return *reinterpret_cast<std::uint32_t*>(reinterpret_cast<char*>(attr) + NLA_HDRLEN);
+                }
+                int step = NLA_ALIGN(attr->nla_len);
+                len -= step;
+                attr = reinterpret_cast<nlattr*>(reinterpret_cast<char*>(attr) + step);
+            }
+        }
+    } catch (const WifiError&) {
+        // Best-effort probe: callers treat "unknown" as "not an AP
+        // interface" so boards without nl80211 quirks keep working.
+        return UINT32_MAX;
+    }
+    return UINT32_MAX;
+}
+
+// Equivalent of `iw reg set <alpha2>` — a single generic-netlink request.
+// Needs CAP_NET_ADMIN (granted to the service as an ambient capability).
+void nl80211_set_regdom(const std::string& alpha2) {
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC);
+    if (fd < 0) throw WifiError(std::string("netlink socket: ") + std::strerror(errno));
+    FdGuard guard{fd};
+
+    auto family_id = nl80211_family_id(fd);
 
     // Send REQ_SET_REG with the alpha2 (NUL-terminated).
     char cc[3] = {alpha2[0], alpha2[1], 0};
-    auto set_req = build(family_id, NL80211_CMD_REQ_SET_REG, NL80211_ATTR_REG_ALPHA2, cc, sizeof(cc));
+    auto set_req = genl_build(family_id, NL80211_CMD_REQ_SET_REG, NL80211_ATTR_REG_ALPHA2, cc, sizeof(cc));
     std::vector<char> ack;
-    send_and_recv(set_req, ack);
+    genl_send_recv(fd, set_req, ack);
     size_t ack_remaining = ack.size();
     for (auto* nlh = reinterpret_cast<nlmsghdr*>(ack.data()); NLMSG_OK(nlh, ack_remaining);
          nlh = NLMSG_NEXT(nlh, ack_remaining)) {
@@ -652,7 +874,7 @@ bool WifiManager::available() {
     std::lock_guard<std::mutex> lock(mutex_);
     try {
         ensure_bus_locked();
-        return !bus_->wifi_device().first.empty();
+        return !bus_->wifi_devices().empty();
     } catch (const WifiError&) {
         return false;
     }
@@ -662,11 +884,14 @@ nlohmann::json WifiManager::status() {
     std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
     nlohmann::json out;
-    auto [dev, ifname] = bus_->wifi_device();
-    out["Available"] = !dev.empty();
-    if (dev.empty()) return out;
+    auto roles = bus_->device_roles();
+    out["Available"] = roles.count > 0;
+    if (roles.count == 0) return out;
+    const std::string& dev = roles.client_path;
 
-    out["Device"] = ifname;
+    out["Device"] = roles.client_if;
+    out["ApDevice"] = roles.ap_if;
+    out["DeviceCount"] = roles.count;
     out["WirelessEnabled"] = bus_->prop_trivial(kNmPath, kNmIface, "WirelessEnabled", 'b') != 0;
 
     auto caps =
@@ -682,21 +907,30 @@ nlohmann::json WifiManager::status() {
                                           : "deactivating";
     out["State"] = state_str;
 
-    // Active connection details (client association or our own AP).
+    // Active connection details on the client device.
     auto active = bus_->prop_path(dev.c_str(), kNmDeviceIface, "ActiveConnection");
-    bool ap_active = false;
     if (!active.empty() && active != "/") {
         out["ConnectionId"] = bus_->prop_string(active.c_str(), kNmActiveIface, "Id");
-        std::string active_uuid = bus_->prop_string(active.c_str(), kNmActiveIface, "Uuid");
-        out["ConnectionUuid"] = active_uuid;
-        // Explicit hotspot flag so clients never have to compare connection
-        // ids against the well-known name - a renamed hotspot profile must
-        // still be recognized (PR #198 review round 5).
-        for (const auto& [cpath, cs] : bus_->wifi_connections()) {
-            if (cs["connection"].value("uuid", "") == active_uuid) {
-                ap_active = cs.contains("802-11-wireless") && cs["802-11-wireless"].value("mode", "") == "ap";
-                break;
+        out["ConnectionUuid"] = bus_->prop_string(active.c_str(), kNmActiveIface, "Uuid");
+    }
+    // Explicit hotspot flag, checked across ALL wifi devices: on
+    // dual-interface boards the hotspot lives on the AP interface while the
+    // client device reports its own association, and a renamed hotspot
+    // profile must still be recognized (PR #198 review round 5), so match
+    // active uuids against ap-mode profiles rather than connection ids.
+    bool ap_active = false;
+    {
+        auto conns = bus_->wifi_connections();
+        for (const auto& u : bus_->active_uuids()) {
+            for (const auto& [cpath, cs] : conns) {
+                if (cs["connection"].value("uuid", "") == u) {
+                    if (cs.contains("802-11-wireless") && cs["802-11-wireless"].value("mode", "") == "ap") {
+                        ap_active = true;
+                    }
+                    break;
+                }
             }
+            if (ap_active) break;
         }
     }
     out["ApActive"] = ap_active;
@@ -745,8 +979,11 @@ void WifiManager::set_wireless_enabled(bool enabled) {
 nlohmann::json WifiManager::scan() {
     std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
-    auto [dev, ifname] = bus_->wifi_device();
-    if (dev.empty()) throw WifiError("no wifi device");
+    auto roles = bus_->device_roles();
+    if (roles.count == 0) throw WifiError("no wifi device");
+    // Scans go to the client device: a dedicated AP interface often cannot
+    // scan while beaconing, and the client device is where a join lands.
+    const std::string& dev = roles.client_path;
 
     // Best-effort scan request; NM throttles ("Scanning not allowed...") and
     // refuses while the AP is up — in both cases the cached BSS list below is
@@ -800,8 +1037,10 @@ nlohmann::json WifiManager::scan() {
 nlohmann::json WifiManager::profiles() {
     std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
-    auto [dev, ifname] = bus_->wifi_device();
-    std::string active = dev.empty() ? "" : bus_->active_uuid(dev);
+    auto active = bus_->active_uuids();
+    auto is_active = [&](const std::string& uuid) {
+        return !uuid.empty() && std::find(active.begin(), active.end(), uuid) != active.end();
+    };
 
     nlohmann::json list = nlohmann::json::array();
     for (const auto& [path, s] : bus_->wifi_connections()) {
@@ -819,7 +1058,7 @@ nlohmann::json WifiManager::profiles() {
                         {"Mode", mode},
                         {"Autoconnect", conn.value("autoconnect", true)},
                         {"Priority", conn.value("autoconnect-priority", 0)},
-                        {"Active", !active.empty() && uuid == active}});
+                        {"Active", is_active(uuid)}});
     }
     return list;
 }
@@ -849,6 +1088,15 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::str
                  {"type", SVal::str("802-11-wireless")},
                  {"autoconnect", SVal::boolean(autoconnect)},
                  {"autoconnect-priority", SVal::i32(priority)}};
+    // On dual-interface boards, pin client profiles to the managed
+    // interface: without the pin NM may activate them on the dedicated AP
+    // interface, displacing the hotspot (OPi 4 Pro field bug, 2026-08-13).
+    {
+        auto roles = bus_->device_roles();
+        if (roles.count > 1 && !roles.client_if.empty()) {
+            conn.push_back({"interface-name", SVal::str(roles.client_if)});
+        }
+    }
     if (!existing_path.empty()) {
         conn.push_back({"uuid", SVal::str(existing["connection"].value("uuid", ""))});
     }
@@ -892,11 +1140,24 @@ void WifiManager::delete_profile(const std::string& uuid) {
 void WifiManager::connect_profile(const std::string& uuid) {
     std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
-    auto [dev, ifname] = bus_->wifi_device();
-    if (dev.empty()) throw WifiError("no wifi device");
+    auto roles = bus_->device_roles();
+    if (roles.count == 0) throw WifiError("no wifi device");
     for (const auto& [path, s] : bus_->wifi_connections()) {
         if (s["connection"].value("uuid", "") == uuid) {
-            bus_->activate(path, dev);
+            // AP profiles activate on the AP device, client profiles on the
+            // managed device — never let NM pick (OPi 4 Pro field bug).
+            bool is_ap = s.contains("802-11-wireless") && s["802-11-wireless"].value("mode", "") == "ap";
+            // Pre-fix client profiles lack the interface-name pin; add it on
+            // connect so a later nmcli join or a boot-time autoconnect race
+            // cannot land them on the AP interface either. Message-level
+            // rewrite preserves every other setting verbatim (PR #202
+            // review: a rebuilt minimal spec would strip static IPs, 802.1x,
+            // hidden-ssid flags... from profiles the app didn't create).
+            if (!is_ap && roles.count > 1 && !roles.client_if.empty() &&
+                s["connection"].value("interface-name", "").empty()) {
+                bus_->pin_interface_name(path, roles.client_if);
+            }
+            bus_->activate(path, is_ap ? roles.ap_path : roles.client_path);
             return;
         }
     }
@@ -906,8 +1167,7 @@ void WifiManager::connect_profile(const std::string& uuid) {
 nlohmann::json WifiManager::get_ap() {
     std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
-    auto [dev, ifname] = bus_->wifi_device();
-    std::string active = dev.empty() ? "" : bus_->active_uuid(dev);
+    auto active = bus_->active_uuids();
 
     auto [ap_path, ap_settings] = bus_->ap_profile();
     if (!ap_path.empty()) {
@@ -919,7 +1179,7 @@ nlohmann::json WifiManager::get_ap() {
                 {"Band", wifi.value("band", "")},
                 {"Channel", wifi.value("channel", 0u)},
                 {"Autoconnect", s["connection"].value("autoconnect", true)},
-                {"Active", !active.empty() && uuid == active},
+                {"Active", !uuid.empty() && std::find(active.begin(), active.end(), uuid) != active.end()},
                 {"Ip4Address", "172.24.1.1"}};
     }
     return {{"Configured", false}};
@@ -934,14 +1194,20 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
     if (band != "a" && band != "bg") throw WifiError("Band must be \"a\" (5 GHz) or \"bg\" (2.4 GHz)");
     std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
-    auto [dev, ifname] = bus_->wifi_device();
-    if (dev.empty()) throw WifiError("no wifi device");
+    auto roles = bus_->device_roles();
+    if (roles.count == 0) throw WifiError("no wifi device");
+    const std::string& dev = roles.ap_path;
 
     auto [existing_path, existing] = bus_->ap_profile();
 
     Section conn{{"id", SVal::str(kApProfileId)},
                  {"type", SVal::str("802-11-wireless")},
                  {"autoconnect", SVal::boolean(enabled)}};
+    // Keep the hotspot pinned to the AP-type interface on dual-interface
+    // boards so a client join can never displace it (and vice versa).
+    if (roles.count > 1 && !roles.ap_if.empty()) {
+        conn.push_back({"interface-name", SVal::str(roles.ap_if)});
+    }
     if (!existing_path.empty()) {
         conn.push_back({"uuid", SVal::str(existing["connection"].value("uuid", ""))});
     }
