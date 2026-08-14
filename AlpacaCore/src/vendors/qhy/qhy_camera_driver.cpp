@@ -321,7 +321,16 @@ private:
             auto& sdk = QHYSDKWrapper::instance();
             const std::string& id = camera_id_.value_or("");
             if (!id.empty()) {
-                // Exposure worker already cancelled + joined above.
+                // Exposure worker cancel attempted above; join_exposure_thread()
+                // may have joined it cleanly OR hit its 2s timeout and
+                // detached a still-running zombie instead (see its own
+                // comment) -- this close_camera() call proceeds either way.
+                // That's intentional and safe here (the zombie holds its own
+                // shared_ptr<qhyccd_handle> copy, so this doesn't touch a
+                // closed handle), but it does erase this id's entry from the
+                // SDK wrapper's handle map once the last owner releases it,
+                // which matters for the next connect() -- see the
+                // exposure_thread_running_ check there.
                 try {
                     sdk.close_camera(id);
                 } catch (const std::exception& e) {
@@ -346,6 +355,32 @@ private:
 
         auto& sdk = QHYSDKWrapper::instance();
         const std::string& id = resolve_camera_id_locked();
+
+        // A prior disconnect's join_exposure_thread() may have hit its 2s
+        // timeout and detached a wedged exposure worker instead of waiting
+        // for it -- that worker can still be alive, blocked inside
+        // GetQHYCCDSingleFrame on the OLD qhyccd_handle, holding its own
+        // shared_ptr<qhyccd_handle> copy (which is what keeps CloseQHYCCD
+        // deferred rather than a use-after-close). disconnect() calls
+        // sdk.close_camera(id) unconditionally in that case, which erases
+        // the handle map's entry for `id` once the last owner releases it.
+        // open_camera() below only reuses a handle while a live map entry
+        // survives; once it's erased, this connect() would OpenQHYCCD() a
+        // SECOND, independent handle to the same physical USB device while
+        // the zombie's is potentially still in flight on the first one --
+        // undefined territory for the vendor SDK, and a much harder failure
+        // mode to diagnose than the hang this generation-tracking exists to
+        // bound in the first place (review finding on PR #201). Refuse
+        // instead of risking a dual-handle open; the client can retry once
+        // the zombie's blocking call eventually returns and this flag
+        // clears (or the process is restarted, if the SDK call never
+        // returns at all -- the same ceiling every other reap path in this
+        // file already has).
+        if (exposure_thread_running_ && exposure_thread_running_->load()) {
+            throw AlpacaException(
+                "Camera cannot reconnect while a previous exposure download is still finishing; try again shortly",
+                AlpacaError::InvalidOperation);
+        }
 
         sdk.open_camera(id);
         // Roll back the ref-counted open if any init step throws: open_camera()
