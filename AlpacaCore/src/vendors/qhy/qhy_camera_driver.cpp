@@ -1471,10 +1471,29 @@ public:
                                             std::string(read_directly ? "true" : "false"));
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "start_single_frame failed: " + std::string(e.what()));
+                // This first check (before touching `this->mutex_` at all)
+                // is what makes it safe to even attempt the lock below if
+                // `this` has already been destroyed (destructor's own
+                // join_exposure_thread() can also hit the 2s timeout and
+                // detach, then finish tearing `this` down) -- exposure_superseded
+                // is a local copy of a shared_ptr, so reading it never
+                // touches `this`. It does NOT by itself close the race the
+                // second check below exists for: load() and the lock
+                // acquisition aren't one atomic step, so a newer generation
+                // could still finish arming, running, and publishing its own
+                // state under mutex_ in the gap between them. Re-checking
+                // immediately after acquiring the lock closes that gap --
+                // the detaching thread's store(true) always happens-before
+                // its own next mutex_ lock/unlock, so the re-check is
+                // guaranteed to observe it correctly relative to whichever
+                // generation's writes land first (review finding on PR #201).
                 if (exposure_superseded->load()) {
                     return;
                 }
                 std::lock_guard<std::mutex> lk(mutex_);
+                if (exposure_superseded->load()) {
+                    return;
+                }
                 exposure_status_ = QHYExposureStatus::Failed;
                 image_ready_ = false;
                 exposure_deadline_valid_ = false;
@@ -1527,7 +1546,18 @@ public:
                     ALPACA_LOG_WARN("QHY",
                                     "cancel_exposure after get_mem_length failure failed: " + std::string(e.what()));
                 }
+                // Re-checked under mutex_: the cancel_exposure() call above
+                // takes real time, long enough for a newer generation to
+                // finish arming, running, and publishing its own state in
+                // the gap since the pre-cancel check. See the
+                // start_single_frame failure branch above for why the
+                // outer check alone (before touching `this->mutex_`) isn't
+                // enough to prevent this stale worker from clobbering that
+                // fresh state (review finding on PR #201).
                 std::lock_guard<std::mutex> lk(mutex_);
+                if (exposure_superseded->load()) {
+                    return;
+                }
                 exposure_status_ = QHYExposureStatus::Failed;
                 image_ready_ = false;
                 exposure_deadline_valid_ = false;
@@ -1578,8 +1608,14 @@ public:
                     std::chrono::duration<double>(static_cast<double>(mem_length) / kMinTransferBytesPerSecond));
                 auto extended_deadline = std::chrono::steady_clock::now() + min_transfer + std::chrono::seconds(15);
                 if (!exposure_superseded->load()) {
+                    // Re-checked immediately after acquiring the lock -- see
+                    // the start_single_frame failure branch above for why
+                    // the outer check alone can't close the gap where a
+                    // newer generation arms and starts in between (review
+                    // finding on PR #201).
                     std::lock_guard<std::mutex> lk(mutex_);
-                    if (exposure_deadline_valid_ && extended_deadline > exposure_deadline_) {
+                    if (!exposure_superseded->load() && exposure_deadline_valid_ &&
+                        extended_deadline > exposure_deadline_) {
                         exposure_deadline_ = extended_deadline;
                     }
                 }
@@ -1601,7 +1637,20 @@ public:
                 return;
             }
 
+            // Re-checked again immediately after acquiring the lock: the
+            // check above only establishes it's safe to *attempt* the lock
+            // (this shared_ptr read never touches `this`) -- it doesn't by
+            // itself close the gap between that load() and actually
+            // acquiring mutex_, wide enough for a newer generation to have
+            // armed, run, and published its own state in the meantime. The
+            // detaching thread's store(true) always happens-before its own
+            // next mutex_ lock/unlock, so this second check is guaranteed to
+            // observe it correctly relative to whichever generation's writes
+            // land first (review finding on PR #201).
             std::lock_guard<std::mutex> lk(mutex_);
+            if (exposure_superseded->load()) {
+                return;
+            }
             if (ok) {
                 exposure_buffer_ = std::move(local_buf);
                 exposure_width_    = w;
