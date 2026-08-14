@@ -1358,6 +1358,22 @@ public:
             if (exposure_thread_.joinable()) {
                 join_exposure_thread();
             }
+            // Re-checked after the reap attempt above: if the worker is
+            // STILL alive -- cancel_exposure() didn't actually unblock it,
+            // or join_exposure_thread() wasn't even reached because
+            // exposure_thread_ was already detached by a PRIOR reap (in
+            // which case the block above skips its 2s grace period
+            // entirely) -- every setter below now takes call_mutex and
+            // would block on it for as long as the zombie holds it,
+            // reintroducing the exact "hangs on exposure with no error"
+            // symptom this PR set out to fix, just one level down (review
+            // finding on PR #201). Refuse instead of risking that hang,
+            // matching the same "camera busy" refusal every other setter
+            // already uses via ensure_not_exposing_locked().
+            if (exposure_thread_running_ && exposure_thread_running_->load()) {
+                throw AlpacaException("Camera is finishing a previous exposure; try again shortly",
+                                      AlpacaError::InvalidOperation);
+            }
         }
 
         // Apply exposure time (microseconds)
