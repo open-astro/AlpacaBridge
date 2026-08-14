@@ -1391,8 +1391,18 @@ public:
         // store() reset of the shared members.
         auto exposure_running = std::make_shared<std::atomic<bool>>(true);
         auto exposure_superseded = std::make_shared<std::atomic<bool>>(false);
-        exposure_thread_running_ = exposure_running;
-        exposure_thread_superseded_ = exposure_superseded;
+        {
+            // Also take mutex_ for this reassignment (in addition to
+            // exposure_lifecycle_mutex_, already held for the whole
+            // function): ensure_not_exposing_locked() now reads
+            // exposure_thread_running_ under mutex_ alone (setters never
+            // take exposure_lifecycle_mutex_), so the shared_ptr member
+            // itself needs to be safe to read under either lock. Holding
+            // both here on write is what makes that valid.
+            std::lock_guard<std::mutex> lock(mutex_);
+            exposure_thread_running_ = exposure_running;
+            exposure_thread_superseded_ = exposure_superseded;
+        }
 
         // Launch background thread to run the WHOLE exposure sequence --
         // ExpQHYCCDSingleFrame through GetQHYCCDSingleFrame -- on one thread
@@ -1456,6 +1466,20 @@ public:
                 ALPACA_LOG_WARN("QHY", "get_mem_length failed: " + std::string(e.what()));
             }
             if (mem_length == 0) {
+                // Check supersession BEFORE cancelling: cancel_exposure()
+                // operates on the physical handle, not this generation. If
+                // join_exposure_thread() already timed out (2s) and detached
+                // this worker -- e.g. while it was in the mandatory 1s settle
+                // sleep or queued behind call_mutex -- a newer start_exposure()
+                // generation may already be armed and mid-download on the same
+                // handle by the time this stale worker reaches mem_length==0.
+                // Cancelling unconditionally here would silently abort that
+                // new, legitimate exposure (review finding on PR #201); the
+                // next generation's own reap-before-arm logic already issues
+                // its own cancel_exposure() if it actually needs one.
+                if (exposure_superseded->load()) {
+                    return;
+                }
                 // Unlike the start_single_frame failure above, ExpQHYCCDSingleFrame
                 // DID succeed to get here -- the SDK is armed with nothing left to
                 // read it back out. Cancel so this failure doesn't leave an
@@ -1467,9 +1491,6 @@ public:
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("QHY",
                                     "cancel_exposure after get_mem_length failure failed: " + std::string(e.what()));
-                }
-                if (exposure_superseded->load()) {
-                    return;
                 }
                 std::lock_guard<std::mutex> lk(mutex_);
                 exposure_status_ = QHYExposureStatus::Failed;
@@ -1730,6 +1751,26 @@ private:
     void ensure_not_exposing_locked() const {
         if (exposure_status_ == QHYExposureStatus::Working) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
+        }
+        // get_camera_state()'s watchdog marks a hung exposure Failed purely
+        // from elapsed time -- it does NOT confirm exposure_thread_ has
+        // actually returned. A genuinely wedged GetQHYCCDSingleFrame call can
+        // still be running (and still holding QHYSDKWrapper's call_mutex)
+        // well after exposure_status_ flips to Failed. Every setter that
+        // reaches this check next holds mutex_ across its own call_mutex-
+        // guarded SDK write (set_gain, set_offset, set_readout_mode,
+        // set_bin_xy, set_temperature, ...); if one of them were let through
+        // here it would block forever on call_mutex while STILL HOLDING
+        // mutex_, and every other operation on this instance -- including
+        // start_exposure()'s and disconnect()'s own reap/cancel logic, which
+        // also need mutex_ -- would then stall forever behind it. That's a
+        // whole-driver deadlock reachable only via this narrow window
+        // (review finding on PR #201). Reject explicitly instead: a stuck
+        // worker degrades to "camera busy, try again" rather than silently
+        // wedging every other property and the paired CFW (shared handle).
+        if (exposure_thread_running_ && exposure_thread_running_->load()) {
+            throw AlpacaException("Camera is finishing a previous exposure; try again shortly",
+                                  AlpacaError::InvalidOperation);
         }
     }
 
