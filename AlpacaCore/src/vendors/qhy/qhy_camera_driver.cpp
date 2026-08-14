@@ -1590,6 +1590,26 @@ public:
             }
             std::vector<uint8_t> local_buf(mem_length, 0);
 
+            // Checked before the readout_mode_ read below (and before this
+            // point, `this` was never touched since the pre-lock check at
+            // the top of the mem_length==0 branch above, or since this
+            // worker was spawned if mem_length was nonzero on the first
+            // try): get_mem_length() itself is a call_mutex-guarded SDK call
+            // and can take longer than expected (e.g. queued behind another
+            // in-flight call on the same handle), long enough for a
+            // concurrent join_exposure_thread() elsewhere (a later
+            // start_exposure()/stop_exposure()/disconnect()/destructor) to
+            // hit its 2s timeout and detach this worker -- and, in the
+            // destructor's case, finish tearing `this` down -- while this
+            // worker was still blocked in get_mem_length() or the preceding
+            // settle sleep. Reading `this->readout_mode_` next without this
+            // check would be a potential use-after-free if that happened
+            // (review finding on PR #201); every other post-blocking-call
+            // touch of `this` in this lambda already has this same guard.
+            if (exposure_superseded->load()) {
+                return;
+            }
+
             // Re-derive the watchdog deadline from the ACTUAL buffer size,
             // now that it's known -- the deadline set at arm time only
             // accounts for exposure_us + a flat 15s margin, which assumes
