@@ -18,11 +18,12 @@
 #define __CPP_MODE__ 1
 #include <qhyccd.h>
 
+#include <atomic>
+#include <cstring>
+#include <iomanip>
 #include <mutex>
 #include <sstream>
-#include <iomanip>
 #include <unordered_map>
-#include <cstring>
 
 namespace alpacacore::vendor::qhy {
 
@@ -86,6 +87,19 @@ public:
         std::shared_ptr<std::mutex> call_mutex{std::make_shared<std::mutex>()};
     };
     std::unordered_map<std::string, SharedHandle> handles;
+    // Deliberately a SEPARATE map from `handles` above, not a field on
+    // SharedHandle: close_camera() erases the handles entry once the last
+    // owner releases it, but that's exactly the moment a still-running
+    // exposure worker's liveness needs to keep being visible to the NEXT
+    // open_camera() call (review finding on PR #201 -- a detached zombie
+    // worker can outlive the handle-map entry, and either the camera driver
+    // OR the paired CFW driver reconnecting afterward would otherwise open
+    // a second, independent physical handle while the zombie's is still
+    // potentially in flight on the first one). Entries are never erased --
+    // there are only ever one or two camera_ids per process, so this isn't
+    // a real growth concern, and erasing on a clean return would just
+    // reintroduce a window to get it wrong.
+    std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> exposure_worker_flags;
     mutable bool resource_initialized{false};
     mutable bool resource_init_attempted{false};
     mutable std::string sdk_version_cache;  // filled on successful init
@@ -265,6 +279,24 @@ void QHYSDKWrapper::open_camera(const std::string& camera_id) {
         return;
     }
 
+    // No live handle to reuse -- about to OpenQHYCCD() a fresh one. Refuse
+    // if a prior exposure worker for this id might still be alive: if
+    // join_exposure_thread() hit its 2s timeout and detached rather than
+    // joined, that worker can still be blocked inside GetQHYCCDSingleFrame
+    // on the OLD handle even though close_camera() already erased the entry
+    // above. Opening a second, independent handle to the same physical USB
+    // device while the zombie's is still potentially in flight is undefined
+    // territory for the vendor SDK -- and reachable through EITHER the
+    // camera driver reconnecting OR the paired CFW driver reconnecting
+    // independently, since both call this same function for the same id
+    // (review finding on PR #201).
+    auto flag_it = pimpl_->exposure_worker_flags.find(camera_id);
+    if (flag_it != pimpl_->exposure_worker_flags.end() && flag_it->second && flag_it->second->load()) {
+        throw AlpacaException(
+            "Camera cannot reopen while a previous exposure download is still finishing; try again shortly",
+            AlpacaError::InvalidOperation);
+    }
+
     char id_buf[64] = {};
     std::strncpy(id_buf, camera_id.c_str(), sizeof(id_buf) - 1);
 
@@ -319,6 +351,12 @@ void QHYSDKWrapper::close_camera(const std::string& camera_id) {
     // close is deferred until that in-flight call returns and its copy goes
     // out of scope, instead of racing it.
     pimpl_->handles.erase(it);
+}
+
+void QHYSDKWrapper::register_exposure_worker(const std::string& camera_id,
+                                             std::shared_ptr<std::atomic<bool>> running_flag) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex);
+    pimpl_->exposure_worker_flags[camera_id] = std::move(running_flag);
 }
 
 // ────────────────────────────────────────────────────────────────────────────

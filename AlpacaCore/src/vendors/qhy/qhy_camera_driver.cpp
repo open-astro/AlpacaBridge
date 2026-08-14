@@ -1438,6 +1438,15 @@ public:
             exposure_thread_running_ = exposure_running;
             exposure_thread_superseded_ = exposure_superseded;
         }
+        // Also register with the SDK wrapper, keyed by camera_id rather than
+        // this driver instance: connect()'s own exposure_thread_running_
+        // check only protects a camera reconnect, but the paired CFW driver
+        // shares this same physical handle and calls open_camera()
+        // independently, with no visibility into this driver's private
+        // members. QHYSDKWrapper::open_camera() consults this registration
+        // to refuse opening a second handle for either caller (review
+        // finding on PR #201).
+        sdk.register_exposure_worker(id, exposure_running);
 
         // Launch background thread to run the WHOLE exposure sequence --
         // ExpQHYCCDSingleFrame through GetQHYCCDSingleFrame -- on one thread
