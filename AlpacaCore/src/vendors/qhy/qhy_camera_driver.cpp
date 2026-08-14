@@ -94,6 +94,8 @@ public:
           camera_info_valid_(false),
           readout_modes_{},
           readout_mode_(0),
+          cached_gain_{},
+          cached_offset_{},
           bin_x_(1),
           bin_y_(1),
           num_x_(0),
@@ -235,7 +237,12 @@ private:
             // the join→close gap (same shape as the ToupTek camera). Lock
             // order: exposure_lifecycle_mutex_ -> mutex_.
             std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-            if (exposure_thread_.joinable()) {
+            // See the matching comment in start_exposure(): joinable() alone
+            // misses a worker that a prior reap already detach()ed but which
+            // may still be alive and stuck in GetQHYCCDSingleFrame -- retry
+            // cancel_exposure() while exposure_thread_running_ says so.
+            bool worker_may_still_be_running = exposure_thread_running_ && exposure_thread_running_->load();
+            if (exposure_thread_.joinable() || worker_may_still_be_running) {
                 std::string cancel_id;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -248,7 +255,9 @@ private:
                         ALPACA_LOG_WARN("QHY", "cancel_exposure failed during disconnect: " + std::string(e.what()));
                     }
                 }
-                join_exposure_thread();
+                if (exposure_thread_.joinable()) {
+                    join_exposure_thread();
+                }
             }
             // Join the cooler-off worker before taking mutex_ below: it takes
             // mutex_ itself and joins the temp thread.
@@ -303,6 +312,8 @@ private:
             }
             readout_modes_.clear();
             readout_mode_ = 0;
+            cached_gain_.reset();
+            cached_offset_.reset();
             telemetry_temp_valid_ = false;
             telemetry_power_valid_ = false;
             reset_exposure_state_locked();
@@ -310,7 +321,16 @@ private:
             auto& sdk = QHYSDKWrapper::instance();
             const std::string& id = camera_id_.value_or("");
             if (!id.empty()) {
-                // Exposure worker already cancelled + joined above.
+                // Exposure worker cancel attempted above; join_exposure_thread()
+                // may have joined it cleanly OR hit its 2s timeout and
+                // detached a still-running zombie instead (see its own
+                // comment) -- this close_camera() call proceeds either way.
+                // That's intentional and safe here (the zombie holds its own
+                // shared_ptr<qhyccd_handle> copy, so this doesn't touch a
+                // closed handle), but it does erase this id's entry from the
+                // SDK wrapper's handle map once the last owner releases it,
+                // which matters for the next connect() -- see the
+                // exposure_thread_running_ check there.
                 try {
                     sdk.close_camera(id);
                 } catch (const std::exception& e) {
@@ -335,6 +355,32 @@ private:
 
         auto& sdk = QHYSDKWrapper::instance();
         const std::string& id = resolve_camera_id_locked();
+
+        // A prior disconnect's join_exposure_thread() may have hit its 2s
+        // timeout and detached a wedged exposure worker instead of waiting
+        // for it -- that worker can still be alive, blocked inside
+        // GetQHYCCDSingleFrame on the OLD qhyccd_handle, holding its own
+        // shared_ptr<qhyccd_handle> copy (which is what keeps CloseQHYCCD
+        // deferred rather than a use-after-close). disconnect() calls
+        // sdk.close_camera(id) unconditionally in that case, which erases
+        // the handle map's entry for `id` once the last owner releases it.
+        // open_camera() below only reuses a handle while a live map entry
+        // survives; once it's erased, this connect() would OpenQHYCCD() a
+        // SECOND, independent handle to the same physical USB device while
+        // the zombie's is potentially still in flight on the first one --
+        // undefined territory for the vendor SDK, and a much harder failure
+        // mode to diagnose than the hang this generation-tracking exists to
+        // bound in the first place (review finding on PR #201). Refuse
+        // instead of risking a dual-handle open; the client can retry once
+        // the zombie's blocking call eventually returns and this flag
+        // clears (or the process is restarted, if the SDK call never
+        // returns at all -- the same ceiling every other reap path in this
+        // file already has).
+        if (exposure_thread_running_ && exposure_thread_running_->load()) {
+            throw AlpacaException(
+                "Camera cannot reconnect while a previous exposure download is still finishing; try again shortly",
+                AlpacaError::InvalidOperation);
+        }
 
         sdk.open_camera(id);
         // Roll back the ref-counted open if any init step throws: open_camera()
@@ -775,6 +821,7 @@ public:
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
         QHYSDKWrapper::instance().set_param(id, control::GAIN, static_cast<double>(gain));
+        cached_gain_ = gain;
     }
 
     int get_gain_max() const override {
@@ -947,6 +994,7 @@ public:
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
         QHYSDKWrapper::instance().set_param(id, control::OFFSET, static_cast<double>(offset));
+        cached_offset_ = offset;
     }
 
     int get_offset_max() const override {
@@ -1028,6 +1076,42 @@ public:
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
         QHYSDKWrapper::instance().set_readout_mode(id, static_cast<uint32_t>(mode));
+
+        // set_readout_mode() re-runs InitQHYCCD on the same handle to fix
+        // "Linearity HDR"'s slow download (see its own comment). Switching
+        // modes can also change Gain/Offset out from under the client
+        // (confirmed on real hardware); re-push whatever was last explicitly
+        // set so a switch between two otherwise-independent modes doesn't
+        // quietly change exposure calibration.
+        //
+        // Known SDK/firmware limitation, NOT something this fix caused: on
+        // real miniCam8M hardware, Gain/Offset writes silently no-op (return
+        // QHYCCD_SUCCESS but the readback never changes) while readout mode
+        // 1 ("Linearity HDR") is active -- confirmed with BOTH the old
+        // single-InitQHYCCD call order (pre-dating this whole investigation,
+        // no re-init involved at all) AND a full CloseQHYCCD+OpenQHYCCD
+        // cycle (not just a second InitQHYCCD on the same handle), so it is
+        // not an artifact of the re-init trick above. HDR mode likely
+        // requires fixed gain/offset internally to combine its multiple
+        // capture stages, and the SDK just doesn't expose that as an error.
+        // This re-push is therefore a no-op while in HDR mode (same as it
+        // always silently was before this driver ever touched read modes at
+        // all) and only meaningfully restores Gain/Offset when switching
+        // between modes where the SDK actually honors them.
+        if (cached_gain_.has_value()) {
+            try {
+                QHYSDKWrapper::instance().set_param(id, control::GAIN, static_cast<double>(*cached_gain_));
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "Failed to restore gain after readout mode change: " + std::string(e.what()));
+            }
+        }
+        if (cached_offset_.has_value()) {
+            try {
+                QHYSDKWrapper::instance().set_param(id, control::OFFSET, static_cast<double>(*cached_offset_));
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "Failed to restore offset after readout mode change: " + std::string(e.what()));
+            }
+        }
 
         // After changing readout mode, refresh chip info as dimensions may change
         QHYCameraInfo updated_info;
@@ -1234,6 +1318,64 @@ public:
             }
         }
 
+        // Reap the previous worker FIRST, before any other SDK call in this
+        // function. cancel_exposure() deliberately does not take the SDK
+        // wrapper's per-handle call_mutex (see its definition) specifically
+        // so it can interrupt a wedged GetQHYCCDSingleFrame that's holding
+        // that mutex; every setter below (set_param, is_control_available,
+        // set_resolution, set_bin_mode, set_bits_mode) DOES take it. If a
+        // prior download is genuinely stuck and its worker was detached by
+        // join_exposure_thread()'s timeout, that detached thread is still
+        // holding call_mutex from inside GetQHYCCDSingleFrame -- calling any
+        // mutexed setter before this reap would block this StartExposure on
+        // that same call_mutex forever, never reaching the cancel that's
+        // supposed to break the hang (review finding on PR #201).
+        //
+        // exposure_thread_.joinable() alone is NOT enough to decide whether
+        // to retry: std::thread::detach() (inside join_exposure_thread()'s
+        // 2s-timeout path) makes joinable() false immediately, even though
+        // the detached worker may still be alive and stuck in
+        // GetQHYCCDSingleFrame, still holding call_mutex. Gating solely on
+        // joinable() would then skip cancel_exposure() on every StartExposure
+        // after the first timeout, reproducing exactly the hang this reorder
+        // was meant to fix once the zombie is holding the mutex instead of
+        // just its own call (second review finding on PR #201).
+        // exposure_thread_running_ is the shared flag the RunningGuard in
+        // launch_exposure_worker_locked() clears on actual return from the
+        // worker lambda -- it stays true for as long as that lambda (and
+        // whatever call_mutex-guarded SDK call it's blocked in) is still
+        // running, independent of whether the std::thread object itself was
+        // detached. Retrying cancel_exposure() while it's still true gives a
+        // wedged-but-not-permanently-unresponsive handle another chance to
+        // unblock before the mutexed setters below would otherwise hang.
+        bool worker_may_still_be_running = exposure_thread_running_ && exposure_thread_running_->load();
+        if (exposure_thread_.joinable() || worker_may_still_be_running) {
+            try {
+                sdk.cancel_exposure(id);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "cancel_exposure before re-arm failed: " + std::string(e.what()));
+            }
+            if (exposure_thread_.joinable()) {
+                join_exposure_thread();
+            }
+            // Re-checked after the reap attempt above: if the worker is
+            // STILL alive -- cancel_exposure() didn't actually unblock it,
+            // or join_exposure_thread() wasn't even reached because
+            // exposure_thread_ was already detached by a PRIOR reap (in
+            // which case the block above skips its 2s grace period
+            // entirely) -- every setter below now takes call_mutex and
+            // would block on it for as long as the zombie holds it,
+            // reintroducing the exact "hangs on exposure with no error"
+            // symptom this PR set out to fix, just one level down (review
+            // finding on PR #201). Refuse instead of risking that hang,
+            // matching the same "camera busy" refusal every other setter
+            // already uses via ensure_not_exposing_locked().
+            if (exposure_thread_running_ && exposure_thread_running_->load()) {
+                throw AlpacaException("Camera is finishing a previous exposure; try again shortly",
+                                      AlpacaError::InvalidOperation);
+            }
+        }
+
         // Apply exposure time (microseconds)
         double exposure_us = duration * 1'000'000.0;
         sdk.set_param(id, control::EXPOSURE, exposure_us);
@@ -1261,39 +1403,24 @@ public:
             num_y_u = static_cast<uint32_t>(num_y_);
             bits_u = static_cast<uint32_t>(bits_);
         }
-        sdk.set_bin_mode(id, bin_x_u, bin_y_u);
+        // Order matches QHY's own SingleFrameMode.cpp sample (resolution
+        // before bin mode) -- not confirmed load-bearing on its own, but kept
+        // aligned with the only sequence QHY ships and validates.
         sdk.set_resolution(id, start_x_u, start_y_u, num_x_u, num_y_u);
+        sdk.set_bin_mode(id, bin_x_u, bin_y_u);
         sdk.set_bits_mode(id, bits_u);
-
-        // Get buffer size before starting exposure
-        uint32_t mem_length = sdk.get_mem_length(id);
-        if (mem_length == 0) {
-            throw AlpacaException("Invalid memory length from QHY SDK", AlpacaError::DriverException);
-        }
-
-        // Reap the previous worker BEFORE arming the new frame (a cancel after
-        // start_single_frame would kill the exposure we just started). Wake a
-        // worker still parked from a previous (e.g. watchdog-failed) exposure
-        // first, or this join could block on a hung GetQHYCCDSingleFrame.
-        if (exposure_thread_.joinable()) {
-            try {
-                sdk.cancel_exposure(id);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("QHY", "cancel_exposure before re-arm failed: " + std::string(e.what()));
-            }
-            join_exposure_thread();
-        }
 
         {
             // Publish Working BEFORE the SDK exposure start so a concurrent
             // setter's ensure_not_exposing_locked() (checked under this same
             // mutex_) cannot pass during StartQHYCCDSingleFrame and write a
-            // register into the starting frame. The catch below rolls back to
-            // Failed if the start throws. Watchdog deadline: exposure time +
-            // a generous margin for SDK readout/transfer. miniCam8's full-res
-            // readout (Linearity HDR doubles the transferred data) can exceed
-            // the previous 15s margin on real hardware, false-failing an
-            // exposure that was still legitimately transferring.
+            // register into the starting frame. Watchdog deadline: exposure
+            // time + a generous margin for SDK readout/transfer. This flat
+            // 60s margin covers ordinary readout; the exposure worker below
+            // extends it further once the actual buffer size is known --
+            // see the comment there for why (miniCam8's "Linearity HDR"
+            // readout mode reliably takes ~64s to download regardless of
+            // exposure duration, exceeding even this flat margin).
             std::lock_guard<std::mutex> lock(mutex_);
             last_exposure_duration_ = duration;
             last_exposure_start_ = std::chrono::system_clock::now();
@@ -1304,39 +1431,271 @@ public:
                                  std::chrono::microseconds(static_cast<long long>(exposure_us)) +
                                  std::chrono::seconds(60);
             exposure_deadline_valid_ = true;
-            exposure_buffer_.assign(mem_length, 0);
+            exposure_buffer_.clear();
             exposure_width_ = 0;
             exposure_height_ = 0;
             exposure_bpp_ = 0;
             exposure_channels_ = 0;
         }
 
-        // Start exposure
-        bool read_directly = false;
-        try {
-            read_directly = sdk.start_single_frame(id);
-        } catch (...) {
+        // Fresh flags per generation -- see the member comment for why not a
+        // store() reset of the shared members.
+        auto exposure_running = std::make_shared<std::atomic<bool>>(true);
+        auto exposure_superseded = std::make_shared<std::atomic<bool>>(false);
+        {
+            // Also take mutex_ for this reassignment (in addition to
+            // exposure_lifecycle_mutex_, already held for the whole
+            // function): ensure_not_exposing_locked() now reads
+            // exposure_thread_running_ under mutex_ alone (setters never
+            // take exposure_lifecycle_mutex_), so the shared_ptr member
+            // itself needs to be safe to read under either lock. Holding
+            // both here on write is what makes that valid.
             std::lock_guard<std::mutex> lock(mutex_);
-            exposure_status_ = QHYExposureStatus::Failed;
-            exposure_deadline_valid_ = false;
-            throw;
+            exposure_thread_running_ = exposure_running;
+            exposure_thread_superseded_ = exposure_superseded;
         }
+        // Also register with the SDK wrapper, keyed by camera_id rather than
+        // this driver instance: connect()'s own exposure_thread_running_
+        // check only protects a camera reconnect, but the paired CFW driver
+        // shares this same physical handle and calls open_camera()
+        // independently, with no visibility into this driver's private
+        // members. QHYSDKWrapper::open_camera() consults this registration
+        // to refuse opening a second handle for either caller (review
+        // finding on PR #201).
+        sdk.register_exposure_worker(id, exposure_running);
 
-        // Launch background thread to complete the blocking GetSingleFrame call
+        // Launch background thread to run the WHOLE exposure sequence --
+        // ExpQHYCCDSingleFrame through GetQHYCCDSingleFrame -- on one thread
         // (previous worker already reaped above, before the frame was armed).
-        exposure_thread_ = std::thread([this, id, read_directly]() {
-            (void)read_directly; // QHYCCD_READ_DIRECTLY: we still call GetSingleFrame
-            uint32_t w = 0, h = 0, bpp = 0, channels = 0;
-            std::vector<uint8_t> local_buf;
-            {
+        //
+        // ExpQHYCCDSingleFrame used to be called synchronously here on the
+        // HTTP handler thread, with only GetQHYCCDSingleFrame backgrounded.
+        // On real miniCam8M hardware that reproduced as GetQHYCCDSingleFrame
+        // never returning -- confirmed NOT a concurrency issue (every other
+        // SDK call in this process is now serialized against this one via
+        // QHYSDKWrapper's per-handle call_mutex, and the hang still happened
+        // with literally nothing else touching the SDK) and NOT an SDK/USB/
+        // firmware issue (QHY's own SingleFrameMode.cpp sample, built and run
+        // standalone against this exact camera, completes both a 20ms and a
+        // 4s exposure cleanly -- the one thing that sample does that this
+        // driver didn't was keep Exp and Get on the SAME thread). QHY's SDK
+        // appears to keep thread-affine state for a single-frame session.
+        exposure_thread_ = std::thread([this, id, exposure_running, exposure_superseded]() {
+            struct RunningGuard {
+                std::shared_ptr<std::atomic<bool>> flag;
+                ~RunningGuard() { flag->store(false); }
+            } running_guard{exposure_running};
+
+            auto& sdk = QHYSDKWrapper::instance();
+
+            ALPACA_LOG_DEBUG("QHY", "exposure worker: calling start_single_frame...");
+            bool read_directly = false;
+            try {
+                read_directly = sdk.start_single_frame(id);
+                ALPACA_LOG_DEBUG("QHY", "exposure worker: start_single_frame returned, read_directly=" +
+                                            std::string(read_directly ? "true" : "false"));
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "start_single_frame failed: " + std::string(e.what()));
+                // This first check (before touching `this->mutex_` at all)
+                // is what makes it safe to even attempt the lock below if
+                // `this` has already been destroyed (destructor's own
+                // join_exposure_thread() can also hit the 2s timeout and
+                // detach, then finish tearing `this` down) -- exposure_superseded
+                // is a local copy of a shared_ptr, so reading it never
+                // touches `this`. It does NOT by itself close the race the
+                // second check below exists for: load() and the lock
+                // acquisition aren't one atomic step, so a newer generation
+                // could still finish arming, running, and publishing its own
+                // state under mutex_ in the gap between them. Re-checking
+                // immediately after acquiring the lock closes that gap --
+                // the detaching thread's store(true) always happens-before
+                // its own next mutex_ lock/unlock, so the re-check is
+                // guaranteed to observe it correctly relative to whichever
+                // generation's writes land first (review finding on PR #201).
+                if (exposure_superseded->load()) {
+                    return;
+                }
                 std::lock_guard<std::mutex> lk(mutex_);
-                local_buf = exposure_buffer_;
+                if (exposure_superseded->load()) {
+                    return;
+                }
+                exposure_status_ = QHYExposureStatus::Failed;
+                image_ready_ = false;
+                exposure_deadline_valid_ = false;
+                return;
             }
 
-            bool ok = QHYSDKWrapper::instance().get_single_frame(
-                id, local_buf.data(), w, h, bpp, channels);
+            // Per QHY's own SingleFrameMode.cpp sample: when ExpQHYCCDSingleFrame
+            // does NOT return QHYCCD_READ_DIRECTLY, the sample sleeps 1s before
+            // calling GetQHYCCDSingleFrame. The camera firmware apparently needs
+            // this settle time to finish transitioning into a readable state.
+            if (!read_directly) {
+                ALPACA_LOG_DEBUG("QHY", "exposure worker: sleeping 1s before GetMemLength/GetSingleFrame...");
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
 
+            // Fetched here (after Exp, like the sample), not before arming:
+            // matches the one sequence QHY ships and validates.
+            ALPACA_LOG_DEBUG("QHY", "exposure worker: calling get_mem_length...");
+            uint32_t mem_length = 0;
+            try {
+                mem_length = sdk.get_mem_length(id);
+                ALPACA_LOG_DEBUG("QHY", "exposure worker: get_mem_length returned " + std::to_string(mem_length));
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "get_mem_length failed: " + std::string(e.what()));
+            }
+            if (mem_length == 0) {
+                // Check supersession BEFORE cancelling: cancel_exposure()
+                // operates on the physical handle, not this generation. If
+                // join_exposure_thread() already timed out (2s) and detached
+                // this worker -- e.g. while it was in the mandatory 1s settle
+                // sleep or queued behind call_mutex -- a newer start_exposure()
+                // generation may already be armed and mid-download on the same
+                // handle by the time this stale worker reaches mem_length==0.
+                // Cancelling unconditionally here would silently abort that
+                // new, legitimate exposure (review finding on PR #201); the
+                // next generation's own reap-before-arm logic already issues
+                // its own cancel_exposure() if it actually needs one.
+                if (exposure_superseded->load()) {
+                    return;
+                }
+                // Unlike the start_single_frame failure above, ExpQHYCCDSingleFrame
+                // DID succeed to get here -- the SDK is armed with nothing left to
+                // read it back out. Cancel so this failure doesn't leave an
+                // armed-but-abandoned exposure behind (review finding on PR #201);
+                // the next start_exposure()/disconnect() would otherwise be the
+                // first thing to notice and clean it up.
+                try {
+                    sdk.cancel_exposure(id);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("QHY",
+                                    "cancel_exposure after get_mem_length failure failed: " + std::string(e.what()));
+                }
+                // Re-checked under mutex_: the cancel_exposure() call above
+                // takes real time, long enough for a newer generation to
+                // finish arming, running, and publishing its own state in
+                // the gap since the pre-cancel check. See the
+                // start_single_frame failure branch above for why the
+                // outer check alone (before touching `this->mutex_`) isn't
+                // enough to prevent this stale worker from clobbering that
+                // fresh state (review finding on PR #201).
+                std::lock_guard<std::mutex> lk(mutex_);
+                if (exposure_superseded->load()) {
+                    return;
+                }
+                exposure_status_ = QHYExposureStatus::Failed;
+                image_ready_ = false;
+                exposure_deadline_valid_ = false;
+                return;
+            }
+            std::vector<uint8_t> local_buf(mem_length, 0);
+
+            // Checked before the readout_mode_ read below (and before this
+            // point, `this` was never touched since the pre-lock check at
+            // the top of the mem_length==0 branch above, or since this
+            // worker was spawned if mem_length was nonzero on the first
+            // try): get_mem_length() itself is a call_mutex-guarded SDK call
+            // and can take longer than expected (e.g. queued behind another
+            // in-flight call on the same handle), long enough for a
+            // concurrent join_exposure_thread() elsewhere (a later
+            // start_exposure()/stop_exposure()/disconnect()/destructor) to
+            // hit its 2s timeout and detach this worker -- and, in the
+            // destructor's case, finish tearing `this` down -- while this
+            // worker was still blocked in get_mem_length() or the preceding
+            // settle sleep. Reading `this->readout_mode_` next without this
+            // check would be a potential use-after-free if that happened
+            // (review finding on PR #201); every other post-blocking-call
+            // touch of `this` in this lambda already has this same guard.
+            if (exposure_superseded->load()) {
+                return;
+            }
+
+            // Re-derive the watchdog deadline from the ACTUAL buffer size,
+            // now that it's known -- the deadline set at arm time only
+            // accounts for exposure_us + a flat 15s margin, which assumes
+            // download time scales with mem_length the same way for every
+            // readout mode. It doesn't: confirmed on real miniCam8M
+            // hardware (both through this driver and via a standalone,
+            // single-threaded repro completely outside it) that a 71MB
+            // "Linearity HDR" frame could reliably take ~64s to transfer via
+            // GetQHYCCDSingleFrame regardless of USBTRAFFIC pacing, while a
+            // 36MB "Full Resolution" frame completes in a few seconds (the
+            // separate readout-mode/InitQHYCCD-ordering fix elsewhere in
+            // this file made that ~64s case rare rather than eliminating
+            // the theoretical risk entirely, so the floor below stays as a
+            // safety net rather than being removed). The flat 15s margin
+            // only covers Full-Resolution-sized transfers; without this
+            // extension the watchdog was killing HDR downloads that were
+            // still correctly in progress. 500,000 B/s is roughly half the
+            // ~1.1 MB/s measured for HDR -- a floor, not a target, so it
+            // only EXTENDS (never shortens) the deadline already set at arm
+            // time.
+            //
+            // Gated on readout_mode_ != 0: index 0 is the SDK's default/
+            // fastest mode on every QHY camera examined during this
+            // investigation and has never shown this slow-transfer
+            // behavior, so applying the same buffer-size floor to it would
+            // only over-extend its watchdog for no benefit -- e.g. its own
+            // 36MB buffer computes to an ~87s floor, letting a genuine hang
+            // on that mode go undetected far longer than the flat 60s
+            // margin already covers it for (review finding on PR #201).
+            //
+            // Read without mutex_: safe because set_readout_mode() calls
+            // ensure_not_exposing_locked() under mutex_ before it ever
+            // writes readout_mode_, and exposure_status_ was published as
+            // Working (also under mutex_) before this worker was spawned --
+            // so a concurrent set_readout_mode() call can't succeed while
+            // this worker is running, and readout_mode_ can't change out
+            // from under this read for the life of this exposure.
+            if (readout_mode_ != 0) {
+                constexpr double kMinTransferBytesPerSecond = 500'000.0;
+                auto min_transfer = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(static_cast<double>(mem_length) / kMinTransferBytesPerSecond));
+                auto extended_deadline = std::chrono::steady_clock::now() + min_transfer + std::chrono::seconds(15);
+                if (!exposure_superseded->load()) {
+                    // Re-checked immediately after acquiring the lock -- see
+                    // the start_single_frame failure branch above for why
+                    // the outer check alone can't close the gap where a
+                    // newer generation arms and starts in between (review
+                    // finding on PR #201).
+                    std::lock_guard<std::mutex> lk(mutex_);
+                    if (!exposure_superseded->load() && exposure_deadline_valid_ &&
+                        extended_deadline > exposure_deadline_) {
+                        exposure_deadline_ = extended_deadline;
+                    }
+                }
+            }
+
+            ALPACA_LOG_DEBUG("QHY", "exposure worker: calling get_single_frame...");
+            uint32_t w = 0, h = 0, bpp = 0, channels = 0;
+            bool ok = sdk.get_single_frame(id, local_buf.data(), w, h, bpp, channels);
+            ALPACA_LOG_DEBUG("QHY",
+                             "exposure worker: get_single_frame returned ok=" + std::string(ok ? "true" : "false"));
+
+            // Recheck immediately after the (possibly indefinitely long)
+            // blocking call, BEFORE touching `this` again: if
+            // join_exposure_thread() timed out and detached this thread
+            // while it was inside GetSingleFrame, a newer exposure
+            // generation may already own exposure_buffer_/exposure_status_,
+            // or `this` itself may already be destroyed.
+            if (exposure_superseded->load()) {
+                return;
+            }
+
+            // Re-checked again immediately after acquiring the lock: the
+            // check above only establishes it's safe to *attempt* the lock
+            // (this shared_ptr read never touches `this`) -- it doesn't by
+            // itself close the gap between that load() and actually
+            // acquiring mutex_, wide enough for a newer generation to have
+            // armed, run, and published its own state in the meantime. The
+            // detaching thread's store(true) always happens-before its own
+            // next mutex_ lock/unlock, so this second check is guaranteed to
+            // observe it correctly relative to whichever generation's writes
+            // land first (review finding on PR #201).
             std::lock_guard<std::mutex> lk(mutex_);
+            if (exposure_superseded->load()) {
+                return;
+            }
             if (ok) {
                 exposure_buffer_ = std::move(local_buf);
                 exposure_width_    = w;
@@ -1391,6 +1750,16 @@ private:
 
     std::vector<std::string> readout_modes_;
     int readout_mode_;
+    // Last value the client explicitly set via set_gain()/set_offset().
+    // set_readout_mode() re-pushes these after its re-InitQHYCCD() call,
+    // which resets Gain/Offset to hardware defaults (review finding on
+    // PR #201, confirmed on real miniCam8M hardware: Gain 77->9, Offset
+    // 55->100 after a plain mode switch with no error or indication).
+    // Unset (nullopt) until the client sets one explicitly -- with nothing
+    // cached there's nothing meaningful to restore, so re-init's default is
+    // left alone exactly as before this fix.
+    std::optional<int> cached_gain_;
+    std::optional<int> cached_offset_;
 
     int bin_x_;
     int bin_y_;
@@ -1426,6 +1795,18 @@ private:
     // thread is joined; no client calls in flight). Lock order:
     // exposure_lifecycle_mutex_ -> mutex_; the exposure thread never takes it.
     std::mutex exposure_lifecycle_mutex_;
+    // GetQHYCCDSingleFrame has no SDK-side timeout and can hang indefinitely
+    // (it did, before the exposing-guards on temp_thread_/telemetry_thread_
+    // above existed). join_exposure_thread() bounds the wait and detaches on
+    // timeout so a wedged download cannot hang every later
+    // start_exposure()/stop_exposure()/disconnect() on this camera forever.
+    // Both shared_ptr, fresh per generation (not a store() reset of the
+    // member), same reasoning as temp_thread_stop_/temp_thread_running_: a
+    // prior generation's timed-out-and-detached zombie keeps its own copy, so
+    // resetting the member in place would let the zombie's eventual
+    // completion clobber a newer exposure's result.
+    std::shared_ptr<std::atomic<bool>> exposure_thread_running_{std::make_shared<std::atomic<bool>>(false)};
+    std::shared_ptr<std::atomic<bool>> exposure_thread_superseded_{std::make_shared<std::atomic<bool>>(false)};
 
     // Watchdog deadline: get_camera_state marks the exposure Failed once
     // now >= this, so a GetQHYCCDSingleFrame that never returns cannot leave
@@ -1500,6 +1881,26 @@ private:
         if (exposure_status_ == QHYExposureStatus::Working) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
         }
+        // get_camera_state()'s watchdog marks a hung exposure Failed purely
+        // from elapsed time -- it does NOT confirm exposure_thread_ has
+        // actually returned. A genuinely wedged GetQHYCCDSingleFrame call can
+        // still be running (and still holding QHYSDKWrapper's call_mutex)
+        // well after exposure_status_ flips to Failed. Every setter that
+        // reaches this check next holds mutex_ across its own call_mutex-
+        // guarded SDK write (set_gain, set_offset, set_readout_mode,
+        // set_bin_xy, set_temperature, ...); if one of them were let through
+        // here it would block forever on call_mutex while STILL HOLDING
+        // mutex_, and every other operation on this instance -- including
+        // start_exposure()'s and disconnect()'s own reap/cancel logic, which
+        // also need mutex_ -- would then stall forever behind it. That's a
+        // whole-driver deadlock reachable only via this narrow window
+        // (review finding on PR #201). Reject explicitly instead: a stuck
+        // worker degrades to "camera busy, try again" rather than silently
+        // wedging every other property and the paired CFW (shared handle).
+        if (exposure_thread_running_ && exposure_thread_running_->load()) {
+            throw AlpacaException("Camera is finishing a previous exposure; try again shortly",
+                                  AlpacaError::InvalidOperation);
+        }
     }
 
     const std::string& camera_id_value() const {
@@ -1570,9 +1971,27 @@ private:
         exposure_channels_ = 0;
     }
 
+    // Bounded wait + detach fallback, mirroring join_temp_thread() /
+    // join_cooler_off_thread(): a plain join() here would let a wedged
+    // GetQHYCCDSingleFrame block every later start_exposure()/stop_exposure()/
+    // disconnect() on this camera forever. Marks the generation superseded
+    // before detaching so the zombie's completion handler (see the lambda in
+    // start_exposure()) discards its result instead of clobbering a newer
+    // exposure's state.
     void join_exposure_thread() {
-        if (exposure_thread_.joinable()) {
-            exposure_thread_.join();
+        if (!exposure_thread_.joinable()) {
+            return;
+        }
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (exposure_thread_running_->load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (exposure_thread_running_->load()) {
+            ALPACA_LOG_WARN("QHY", "Exposure download worker exceeded 2s reap timeout; detaching.");
+            exposure_thread_superseded_->store(true);
+            exposure_thread_.detach();
+        } else {
+            exposure_thread_.join();  // finished -- instant reap
         }
     }
 
@@ -1704,11 +2123,23 @@ private:
             } running_guard{running_flag};
             while (!stop_flag->load()) {
                 double target = 0.0;
+                bool exposing = false;
                 {
                     std::lock_guard<std::mutex> lk(mutex_);
                     target = target_temp_;
+                    exposing = (exposure_status_ == QHYExposureStatus::Working);
                 }
-                if (connected_.load()) {
+                // Skip this cycle's SDK call while a frame is downloading:
+                // ControlQHYCCDTemp and the exposure worker's
+                // GetQHYCCDSingleFrame share the SAME physical USB handle, and
+                // the QHY SDK is not safe against concurrent calls on one
+                // handle from two threads -- a temp call landing mid-transfer
+                // wedges GetQHYCCDSingleFrame forever (no SDK-side timeout),
+                // which is exactly the "exposure reaches full time but never
+                // downloads" failure this fixes. Skipping here (not locking
+                // around the SDK call) keeps this thread from itself blocking
+                // on a multi-second exposure/readout.
+                if (connected_.load() && !exposing) {
                     try {
                         QHYSDKWrapper::instance().control_temp(id, target);
                     } catch (const std::exception& e) {
@@ -1798,6 +2229,20 @@ private:
                 }
 
                 if (!connected) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
+
+                bool exposing = false;
+                {
+                    std::lock_guard<std::mutex> lk(mutex_);
+                    exposing = (exposure_status_ == QHYExposureStatus::Working);
+                }
+                if (exposing) {
+                    // Skip this cycle: see the matching comment in
+                    // start_temp_control_thread() -- IsQHYCCDControlAvailable
+                    // and GetQHYCCDParam share the exposure worker's USB
+                    // handle and can wedge its GetQHYCCDSingleFrame call.
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     continue;
                 }

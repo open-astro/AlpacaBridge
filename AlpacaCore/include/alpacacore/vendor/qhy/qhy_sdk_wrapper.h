@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -141,6 +142,21 @@ public:
     void open_camera(const std::string& camera_id);
     void init_camera(const std::string& camera_id);
     void close_camera(const std::string& camera_id);
+
+    /**
+     * @brief Register the exposure worker's liveness flag for a camera_id.
+     *
+     * The camera driver calls this once per exposure generation (alongside
+     * its own exposure_thread_running_ assignment) so open_camera() below
+     * can refuse to open a SECOND physical handle to the same device while
+     * a detached zombie worker might still be blocked inside
+     * GetQHYCCDSingleFrame on the OLD handle -- a hazard reachable not just
+     * through the camera driver's own reconnect, but through the paired CFW
+     * driver reconnecting independently (they share one physical handle).
+     * Stored outside the handle map so it survives that map entry being
+     * erased by close_camera() -- which is exactly the moment it's needed.
+     */
+    void register_exposure_worker(const std::string& camera_id, std::shared_ptr<std::atomic<bool>> running_flag);
 
     // ── Chip info (requires open + init) ────────────────────────────────────
 
