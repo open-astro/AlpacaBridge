@@ -58,7 +58,10 @@ jobs:
           sudo ldconfig
 
       - name: Build the .deb
-        run: scripts/build_deb.sh
+        # -d: libgpiod v2 was built into /usr/local from source (no dpkg
+        # package), so dpkg-checkbuilddeps can't see it; the build deps are
+        # genuinely present.
+        run: scripts/build_deb.sh -d
 
       - name: Upload the .deb artifact
         uses: actions/upload-artifact@v4
