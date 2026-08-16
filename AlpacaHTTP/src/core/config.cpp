@@ -59,8 +59,38 @@ std::string unquote_string(const std::string& value) {
     }
     char first = value.front();
     char last = value.back();
-    if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+    if (first == '\'' && last == '\'') {
         return value.substr(1, value.size() - 2);
+    }
+    if (first == '"' && last == '"') {
+        // Double-quoted values are written by the config rewriter with
+        // backslash escapes (see escape_yaml_string in router.cpp); reverse
+        // them so a value containing " \ or whitespace escapes round-trips.
+        std::string inner = value.substr(1, value.size() - 2);
+        std::string result;
+        result.reserve(inner.size());
+        for (std::size_t i = 0; i < inner.size(); ++i) {
+            if (inner[i] == '\\' && i + 1 < inner.size()) {
+                char next = inner[++i];
+                switch (next) {
+                    case 'n':
+                        result.push_back('\n');
+                        break;
+                    case 'r':
+                        result.push_back('\r');
+                        break;
+                    case 't':
+                        result.push_back('\t');
+                        break;
+                    default:
+                        result.push_back(next);
+                        break;
+                }
+            } else {
+                result.push_back(inner[i]);
+            }
+        }
+        return result;
     }
     return value;
 }
@@ -180,6 +210,8 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 manufacturer_ = value;
             } else if (key == "location") {
                 location_ = value;
+            } else if (key == "profile_name") {
+                profile_name_ = value;
             }
         }
     }
@@ -270,6 +302,11 @@ void Config::apply_environment_overrides() {
     const char* location_env = std::getenv("ALPACAHTTP_LOCATION");
     if (location_env) {
         location_ = location_env;
+    }
+
+    const char* profile_name_env = std::getenv("ALPACAHTTP_PROFILE_NAME");
+    if (profile_name_env) {
+        profile_name_ = profile_name_env;
     }
 
     const char* thread_pool_env = std::getenv("ALPACAHTTP_THREAD_POOL_SIZE");

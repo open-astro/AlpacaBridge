@@ -14,7 +14,7 @@ AlpacaBridge turns a single-board computer into a control server for your entire
 
 Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., APT, CCDciel, Sequence Generator Pro, SharpCap, or [Ara](https://www.openastro.net).
 
-#### [3.4.1] - 2026-08-13 &middot; [Changelog](CHANGELOG.md)
+#### [3.5.0] - 2026-08-16 &middot; [Changelog](CHANGELOG.md)
 
 ## Why AlpacaBridge
 
@@ -36,7 +36,8 @@ Give commercial astro gear a second life:
 | Machine | | Setup guide |
 |---------|---|-------------|
 | iOptron iMate | Built hand-in-hand with iOptron, ready for OpenAstro | [iOptron iMate](https://www.openastro.net/docs/sbc-install/ioptron-imate) |
-| ToupTek StellaVita | The same Pi CM4 inside, set free | [ToupTek StellaVita](https://www.openastro.net/docs/sbc-install/touptek-stellavita) |
+| ToupTek StellaVita (Pi CM4) | The same Pi CM4 inside, set free | [ToupTek StellaVita](https://www.openastro.net/docs/sbc-install/touptek-stellavita) |
+| ZWO ASIAIR | The one that started it all; flash a fresh card and keep the original | [ZWO ASIAIR](https://www.openastro.net/docs/sbc-install/zwo-asiair) |
 | ZWO ASIAIR Pro | Installs to a fresh card, leaves the stock card untouched | [ZWO ASIAIR Pro](https://www.openastro.net/docs/sbc-install/zwo-asiair-pro) |
 | ZWO ASIAIR Plus (Pi CM4) | Back up the eMMC, then flash | [ZWO ASIAIR Plus (CM4)](https://www.openastro.net/docs/sbc-install/zwo-asiair-plus-cm4) |
 | ZWO ASIAIR Plus (RK3568) | Backs up the stock software automatically | [ZWO ASIAIR Plus (RK3568)](https://www.openastro.net/docs/sbc-install/zwo-asiair-plus-rk3568) |
@@ -47,8 +48,10 @@ Start from a bare board and pair it with the gear you choose:
 
 | Machine | | Setup guide |
 |---------|---|-------------|
-| Raspberry Pi 3B+, 4 & 5 | Pair it with a power-port box to run your rig | [Raspberry Pi](https://www.openastro.net/docs/sbc-install/raspberry-pi) |
-| Orange Pi 4 Pro | Ready-made image; flash it to a microSD card and boot | [Orange Pi 4 Pro](https://www.openastro.net/docs/sbc-install/orange-pi-4-pro) |
+| Orange Pi 4 Pro | The best value build; faster than a Pi 4 at a lower price, with a ready-made image | [Orange Pi 4 Pro](https://www.openastro.net/docs/sbc-install/orange-pi-4-pro) |
+| Raspberry Pi 3B+ | The budget build; USB 2.0 only, so camera downloads take longer | [Raspberry Pi 3B+](https://www.openastro.net/docs/sbc-install/raspberry-pi-3) |
+| Raspberry Pi 4 | The classic build; USB 3.0 speed on power any mount can supply | [Raspberry Pi 4](https://www.openastro.net/docs/sbc-install/raspberry-pi-4) |
+| Raspberry Pi 5 | The fastest build; bring a 5V/5A supply to feed it | [Raspberry Pi 5](https://www.openastro.net/docs/sbc-install/raspberry-pi-5) |
 
 Other Rockchip and Orange Pi arm64 boards running Debian 13 work with the standard Raspberry Pi instructions.
 

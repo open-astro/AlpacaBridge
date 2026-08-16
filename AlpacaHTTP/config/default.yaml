@@ -21,6 +21,7 @@ server:
   name: AlpacaHTTP
   manufacturer: OpenAstro.net
   location: ""
+  profile_name: ""  # Friendly profile name shown in the web UI header and exposed via the management API. Env: ALPACAHTTP_PROFILE_NAME
 
 # Device enable/disable (optional)
 # devices:

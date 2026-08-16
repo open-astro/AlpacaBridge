@@ -42,6 +42,7 @@ public:
     const std::string& server_name() const { return server_name_; }
     const std::string& manufacturer() const { return manufacturer_; }
     const std::string& location() const { return location_; }
+    const std::string& profile_name() const { return profile_name_; }
     std::size_t thread_pool_size() const { return thread_pool_size_; }
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
@@ -58,6 +59,7 @@ public:
     void set_server_name(const std::string& name) { server_name_ = name; }
     void set_manufacturer(const std::string& mfg) { manufacturer_ = mfg; }
     void set_location(const std::string& loc) { location_ = loc; }
+    void set_profile_name(const std::string& name) { profile_name_ = name; }
     void set_thread_pool_size(std::size_t size) {
         if (size < 1) size = 1;
         if (size > 256) size = 256;
@@ -74,6 +76,7 @@ private:
     std::string server_name_ = "AlpacaHTTP";
     std::string manufacturer_ = "OpenAstro.net";
     std::string location_ = "";
+    std::string profile_name_ = "";
     std::size_t thread_pool_size_ = 32;  // Default: 32 concurrent requests (supports multiple devices + clients)
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;

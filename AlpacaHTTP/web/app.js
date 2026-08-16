@@ -220,6 +220,23 @@ function showTab(tabName, options) {
     if (tabName === 'configure' && !(options && options.preserveForm)) {
         resetDeviceForm();
     }
+
+    // The global action bar's Refresh only makes sense where there is
+    // something to refresh - hide it on the Configure form.
+    const globalRefreshBtn = document.getElementById('global-refresh');
+    if (globalRefreshBtn) {
+        globalRefreshBtn.style.display = (tabName === 'configure') ? 'none' : '';
+    }
+}
+
+// Refresh whatever the active tab shows.
+function globalRefresh() {
+    const serverTab = document.getElementById('server-tab');
+    if (serverTab && serverTab.classList.contains('active')) {
+        refreshServerInfo();
+    } else {
+        refreshDevices();
+    }
 }
 
 // Restore the configure form to a clean "Add Device" state: native defaults,
@@ -1201,6 +1218,7 @@ async function loadServerInfo() {
         const manufacturer = resolveDescriptionValue(desc, ['Manufacturer', 'manufacturer']) || 'N/A';
         const manufacturerVersion = resolveDescriptionValue(desc, ['ManufacturerVersion', 'manufacturerVersion', 'Version', 'version']) || 'N/A';
         const location = resolveDescriptionValue(desc, ['Location', 'location']) || '';
+        const profileName = resolveDescriptionValue(desc, ['ProfileName', 'profileName', 'profile_name']) || '';
 
         // Mirror the server-reported version (sourced from the VERSION file at
         // build time) into the header badge.
@@ -1208,12 +1226,20 @@ async function loadServerInfo() {
         if (headerVersion) {
             headerVersion.textContent = manufacturerVersion !== 'N/A' ? 'v' + manufacturerVersion : '';
         }
+        updateHeaderProfileName(profileName);
 
         serverInfo.innerHTML = `
             <div class="server-info-grid">
                 ${renderServerInfoRow('Server Name', serverName)}
                 ${renderServerInfoRow('Manufacturer', manufacturer)}
                 ${renderServerInfoRow('Version', manufacturerVersion)}
+                <div class="server-info-row">
+                    <span class="info-label">Profile Name</span>
+                    <div class="server-location">
+                        <input id="server-profile-input" type="text" placeholder="e.g. Backyard Rig">
+                    </div>
+                    <button id="server-profile-save" class="btn btn-secondary btn-small" type="button">Save</button>
+                </div>
                 <div class="server-info-row">
                     <span class="info-label">Location</span>
                     <div class="server-location">
@@ -1237,6 +1263,20 @@ async function loadServerInfo() {
         const locationSaveButton = document.getElementById('server-location-save');
         if (locationSaveButton) {
             locationSaveButton.addEventListener('click', updateServerLocation);
+        }
+        const profileInput = document.getElementById('server-profile-input');
+        if (profileInput) {
+            profileInput.value = profileName;
+            profileInput.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    updateServerProfileName();
+                }
+            });
+        }
+        const profileSaveButton = document.getElementById('server-profile-save');
+        if (profileSaveButton) {
+            profileSaveButton.addEventListener('click', updateServerProfileName);
         }
         setServerInfoStatus('');
     } catch (error) {
@@ -1352,6 +1392,80 @@ async function updateServerLocation() {
             locationSaveButton.disabled = false;
         }
         locationInput.disabled = false;
+    }
+}
+
+function updateHeaderProfileName(profileName) {
+    const headerProfile = document.getElementById('header-profile');
+    if (headerProfile) {
+        headerProfile.textContent = profileName || '';
+    }
+}
+
+async function updateServerProfileName() {
+    const profileInput = document.getElementById('server-profile-input');
+    const profileSaveButton = document.getElementById('server-profile-save');
+    if (!profileInput) {
+        return;
+    }
+
+    const profileName = profileInput.value || '';
+    setServerInfoStatus('Updating profile name...');
+    if (profileSaveButton) {
+        profileSaveButton.dataset.originalLabel = profileSaveButton.textContent;
+        profileSaveButton.textContent = 'Saving...';
+        profileSaveButton.disabled = true;
+    }
+    profileInput.disabled = true;
+
+    try {
+        const response = await fetch(API_BASE + '/management/v1/description', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ProfileName: profileName})
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const text = await response.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (e) {
+            throw new Error('Invalid JSON response from server');
+        }
+
+        if (data.ErrorNumber !== 0) {
+            throw new Error(data.ErrorMessage || 'Unknown server error');
+        }
+
+        const payload = parseResponseValue(data.Value) || {};
+        const updatedProfileName = resolveDescriptionValue(payload, ['ProfileName', 'profileName', 'profile_name']);
+        if (updatedProfileName !== undefined && updatedProfileName !== null) {
+            profileInput.value = updatedProfileName;
+        }
+        updateHeaderProfileName(profileInput.value);
+        setServerInfoStatus('Profile name updated.');
+        if (profileSaveButton) {
+            profileSaveButton.textContent = 'Saved';
+            setTimeout(() => {
+                profileSaveButton.textContent = profileSaveButton.dataset.originalLabel || 'Save';
+                delete profileSaveButton.dataset.originalLabel;
+            }, 1500);
+        }
+    } catch (error) {
+        setServerInfoStatus(`Failed to update profile name: ${error.message}`, true);
+        if (profileSaveButton) {
+            profileSaveButton.textContent = profileSaveButton.dataset.originalLabel || 'Save';
+            delete profileSaveButton.dataset.originalLabel;
+        }
+    } finally {
+        if (profileSaveButton) {
+            profileSaveButton.disabled = false;
+        }
+        profileInput.disabled = false;
     }
 }
 

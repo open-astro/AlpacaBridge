@@ -33,10 +33,8 @@ Server::Server(const Config& config)
 {
     router_.set_shutdown_callback([this]() { handle_shutdown_request(); });
     router_.set_restart_callback([this]() { handle_restart_request(); });
-    router_.set_server_info(config_.server_name(),
-                            config_.manufacturer(),
-                            alpacahttp::kVersion,
-                            config_.location());
+    router_.set_server_info(config_.server_name(), config_.manufacturer(), alpacahttp::kVersion, config_.location(),
+                            config_.profile_name());
     router_.set_config_path(config_.config_path());
 }
 
