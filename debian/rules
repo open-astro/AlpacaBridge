@@ -141,6 +141,10 @@ override_dh_auto_install:
 override_dh_auto_clean:
 	rm -rf $(BUILD_DIR)
 
-# Tell dh_shlibdeps where to find bundled proprietary shared libraries
+# Tell dh_shlibdeps where to find bundled proprietary shared libraries.
+# --ignore-missing-info: the bridge links libgpiod.so.3 from /usr/local (a
+# source-built v2.2.4, no dpkg package), so dpkg-shlibdeps has no dependency
+# info for it — harmless to ignore (the runtime system will have libgpiod).
 override_dh_shlibdeps:
-	dh_shlibdeps -l$(STAGING)/usr/lib/alpacabridge
+	dh_shlibdeps -l$(STAGING)/usr/lib/alpacabridge \
+		--dpkg-shlibdeps-params=--ignore-missing-info
