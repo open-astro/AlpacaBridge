@@ -46,6 +46,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <variant>
 #include <vector>
 #ifdef ALPACACORE_ENABLE_IOPTRON
@@ -192,11 +193,18 @@ std::string escape_yaml_string(const std::string& value) {
     return escaped;
 }
 
-bool update_server_value_in_config(const std::string& config_path, const std::string& yaml_key,
-                                   const std::string& value, std::string& error_message) {
+// Update one or more keys under the config file's `server:` section in a
+// single read/rewrite pass, so a request that sets several values can never
+// leave the file with only some of them applied.
+bool update_server_values_in_config(const std::string& config_path,
+                                    const std::vector<std::pair<std::string, std::string>>& values,
+                                    std::string& error_message) {
     if (config_path.empty()) {
         error_message = "Config path not set";
         return false;
+    }
+    if (values.empty()) {
+        return true;
     }
 
     std::ifstream input(config_path);
@@ -206,7 +214,10 @@ bool update_server_value_in_config(const std::string& config_path, const std::st
             error_message = "Unable to open config file for writing";
             return false;
         }
-        output << "server:\n  " << yaml_key << ": \"" << escape_yaml_string(value) << "\"\n";
+        output << "server:\n";
+        for (const auto& [key, value] : values) {
+            output << "  " << key << ": \"" << escape_yaml_string(value) << "\"\n";
+        }
         return true;
     }
 
@@ -246,10 +257,29 @@ bool update_server_value_in_config(const std::string& config_path, const std::st
 
     bool in_server_section = false;
     bool server_section_found = false;
-    bool value_written = false;
+    std::vector<bool> written(values.size(), false);
     std::size_t server_indent = 0;
     std::vector<std::string> output;
-    output.reserve(lines.size() + 2);
+    output.reserve(lines.size() + values.size() + 1);
+
+    auto find_value_index = [&values](const std::string& key) -> std::size_t {
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (values[i].first == key) {
+                return i;
+            }
+        }
+        return values.size();
+    };
+
+    auto append_unwritten = [&](std::size_t indent) {
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (!written[i]) {
+                output.push_back(std::string(indent, ' ') + values[i].first + ": \"" +
+                                 escape_yaml_string(values[i].second) + "\"");
+                written[i] = true;
+            }
+        }
+    };
 
     for (const auto& current_line : lines) {
         std::string stripped_comment = strip_comment(current_line);
@@ -257,10 +287,8 @@ bool update_server_value_in_config(const std::string& config_path, const std::st
         std::size_t indent = leading_spaces(current_line);
 
         if (indent == 0) {
-            if (in_server_section && !value_written) {
-                output.push_back(std::string(server_indent + 2, ' ') + yaml_key + ": \"" + escape_yaml_string(value) +
-                                 "\"");
-                value_written = true;
+            if (in_server_section) {
+                append_unwritten(server_indent + 2);
             }
             in_server_section = false;
         }
@@ -277,9 +305,11 @@ bool update_server_value_in_config(const std::string& config_path, const std::st
             auto delimiter = trimmed.find(':');
             if (delimiter != std::string::npos) {
                 std::string key = trim_copy(trimmed.substr(0, delimiter));
-                if (key == yaml_key) {
-                    output.push_back(std::string(indent, ' ') + yaml_key + ": \"" + escape_yaml_string(value) + "\"");
-                    value_written = true;
+                std::size_t value_index = find_value_index(key);
+                if (value_index < values.size()) {
+                    output.push_back(std::string(indent, ' ') + key + ": \"" +
+                                     escape_yaml_string(values[value_index].second) + "\"");
+                    written[value_index] = true;
                     continue;
                 }
             }
@@ -288,8 +318,8 @@ bool update_server_value_in_config(const std::string& config_path, const std::st
         output.push_back(current_line);
     }
 
-    if (in_server_section && !value_written) {
-        output.push_back(std::string(server_indent + 2, ' ') + yaml_key + ": \"" + escape_yaml_string(value) + "\"");
+    if (in_server_section) {
+        append_unwritten(server_indent + 2);
     }
 
     if (!server_section_found) {
@@ -297,7 +327,7 @@ bool update_server_value_in_config(const std::string& config_path, const std::st
             output.push_back("");
         }
         output.push_back("server:");
-        output.push_back("  " + yaml_key + ": \"" + escape_yaml_string(value) + "\"");
+        append_unwritten(2);
     }
 
     std::ofstream output_file(config_path, std::ios::trunc);
@@ -1605,21 +1635,17 @@ Response Router::handle_description(const Request& request, std::uint32_t server
             }
 
             if (!config_path.empty()) {
-                std::string persist_error;
-                if (new_location &&
-                    !update_server_value_in_config(config_path, "location", *new_location, persist_error)) {
-                    AlpacaResponse err = make_error_response(
-                        client_tx_id, server_tx_id,
-                        util::ErrorCode::DRIVER_ERROR,
-                        "Failed to persist location: " + persist_error
-                    );
-                    response.set_body(err);
-                    return response;
+                std::vector<std::pair<std::string, std::string>> persist_values;
+                if (new_location) {
+                    persist_values.emplace_back("location", *new_location);
                 }
-                if (new_profile_name &&
-                    !update_server_value_in_config(config_path, "profile_name", *new_profile_name, persist_error)) {
+                if (new_profile_name) {
+                    persist_values.emplace_back("profile_name", *new_profile_name);
+                }
+                std::string persist_error;
+                if (!update_server_values_in_config(config_path, persist_values, persist_error)) {
                     AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
-                                                             "Failed to persist profile name: " + persist_error);
+                                                             "Failed to persist server settings: " + persist_error);
                     response.set_body(err);
                     return response;
                 }
