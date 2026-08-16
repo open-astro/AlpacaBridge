@@ -6,6 +6,10 @@ on:
     branches:
       - 'feat/**'
 
+env:
+  LIBGPIOD_VER: "2.2.4"
+  LIBGPIOD_SHA256: "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592"
+
 jobs:
   build-deb:
     name: dpkg-buildpackage (arm64)
@@ -31,9 +35,27 @@ jobs:
             nlohmann-json3-dev \
             zlib1g-dev \
             libcurl4-openssl-dev \
+            libhidapi-dev \
             dpkg-dev \
             debhelper \
             python3
+
+      - name: Build libgpiod v2 from source
+        # debian/control requires libgpiod >= 2.0 (the ZWO switch drivers use
+        # gpiod_chip_request_lines), which the runner's apt does not provide.
+        # Same vendored-tarball build as the CI workflow.
+        run: |
+          set -euo pipefail
+          cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
+          echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
+            | sha256sum -c -
+          mkdir -p /tmp/libgpiod
+          tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
+          cd /tmp/libgpiod
+          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
 
       - name: Build the .deb
         run: scripts/build_deb.sh
