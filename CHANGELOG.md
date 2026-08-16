@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.5.0] - UNRELEASED
+## [3.5.0] - 2026-08-16
 
 ### Added
 - **Server profile name** (AlpacaHTTP): the Server Information card gains an editable Profile Name field, persisted to the config file (`server.profile_name`, env override `ALPACAHTTP_PROFILE_NAME`). The management API exposes it as `ProfileName` in GET `/management/v1/description` and accepts it via PUT/POST on the same endpoint (alongside `Location`), so external clients such as Ara can read and set it. The web UI header shows the profile name in a badge after the version number.
