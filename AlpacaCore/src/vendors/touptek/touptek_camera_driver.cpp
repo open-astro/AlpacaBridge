@@ -224,6 +224,17 @@ public:
                 }
             }
 
+            // Re-apply the fan speed from the last /fan PUT: the setting is
+            // volatile and resets to the hardware default on every open.
+            if (fan_speed_.has_value()) {
+                try {
+                    sdk.put_fan(handle_, *fan_speed_);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("ToupTek", "put_Option(FAN) on connect failed: " +
+                                               std::string(e.what()));
+                }
+            }
+
             // Everything from here until connected_ is set true must release the
             // freshly opened handle on failure: the destructor only closes when
             // connected_, so an unguarded throw (put_trigger_mode, get_serial_number,
@@ -470,6 +481,35 @@ public:
         } catch (const std::exception&) {
             return 0.0;
         }
+    }
+
+    // Vendor fan control (TOUPCAM_OPTION_FAN): speed 0 = off, [1, max] = speed.
+    bool get_supports_fan() const override {
+        return camera_info_valid_ && camera_info_.supports_fan;
+    }
+    int get_fan_speed() const override {
+        ensure_connected();
+        if (!get_supports_fan()) {
+            throw AlpacaException("Fan not supported", AlpacaError::NotImplemented);
+        }
+        auto& sdk = sdk_;
+        return with_handle([&](HToupcam h) { return sdk.get_fan(h); });
+    }
+    void set_fan_speed(int speed) override {
+        ensure_connected();
+        if (!get_supports_fan()) {
+            throw AlpacaException("Fan not supported", AlpacaError::NotImplemented);
+        }
+        fan_speed_ = speed;
+        auto& sdk = sdk_;
+        with_handle([&](HToupcam h) { sdk.put_fan(h, speed); });
+    }
+    int get_max_fan_speed() const override {
+        ensure_connected();
+        if (!get_supports_fan()) {
+            throw AlpacaException("Fan not supported", AlpacaError::NotImplemented);
+        }
+        return static_cast<int>(camera_info_.max_fan_speed);
     }
 
     double get_electrons_per_adu() const override { return 1.0; }
@@ -1288,6 +1328,12 @@ private:
     int num_y_;
     bool roi_dirty_{false};
     bool format_dirty_{false};
+
+    // Last fan speed set via the vendor /fan endpoint; re-applied on every
+    // connect because the ToupTek fan setting is volatile (resets to the
+    // hardware default each time the SDK handle opens). nullopt = never set —
+    // leave the hardware default alone.
+    std::optional<int> fan_speed_;
 
     mutable bool image_ready_;
     mutable bool image_cached_;

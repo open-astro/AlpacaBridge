@@ -541,6 +541,8 @@ const std::unordered_set<std::string> kCameraMethods = {
     "exposuremax",
     "exposuremin",
     "exposureresolution",
+    "fan",
+    "fanmaxspeed",
     "fastreadout",
     "fullwellcapacity",
     "gain",
@@ -3653,6 +3655,17 @@ Response Router::dispatch_camera_method(
                     client_tx_id, server_tx_id, camera->get_cooler_power());
                 response.set_body(alpaca_response);
                 return response;
+            } else if (method_name == "fan") {
+                // Vendor extension — cooling fan speed (0 = off, [1, max] = speed).
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_fan_speed());
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "fanmaxspeed") {
+                AlpacaResponse alpaca_response = make_success_response(
+                    client_tx_id, server_tx_id, camera->get_max_fan_speed());
+                response.set_body(alpaca_response);
+                return response;
             } else if (method_name == "electronsperadu") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, camera->get_electrons_per_adu());
@@ -3916,6 +3929,13 @@ Response Router::dispatch_camera_method(
             } else if (method_name == "cooleron") {
                 bool value = parse_bool("CoolerOn");
                 camera->set_cooler_on(value);
+                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+                response.set_body(alpaca_response);
+                return response;
+            } else if (method_name == "fan") {
+                // Vendor extension — cooling fan speed (0 = off, [1, max] = speed).
+                int value = parse_int("FanSpeed");
+                camera->set_fan_speed(value);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;

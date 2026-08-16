@@ -125,6 +125,20 @@ public:
 
     virtual double get_cooler_power() const = 0;
 
+    // Vendor extension — cooling fan control. Not part of the ASCOM Camera
+    // interface; drivers with a controllable fan (ToupTek TOUPCAM_OPTION_FAN,
+    // ZWO ASI fan, …) override these. Default: unsupported (Alpaca 1025).
+    virtual bool get_supports_fan() const { return false; }
+    virtual int get_fan_speed() const {
+        throw AlpacaException("Fan not supported", AlpacaError::NotImplemented);
+    }
+    virtual void set_fan_speed(int /*speed*/) {
+        throw AlpacaException("Fan not supported", AlpacaError::NotImplemented);
+    }
+    virtual int get_max_fan_speed() const {
+        throw AlpacaException("Fan not supported", AlpacaError::NotImplemented);
+    }
+
     virtual double get_electrons_per_adu() const = 0;
     virtual double get_exposure_max() const = 0;
     virtual double get_exposure_min() const = 0;

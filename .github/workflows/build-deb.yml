@@ -1,0 +1,48 @@
+name: Build .deb (arm64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'feat/**'
+
+jobs:
+  build-deb:
+    name: dpkg-buildpackage (arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            g++ \
+            pkg-config \
+            libusb-1.0-0-dev \
+            libudev-dev \
+            libsystemd-dev \
+            libgpiod-dev \
+            nlohmann-json3-dev \
+            zlib1g-dev \
+            libcurl4-openssl-dev \
+            dpkg-dev \
+            debhelper \
+            python3
+
+      - name: Build the .deb
+        run: scripts/build_deb.sh
+
+      - name: Upload the .deb artifact
+        uses: actions/upload-artifact@5d5d22a31266ced266874596b3d4c2d34531c4cd  # v4.6.2 pinned
+        with:
+          name: alpacabridge-deb
+          path: |
+            ../alpacabridge_*.deb
+            !../alpacabridge_*dbgsym*.deb
+          if-no-files-found: error
