@@ -181,14 +181,39 @@ std::string gzip_compress(const std::string& input) {
     return output;
 }
 
+// Escape a value for a double-quoted scalar in the hand-rolled config
+// writer. Config::unquote_string() reverses these escapes on load, so the
+// two must stay symmetric. Newlines and other control characters must never
+// reach the file verbatim - the line-based reader would misparse them as
+// new config entries.
 std::string escape_yaml_string(const std::string& value) {
     std::string escaped;
     escaped.reserve(value.size());
     for (char ch : value) {
-        if (ch == '\\' || ch == '"') {
-            escaped.push_back('\\');
+        switch (ch) {
+            case '\\':
+                escaped += "\\\\";
+                break;
+            case '"':
+                escaped += "\\\"";
+                break;
+            case '\n':
+                escaped += "\\n";
+                break;
+            case '\r':
+                escaped += "\\r";
+                break;
+            case '\t':
+                escaped += "\\t";
+                break;
+            default:
+                if (static_cast<unsigned char>(ch) >= 0x20) {
+                    escaped.push_back(ch);
+                }
+                // Other control characters are dropped - they have no
+                // meaning in a friendly name or location string.
+                break;
         }
-        escaped.push_back(ch);
     }
     return escaped;
 }
