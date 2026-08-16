@@ -39,7 +39,7 @@ jobs:
         run: scripts/build_deb.sh
 
       - name: Upload the .deb artifact
-        uses: actions/upload-artifact@5d5d22a31266ced266874596b3d4c2d34531c4cd  # v4.6.2 pinned
+        uses: actions/upload-artifact@v4
         with:
           name: alpacabridge-deb
           path: |
