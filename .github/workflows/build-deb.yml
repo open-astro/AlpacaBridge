@@ -63,11 +63,17 @@ jobs:
         # genuinely present.
         run: scripts/build_deb.sh -d
 
+      - name: Stage the .deb into the workspace
+        # dpkg-buildpackage emits into the parent dir; upload-artifact forbids
+        # '..' paths, so copy the package into the workspace first.
+        run: |
+          set -euo pipefail
+          cp ../alpacabridge_*.deb .
+          ls -la alpacabridge_*.deb
+
       - name: Upload the .deb artifact
         uses: actions/upload-artifact@v4
         with:
           name: alpacabridge-deb
-          path: |
-            ../alpacabridge_*.deb
-            !../alpacabridge_*dbgsym*.deb
+          path: alpacabridge_*.deb
           if-no-files-found: error
