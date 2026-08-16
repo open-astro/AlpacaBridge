@@ -220,6 +220,23 @@ function showTab(tabName, options) {
     if (tabName === 'configure' && !(options && options.preserveForm)) {
         resetDeviceForm();
     }
+
+    // The global action bar's Refresh only makes sense where there is
+    // something to refresh - hide it on the Configure form.
+    const globalRefreshBtn = document.getElementById('global-refresh');
+    if (globalRefreshBtn) {
+        globalRefreshBtn.style.display = (tabName === 'configure') ? 'none' : '';
+    }
+}
+
+// Refresh whatever the active tab shows.
+function globalRefresh() {
+    const serverTab = document.getElementById('server-tab');
+    if (serverTab && serverTab.classList.contains('active')) {
+        refreshServerInfo();
+    } else {
+        refreshDevices();
+    }
 }
 
 // Restore the configure form to a clean "Add Device" state: native defaults,

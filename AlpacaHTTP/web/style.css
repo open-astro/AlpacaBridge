@@ -368,6 +368,14 @@ h2 {
     margin-top: 14px;
 }
 
+/* Always-visible action bar below the tab content, on every tab. */
+.global-actions {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    flex-wrap: wrap;
+}
+
 /* ---- forms ---- */
 .device-form {
     max-width: 600px;
@@ -643,6 +651,12 @@ input[type="range"] {
 
 .server-clock.drift {
     color: #f08a7a;
+}
+
+/* Clock lives in the page header bar; the section-card margins don't apply there. */
+header > .server-clock {
+    margin-right: 0;
+    font-family: var(--mono);
 }
 
 .server-helper {

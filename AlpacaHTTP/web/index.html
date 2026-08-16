@@ -19,12 +19,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=13">
+    <link rel="stylesheet" href="/web/style.css?v=15">
 </head>
 <body>
     <div class="container">
         <header>
             <h1 class="title"><img src="/web/assets/oa512.png" alt="OpenAstro logo" class="logo"><span class="title-text">OpenAstro <span class="brand-name">AlpacaBridge</span></span><span id="header-version" class="version"></span><span id="header-profile" class="profile-name"></span></h1>
+            <span id="server-clock" class="server-clock" title="Live server (SBC) clock, UTC">--:--:--</span>
         </header>
 
         <nav class="tabs">
@@ -39,7 +40,6 @@
             <div id="devices-list" class="devices-list">
                 <p class="loading">Loading devices...</p>
             </div>
-            <button class="btn btn-primary" onclick="refreshDevices()">Refresh</button>
         </div>
 
         <!-- Configure Tab -->
@@ -1276,7 +1276,6 @@
             <div id="server-info-section" class="section-card collapsed">
                 <div class="section-card-header">
                     <h3>Server Info</h3>
-                    <span id="server-clock" class="server-clock" title="Live server (SBC) clock, UTC">--:--:--</span>
                     <button class="section-toggle" type="button" aria-expanded="false">
                         <span class="section-toggle-icon" aria-hidden="true"></span>
                         <span class="section-toggle-label">Details</span>
@@ -1306,6 +1305,15 @@
                         <label class="oa-switch"><input type="checkbox" id="wifi-radio-toggle"><span class="oa-slider"></span></label>
                     </div>
                     <p id="wifi-status-line" class="wifi-substatus">Loading...</p>
+
+                    <div class="wifi-row">
+                        <div class="wifi-row-label">
+                            <span>Country</span>
+                            <small>Where this device is physically located</small>
+                            <button class="info-btn" type="button" aria-label="About regulatory country" data-info-title="Country" data-info-text="WiFi channels and power limits are regulated per country. Setting the device's real location unlocks the correct 5 GHz channels for your region, and is required before the 5 GHz hotspot can start on some boards. Remembered across reboots.">i</button>
+                        </div>
+                        <select id="wifi-country" class="wifi-country-select"></select>
+                    </div>
 
                     <div class="wifi-group-title">Networks<button class="info-btn" type="button" aria-label="About networks" data-info-title="Networks" data-info-text="Networks the device can see right now. Tap one to join it. The device remembers networks you join and reconnects automatically. A checkmark shows the network in use. Joining a network turns off the hotspot (the radio does one thing at a time); a wired ethernet connection is never affected.">i</button></div>
                     <div id="wifi-networks" class="wifi-list"><p class="wifi-substatus">Turn WiFi on to see networks.</p></div>
@@ -1337,16 +1345,6 @@
                             </div>
                         </div>
                         <p class="wifi-hint">Changes save automatically.</p>
-                    </div>
-
-                    <div class="wifi-group-title">Advanced</div>
-                    <div class="wifi-row">
-                        <div class="wifi-row-label">
-                            <span>Country</span>
-                            <small>Where this device is physically located</small>
-                            <button class="info-btn" type="button" aria-label="About regulatory country" data-info-title="Country" data-info-text="WiFi channels and power limits are regulated per country. Setting the device's real location unlocks the correct 5 GHz channels for your region, and is required before the 5 GHz hotspot can start on some boards. Remembered across reboots.">i</button>
-                        </div>
-                        <select id="wifi-country" class="wifi-country-select"></select>
                     </div>
 
                     <p id="wifi-message" class="wifi-substatus"></p>
@@ -1397,15 +1395,16 @@
                     </div>
                 </div>
             </div>
-            <div class="server-actions">
-                <button class="btn btn-primary" onclick="refreshServerInfo()">Refresh</button>
-                <button class="btn btn-secondary" onclick="syncTime()">Sync Time</button>
-                <button class="btn btn-secondary" onclick="restartServer()">Restart Server</button>
-                <button class="btn btn-danger" onclick="shutdownServer()">Shutdown Server</button>
-            </div>
+        </div>
+
+        <div class="server-actions global-actions">
+            <button id="global-refresh" class="btn btn-primary" onclick="globalRefresh()">Refresh</button>
+            <button class="btn btn-secondary" onclick="syncTime()">Sync Time</button>
+            <button class="btn btn-secondary" onclick="restartServer()">Restart Server</button>
+            <button class="btn btn-danger" onclick="shutdownServer()">Shutdown Server</button>
         </div>
     </div>
 
-    <script src="/web/app.js?v=25"></script>
+    <script src="/web/app.js?v=26"></script>
 </body>
 </html>
