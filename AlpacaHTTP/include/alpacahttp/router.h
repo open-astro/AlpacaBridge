@@ -58,11 +58,8 @@ public:
 
     // Set management driver (from AlpacaCore)
     void set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver);
-    void set_server_info(std::string server_name,
-                         std::string manufacturer,
-                         std::string manufacturer_version,
-                         std::string location,
-                         std::string profile_name = "");
+    void set_server_info(std::string server_name, std::string manufacturer, std::string manufacturer_version,
+                         std::string location, std::string profile_name = "");
     void set_config_path(std::string config_path);
 
     // Set shutdown callback (called when shutdown endpoint is requested)

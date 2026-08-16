@@ -192,10 +192,8 @@ std::string escape_yaml_string(const std::string& value) {
     return escaped;
 }
 
-bool update_server_value_in_config(const std::string& config_path,
-                                   const std::string& yaml_key,
-                                   const std::string& value,
-                                   std::string& error_message) {
+bool update_server_value_in_config(const std::string& config_path, const std::string& yaml_key,
+                                   const std::string& value, std::string& error_message) {
     if (config_path.empty()) {
         error_message = "Config path not set";
         return false;
@@ -260,8 +258,8 @@ bool update_server_value_in_config(const std::string& config_path,
 
         if (indent == 0) {
             if (in_server_section && !value_written) {
-                output.push_back(std::string(server_indent + 2, ' ') +
-                                 yaml_key + ": \"" + escape_yaml_string(value) + "\"");
+                output.push_back(std::string(server_indent + 2, ' ') + yaml_key + ": \"" + escape_yaml_string(value) +
+                                 "\"");
                 value_written = true;
             }
             in_server_section = false;
@@ -280,8 +278,7 @@ bool update_server_value_in_config(const std::string& config_path,
             if (delimiter != std::string::npos) {
                 std::string key = trim_copy(trimmed.substr(0, delimiter));
                 if (key == yaml_key) {
-                    output.push_back(std::string(indent, ' ') +
-                                     yaml_key + ": \"" + escape_yaml_string(value) + "\"");
+                    output.push_back(std::string(indent, ' ') + yaml_key + ": \"" + escape_yaml_string(value) + "\"");
                     value_written = true;
                     continue;
                 }
@@ -1263,11 +1260,8 @@ void Router::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver>
     management_driver_ = mgmt_driver;
 }
 
-void Router::set_server_info(std::string server_name,
-                             std::string manufacturer,
-                             std::string manufacturer_version,
-                             std::string location,
-                             std::string profile_name) {
+void Router::set_server_info(std::string server_name, std::string manufacturer, std::string manufacturer_version,
+                             std::string location, std::string profile_name) {
     std::lock_guard<std::mutex> lock(server_info_mutex_);
     server_name_ = std::move(server_name);
     manufacturer_ = std::move(manufacturer);
@@ -1590,21 +1584,16 @@ Response Router::handle_description(const Request& request, std::uint32_t server
             }
 
             if (!new_location && !new_profile_name) {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::VALUE_NOT_SET,
-                    "Request must include a 'Location' or 'ProfileName' property"
-                );
+                AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::VALUE_NOT_SET,
+                                                         "Request must include a 'Location' or 'ProfileName' property");
                 response.set_body(err);
                 return response;
             }
 
             if (new_location && management_driver_) {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::INVALID_OPERATION,
-                    "Location updates are not supported when a management driver is active"
-                );
+                AlpacaResponse err =
+                    make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                        "Location updates are not supported when a management driver is active");
                 response.set_body(err);
                 return response;
             }
@@ -1629,11 +1618,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 }
                 if (new_profile_name &&
                     !update_server_value_in_config(config_path, "profile_name", *new_profile_name, persist_error)) {
-                    AlpacaResponse err = make_error_response(
-                        client_tx_id, server_tx_id,
-                        util::ErrorCode::DRIVER_ERROR,
-                        "Failed to persist profile name: " + persist_error
-                    );
+                    AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+                                                             "Failed to persist profile name: " + persist_error);
                     response.set_body(err);
                     return response;
                 }
