@@ -500,6 +500,20 @@ public:
         if (!get_supports_fan()) {
             throw AlpacaException("Fan not supported", AlpacaError::NotImplemented);
         }
+        // Safety: the TEC dumps heat into the heat sink and the fan vents it —
+        // cooling with the fan off overheats the hot side and can damage the
+        // camera. Refuse fan-off while the TEC is enabled (defence-in-depth;
+        // the daemon enforces the same rule).
+        if (speed == 0) {
+            bool tecEnabled = false;
+            auto& sdk = sdk_;
+            with_handle([&](HToupcam h) { tecEnabled = sdk.get_tec_enable(h); });
+            if (tecEnabled) {
+                throw AlpacaException(
+                    "turn the cooler off before stopping the fan - cooling with the fan off can damage the camera",
+                    AlpacaError::InvalidOperation);
+            }
+        }
         fan_speed_ = speed;
         auto& sdk = sdk_;
         with_handle([&](HToupcam h) { sdk.put_fan(h, speed); });
