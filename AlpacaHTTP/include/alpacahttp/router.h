@@ -61,7 +61,8 @@ public:
     void set_server_info(std::string server_name,
                          std::string manufacturer,
                          std::string manufacturer_version,
-                         std::string location);
+                         std::string location,
+                         std::string profile_name = "");
     void set_config_path(std::string config_path);
 
     // Set shutdown callback (called when shutdown endpoint is requested)
@@ -264,6 +265,7 @@ private:
     // This fallback uses the version constant from version.h (which comes from VERSION file via CMake)
     std::string manufacturer_version_ = alpacahttp::kVersion;
     std::string location_;
+    std::string profile_name_;
     std::string config_path_;
 };
 

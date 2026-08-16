@@ -180,6 +180,8 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 manufacturer_ = value;
             } else if (key == "location") {
                 location_ = value;
+            } else if (key == "profile_name") {
+                profile_name_ = value;
             }
         }
     }
@@ -270,6 +272,11 @@ void Config::apply_environment_overrides() {
     const char* location_env = std::getenv("ALPACAHTTP_LOCATION");
     if (location_env) {
         location_ = location_env;
+    }
+
+    const char* profile_name_env = std::getenv("ALPACAHTTP_PROFILE_NAME");
+    if (profile_name_env) {
+        profile_name_ = profile_name_env;
     }
 
     const char* thread_pool_env = std::getenv("ALPACAHTTP_THREAD_POOL_SIZE");

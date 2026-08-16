@@ -192,9 +192,10 @@ std::string escape_yaml_string(const std::string& value) {
     return escaped;
 }
 
-bool update_location_in_config(const std::string& config_path,
-                               const std::string& location,
-                               std::string& error_message) {
+bool update_server_value_in_config(const std::string& config_path,
+                                   const std::string& yaml_key,
+                                   const std::string& value,
+                                   std::string& error_message) {
     if (config_path.empty()) {
         error_message = "Config path not set";
         return false;
@@ -207,7 +208,7 @@ bool update_location_in_config(const std::string& config_path,
             error_message = "Unable to open config file for writing";
             return false;
         }
-        output << "server:\n  location: \"" << escape_yaml_string(location) << "\"\n";
+        output << "server:\n  " << yaml_key << ": \"" << escape_yaml_string(value) << "\"\n";
         return true;
     }
 
@@ -247,7 +248,7 @@ bool update_location_in_config(const std::string& config_path,
 
     bool in_server_section = false;
     bool server_section_found = false;
-    bool location_written = false;
+    bool value_written = false;
     std::size_t server_indent = 0;
     std::vector<std::string> output;
     output.reserve(lines.size() + 2);
@@ -258,10 +259,10 @@ bool update_location_in_config(const std::string& config_path,
         std::size_t indent = leading_spaces(current_line);
 
         if (indent == 0) {
-            if (in_server_section && !location_written) {
+            if (in_server_section && !value_written) {
                 output.push_back(std::string(server_indent + 2, ' ') +
-                                 "location: \"" + escape_yaml_string(location) + "\"");
-                location_written = true;
+                                 yaml_key + ": \"" + escape_yaml_string(value) + "\"");
+                value_written = true;
             }
             in_server_section = false;
         }
@@ -278,10 +279,10 @@ bool update_location_in_config(const std::string& config_path,
             auto delimiter = trimmed.find(':');
             if (delimiter != std::string::npos) {
                 std::string key = trim_copy(trimmed.substr(0, delimiter));
-                if (key == "location") {
+                if (key == yaml_key) {
                     output.push_back(std::string(indent, ' ') +
-                                     "location: \"" + escape_yaml_string(location) + "\"");
-                    location_written = true;
+                                     yaml_key + ": \"" + escape_yaml_string(value) + "\"");
+                    value_written = true;
                     continue;
                 }
             }
@@ -290,8 +291,8 @@ bool update_location_in_config(const std::string& config_path,
         output.push_back(current_line);
     }
 
-    if (in_server_section && !location_written) {
-        output.push_back(std::string(server_indent + 2, ' ') + "location: \"" + escape_yaml_string(location) + "\"");
+    if (in_server_section && !value_written) {
+        output.push_back(std::string(server_indent + 2, ' ') + yaml_key + ": \"" + escape_yaml_string(value) + "\"");
     }
 
     if (!server_section_found) {
@@ -299,7 +300,7 @@ bool update_location_in_config(const std::string& config_path,
             output.push_back("");
         }
         output.push_back("server:");
-        output.push_back("  location: \"" + escape_yaml_string(location) + "\"");
+        output.push_back("  " + yaml_key + ": \"" + escape_yaml_string(value) + "\"");
     }
 
     std::ofstream output_file(config_path, std::ios::trunc);
@@ -1253,7 +1254,7 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
 namespace alpacahttp {
 
 Router::Router() {
-    set_server_info("AlpacaHTTP", "AlpacaHTTP", alpacahttp::kVersion, "");
+    set_server_info("AlpacaHTTP", "AlpacaHTTP", alpacahttp::kVersion, "", "");
     load_persisted_devices();
 }
 Router::~Router() = default;
@@ -1265,12 +1266,14 @@ void Router::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver>
 void Router::set_server_info(std::string server_name,
                              std::string manufacturer,
                              std::string manufacturer_version,
-                             std::string location) {
+                             std::string location,
+                             std::string profile_name) {
     std::lock_guard<std::mutex> lock(server_info_mutex_);
     server_name_ = std::move(server_name);
     manufacturer_ = std::move(manufacturer);
     manufacturer_version_ = std::move(manufacturer_version);
     location_ = std::move(location);
+    profile_name_ = std::move(profile_name);
 }
 
 void Router::set_config_path(std::string config_path) {
@@ -1503,6 +1506,10 @@ nlohmann::json Router::build_description_payload() const {
         desc["Manufacturer"] = management_driver_->get_manufacturer();
         desc["ManufacturerVersion"] = management_driver_->get_manufacturer_version();
         desc["Location"] = management_driver_->get_location();
+        {
+            std::lock_guard<std::mutex> lock(server_info_mutex_);
+            desc["ProfileName"] = profile_name_;
+        }
         return desc;
     }
 
@@ -1510,18 +1517,21 @@ nlohmann::json Router::build_description_payload() const {
     std::string manufacturer;
     std::string manufacturer_version;
     std::string location;
+    std::string profile_name;
     {
         std::lock_guard<std::mutex> lock(server_info_mutex_);
         server_name = server_name_;
         manufacturer = manufacturer_;
         manufacturer_version = manufacturer_version_;
         location = location_;
+        profile_name = profile_name_;
     }
 
     desc["ServerName"] = server_name;
     desc["Manufacturer"] = manufacturer;
     desc["ManufacturerVersion"] = manufacturer_version;
     desc["Location"] = location;
+    desc["ProfileName"] = profile_name;
     return desc;
 }
 
@@ -1536,16 +1546,6 @@ Response Router::handle_description(const Request& request, std::uint32_t server
 
     try {
         if (request.method() == HttpMethod::POST || request.method() == HttpMethod::PUT) {
-            if (management_driver_) {
-                AlpacaResponse err = make_error_response(
-                    client_tx_id, server_tx_id,
-                    util::ErrorCode::INVALID_OPERATION,
-                    "Location updates are not supported when a management driver is active"
-                );
-                response.set_body(err);
-                return response;
-            }
-
             if (request.body().empty()) {
                 AlpacaResponse err = make_error_response(
                     client_tx_id, server_tx_id,
@@ -1573,16 +1573,37 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 client_tx_id = body_client_tx;
             }
 
-            std::string new_location;
+            std::optional<std::string> new_location;
             if (body.contains("Location")) {
                 new_location = body["Location"].get<std::string>();
             } else if (body.contains("location")) {
                 new_location = body["location"].get<std::string>();
-            } else {
+            }
+
+            std::optional<std::string> new_profile_name;
+            if (body.contains("ProfileName")) {
+                new_profile_name = body["ProfileName"].get<std::string>();
+            } else if (body.contains("profileName")) {
+                new_profile_name = body["profileName"].get<std::string>();
+            } else if (body.contains("profile_name")) {
+                new_profile_name = body["profile_name"].get<std::string>();
+            }
+
+            if (!new_location && !new_profile_name) {
                 AlpacaResponse err = make_error_response(
                     client_tx_id, server_tx_id,
                     util::ErrorCode::VALUE_NOT_SET,
-                    "Request must include a 'Location' property"
+                    "Request must include a 'Location' or 'ProfileName' property"
+                );
+                response.set_body(err);
+                return response;
+            }
+
+            if (new_location && management_driver_) {
+                AlpacaResponse err = make_error_response(
+                    client_tx_id, server_tx_id,
+                    util::ErrorCode::INVALID_OPERATION,
+                    "Location updates are not supported when a management driver is active"
                 );
                 response.set_body(err);
                 return response;
@@ -1596,7 +1617,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
 
             if (!config_path.empty()) {
                 std::string persist_error;
-                if (!update_location_in_config(config_path, new_location, persist_error)) {
+                if (new_location &&
+                    !update_server_value_in_config(config_path, "location", *new_location, persist_error)) {
                     AlpacaResponse err = make_error_response(
                         client_tx_id, server_tx_id,
                         util::ErrorCode::DRIVER_ERROR,
@@ -1605,11 +1627,26 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     response.set_body(err);
                     return response;
                 }
+                if (new_profile_name &&
+                    !update_server_value_in_config(config_path, "profile_name", *new_profile_name, persist_error)) {
+                    AlpacaResponse err = make_error_response(
+                        client_tx_id, server_tx_id,
+                        util::ErrorCode::DRIVER_ERROR,
+                        "Failed to persist profile name: " + persist_error
+                    );
+                    response.set_body(err);
+                    return response;
+                }
             }
 
             {
                 std::lock_guard<std::mutex> lock(server_info_mutex_);
-                location_ = new_location;
+                if (new_location) {
+                    location_ = *new_location;
+                }
+                if (new_profile_name) {
+                    profile_name_ = *new_profile_name;
+                }
             }
         } else if (request.method() != HttpMethod::GET) {
             AlpacaResponse alpaca_response = make_error_response(
