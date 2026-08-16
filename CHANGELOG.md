@@ -17,6 +17,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 ### Changed
 - **Live server clock moved to the page header** (AlpacaHTTP web UI): the UTC clock previously shown only in the Server Info card header now sits in the top bar next to the version and profile name, so it is visible from every tab.
 - **Sync Time, Restart Server, and Shutdown Server available from every tab** (AlpacaHTTP web UI): these actions moved from the Server Info tab into an always-visible action bar below the tab content, alongside a context-aware Refresh button that reloads the device list or server info depending on the active tab (hidden on Configure).
+- **README supported-hardware tables synced with the OpenAstro docs overview**: added the original ZWO ASIAIR, split the Raspberry Pi row into 3B+/4/5 with per-model setup-guide links, and matched the site's ordering and taglines.
 - **WiFi card: Country moved under the WiFi toggle** (AlpacaHTTP web UI): the regulatory country selector now sits directly below the WiFi on/off row instead of in an Advanced group at the bottom, and the now-empty Advanced group is gone.
 
 ### Fixed
