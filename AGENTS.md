@@ -1435,6 +1435,13 @@ it is never reachable through `router.cpp` or the web UI.
 - 5 GHz AP init fails under the WORLD/00 regdom on some drivers — the
   persisted country must be applied at daemon startup (main.cpp), BEFORE
   NM's boot-time AP autoconnect, not lazily on first request.
+- Even when 5 GHz AP init *succeeds* under WORLD/00, the AP can beacon on a
+  world-domain-forbidden channel (seen live: NM auto picked ch 149 on the
+  OPi 4 Pro) that clients refuse to see or join — "the network disappeared".
+  `set_ap` therefore rejects band "a" until a country is persisted, and the
+  web UI front-runs that with a message pointing at the country selector
+  (3.5.1). 2.4 GHz is exempt: ch 1-11 are world-domain legal, which is why
+  the shipped images default to 2.4 GHz ch 6.
 - The review bot login is `github-actions`; every push restarts a full
   review round — batch fixes. Test rig persisted-device state under
   `AlpacaHTTP/build/config/` makes `test_routing` fail with "already

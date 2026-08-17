@@ -1122,9 +1122,11 @@ header > .server-clock {
     border-radius: 6px;
 }
 .wifi-net-row:hover { background: var(--panel-2); }
+.wifi-substatus.wifi-status-active { color: var(--accent); font-weight: 600; }
 .wifi-net-row.active { cursor: default; }
+.wifi-net-row.active .wifi-net-name { color: var(--accent); font-weight: 600; }
 .wifi-net-row.dim .wifi-net-name { color: var(--dim); }
-.wifi-net-check { width: 16px; color: var(--accent-2); font-weight: 700; flex: none; }
+.wifi-net-check { width: 16px; color: var(--accent); font-weight: 700; flex: none; }
 .wifi-net-name { flex: 1; }
 .wifi-net-name small { color: var(--dim); margin-left: 6px; }
 .wifi-net-meta { color: var(--dim); font-size: 12px; white-space: nowrap; }

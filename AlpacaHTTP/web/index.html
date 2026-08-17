@@ -19,7 +19,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=15">
+    <link rel="stylesheet" href="/web/style.css?v=30">
 </head>
 <body>
     <div class="container">
@@ -1306,19 +1306,6 @@
                     </div>
                     <p id="wifi-status-line" class="wifi-substatus">Loading...</p>
 
-                    <div class="wifi-row">
-                        <div class="wifi-row-label">
-                            <span>Country</span>
-                            <small>Where this device is physically located</small>
-                            <button class="info-btn" type="button" aria-label="About regulatory country" data-info-title="Country" data-info-text="WiFi channels and power limits are regulated per country. Setting the device's real location unlocks the correct 5 GHz channels for your region, and is required before the 5 GHz hotspot can start on some boards. Remembered across reboots.">i</button>
-                        </div>
-                        <select id="wifi-country" class="wifi-country-select"></select>
-                    </div>
-
-                    <div class="wifi-group-title">Networks<button class="info-btn" type="button" aria-label="About networks" data-info-title="Networks" data-info-text="Networks the device can see right now. Tap one to join it. The device remembers networks you join and reconnects automatically. A checkmark shows the network in use. Joining a network turns off the hotspot (the radio does one thing at a time); a wired ethernet connection is never affected.">i</button></div>
-                    <div id="wifi-networks" class="wifi-list"><p class="wifi-substatus">Turn WiFi on to see networks.</p></div>
-                    <div class="wifi-actions-right"><button class="btn btn-secondary btn-small" type="button" onclick="wifiScanClicked()">Scan Again</button></div>
-
                     <div class="wifi-group-title">Personal Hotspot<button class="info-btn" type="button" aria-label="About the hotspot" data-info-title="Personal Hotspot" data-info-text="The device broadcasts its own WiFi network so you can reach this portal in the field with no router, and so WiFi-controlled gear like a mount can connect to the device. Join the hotspot from your phone or the mount's WiFi settings, then open http://172.24.1.1:6800/. While the hotspot is on, the device is not connected to any other WiFi network.">i</button></div>
                     <div class="wifi-row">
                         <div class="wifi-row-label">
@@ -1338,7 +1325,7 @@
                             <button class="btn btn-secondary btn-small" type="button" id="wifi-ap-pass-toggle">Show</button>
                         </div>
                         <div class="wifi-field">
-                            <label>Band<button class="info-btn" type="button" aria-label="About WiFi bands" data-info-title="2.4 GHz vs 5 GHz" data-info-text="2.4 GHz reaches further and most WiFi mounts only support 2.4 GHz. 5 GHz is faster, best for phones and laptops nearby. The hotspot runs on one band at a time. If 5 GHz is not shown, this board's WiFi hardware doesn't support hosting on 5 GHz.">i</button></label>
+                            <label>Band<button class="info-btn" type="button" aria-label="About WiFi bands" data-info-title="2.4 GHz vs 5 GHz" data-info-text="2.4 GHz reaches further and most WiFi mounts only support 2.4 GHz. 5 GHz is faster, best for phones and laptops nearby. The hotspot runs on one band at a time. 5 GHz requires the regulatory country to be set first, since the allowed 5 GHz channels vary by region. If 5 GHz is not shown, this board's WiFi hardware doesn't support hosting on 5 GHz.">i</button></label>
                             <div class="wifi-segment" id="wifi-ap-band">
                                 <button type="button" data-band="bg">2.4 GHz</button>
                                 <button type="button" data-band="a">5 GHz</button>
@@ -1346,6 +1333,19 @@
                         </div>
                         <p class="wifi-hint">Changes save automatically.</p>
                     </div>
+
+                    <div class="wifi-row">
+                        <div class="wifi-row-label">
+                            <span>Country</span>
+                            <small>Where this device is physically located</small>
+                            <button class="info-btn" type="button" aria-label="About regulatory country" data-info-title="Country" data-info-text="WiFi channels and power limits are regulated per country. Setting the device's real location unlocks the correct 5 GHz channels for your region, and is required before the 5 GHz hotspot can start on some boards. Remembered across reboots.">i</button>
+                        </div>
+                        <select id="wifi-country" class="wifi-country-select"></select>
+                    </div>
+
+                    <div class="wifi-group-title">Join a Network<button class="info-btn" type="button" aria-label="About joining a network" data-info-title="Join a Network" data-info-text="Networks the device can see right now. Tap one to join it. The device remembers networks you join and reconnects automatically. A checkmark shows the network in use. Joining a network turns off the hotspot (the radio does one thing at a time); a wired ethernet connection is never affected.">i</button></div>
+                    <div id="wifi-networks" class="wifi-list"><p class="wifi-substatus">Turn WiFi on to see nearby networks.</p></div>
+                    <div class="wifi-actions-right"><button class="btn btn-secondary btn-small" type="button" onclick="wifiScanClicked()">Scan Again</button></div>
 
                     <p id="wifi-message" class="wifi-substatus"></p>
                 </div>
@@ -1405,6 +1405,6 @@
         </div>
     </div>
 
-    <script src="/web/app.js?v=26"></script>
+    <script src="/web/app.js?v=30"></script>
 </body>
 </html>
