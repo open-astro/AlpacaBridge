@@ -3775,24 +3775,37 @@ async function wifiRefresh() {
         if (radioToggle) radioToggle.checked = !!status.WirelessEnabled;
 
         const apActive = !!status.ApActive;
+        const clientConnected = wifiClientConnected(status);
+        // On dual-interface boards status.Ssid is the client side, so the
+        // hotspot's own name comes from the ap config (fetched below; one
+        // refresh behind at worst). Single-radio: status.Ssid IS the hotspot.
+        const apSsid = apActive
+            ? ((status.DeviceCount > 1 ? (wifiState.ap && wifiState.ap.Ssid) : status.Ssid) || '')
+            : '';
         let summary;
         if (!status.WirelessEnabled) summary = 'Off';
-        else if (apActive) summary = 'Hotspot: ' + (status.Ssid || 'on');
-        else if (status.Ssid) summary = status.Ssid;
+        else if (apActive && clientConnected) summary = status.Ssid + ' + Hotspot';
+        else if (apActive) summary = 'Hotspot: ' + (apSsid || 'on');
+        else if (clientConnected) summary = status.Ssid;
         else summary = 'Not Connected';
         const summaryEl = wifiEl('wifi-summary');
         if (summaryEl) summaryEl.textContent = summary;
 
         const line = wifiEl('wifi-status-line');
         if (line) {
+            // Highlight the line whenever the radio is doing something
+            // (joined a network or broadcasting the hotspot) so the state
+            // is obvious at a glance; plain grey when idle or off.
+            line.classList.toggle('wifi-status-active', !!(status.WirelessEnabled && (clientConnected || apActive)));
             if (!status.WirelessEnabled) {
                 line.textContent = 'WiFi is off. The hotspot and network connections are unavailable.';
-            } else if (apActive) {
-                line.textContent = 'Hotspot "' + status.Ssid + '" is on. Join it and open http://172.24.1.1:6800/';
-            } else if (status.Ssid) {
+            } else if (clientConnected) {
                 const band = status.FrequencyMhz > 5000 ? '5 GHz' : '2.4 GHz';
                 line.textContent = 'Connected to ' + status.Ssid + ' (' + band +
-                    (status.Ip4Address ? ', ' + status.Ip4Address : '') + ')';
+                    (status.Ip4Address ? ', ' + status.Ip4Address : '') + ').' +
+                    (apActive ? ' Hotspot' + (apSsid ? ' "' + apSsid + '"' : '') + ' is also on.' : '');
+            } else if (apActive) {
+                line.textContent = 'Hotspot' + (apSsid ? ' "' + apSsid + '"' : '') + ' is on. Join it and open http://172.24.1.1:6800/';
             } else {
                 line.textContent = 'Not connected to any network.';
             }
@@ -3824,8 +3837,20 @@ async function wifiRefresh() {
         await wifiRenderNetworks(false);
     } catch (e) {
         const line = wifiEl('wifi-status-line');
-        if (line) line.textContent = 'WiFi status unavailable: ' + e.message;
+        if (line) {
+            line.classList.remove('wifi-status-active');
+            line.textContent = 'WiFi status unavailable: ' + e.message;
+        }
     }
+}
+
+// True when the device is joined to a network as a client. On dual-interface
+// boards (DeviceCount > 1, e.g. OPi 4 Pro ap0 + wlan0) the hotspot and a
+// client join run concurrently, and status.Ssid reports the client side, so
+// ApActive must not mask it. On single-radio boards an active hotspot means
+// status.Ssid is the hotspot's own name, not a joined network.
+function wifiClientConnected(status) {
+    return !!(status.Ssid && status.State === 'connected' && (!status.ApActive || status.DeviceCount > 1));
 }
 
 // Render the network list from the last scan + saved profiles. rescan=true
@@ -3835,7 +3860,7 @@ async function wifiRenderNetworks(rescan) {
     if (!list) return;
     const status = wifiState.status || {};
     if (!status.WirelessEnabled) {
-        list.innerHTML = '<p class="wifi-substatus">Turn WiFi on to see networks.</p>';
+        list.innerHTML = '<p class="wifi-substatus">Turn WiFi on to see nearby networks.</p>';
         return;
     }
     if (rescan) list.innerHTML = '<p class="wifi-substatus">Scanning...</p>';
@@ -3851,7 +3876,7 @@ async function wifiRenderNetworks(rescan) {
     for (const p of profiles) {
         if (p.Mode !== 'ap') savedBySsid[p.Ssid] = p;
     }
-    const activeSsid = (!status.ApActive && status.Ssid) ? status.Ssid : null;
+    const activeSsid = wifiClientConnected(status) ? status.Ssid : null;
 
     list.innerHTML = '';
     const inRange = new Set();
@@ -3870,7 +3895,7 @@ async function wifiRenderNetworks(rescan) {
         if (!isActive) {
             row.addEventListener('click', () => saved ? wifiConnectSaved(saved) : wifiJoinNew(n));
         }
-        if (saved && !isActive) {
+        if (saved) {
             const forget = document.createElement('button');
             forget.className = 'btn btn-secondary btn-small';
             forget.textContent = 'Forget';
@@ -3937,7 +3962,8 @@ async function wifiConnectSaved(profile) {
 }
 
 async function wifiForget(profile) {
-    if (!confirm('Forget "' + profile.Ssid + '"?')) return;
+    const connectedNow = wifiClientConnected(wifiState.status || {}) && (wifiState.status || {}).Ssid === profile.Ssid;
+    if (!confirm('Forget "' + profile.Ssid + '"?' + (connectedNow ? '\n\nThe device is connected to this network right now and will disconnect from it.' : ''))) return;
     try {
         await wifiApi('/profiles/' + encodeURIComponent(profile.Uuid), 'DELETE');
         wifiState.profiles = await wifiApi('/profiles');
@@ -3960,6 +3986,20 @@ function wifiConfirmSwitch(action) {
     return confirm('The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection while it switches.');
 }
 
+// 5 GHz needs a regulatory country: under the world domain most 5 GHz
+// channels are blocked, so the AP can beacon on a channel clients refuse.
+// The server rejects Band "a" too; this is the friendly front-end check.
+function wifiCountryIsSet() {
+    const sel = wifiEl('wifi-country');
+    return !!(sel && sel.value);
+}
+
+function wifiRequireCountryFor5GHz() {
+    alert('Set the regulatory country before using 5 GHz.\n\nWithout it, most 5 GHz channels are blocked and the hotspot may not be visible to your devices.');
+    const sel = wifiEl('wifi-country');
+    if (sel) sel.focus();
+}
+
 function wifiSetBandUi(band) {
     document.querySelectorAll('#wifi-ap-band button').forEach((b) => {
         b.classList.toggle('active', b.dataset.band === band);
@@ -3978,6 +4018,11 @@ async function wifiApplyAp(enabled, fromToggle) {
     const ssid = (wifiEl('wifi-ap-ssid') || {}).value || '';
     const passphrase = (wifiEl('wifi-ap-pass') || {}).value || '';
     if (!ssid) { wifiMessage('The hotspot needs a name.', true); return; }
+    if (wifiSelectedBand() === 'a' && !wifiCountryIsSet()) {
+        wifiRequireCountryFor5GHz();
+        if (fromToggle) { const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = false; }
+        return;
+    }
     const configured = wifiState.ap && wifiState.ap.Configured;
     if (!configured && !passphrase) {
         wifiMessage('Set a hotspot password first (8-63 characters).', true);
@@ -4049,6 +4094,10 @@ function wifiInit() {
     }
     document.querySelectorAll('#wifi-ap-band button').forEach((b) => {
         b.addEventListener('click', () => {
+            if (b.dataset.band === 'a' && !wifiCountryIsSet()) {
+                wifiRequireCountryFor5GHz();
+                return;
+            }
             wifiSetBandUi(b.dataset.band);
             wifiApplyAp((wifiEl('wifi-ap-toggle') || {}).checked || false, false);
         });

@@ -1192,6 +1192,17 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
         throw WifiError("Passphrase must be 8-63 characters");
     }
     if (band != "a" && band != "bg") throw WifiError("Band must be \"a\" (5 GHz) or \"bg\" (2.4 GHz)");
+    if (band == "a") {
+        // Under the world regulatory domain (country 00) most 5 GHz channels
+        // are forbidden or passive-scan, so NetworkManager can bring the AP
+        // up on a channel clients refuse to join. Require a country first.
+        std::lock_guard<std::mutex> country_lock(country_mutex_);
+        std::ifstream f(country_file());
+        std::string cc;
+        if (!f || !std::getline(f, cc) || cc.size() != 2) {
+            throw WifiError("Set the regulatory country before enabling 5 GHz");
+        }
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     ensure_bus_locked();
     auto roles = bus_->device_roles();

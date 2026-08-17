@@ -265,4 +265,8 @@ if(ALPACAHTTP_BUILD_TESTS)
     add_executable(test_config tests/test_config.cpp)
     target_link_libraries(test_config alpacahttp)
     add_test(NAME test_config COMMAND test_config)
+
+    add_executable(test_wifi_manager tests/test_wifi_manager.cpp)
+    target_link_libraries(test_wifi_manager alpacahttp)
+    add_test(NAME test_wifi_manager COMMAND test_wifi_manager)
 endif()
