@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [3.5.1] - 2026-08-16
+## [3.6.0] - UNRELEASED
+
+### Added
+- **Sky-Watcher Wave mount driver** (new `skywatcher` vendor): talks directly to the mount motor controller (Wave 100i/150i, AZ-GTi class) over USB serial or the mount's built-in WiFi (UDP port 11880), with no hand controller or SynScan app required. The driver owns all pointing math (axis counts to RA/Dec, LST, pier side, tracking step periods), uses the controller's native `:E` set-position for sync, changes the RA step period in place for pulse guiding while tracking, and supports Auto-Detect (serial scan then WiFi discovery), Serial, and Network connection modes in the web UI. ConformU validation on Wave 100i hardware pending.
+
+<details>
+<summary><strong>[3.5.1] - 2026-08-16</strong></summary>
+
 
 ### Changed
 - **WiFi card: Personal Hotspot moved to the top** (AlpacaHTTP web UI): the hotspot group (toggle, name, password, band) now sits directly under the WiFi on/off row, above Country and the network list, since it is the most-used control in the field. The Networks group is renamed "Join a Network" to make the direction explicit next to the hotspot (broadcast vs join).
@@ -17,6 +24,8 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 ### Fixed
 - **Connected network showed grey (as merely "saved") while the hotspot was on** (AlpacaHTTP web UI): on dual-interface boards (e.g. OPi 4 Pro ap0 + wlan0) the hotspot and a client join run concurrently, but the WiFi card assumed one radio doing one thing: with the hotspot active it never highlighted the joined network in the list, hid the connection from the status line, and printed the client SSID as the hotspot name. The card now recognizes the concurrent state: the joined network is highlighted with its checkmark, the summary reads "SSID + Hotspot", and the status line reports both, with the hotspot name taken from the AP config instead of the client status. The connected row is highlighted in the accent color (checkmark and SSID), the Forget button now also appears on the connected network (with an extra confirm warning that forgetting it disconnects), and the WiFi status line renders in the accent color whenever the radio is active (joined or broadcasting).
 - **5 GHz hotspot could vanish when no regulatory country was set** (AlpacaHTTP): with the regulatory domain unset (country 00, world domain), switching the hotspot to 5 GHz let NetworkManager pick a channel (e.g. 149) that the world domain forbids, so the AP beaconed on a channel clients refuse to see or join. `WifiManager::set_ap` now rejects band `"a"` until a regulatory country has been set, and the web UI's 5 GHz band button and hotspot toggle show a message pointing at the country selector instead of applying. 2.4 GHz remains usable without a country (channels 1-11 are world-domain legal), matching the image's default. Covered by a new `test_wifi_manager` unit test.
+
+</details>
 
 <details>
 <summary><strong>[3.5.0] - 2026-08-16</strong></summary>

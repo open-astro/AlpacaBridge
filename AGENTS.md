@@ -1004,6 +1004,46 @@ Connection types: Serial (USB serial) only. Default 9600 baud, 8N1. Protocol ver
 - **RA tracking restoration**: The stop thread re-issues `set_tracking_mode()` after stopping an RA-axis pulse to counteract the variable-rate stop command killing sidereal tracking. Without this, the mount stops tracking after every RA pulse guide.
 - ConformU 4.3.0 validated for **Sky-Watcher HEQ5 PRO** on Linux arm64 with 0 errors and 0 issues.
 
+### SkyWatcher (Wave / direct motor controller)
+
+Devices: Telescope. Vendor key `skywatcher` — distinct from `synscan`, which speaks the
+hand-controller protocol. This driver speaks the **Sky-Watcher motor controller command
+set** (the `:` command / `=`|`!` reply protocol) directly to the mount's motor board.
+Target hardware: Wave 100i/150i (also applicable to AZ-GTi-class mounts).
+
+Protocol documentation: `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md`
+(shared with the SynScan vendor directory). No external SDK required.
+
+Connection types: Serial (mount USB port, 9600 8N1) and Network (built-in Wi-Fi module,
+**UDP** port 11880 — one command per datagram, one reply per datagram; AP-mode address
+192.168.4.1). The wrapper retransmits up to 3 times on UDP timeout and drains stale
+datagrams before each send so replies cannot get off-by-one.
+
+- **All pointing math lives in the driver.** The MC protocol only counts steps: the driver
+  owns RA/Dec <-> axis-angle conversion (CPR read at connect via `:a`, timer frequency
+  `:b`, high-speed ratio `:g`), LST computation, pier-side selection, and tracking-rate
+  step-period math (`T1 = TMR_Freq * 360 / rate / CPR`, times the high-speed ratio in
+  fast mode). The mount stores **no site or time** — site lat/long/elevation come from
+  the web UI config or the Alpaca setters, and UTCDate is host-clock backed.
+- Pointing convention: home = counterweight down pointing at the pole, counts offset
+  `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
+  `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle
+  sign (HA >= 0 -> pierEast). TODO markers in the driver flag the physical rotation
+  signs and southern-hemisphere handling as hardware-unvalidated.
+- **Sync** uses the controller's own `:E` set-position command (motors must be fully
+  stopped — the driver pauses tracking around the write), never a driver-side offset.
+- **Pulse guiding**: RA pulses while tracking are done by changing the RA step period
+  in-place (`:I` is legal during slow-mode motion), then restoring the sidereal preset —
+  the axis never stops. Dec pulses (and RA while not tracking) are software-timed
+  speed-mode nudges. Position override accumulation as per the SynScan lessons.
+- `:f` status nibbles: char0 bit0 speed-mode/bit1 CCW/bit2 fast; char1 bit0 running/bit1
+  blocked; char2 bit0 init-done/bit1 level switch. Slewing = running AND NOT speed-mode
+  on either axis (a tracking axis is not slewing).
+- Connect sequence: `:e` version, `:a`/`:b`/`:g` per axis, then `:F` init (with `:E` home
+  stamp) ONLY when the status reports not-initialized — never re-stamp an aligned session.
+- Web UI: `skywatcher`-prefixed field names; network field is `udpPort` (NOT `tcpPort`).
+- ConformU validation on Wave 100i (USB + Wi-Fi separately) pending.
+
 ### iOptron
 
 Devices: Telescope (mount), Switch (iMate PowerBox).

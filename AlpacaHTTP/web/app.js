@@ -791,6 +791,26 @@ function startEditDevice(device) {
         if (synscanConnectionTypeEl) {
             synscanConnectionTypeEl.dispatchEvent(new Event('change'));
         }
+    } else if (vendor === 'skywatcher') {
+        const skywatcherConnectionType = config.connectionType || 'auto';
+        setFormValue('skywatcher-connection-type', skywatcherConnectionType);
+        if (skywatcherConnectionType === 'serial') {
+            setFormValue('skywatcher-port-path', config.portPath);
+            setFormValue('skywatcher-baud-rate', config.baudRate);
+        } else if (skywatcherConnectionType === 'network') {
+            setFormValue('skywatcher-host', config.host);
+            setFormValue('skywatcher-udp-port', config.udpPort);
+        }
+        setFormValue('skywatcher-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
+        setFormValue('skywatcher-focal-length', opticsMetersToMm(config.focalLength));
+        setFormValue('skywatcher-site-latitude', config.siteLatitude);
+        setFormValue('skywatcher-site-longitude', config.siteLongitude);
+        setFormValue('skywatcher-site-elevation', config.siteElevation);
+        updateApertureAreaFromDiameter('skywatcher-aperture-diameter', 'skywatcher-aperture-area');
+        const skywatcherConnectionTypeEl = document.getElementById('skywatcher-connection-type');
+        if (skywatcherConnectionTypeEl) {
+            skywatcherConnectionTypeEl.dispatchEvent(new Event('change'));
+        }
     } else if (vendor === 'onstep') {
         const onstepConnectionType = config.connectionType || 'auto';
         setFormValue('onstep-connection-type', onstepConnectionType);
@@ -1981,6 +2001,11 @@ function updateVendorOptions() {
         synscanOption.disabled = !isTelescope;
         synscanOption.hidden = !isTelescope;
     }
+    const skywatcherOption = vendorSelect.querySelector('option[value="skywatcher"]');
+    if (skywatcherOption) {
+        skywatcherOption.disabled = !isTelescope;
+        skywatcherOption.hidden = !isTelescope;
+    }
     const celestronOption = vendorSelect.querySelector('option[value="celestron"]');
     if (celestronOption) {
         celestronOption.disabled = !isTelescope;
@@ -2063,6 +2088,9 @@ function updateVendorOptions() {
     if (!isTelescope && vendorSelect.value === 'synscan') {
         vendorSelect.value = '';
     }
+    if (!isTelescope && vendorSelect.value === 'skywatcher') {
+        vendorSelect.value = '';
+    }
     if (!isTelescope && vendorSelect.value === 'celestron') {
         vendorSelect.value = '';
     }
@@ -2115,6 +2143,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         updateIoptronConfigFields();
     } else if (vendor === 'synscan') {
         document.getElementById('synscan-config').style.display = 'block';
+    } else if (vendor === 'skywatcher') {
+        document.getElementById('skywatcher-config').style.display = 'block';
     } else if (vendor === 'celestron') {
         document.getElementById('celestron-config').style.display = 'block';
     } else if (vendor === 'onstep') {
@@ -2256,6 +2286,15 @@ if (zwoSwitchTypeSelect) {
 const touptekSwitchTypeSelect = document.getElementById('touptek-switch-type');
 if (touptekSwitchTypeSelect) {
     touptekSwitchTypeSelect.addEventListener('change', updateTouptekConfigFields);
+}
+
+const skywatcherConnectionType = document.getElementById('skywatcher-connection-type');
+if (skywatcherConnectionType) {
+    skywatcherConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('skywatcher-serial-config').style.display = type === 'serial' ? 'block' : 'none';
+        document.getElementById('skywatcher-network-config').style.display = type === 'network' ? 'block' : 'none';
+    });
 }
 
 const synscanConnectionType = document.getElementById('synscan-connection-type');
@@ -2424,6 +2463,12 @@ if (apertureDiameterInput) {
     apertureDiameterInput.addEventListener('input', () =>
         updateApertureAreaFromDiameter('aperture-diameter', 'aperture-area'));
 }
+const skywatcherApertureDiameterInput = document.getElementById('skywatcher-aperture-diameter');
+if (skywatcherApertureDiameterInput) {
+    skywatcherApertureDiameterInput.addEventListener('input', () =>
+        updateApertureAreaFromDiameter('skywatcher-aperture-diameter', 'skywatcher-aperture-area'));
+}
+
 const synscanApertureDiameterInput = document.getElementById('synscan-aperture-diameter');
 if (synscanApertureDiameterInput) {
     synscanApertureDiameterInput.addEventListener('input', () =>
@@ -3008,6 +3053,33 @@ document.getElementById('device-form').addEventListener('submit', async function
 
         if (!applyOpticsMm(formData, deviceData, 'synscanApertureDiameter', 'synscanFocalLength')) {
             return;
+        }
+    } else if (deviceData.vendor === 'skywatcher') {
+        deviceData.connectionType = formData.get('skywatcherConnectionType') || 'auto';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('skywatcherPortPath');
+            deviceData.baudRate = parseInt(formData.get('skywatcherBaudRate')) || 9600;
+        } else if (deviceData.connectionType === 'network') {
+            deviceData.host = formData.get('skywatcherHost');
+            deviceData.udpPort = parseInt(formData.get('skywatcherUdpPort')) || 11880;
+        }
+        // "auto" needs no connection fields - the mount is discovered at startup
+
+        if (!applyOpticsMm(formData, deviceData, 'skywatcherApertureDiameter', 'skywatcherFocalLength')) {
+            return;
+        }
+
+        const skywatcherSiteLatitude = readOptionalNumber(formData, 'skywatcherSiteLatitude');
+        if (skywatcherSiteLatitude !== null) {
+            deviceData.siteLatitude = skywatcherSiteLatitude;
+        }
+        const skywatcherSiteLongitude = readOptionalNumber(formData, 'skywatcherSiteLongitude');
+        if (skywatcherSiteLongitude !== null) {
+            deviceData.siteLongitude = skywatcherSiteLongitude;
+        }
+        const skywatcherSiteElevation = readOptionalNumber(formData, 'skywatcherSiteElevation');
+        if (skywatcherSiteElevation !== null) {
+            deviceData.siteElevation = skywatcherSiteElevation;
         }
     } else if (deviceData.vendor === 'onstep') {
         deviceData.connectionType = formData.get('onstepConnectionType') || 'auto';

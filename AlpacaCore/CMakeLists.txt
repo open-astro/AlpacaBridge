@@ -24,6 +24,7 @@ option(ALPACACORE_ENABLE_ZWO "Enable ZWO vendor support" OFF)
 option(ALPACACORE_ENABLE_QHY "Enable QHY vendor support" OFF)
 option(ALPACACORE_ENABLE_IOPTRON "Enable iOptron vendor support" OFF)
 option(ALPACACORE_ENABLE_SYNSCAN "Enable SynScan vendor support" OFF)
+option(ALPACACORE_ENABLE_SKYWATCHER "Enable SkyWatcher motor controller vendor support" OFF)
 option(ALPACACORE_ENABLE_ONSTEP "Enable OnStep vendor support" OFF)
 option(ALPACACORE_ENABLE_WEEWX "Enable WeeWX vendor support" OFF)
 option(ALPACACORE_ENABLE_GEMINI "Enable Gemini vendor support (focuser, flat panel)" OFF)
@@ -42,6 +43,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_QHY ON)
     set(ALPACACORE_ENABLE_IOPTRON ON)
     set(ALPACACORE_ENABLE_SYNSCAN ON)
+    set(ALPACACORE_ENABLE_SKYWATCHER ON)
     set(ALPACACORE_ENABLE_ONSTEP ON)
     set(ALPACACORE_ENABLE_WEEWX ON)
     set(ALPACACORE_ENABLE_GEMINI ON)
@@ -137,6 +139,13 @@ if(ALPACACORE_ENABLE_SYNSCAN)
     add_subdirectory(src/vendors/synscan)
     if(TARGET alpacacore_synscan)
         target_link_libraries(alpacacore PRIVATE alpacacore_synscan)
+    endif()
+endif()
+
+if(ALPACACORE_ENABLE_SKYWATCHER)
+    add_subdirectory(src/vendors/skywatcher)
+    if(TARGET alpacacore_skywatcher)
+        target_link_libraries(alpacacore PRIVATE alpacacore_skywatcher)
     endif()
 endif()
 
@@ -278,6 +287,15 @@ endif()
 
 if(ALPACACORE_ENABLE_SYNSCAN AND TARGET alpacacore_synscan)
     install(TARGETS alpacacore_synscan
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_SKYWATCHER AND TARGET alpacacore_skywatcher)
+    install(TARGETS alpacacore_skywatcher
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

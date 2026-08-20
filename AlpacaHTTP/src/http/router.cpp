@@ -56,6 +56,9 @@
 #ifdef ALPACACORE_ENABLE_SYNSCAN
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+#include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
@@ -7027,6 +7030,82 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "skywatcher" && device_type_str == "telescope") {
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::optional<double> site_latitude;
+        std::optional<double> site_longitude;
+        std::optional<double> site_elevation;
+
+        if (config.contains("siteLatitude")) {
+            site_latitude = config.value("siteLatitude", 0.0);
+        }
+        if (config.contains("siteLongitude")) {
+            site_longitude = config.value("siteLongitude", 0.0);
+        }
+        if (config.contains("siteElevation")) {
+            site_elevation = config.value("siteElevation", 0.0);
+        }
+
+        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
+
+        if (conn_type == "auto" || conn_type.empty()) {
+            int mount_index = config.value("mountIndex", 0);
+            telescope = alpacacore::vendor::skywatcher::create_skywatcher_telescope_auto(
+                device_number, mount_index, site_latitude, site_longitude, site_elevation);
+        } else {
+            alpacacore::vendor::skywatcher::ConnectionInfo conn_info;
+
+            if (conn_type == "serial") {
+                conn_info.type = alpacacore::vendor::skywatcher::ConnectionType::Serial;
+                conn_info.port_path = config.value("portPath", "");
+                conn_info.baud_rate = config.value("baudRate", 9600);
+
+                if (conn_info.port_path.empty()) {
+                    error_message = "Serial port path is required";
+                    return false;
+                }
+            } else if (conn_type == "network") {
+                conn_info.type = alpacacore::vendor::skywatcher::ConnectionType::Network;
+                conn_info.host = config.value("host", "");
+                conn_info.udp_port = config.value("udpPort", conn_info.udp_port);
+
+                if (conn_info.host.empty()) {
+                    error_message = "Host IP address is required";
+                    return false;
+                }
+            } else {
+                error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
+                return false;
+            }
+
+            conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+
+            telescope = alpacacore::vendor::skywatcher::create_skywatcher_telescope(
+                device_number, conn_info, site_latitude, site_longitude, site_elevation);
+        }
+
+        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+            telescope->set_aperture_diameter(aperture);
+        }
+        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+            telescope->set_focal_length(focal);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
+            util::log_info("Registered SkyWatcher telescope");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "SkyWatcher support not enabled. Rebuild with -DALPACACORE_ENABLE_SKYWATCHER=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "onstep" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_ONSTEP
         std::string conn_type = config.value("connectionType", "auto");
@@ -8276,6 +8355,20 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         } else if (connection_type == "network") {
             copy_if_present("host");
             copy_if_present("tcpPort");
+        }
+    } else if (vendor == "skywatcher") {
+        copy_if_present("connectionType");
+        copy_if_present("mountIndex");  // same issue-#102 gap as ioptron above
+        copy_if_present("siteLatitude");
+        copy_if_present("siteLongitude");
+        copy_if_present("siteElevation");
+        std::string connection_type = config.value("connectionType", "");
+        if (connection_type == "serial") {
+            copy_if_present("portPath");
+            copy_if_present("baudRate");
+        } else if (connection_type == "network") {
+            copy_if_present("host");
+            copy_if_present("udpPort");
         }
     } else if (vendor == "onstep") {
         // OnStep is USB-serial only — no "network" branch (see the
