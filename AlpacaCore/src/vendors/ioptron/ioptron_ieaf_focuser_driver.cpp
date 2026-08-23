@@ -47,36 +47,24 @@ public:
         shutdown_connection();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("iOptron", "Error during iEAF destruction: " + std::string(e.what()));
             }
         }
     }
 
-    int get_device_number() const override {
-        return device_number_;
-    }
+    int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override {
-        return "iOptron iEAF";
-    }
+    std::string get_name() const override { return "iOptron iEAF"; }
 
-    DeviceType get_device_type() const override {
-        return DeviceType::Focuser;
-    }
+    DeviceType get_device_type() const override { return DeviceType::Focuser; }
 
-    std::string get_unique_id() const override {
-        return "IOPTRON_IEAF_" + std::to_string(device_number_);
-    }
+    std::string get_unique_id() const override { return "IOPTRON_IEAF_" + std::to_string(device_number_); }
 
-    std::string get_description() const override {
-        return "iOptron iEAF Electronic Focuser Driver";
-    }
+    std::string get_description() const override { return "iOptron iEAF Electronic Focuser Driver"; }
 
-    std::string get_driver_info() const override {
-        return "AlpacaCore iOptron iEAF Focuser Driver";
-    }
+    std::string get_driver_info() const override { return "AlpacaCore iOptron iEAF Focuser Driver"; }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
@@ -93,13 +81,9 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    bool get_connected() const override {
-        return connected_.load();
-    }
+    bool get_connected() const override { return connected_.load(); }
 
-    void connect() override {
-        start_connection_task(true);
-    }
+    void connect() override { start_connection_task(true); }
 
     void disconnect() override {
         // Disconnect synchronously — trivial (close fd + set flag) and ASCOM
@@ -148,18 +132,13 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override {
-        return {};
-    }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
 
     std::string action(std::string_view action_name, std::string_view) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name),
-                              AlpacaError::ActionNotImplemented);
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
-    bool can_action(std::string_view) const override {
-        return false;
-    }
+    bool can_action(std::string_view) const override { return false; }
 
     std::string command_blind(std::string_view, bool) override {
         throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
@@ -175,22 +154,16 @@ public:
 
     // --- Focuser interface ---
 
-    bool get_absolute() const override {
-        return true;
-    }
+    bool get_absolute() const override { return true; }
 
     bool get_is_moving() const override {
         ensure_connected();
         return cached_status().moving;
     }
 
-    int get_max_step() const override {
-        return IEAF_MAX_STEP;
-    }
+    int get_max_step() const override { return IEAF_MAX_STEP; }
 
-    int get_max_increment() const override {
-        return IEAF_MAX_STEP;
-    }
+    int get_max_increment() const override { return IEAF_MAX_STEP; }
 
     int get_position() const override {
         ensure_connected();
@@ -200,21 +173,15 @@ public:
     double get_step_size() const override {
         // The iEAF protocol does not expose step size in microns — it depends
         // on the focuser drawtube it is mounted to.
-        throw AlpacaException("Step size not available for this focuser",
-                              AlpacaError::PropertyNotImplemented);
+        throw AlpacaException("Step size not available for this focuser", AlpacaError::PropertyNotImplemented);
     }
 
-    bool get_temp_comp_available() const override {
-        return false;
-    }
+    bool get_temp_comp_available() const override { return false; }
 
-    bool get_temp_comp() const override {
-        return false;
-    }
+    bool get_temp_comp() const override { return false; }
 
     void set_temp_comp(bool) override {
-        throw AlpacaException("Temperature compensation not supported",
-                              AlpacaError::NotImplemented);
+        throw AlpacaException("Temperature compensation not supported", AlpacaError::NotImplemented);
     }
 
     double get_temperature() const override {
@@ -280,33 +247,31 @@ private:
     mutable std::chrono::steady_clock::time_point status_cache_time_{};
 };
 
-std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number,
-                                                   const std::string& serial_port) {
+std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std::string& serial_port) {
     IeafConnectionConfig config;
     config.serial_port = serial_port;
     return std::make_unique<IeafFocuserDriver>(device_number, std::move(config));
 }
 
-std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number,
-                                                            int focuser_index) {
+std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index) {
     auto ports = enumerate_ieaf_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("iOptron iEAF focuser"),
                               AlpacaError::NotConnected);
     }
     if (focuser_index < 0 || focuser_index >= static_cast<int>(ports.size())) {
-        throw AlpacaException("Focuser index " + std::to_string(focuser_index) +
-                              " out of range (detected " + std::to_string(ports.size()) + ")",
+        throw AlpacaException("Focuser index " + std::to_string(focuser_index) + " out of range (detected " +
+                                  std::to_string(ports.size()) + ")",
                               AlpacaError::InvalidValue);
     }
 
     const auto& port = ports[static_cast<std::size_t>(focuser_index)];
-    ALPACA_LOG_INFO("iOptron", "Auto-detected iEAF at " + port.port_path +
-                    " (firmware " + std::to_string(port.info.firmware) + ")");
+    ALPACA_LOG_INFO("iOptron", "Auto-detected iEAF at " + port.port_path + " (firmware " +
+                                   std::to_string(port.info.firmware) + ")");
 
     IeafConnectionConfig config;
     config.serial_port = port.port_path;
     return std::make_unique<IeafFocuserDriver>(device_number, std::move(config));
 }
 
-} // namespace alpacacore::vendor::ioptron
+}  // namespace alpacacore::vendor::ioptron

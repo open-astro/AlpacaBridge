@@ -36,12 +36,13 @@ namespace alpacacore::vendor::ioptron {
 
 namespace {
 
-constexpr int COMMAND_DELAY_MS = 5;  // read_response() waits for the # terminator; no need to pre-sleep a full reply time
+constexpr int COMMAND_DELAY_MS =
+    5;  // read_response() waits for the # terminator; no need to pre-sleep a full reply time
 constexpr int READ_CHAR_DELAY_MS = 10;
 constexpr int ACK_TIMEOUT_MS = 300;
 constexpr int MAX_RESPONSE_LEN = 32;
 constexpr int HANDSHAKE_RETRIES = 3;
-constexpr int HANDSHAKE_READ_TIMEOUT_S = 2;  // Shorter than the 4s runtime timeout (INDI iEAFFOCUS_TIMEOUT)
+constexpr int HANDSHAKE_READ_TIMEOUT_S = 2;        // Shorter than the 4s runtime timeout (INDI iEAFFOCUS_TIMEOUT)
 constexpr std::int32_t IEAF_MAX_POSITION = 99999;  // matches INDI FocusAbsPos max
 
 bool parse_device_info(const std::string& resp, IeafDeviceInfo& out) {
@@ -76,7 +77,7 @@ static bool probe_port(const std::string& port_path, IeafDeviceInfo& info) {
         return false;
     }
 
-    struct termios tty{};
+    struct termios tty {};
     if (tcgetattr(fd, &tty) != 0) {
         close(fd);
         return false;
@@ -121,8 +122,8 @@ static bool probe_port(const std::string& port_path, IeafDeviceInfo& info) {
         std::string resp;
         auto start = std::chrono::steady_clock::now();
         while (resp.length() < MAX_RESPONSE_LEN) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now() - start).count();
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
             if (elapsed > HANDSHAKE_READ_TIMEOUT_S) {
                 break;
             }
@@ -163,8 +164,8 @@ namespace {
 bool raw_port_looks_like_ieaf_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"});
+    return alpacacore::util::usb_tty_descriptor_matches(*descriptor,
+                                                        {"067b", "Prolific", "PL2303", "USB-Serial", "USB_Serial"});
 }
 }  // namespace
 #endif
@@ -183,24 +184,27 @@ std::vector<IeafPortInfo> enumerate_ieaf_ports() {
             const std::string& name = sym.name;
 
             // Prolific PL2303 USB-serial bridge (067b:23d3) used by the iEAF.
-            bool is_candidate = (name.find("Prolific") != std::string::npos) ||
-                                (name.find("PL2303") != std::string::npos) ||
-                                (name.find("067b") != std::string::npos) ||
-                                (name.find("USB-Serial") != std::string::npos) ||
-                                (name.find("USB_Serial") != std::string::npos);
+            bool is_candidate =
+                (name.find("Prolific") != std::string::npos) || (name.find("PL2303") != std::string::npos) ||
+                (name.find("067b") != std::string::npos) || (name.find("USB-Serial") != std::string::npos) ||
+                (name.find("USB_Serial") != std::string::npos);
             if (!is_candidate) continue;
 
             std::error_code canon_ec;
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
-            ALPACA_LOG_INFO("iOptron", "Probing " + resolved + " (" + name + ") for iEAF...");
+            std::string probe_msg = "Probing ";
+            probe_msg += resolved;
+            probe_msg += " (";
+            probe_msg += name;
+            probe_msg += ") for iEAF...";
+            ALPACA_LOG_INFO("iOptron", probe_msg);
 
             IeafDeviceInfo info;
             if (probe_port(resolved, info)) {
-                ALPACA_LOG_INFO("iOptron", "Found iEAF on " + resolved +
-                                " (model " + std::to_string(info.model) +
-                                ", firmware " + std::to_string(info.firmware) + ")");
+                ALPACA_LOG_INFO("iOptron", "Found iEAF on " + resolved + " (model " + std::to_string(info.model) +
+                                               ", firmware " + std::to_string(info.firmware) + ")");
                 results.push_back({resolved, name, info});
             }
         }
@@ -223,9 +227,8 @@ std::vector<IeafPortInfo> enumerate_ieaf_ports() {
         ALPACA_LOG_INFO("iOptron", "Probing " + resolved + " for iEAF...");
         IeafDeviceInfo info;
         if (probe_port(resolved, info)) {
-            ALPACA_LOG_INFO("iOptron", "Found iEAF on " + resolved +
-                            " (model " + std::to_string(info.model) +
-                            ", firmware " + std::to_string(info.firmware) + ")");
+            ALPACA_LOG_INFO("iOptron", "Found iEAF on " + resolved + " (model " + std::to_string(info.model) +
+                                           ", firmware " + std::to_string(info.firmware) + ")");
             results.push_back({resolved, "", info});
         }
     }
@@ -238,9 +241,7 @@ class IeafProtocolWrapper::Impl {
 public:
     Impl() = default;
 
-    ~Impl() {
-        disconnect();
-    }
+    ~Impl() { disconnect(); }
 
     IeafDeviceInfo connect(const IeafConnectionConfig& config) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -256,8 +257,7 @@ public:
         config_.serial_timeout_s = HANDSHAKE_READ_TIMEOUT_S;
 
         for (int attempt = 0; attempt < HANDSHAKE_RETRIES && !success; ++attempt) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(attempt == 0 ? 100 : 1000));
+            std::this_thread::sleep_for(std::chrono::milliseconds(attempt == 0 ? 100 : 1000));
             tcflush_port();
 
             try {
@@ -266,8 +266,8 @@ public:
                     success = true;
                 }
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("iOptron", "iEAF handshake attempt " + std::to_string(attempt + 1) +
-                                " failed: " + e.what());
+                ALPACA_LOG_WARN("iOptron",
+                                "iEAF handshake attempt " + std::to_string(attempt + 1) + " failed: " + e.what());
             }
         }
 
@@ -275,21 +275,19 @@ public:
 
         if (!success) {
             disconnect_locked();
-            throw AlpacaException("iEAF handshake failed after " +
-                                  std::to_string(HANDSHAKE_RETRIES) + " attempts",
+            throw AlpacaException("iEAF handshake failed after " + std::to_string(HANDSHAKE_RETRIES) + " attempts",
                                   AlpacaError::NotConnected);
         }
         if (!is_ieaf_model(info.model)) {
             disconnect_locked();
-            throw AlpacaException("Device on " + config_.serial_port +
-                                  " reported model code " + std::to_string(info.model) +
-                                  ", not an iEAF (expected 2 or 3)",
+            throw AlpacaException("Device on " + config_.serial_port + " reported model code " +
+                                      std::to_string(info.model) + ", not an iEAF (expected 2 or 3)",
                                   AlpacaError::NotConnected);
         }
 
         connected_ = true;
-        ALPACA_LOG_INFO("iOptron", "iEAF connected (model " + std::to_string(info.model) +
-                        ", firmware " + std::to_string(info.firmware) + ")");
+        ALPACA_LOG_INFO("iOptron", "iEAF connected (model " + std::to_string(info.model) + ", firmware " +
+                                       std::to_string(info.firmware) + ")");
         return info;
     }
 
@@ -311,8 +309,7 @@ public:
         // direction flag (0 = reversed).
         int pos = 0, moving = 0, temp = 0, dir = 0;
         if (std::sscanf(resp.c_str(), "%7d%1d%5d%1d", &pos, &moving, &temp, &dir) != 4) {
-            throw AlpacaException("Failed to parse iEAF status: " + resp,
-                                  AlpacaError::DriverException);
+            throw AlpacaException("Failed to parse iEAF status: " + resp, AlpacaError::DriverException);
         }
         IeafStatus status;
         status.position = pos;
@@ -326,8 +323,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
         if (position < 0 || position > IEAF_MAX_POSITION) {
-            throw AlpacaException("iEAF target position out of range",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("iEAF target position out of range", AlpacaError::InvalidValue);
         }
         char cmd[16];
         // Space-padded 7-wide, matching INDI's ":FM%7u#".
@@ -358,17 +354,16 @@ private:
 #ifndef _WIN32
         serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
-            throw AlpacaException("Failed to open serial port: " + config_.serial_port +
-                                  " (" + std::strerror(errno) + ")",
-                                  AlpacaError::NotConnected);
+            throw AlpacaException(
+                "Failed to open serial port: " + config_.serial_port + " (" + std::strerror(errno) + ")",
+                AlpacaError::NotConnected);
         }
 
-        struct termios tty{};
+        struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
-            throw AlpacaException("Failed to get serial port attributes",
-                                  AlpacaError::DriverException);
+            throw AlpacaException("Failed to get serial port attributes", AlpacaError::DriverException);
         }
 
         // The iEAF runs at a fixed 115200 regardless of config_.baud_rate.
@@ -393,15 +388,13 @@ private:
         if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
-            throw AlpacaException("Failed to set serial port attributes",
-                                  AlpacaError::DriverException);
+            throw AlpacaException("Failed to set serial port attributes", AlpacaError::DriverException);
         }
 
         if (!util::clear_nonblocking(serial_fd_)) {
             close(serial_fd_);
             serial_fd_ = -1;
-            throw AlpacaException("Failed to set serial port to blocking mode",
-                                  AlpacaError::DriverException);
+            throw AlpacaException("Failed to set serial port to blocking mode", AlpacaError::DriverException);
         }
 
         tcflush(serial_fd_, TCIOFLUSH);
@@ -431,8 +424,7 @@ private:
     void write_data(const std::string& data) {
 #ifndef _WIN32
         if (!util::write_all(serial_fd_, data.c_str(), data.length())) {
-            throw AlpacaException("Write failed: " + std::string(std::strerror(errno)),
-                                  AlpacaError::DriverException);
+            throw AlpacaException("Write failed: " + std::string(std::strerror(errno)), AlpacaError::DriverException);
         }
 #else
         (void)data;
@@ -447,8 +439,8 @@ private:
         auto start = std::chrono::steady_clock::now();
 
         while (true) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
             if (elapsed > timeout_ms) {
                 throw AlpacaException("iEAF read timeout", AlpacaError::DriverException);
             }
@@ -456,7 +448,7 @@ private:
             char ch = 0;
             bool got_char = false;
 #ifndef _WIN32
-            ssize_t r = read(serial_fd_, &ch, 1);
+            ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
             if (r == 1) {
                 got_char = true;
             }
@@ -506,7 +498,7 @@ private:
         while (true) {
             char ch = 0;
 #ifndef _WIN32
-            if (read(serial_fd_, &ch, 1) == 1) {
+            if (read(serial_fd_, &ch, 1) == 1) {  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
                 if (ch == '\r' || ch == '\n') {
                     continue;
                 }
@@ -516,8 +508,8 @@ private:
                 return;
             }
 #endif
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
             if (elapsed > ACK_TIMEOUT_MS) {
                 ALPACA_LOG_DEBUG("iOptron", "iEAF no ack for " + cmd);
                 return;
@@ -537,37 +529,22 @@ private:
 
 // --- IeafProtocolWrapper public interface forwarding ---
 
-IeafProtocolWrapper::IeafProtocolWrapper()
-    : impl_(std::make_unique<Impl>()) {}
+IeafProtocolWrapper::IeafProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
 
 IeafProtocolWrapper::~IeafProtocolWrapper() = default;
 
-IeafDeviceInfo IeafProtocolWrapper::connect(const IeafConnectionConfig& config) {
-    return impl_->connect(config);
-}
+IeafDeviceInfo IeafProtocolWrapper::connect(const IeafConnectionConfig& config) { return impl_->connect(config); }
 
-void IeafProtocolWrapper::disconnect() {
-    impl_->disconnect();
-}
+void IeafProtocolWrapper::disconnect() { impl_->disconnect(); }
 
-bool IeafProtocolWrapper::is_connected() const {
-    return impl_->is_connected();
-}
+bool IeafProtocolWrapper::is_connected() const { return impl_->is_connected(); }
 
-IeafStatus IeafProtocolWrapper::get_status() {
-    return impl_->get_status();
-}
+IeafStatus IeafProtocolWrapper::get_status() { return impl_->get_status(); }
 
-void IeafProtocolWrapper::move_to(std::int32_t position) {
-    impl_->move_to(position);
-}
+void IeafProtocolWrapper::move_to(std::int32_t position) { impl_->move_to(position); }
 
-void IeafProtocolWrapper::halt() {
-    impl_->halt();
-}
+void IeafProtocolWrapper::halt() { impl_->halt(); }
 
-void IeafProtocolWrapper::set_zero() {
-    impl_->set_zero();
-}
+void IeafProtocolWrapper::set_zero() { impl_->set_zero(); }
 
-} // namespace alpacacore::vendor::ioptron
+}  // namespace alpacacore::vendor::ioptron

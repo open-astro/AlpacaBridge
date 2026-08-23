@@ -29,7 +29,7 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     }
 }
 
-} // namespace
+}  // namespace
 
 TEST_CASE("iOptron iEAF Focuser Driver - Defaults", "[ioptron][focuser][unit]") {
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
@@ -71,9 +71,11 @@ TEST_CASE("iOptron iEAF Focuser Driver - Unsupported actions", "[ioptron][focuse
     CHECK(driver->get_supported_actions().empty());
     CHECK(driver->can_action("anything") == false);
     require_alpaca_error([&]() { driver->action("test", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
-    require_alpaca_error([&]() { driver->command_blind("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_blind("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->command_bool("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&]() { driver->command_string("test", false); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&]() { driver->command_string("test", false); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
 }
 
 TEST_CASE("iOptron iEAF Focuser Driver - Static capabilities", "[ioptron][focuser][unit]") {
@@ -85,8 +87,7 @@ TEST_CASE("iOptron iEAF Focuser Driver - Static capabilities", "[ioptron][focuse
     CHECK(driver->get_max_increment() == 99999);
 
     // Step size in microns is not exposed by the iEAF protocol.
-    require_alpaca_error([&]() { driver->get_step_size(); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::PropertyNotImplemented);
 }
 
 TEST_CASE("iOptron iEAF Focuser Driver - Unsupported methods", "[ioptron][focuser][unit]") {
@@ -97,10 +98,8 @@ TEST_CASE("iOptron iEAF Focuser Driver - Unsupported methods", "[ioptron][focuse
     // regardless of connection state.
     CHECK(driver->get_temp_comp_available() == false);
     CHECK(driver->get_temp_comp() == false);
-    require_alpaca_error([&]() { driver->set_temp_comp(true); },
-                         alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->set_temp_comp(false); },
-                         alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->set_temp_comp(false); }, alpacacore::AlpacaError::NotImplemented);
 }
 
 TEST_CASE("iOptron iEAF Focuser Driver - State machine", "[ioptron][focuser][unit]") {

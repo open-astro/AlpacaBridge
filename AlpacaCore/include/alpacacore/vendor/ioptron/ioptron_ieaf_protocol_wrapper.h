@@ -56,9 +56,9 @@ struct IeafStatus {
  * @brief Information about a detected serial port that may host an iEAF.
  */
 struct IeafPortInfo {
-    std::string port_path;    // e.g., "/dev/ttyUSB0"
-    std::string device_id;    // by-id symlink name, empty for raw nodes
-    IeafDeviceInfo info;      // populated after successful probe
+    std::string port_path;  // e.g., "/dev/ttyUSB0"
+    std::string device_id;  // by-id symlink name, empty for raw nodes
+    IeafDeviceInfo info;    // populated after successful probe
 };
 
 /**
@@ -113,4 +113,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace alpacacore::vendor::ioptron
+}  // namespace alpacacore::vendor::ioptron

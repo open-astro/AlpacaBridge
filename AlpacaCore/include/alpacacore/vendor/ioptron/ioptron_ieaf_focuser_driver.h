@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/focuser_driver.h>
+
 #include <memory>
 #include <string>
 
@@ -28,8 +29,7 @@ namespace alpacacore::vendor::ioptron {
  * @param serial_port Serial port path (e.g., "/dev/ttyUSB0")
  * @return Unique pointer to focuser driver
  */
-std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number,
-                                                   const std::string& serial_port);
+std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std::string& serial_port);
 
 /**
  * @brief Create an iOptron iEAF focuser driver by auto-detecting the serial port.
@@ -42,7 +42,6 @@ std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number,
  * @param focuser_index 0-based index into the list of detected focusers
  * @return Unique pointer to focuser driver
  */
-std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number,
-                                                            int focuser_index = 0);
+std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index = 0);
 
-} // namespace alpacacore::vendor::ioptron
+}  // namespace alpacacore::vendor::ioptron
