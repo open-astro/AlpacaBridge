@@ -1585,7 +1585,14 @@ private:
         // below: if either wait is superseded (AbortSlew bumps the
         // generation too), the whole dispatch aborts before any new motor
         // command is sent.
-        if (!stop_axis_and_wait_locked(lock, kAxisRa, gen) || !stop_axis_and_wait_locked(lock, kAxisDec, gen)) {
+        // Evaluate BOTH waits unconditionally: each issues its axis's stop
+        // command as its first action, and a short-circuit would leave the
+        // second axis physically moving when the first wait is superseded
+        // (PR #216 round-4 finding — only AbortSlew masked it by stopping
+        // both axes itself).
+        const bool ra_stopped = stop_axis_and_wait_locked(lock, kAxisRa, gen);
+        const bool dec_stopped = stop_axis_and_wait_locked(lock, kAxisDec, gen);
+        if (!ra_stopped || !dec_stopped) {
             throw AlpacaException("Slew superseded before dispatch");
         }
         refresh_position_cache_locked(true);
@@ -1792,7 +1799,10 @@ private:
         ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 1: arming home indexers");
         {
             const uint64_t gen = ++motion_generation_;
-            if (!stop_axis_and_wait_locked(lock, kAxisRa, gen) || !stop_axis_and_wait_locked(lock, kAxisDec, gen)) {
+            // Both waits evaluated unconditionally (see dispatch_goto_locked).
+            const bool ra_stopped = stop_axis_and_wait_locked(lock, kAxisRa, gen);
+            const bool dec_stopped = stop_axis_and_wait_locked(lock, kAxisDec, gen);
+            if (!ra_stopped || !dec_stopped) {
                 throw AlpacaException("AutoHome cancelled");
             }
         }

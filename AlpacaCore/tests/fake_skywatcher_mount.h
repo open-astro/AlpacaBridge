@@ -113,6 +113,13 @@ public:
         return ax(axis).start_count;
     }
 
+    /// Number of ":K"/":L" stop commands received for an axis (regression:
+    /// a superseded goto dispatch must still stop BOTH axes).
+    int stop_count(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).stop_count;
+    }
+
     bool axis_running(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
@@ -163,6 +170,7 @@ private:
         // else the latched count of the crossing.
         uint32_t indexer = 0;
         int start_count = 0;
+        int stop_count = 0;
         int64_t home_index_counts = kHome;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
 
@@ -302,6 +310,7 @@ private:
                 }
                 return "=";
             case 'K':  // ramped stop: keeps running for stop_ramp_ms_ first
+                ++a.stop_count;
                 if (a.running && stop_ramp_ms_ > 0) {
                     a.stopping = true;
                     a.stop_at = now() + std::chrono::milliseconds(stop_ramp_ms_);
@@ -311,6 +320,7 @@ private:
                 }
                 return "=";
             case 'L':  // instant stop
+                ++a.stop_count;
                 a.running = false;
                 a.stopping = false;
                 a.in_goto = false;
