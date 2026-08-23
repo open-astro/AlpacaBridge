@@ -1121,6 +1121,7 @@ public:
         // (the task takes mutex_).
         reap_stop_task();
         bool need_stop_task = false;
+        uint64_t stop_task_generation = 0;
         int channel = kAxisRa;
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -1156,6 +1157,13 @@ public:
                 // exceed 1 s), then restores the previous tracking state per
                 // ASCOM.
                 SkyWatcherProtocolWrapper::instance().stop_motion(channel);
+                cmd_axis_rate_deg_s_[axis] = 0.0;
+                // The stop is a motion command: bump and capture the
+                // generation so the background restore-tracking task can tell
+                // whether a newer motion command took over while it polled
+                // (PR #216 round-5 finding — the restore otherwise re-starts
+                // tracking a concurrent SetTracking(false) just stopped).
+                stop_task_generation = ++motion_generation_;
                 need_stop_task = true;
             }
             // MoveAxis(axis, 0) on an axis with no manual motion is a no-op:
@@ -1177,7 +1185,7 @@ public:
             stop_task_thread_.join();
             stop_task_cancel_.store(false);
         }
-        stop_task_thread_ = std::thread([this, channel, axis]() {
+        stop_task_thread_ = std::thread([this, channel, axis, stop_task_generation]() {
             auto& protocol = SkyWatcherProtocolWrapper::instance();
             auto deadline = std::chrono::steady_clock::now() + kAxisStopTimeout;
             bool stopped = false;
@@ -1203,8 +1211,10 @@ public:
                 ALPACA_LOG_WARN("SkyWatcher", "MoveAxis stop: axis " + std::to_string(channel) +
                                                   " still reported running at timeout");
             }
-            // ASCOM: MoveAxis(axis, 0) restores the previous tracking state.
-            if (channel == kAxisRa && tracking_) {
+            // ASCOM: MoveAxis(axis, 0) restores the previous tracking state —
+            // but only if no newer motion command superseded this stop while
+            // the task polled (generation guard, same as every other path).
+            if (channel == kAxisRa && tracking_ && motion_generation_ == stop_task_generation) {
                 try {
                     set_tracking_locked(lock, true);
                 } catch (const std::exception& e) {

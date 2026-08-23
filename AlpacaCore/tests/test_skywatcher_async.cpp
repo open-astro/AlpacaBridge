@@ -295,4 +295,27 @@ TEST_CASE("SkyWatcher async - superseded dispatch still stops BOTH axes", "[skyw
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - MoveAxis stop restore yields to a newer tracking command", "[skywatcher][async]") {
+    // PR #216 round-5 finding: the MoveAxis(0) background restore-tracking
+    // task must not re-start tracking that a concurrent SetTracking(false)
+    // stopped while the task was polling the deceleration.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->move_axis(0, 2.0);
+    REQUIRE(driver->get_slewing());
+    driver->move_axis(0, 0.0);  // async stop; restore task polls the ramp
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->set_tracking(false);  // newer motion command supersedes the restore
+
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    REQUIRE_FALSE(driver->get_tracking());
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 5000));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
