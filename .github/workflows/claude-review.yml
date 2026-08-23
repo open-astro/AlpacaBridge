@@ -111,12 +111,14 @@ jobs:
               "✅ Approved" if no significant issues, or
               "⚠️ Issues found" if there are things to address.
 
-            When you are done, write the FULL review text to /tmp/review.md
-            with the Write tool. Do NOT attempt to post it yourself — a
-            workflow step posts that file as the PR comment after you finish.
-            The file is the deliverable: if it is missing, the run fails.
-            Ignore files under AlpacaCore/conformu/ (validation logs, not
-            code).
+            When you are done, write the FULL review text to review-comment.md
+            in the repository root (the current working directory) with the
+            Write tool — file writes OUTSIDE the workspace are permission-
+            denied, so do not use /tmp. Do NOT attempt to post the review
+            yourself — a workflow step posts that file as the PR comment after
+            you finish. The file is the deliverable: if it is missing, the run
+            fails. Ignore files under AlpacaCore/conformu/ (validation logs,
+            not code).
           claude_args: |
             --model sonnet
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
@@ -131,13 +133,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ ! -s /tmp/review.md ]; then
-            echo "::warning::Agent did not produce /tmp/review.md — nothing to post (the assert step will fail unless this PR edits the workflow itself)."
+          if [ ! -s review-comment.md ]; then
+            echo "::warning::Agent did not produce review-comment.md — nothing to post (the assert step will fail unless this PR edits the workflow itself)."
             exit 0
           fi
           gh pr comment "${{ github.event.pull_request.number }}" \
             --repo "${{ github.repository }}" \
-            --body-file /tmp/review.md
+            --body-file review-comment.md
 
       # Ported from openastro-ara #862/#863: the action exits 0 even when the
       # agent never manages to post its comment, so a green check could exist
