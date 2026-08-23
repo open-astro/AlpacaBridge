@@ -343,6 +343,7 @@ const INDEX_FIELDS = [
     { fieldId: 'playerone-filterwheel-index', vendor: 'playerone', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'astroasis-focuser-index', vendor: 'astroasis', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'astroasis-hid-path' },
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
+    { fieldId: 'ioptron-ieaf-focuser-index', vendor: 'ioptron', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
     // Same configKey as the Lite field above: panelIndex is an index into
     // enumerate_gemini_flatpanel_ports(), a scan shared by both models, so
@@ -754,6 +755,20 @@ function startEditDevice(device) {
                     pwmCheckbox.checked = config.ports[i].pwm === true;
                 }
             });
+        }
+        updateIoptronConfigFields();
+    } else if (vendor === 'ioptron' && deviceType === 'focuser') {
+        // iEAF: USB-serial only, fixed 115200 baud.
+        const ieafConnectionType = config.connectionType || 'auto';
+        setFormValue('ioptron-ieaf-connection-type', ieafConnectionType);
+        if (ieafConnectionType === 'serial') {
+            setFormValue('ioptron-ieaf-port-path', config.portPath);
+        } else if (config.focuserIndex !== undefined && config.focuserIndex !== null) {
+            setFormValue('ioptron-ieaf-focuser-index', config.focuserIndex);
+        }
+        const ieafConnectionTypeEl = document.getElementById('ioptron-ieaf-connection-type');
+        if (ieafConnectionTypeEl) {
+            ieafConnectionTypeEl.dispatchEvent(new Event('change'));
         }
         updateIoptronConfigFields();
     } else if (vendor === 'ioptron') {
@@ -1991,8 +2006,9 @@ function updateVendorOptions() {
     }
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
-        // iOptron provides the mount (telescope) and the iMate PowerBox (switch).
-        const ioptronAllowed = isTelescope || isSwitch;
+        // iOptron provides the mount (telescope), the iMate PowerBox (switch)
+        // and the iEAF electronic focuser.
+        const ioptronAllowed = isTelescope || isSwitch || isFocuser;
         ioptronOption.disabled = !ioptronAllowed;
         ioptronOption.hidden = !ioptronAllowed;
     }
@@ -2082,7 +2098,7 @@ function updateVendorOptions() {
     if (!isFocuser && vendorSelect.value === 'astroasis') {
         vendorSelect.value = '';
     }
-    if (!isTelescope && !isSwitch && vendorSelect.value === 'ioptron') {
+    if (!isTelescope && !isSwitch && !isFocuser && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
     }
     if (!isTelescope && vendorSelect.value === 'synscan') {
@@ -2253,20 +2269,23 @@ function updateWandererastroConfigFields() {
     setFieldGroupEnabled(boxSection, isBox);
 }
 
-// iOptron covers two device types from one vendor config block: the mount
-// (telescope) and the iMate PowerBox (switch). Show the relevant sub-section
-// based on the selected device type.
+// iOptron covers three device types from one vendor config block: the mount
+// (telescope), the iMate PowerBox (switch) and the iEAF focuser. Show the
+// relevant sub-section based on the selected device type.
 function updateIoptronConfigFields() {
     const telescopeSection = document.getElementById('ioptron-telescope-config');
     const switchSection = document.getElementById('ioptron-switch-config');
-    if (!telescopeSection || !switchSection) {
+    const focuserSection = document.getElementById('ioptron-focuser-config');
+    if (!telescopeSection || !switchSection || !focuserSection) {
         return;
     }
     const deviceTypeSelect = document.getElementById('device-type');
     const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
     const isSwitch = deviceType === 'switch';
-    telescopeSection.style.display = isSwitch ? 'none' : 'block';
+    const isFocuser = deviceType === 'focuser';
+    telescopeSection.style.display = (isSwitch || isFocuser) ? 'none' : 'block';
     switchSection.style.display = isSwitch ? 'block' : 'none';
+    focuserSection.style.display = isFocuser ? 'block' : 'none';
 }
 
 const ioptronConnectionType = document.getElementById('ioptron-connection-type');
@@ -2275,6 +2294,15 @@ if (ioptronConnectionType) {
         const type = this.value;
         document.getElementById('ioptron-serial-config').style.display = type === 'serial' ? 'block' : 'none';
         document.getElementById('ioptron-network-config').style.display = type === 'network' ? 'block' : 'none';
+    });
+}
+
+const ioptronIeafConnectionType = document.getElementById('ioptron-ieaf-connection-type');
+if (ioptronIeafConnectionType) {
+    ioptronIeafConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('ioptron-ieaf-auto-config').style.display = type === 'serial' ? 'none' : 'block';
+        document.getElementById('ioptron-ieaf-serial-config').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -3022,6 +3050,14 @@ document.getElementById('device-form').addEventListener('submit', async function
             { pwm: dc1Pwm },
             { pwm: dc2Pwm },
         ];
+    } else if (deviceData.vendor === 'ioptron' && normalizeDeviceType(deviceData.deviceType) === 'focuser') {
+        // iEAF: USB-serial only, fixed baud — no baudRate/network fields.
+        deviceData.connectionType = formData.get('ioptronIeafConnectionType') || 'auto';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('ioptronIeafPortPath');
+        } else {
+            deviceData.focuserIndex = parseInt(formData.get('ioptronIeafFocuserIndex')) || 0;
+        }
     } else if (deviceData.vendor === 'ioptron') {
         deviceData.connectionType = formData.get('ioptronConnectionType') || 'auto';
         if (deviceData.connectionType === 'serial') {
