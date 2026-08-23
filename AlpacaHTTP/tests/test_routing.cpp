@@ -1595,6 +1595,52 @@ int main() {
     }
 #endif
 
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+    {
+        // skywatcher / telescope (direct motor controller) — serial fields,
+        // mountIndex, and the driver-owned site properties must all survive
+        // the sanitize round-trip (the mount stores no site of its own).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "skywatcher"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9617},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB6"},
+                                           {"baudRate", 9600},
+                                           {"siteLatitude", 39.7392},
+                                           {"siteLongitude", -104.9903},
+                                           {"siteElevation", 1609.0},
+                                           {"mountIndex", 1}},
+                                          "Telescope", 9617);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB6");
+        EXPECT(cfg.value("baudRate", -1) == 9600);
+        EXPECT(cfg.value("siteLatitude", 0.0) == 39.7392);
+        EXPECT(cfg.value("siteLongitude", 0.0) == -104.9903);
+        EXPECT(cfg.value("siteElevation", 0.0) == 1609.0);
+        EXPECT(cfg.value("mountIndex", -1) == 1);
+        remove_device(router, "skywatcher", "telescope", 9617);
+    }
+    {
+        // skywatcher / telescope network variant: host + udpPort (UDP 11880,
+        // not tcpPort) must survive.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "skywatcher"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9618},
+                                           {"connectionType", "network"},
+                                           {"host", "192.168.4.1"},
+                                           {"udpPort", 11880}},
+                                          "Telescope", 9618);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("connectionType", "") == "network");
+        EXPECT(cfg.value("host", "") == "192.168.4.1");
+        EXPECT(cfg.value("udpPort", -1) == 11880);
+        remove_device(router, "skywatcher", "telescope", 9618);
+    }
+#endif
+
 #ifdef ALPACACORE_ENABLE_ONSTEP
     {
         // onstep / telescope — same mountIndex allowlist gap class as

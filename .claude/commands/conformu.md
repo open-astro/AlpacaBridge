@@ -44,6 +44,25 @@ After all answers, summarize and confirm before continuing:
 
 > "Ready to run ConformU against `<vendor> <model>` (<type>) over <transport> at `http://<host>:<port>/api/v1/<type>/<n>`. Output will be saved to `AlpacaCore/conformu/<Vendor>/<Model>/Linux-arm64[-<transport>].txt`. Proceed?"
 
+## SAFETY — NEVER run ConformU with a telescope (OTA) mounted (HARD RULE)
+
+ConformU's telescope suite commands aggressive, large-amplitude motion by design: 40+ slews
+at the mount's maximum rate (800x sidereal on Sky-Watcher class mounts), deliberate mid-slew
+aborts, forced meridian flips in both directions, and test targets placed halfway to the
+horizon — with mid-slew arcs dipping even lower (altitude ~5 degrees was recorded on a Wave
+100i during a normal passing run). With an OTA mounted this risks tripod/pier strikes, cable
+snags through full flips, and balance failures at maximum acceleration; strain-wave mounts
+have no clutch to slip if something snags.
+
+Before starting any telescope ConformU run, confirm with the user that the mount is BARE (no
+OTA, no counterweight-critical payload, cables clear). If a scope is mounted, refuse to start
+the run until it is removed. This applies to every telescope driver and both transports.
+
+Also send the mount HOME before every telescope run (FindHome where the driver supports it,
+otherwise the vendor's home/park procedure): a run started from an arbitrary position begins
+its slew choreography from unpredictable geometry, and after any stopped/failed run the mount
+must be re-homed before the retest.
+
 ## Step 2 — Pre-flight checks (HARD STOP if any fail)
 
 Before invoking ConformU, verify the environment. If any check fails, **STOP** and tell the user what to fix. Do NOT run ConformU against a broken setup — it wastes time and produces noisy logs that look like driver bugs.
@@ -160,7 +179,24 @@ TMPDIR=$(mktemp -d /tmp/conformu-XXXXXX)
   -n "$TMPDIR/conformu.txt"
 ```
 
-Stream output to the user as it runs. ConformU can take minutes (especially for cameras and telescopes). Do not interrupt unless the user says so.
+Stream output to the user as it runs. ConformU can take minutes (especially for cameras and telescopes).
+
+**Motion devices (Telescope, Dome, Rotator): STOP AT THE FIRST ISSUE — do not let a failing run grind to the end.** Run a watchdog alongside ConformU that polls the log every ~5 s and kills the run the moment an `ISSUE` or `ERROR` line appears:
+
+```bash
+while pgrep -x conformu >/dev/null; do
+  N=$(grep -c "ISSUE" "$TMPDIR/conformu.txt" 2>/dev/null | head -1)
+  if [ "${N:-0}" -gt 0 ] 2>/dev/null; then
+    pkill -x conformu
+    break
+  fi
+  sleep 5
+done
+```
+
+Why: a failed motion run keeps exercising the mechanics for 20+ minutes, later failures are usually cascade noise from the first one, and killing immediately preserves the exact server-log window around the root cause (grab the journal for the 2 minutes before the kill). After stopping: diagnose and fix the driver (Step 5), **send the mount back to home** (FindHome where supported, else the vendor's home/park), redeploy, and rerun from Step 3. Repeat until the suite completes clean.
+
+For static devices (camera, filter wheel, focuser, switch, cover/calibrator, ObservingConditions, SafetyMonitor) let the run complete — the full issue list in one pass is more efficient to fix as a batch, and there is no mechanical wear argument. Stop-on-first-issue remains available if the user asks for it.
 
 If the run errors out before producing a log (e.g. SIGSEGV, missing .NET runtime), surface the error message verbatim and stop — do not proceed to validation.
 
