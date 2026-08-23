@@ -19,6 +19,7 @@
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -142,6 +143,7 @@ public:
                 firmware_.clear();
             }
             connected_.store(false);
+            invalidate_status_cache();
             ALPACA_LOG_INFO("iOptron", "iEAF focuser disconnected");
         }
     }
@@ -179,7 +181,7 @@ public:
 
     bool get_is_moving() const override {
         ensure_connected();
-        return const_cast<IeafFocuserDriver*>(this)->protocol_.get_status().moving;
+        return cached_status().moving;
     }
 
     int get_max_step() const override {
@@ -192,7 +194,7 @@ public:
 
     int get_position() const override {
         ensure_connected();
-        return const_cast<IeafFocuserDriver*>(this)->protocol_.get_status().position;
+        return cached_status().position;
     }
 
     double get_step_size() const override {
@@ -217,12 +219,13 @@ public:
 
     double get_temperature() const override {
         ensure_connected();
-        return const_cast<IeafFocuserDriver*>(this)->protocol_.get_status().temperature_c;
+        return cached_status().temperature_c;
     }
 
     void halt() override {
         ensure_connected();
         protocol_.halt();
+        invalidate_status_cache();
     }
 
     void move(int position) override {
@@ -231,9 +234,32 @@ public:
             throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
         }
         protocol_.move_to(position);
+        invalidate_status_cache();
     }
 
 private:
+    // One :FI# round trip is ~60 ms on the PL2303 link. DeviceState reads
+    // IsMoving + Position + Temperature back to back, which is three round
+    // trips (~0.26 s) against a 0.1 s ASCOM FAST target. Serve a burst of
+    // reads from one poll: the cache lives for STATUS_CACHE_TTL and is
+    // dropped by move()/halt() so the first read after a command is live.
+    static constexpr auto STATUS_CACHE_TTL = std::chrono::milliseconds(100);
+
+    IeafStatus cached_status() const {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        if (!status_cache_ || now - status_cache_time_ > STATUS_CACHE_TTL) {
+            status_cache_ = const_cast<IeafFocuserDriver*>(this)->protocol_.get_status();
+            status_cache_time_ = now;
+        }
+        return *status_cache_;
+    }
+
+    void invalidate_status_cache() {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        status_cache_.reset();
+    }
+
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
@@ -249,6 +275,9 @@ private:
     // the base joins that thread — sharing one mutex would deadlock.
     mutable std::mutex firmware_mutex_;
     std::string firmware_;  // captured at connect; web-UI only (guarded by firmware_mutex_)
+    mutable std::mutex status_mutex_;
+    mutable std::optional<IeafStatus> status_cache_;
+    mutable std::chrono::steady_clock::time_point status_cache_time_{};
 };
 
 std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number,

@@ -110,7 +110,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | Player One | Camera, FilterWheel (Phoenix Wheel), Switch (dew heater + fan) | SDK wrapper | Production |
 | SVBONY | Camera | SDK wrapper | Production |
 | ToupTek | Camera (incl. cooled + High Full Well), Focuser (AAF), FilterWheel (AFW-M), Switch (camera thermal: dew heater + fan; StellaVita power) | SDK + protocol wrapper | Production |
-| iOptron | Telescope, Switch (iMate PowerBox), Focuser (iEAF) | Protocol wrapper | Production (Focuser: In development) |
+| iOptron | Telescope, Switch (iMate PowerBox), Focuser (iEAF) | Protocol wrapper | Production |
 | SynScan | Telescope | Protocol wrapper | Production |
 | SkyWatcher (direct MC) | Telescope (Wave 100i/150i, AZ-GTi class, motor controller protocol over USB or WiFi UDP) | Protocol wrapper | Production |
 | Celestron | Telescope | Protocol wrapper | Production |

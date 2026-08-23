@@ -36,8 +36,9 @@ namespace alpacacore::vendor::ioptron {
 
 namespace {
 
-constexpr int COMMAND_DELAY_MS = 50;
+constexpr int COMMAND_DELAY_MS = 5;  // read_response() waits for the # terminator; no need to pre-sleep a full reply time
 constexpr int READ_CHAR_DELAY_MS = 10;
+constexpr int ACK_TIMEOUT_MS = 300;
 constexpr int MAX_RESPONSE_LEN = 32;
 constexpr int HANDSHAKE_RETRIES = 3;
 constexpr int HANDSHAKE_READ_TIMEOUT_S = 2;  // Shorter than the 4s runtime timeout (INDI iEAFFOCUS_TIMEOUT)
@@ -491,9 +492,38 @@ private:
         return read_response();
     }
 
+    // :FM / :FQ / :FZ answer with a single '1' byte and no '#' terminator
+    // (INDI ieaffocus.cpp reads exactly one byte after each). Consume it
+    // here: leaving it in the input buffer races the tcflush at the start
+    // of the next :FI# — when it lands after the flush it prefixes the reply
+    // ("1+013211...") and breaks the fixed-width parse. The ack is optional:
+    // a firmware that stays silent just costs us ACK_TIMEOUT_MS.
     void send_command_blind_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("iOptron", "iEAF command (blind): " + cmd);
+        tcflush_port();
         write_data(cmd);
+        auto start = std::chrono::steady_clock::now();
+        while (true) {
+            char ch = 0;
+#ifndef _WIN32
+            if (read(serial_fd_, &ch, 1) == 1) {
+                if (ch == '\r' || ch == '\n') {
+                    continue;
+                }
+                if (ch != '1') {
+                    ALPACA_LOG_WARN("iOptron", std::string("iEAF unexpected ack byte: ") + ch);
+                }
+                return;
+            }
+#endif
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed > ACK_TIMEOUT_MS) {
+                ALPACA_LOG_DEBUG("iOptron", "iEAF no ack for " + cmd);
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(READ_CHAR_DELAY_MS));
+        }
     }
 
     mutable std::mutex mutex_;
