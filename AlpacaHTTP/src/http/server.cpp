@@ -198,10 +198,27 @@ void Server::run_server() {
     // our fd number). Observed once in the field: the accept loop broke
     // silently and the whole server shut down "successfully" mid ConformU
     // run. Recreate the listener instead of dying.
+    auto last_rebind = std::chrono::steady_clock::time_point::min();
     auto rebind_listener = [&]() -> bool {
+        // Backoff ACROSS rebind cycles too: if the fd-loss condition recurs
+        // immediately after a successful rebind, sleep instead of spinning
+        // select-fail -> rebind -> select-fail with continuous error logging.
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_rebind < std::chrono::seconds(2)) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        last_rebind = now;
         auto old = server_fd_.exchange(util::kInvalidSocket);
         if (old != util::kInvalidSocket) {
-            util::socket_close(old);
+            // The fd number may have been recycled to an UNRELATED live socket
+            // by whatever double-closed the listener. Close it only if it is
+            // still a listening socket; otherwise leak the number rather than
+            // sever an innocent connection.
+            int acc = 0;
+            socklen_t len = sizeof(acc);
+            if (getsockopt(old, SOL_SOCKET, SO_ACCEPTCONN, &acc, &len) == 0 && acc != 0) {
+                util::socket_close(old);
+            }
         }
         for (int attempt = 0; attempt < 10 && running_; ++attempt) {
             util::SocketHandle fd = socket(AF_INET, SOCK_STREAM, 0);

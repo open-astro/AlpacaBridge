@@ -50,8 +50,13 @@ constexpr double kMaxMoveAxisRateDegPerSec = 800.0 * kSiderealDegPerSec;
 // Above ~128x sidereal the controller needs high-speed (fast) mode.
 constexpr double kFastModeThresholdDegPerSec = 128.0 * kSiderealDegPerSec;
 constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
+// Longest a comms fault may serve last-known position/slewing state.
+constexpr auto kStaleCacheLimit = std::chrono::seconds(10);
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
 constexpr auto kAxisStopTimeout = std::chrono::seconds(5);
+// Below this rate an in-place ":I" pulse adjustment is unreliable (and a
+// non-positive rate needs a direction change ":I" cannot deliver).
+constexpr double kMinInPlacePulseRateDegPerSec = 0.05 * kSiderealDegPerSec;
 // AutoHome (home index sensor) constants — SynScan/EQMod ":q"/":W" extended
 // commands. Indexer reads: 0 = armed below the index, 0xFFFFFF = armed above,
 // anything else = the count at which the sensor edge latched.
@@ -386,9 +391,6 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
-            return std::clamp(target_dec_degrees_, -90.0, 90.0);
-        }
         refresh_position_cache_locked(false);
         auto [ra, dec] = compute_ra_dec_locked();
         (void)ra;
@@ -446,9 +448,6 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
-            return target_ra_hours_;
-        }
         refresh_position_cache_locked(false);
         auto [ra, dec] = compute_ra_dec_locked();
         (void)dec;
@@ -633,7 +632,6 @@ public:
             invalidate_position_cache_locked();
             slewing_cached_ = true;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
             restore_tracking_after_slew_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
@@ -711,7 +709,6 @@ public:
             invalidate_position_cache_locked();
             slewing_cached_ = true;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
             restore_tracking_after_slew_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
@@ -757,6 +754,7 @@ public:
     void pulse_guide(int direction, int duration) override {
         int axis = -1;
         bool ra_rate_adjust = false;
+        bool ra_pulse_restart = false;  // pulse rate <= 0: axis must reverse
         double dec_rate_deg_per_sec = 0.0;
         double ra_pulse_rate_deg_per_sec = 0.0;
         double ra_restore_rate_deg_per_sec = kSiderealDegPerSec;
@@ -771,19 +769,12 @@ public:
                 throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
             }
 
-            const double duration_sec = duration / 1000.0;
             const auto now = std::chrono::steady_clock::now();
 
-            // Initialize target coords from the mount when no override active,
-            // then accumulate the expected rate x duration delta — reading back
-            // noisy positions mid-guide causes drift (project lesson).
-            if (!target_set_ || now >= position_override_until_) {
-                refresh_position_cache_locked(true);
-                auto [ra, dec] = compute_ra_dec_locked();
-                target_ra_hours_ = ra;
-                target_dec_degrees_ = dec;
-                target_set_ = true;
-            }
+            // Reads are live (dead-reckoned) during pulses — no frozen-target
+            // accumulation, and pulses never rewrite the slew Target
+            // properties. The pier-side sign for Dec needs a fresh position.
+            refresh_position_cache_locked(false);
 
             if (direction == 0 || direction == 1) {
                 // North/South: DEC axis speed-mode nudge. Freeze the RA value —
@@ -797,9 +788,6 @@ public:
                 if (cached_dec_axis_deg_ >= 0.0) {
                     dec_rate_deg_per_sec = -dec_rate_deg_per_sec;
                 }
-                double delta_deg = guide_rate_.dec * duration_sec;
-                if (direction == 1) delta_deg = -delta_deg;
-                target_dec_degrees_ = std::clamp(target_dec_degrees_ + delta_deg, -90.0, 90.0);
             } else {
                 // East/West: adjust the RA tracking rate for the pulse window
                 // (slow speed mode allows a live step-period change). East
@@ -809,9 +797,10 @@ public:
                 double adjust = direction == 2 ? -guide_rate_.ra : guide_rate_.ra;
                 ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
                 ra_pulse_rate_deg_per_sec = ra_restore_rate_deg_per_sec + adjust;
-                double delta_hours = (guide_rate_.ra * duration_sec) / kHoursToDegrees;
-                if (direction == 3) delta_hours = -delta_hours;
-                target_ra_hours_ = wrap_hours(target_ra_hours_ + delta_hours);
+                // In-place ":I" cannot change direction. A non-positive pulse
+                // rate (guide rate near 1x sidereal under Lunar/Solar drive)
+                // needs a full stop-and-reverse, and a full restart to resume.
+                ra_pulse_restart = ra_pulse_rate_deg_per_sec <= kMinInPlacePulseRateDegPerSec;
             }
 
             // No read freeze during the pulse: ConformU 4.5 measures the
@@ -835,8 +824,9 @@ public:
         const bool restore_tracking = ra_rate_adjust;
         const double dec_rate = dec_rate_deg_per_sec;
         const double ra_pulse_rate = ra_pulse_rate_deg_per_sec;
+        const bool pulse_restart = ra_pulse_restart;
         pulse_task_thread_ = std::thread([this, axis, duration, restore_tracking, direction, dec_rate, ra_pulse_rate,
-                                          ra_restore_rate_deg_per_sec]() {
+                                          ra_restore_rate_deg_per_sec, pulse_restart]() {
             // PulseGuide is an asynchronous initiator (ITelescopeV4): the axis
             // dispatch (which can stop-and-wait a ramping axis, plus UDP
             // retries) runs here so pulse_guide() returns inside the STANDARD
@@ -846,8 +836,14 @@ public:
                 auto& proto = SkyWatcherProtocolWrapper::instance();
                 if (axis == kAxisDec) {
                     start_speed_motion_locked(kAxisDec, dec_rate);
-                } else if (restore_tracking) {
+                } else if (restore_tracking && !pulse_restart) {
                     proto.set_step_period(kAxisRa, tracking_step_period_for(ra_pulse_rate));
+                    cmd_axis_rate_deg_s_[0] = ra_pulse_rate;
+                } else if (restore_tracking) {
+                    // Pulse rate is non-positive (direction reversal): a live
+                    // ":I" write cannot reverse the axis — stop and restart in
+                    // the pulse direction instead.
+                    start_speed_motion_locked(kAxisRa, ra_pulse_rate);
                 } else {
                     // Not tracking: nudge the RA axis directly like DEC.
                     double rate = direction == 2 ? -guide_rate_.ra : guide_rate_.ra;
@@ -864,14 +860,18 @@ public:
                 pulse_guiding_active_ = false;
                 return;
             }
-            auto stop_axis = [this, axis, restore_tracking, ra_restore_rate_deg_per_sec]() {
+            auto stop_axis = [this, axis, restore_tracking, ra_restore_rate_deg_per_sec, pulse_restart]() {
                 auto& proto = SkyWatcherProtocolWrapper::instance();
-                if (restore_tracking) {
+                if (restore_tracking && !pulse_restart) {
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped.
                     proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec));
                     std::lock_guard<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
+                } else if (restore_tracking) {
+                    // Reversed pulse: full stop-and-restart back to the drive rate.
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    start_speed_motion_locked(kAxisRa, ra_restore_rate_deg_per_sec);
                 } else {
                     proto.stop_motion(axis);
                     // Zero the dead-reckoning rate: this direct stop bypasses
@@ -966,7 +966,6 @@ public:
             invalidate_position_cache_locked();
             slewing_cached_ = true;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
             target_set_ = true;
@@ -1002,13 +1001,11 @@ public:
                 goto_in_progress_ = false;
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                position_override_until_ = std::chrono::steady_clock::time_point::min();
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Async slew failed: ") + ex.what());
             } catch (...) {
                 goto_in_progress_ = false;
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                position_override_until_ = std::chrono::steady_clock::time_point::min();
                 ALPACA_LOG_WARN("SkyWatcher", "Async slew failed with unknown exception");
             }
         });
@@ -1067,7 +1064,6 @@ public:
         target_set_ = true;
         invalidate_position_cache_locked();
         // No post-sync read freeze: live reads land on the synced frame.
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
     }
 
     void sync_to_target() override {
@@ -1250,7 +1246,6 @@ public:
         goto_in_progress_ = false;
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         restore_tracking_after_slew_ = false;
@@ -1308,7 +1303,6 @@ private:
         pulse_guiding_active_ = false;
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         parking_ = false;
@@ -1421,6 +1415,12 @@ private:
             last_position_update_ = now;
         } catch (...) {
             if (!position_cache_valid_) {
+                throw;
+            }
+            // Serve last-known values only briefly: a sustained comms fault
+            // must surface as an error, not as a frozen position.
+            if ((now - last_position_update_) > kStaleCacheLimit) {
+                position_cache_valid_ = false;
                 throw;
             }
         }
@@ -1614,7 +1614,6 @@ private:
         invalidate_position_cache_locked();
         slewing_cached_ = true;
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
         restore_tracking_after_slew_ = tracking_;
         (void)axis1;
         (void)axis2;
@@ -1641,7 +1640,6 @@ private:
         invalidate_position_cache_locked();
         slewing_cached_ = true;
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
         restore_tracking_after_slew_ = false;
         try {
             dispatch_goto_locked(axis1_deg, axis2_deg);
@@ -1698,8 +1696,13 @@ private:
             // while either axis is running in GOTO mode. A tracking axis
             // (speed mode) is NOT slewing.
             slewing_cached_ = (ra.running && !ra.speed_mode) || (dec.running && !dec.speed_mode);
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
-            // Keep last known state if polling times out.
+            last_slewing_poll_ = std::chrono::steady_clock::now();
+        } catch (...) {
+            // Keep last known state across a transient poll failure, but a
+            // sustained fault must surface, not report frozen Slewing forever.
+            if ((std::chrono::steady_clock::now() - last_slewing_poll_) > kStaleCacheLimit) {
+                throw;
+            }
         }
         if (was_slewing && !slewing_cached_) {
             invalidate_position_cache_locked();
@@ -2018,9 +2021,8 @@ private:
     mutable bool parked_ = false;
     mutable bool at_home_ = false;
     mutable bool slewing_cached_ = false;
+    mutable std::chrono::steady_clock::time_point last_slewing_poll_ = std::chrono::steady_clock::now();
     mutable std::chrono::steady_clock::time_point slew_force_until_ = std::chrono::steady_clock::time_point::min();
-    mutable std::chrono::steady_clock::time_point position_override_until_ =
-        std::chrono::steady_clock::time_point::min();
     mutable bool manual_axis_slewing_[2] = {false, false};
 
     bool does_refraction_ = false;

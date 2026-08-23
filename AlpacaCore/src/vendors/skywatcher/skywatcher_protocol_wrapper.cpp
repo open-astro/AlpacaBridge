@@ -33,6 +33,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -497,6 +498,8 @@ public:
             return false;
         }
         info_ = info;
+        response_timeout_ms_.store(info.response_timeout_ms > 0 ? info.response_timeout_ms : 1000,
+                                   std::memory_order_relaxed);
         bool ok = info.type == ConnectionType::Serial ? connect_serial(info) : connect_udp(info);
         connected_ = ok;
         return ok;
@@ -523,7 +526,8 @@ public:
         return exchange_udp(frame, timeout_ms, expected_data_len);
     }
 
-    int default_timeout() const { return info_.response_timeout_ms > 0 ? info_.response_timeout_ms : 1000; }
+    // Read lock-free from send paths; published in connect() under io_mutex_.
+    int default_timeout() const { return response_timeout_ms_.load(std::memory_order_relaxed); }
 
 private:
     void disconnect_locked() {
@@ -626,6 +630,7 @@ private:
                 socket_fd_ = -1;
                 return false;
             }
+            fw_reply_ = reply;  // known ":e1" answer, used by resync_udp()
         } catch (const std::exception&) {
             close(socket_fd_);
             socket_fd_ = -1;
@@ -678,13 +683,21 @@ private:
             // Drain any stale datagram (a late reply to a timed-out command)
             // before sending, so replies can't get off-by-one.
             drain_udp();
+            bool was_dirty = link_dirty_;
             if (link_dirty_) {
                 // A previous exchange timed out, so its reply may still be in
                 // flight and would otherwise be consumed as THIS command's
                 // reply — the mis-pairing that garbled positions and made the
                 // mount swing erratically over Wi-Fi. Soak up late arrivals
-                // for a settle window before trusting the stream again.
+                // for a settle window, then RESYNC: probe with ":e1" (whose
+                // reply value is fixed and known from connect) and require the
+                // known answer before trusting the stream — a same-length
+                // stale reply to a different command cannot fake that.
                 settle_drain(300);
+                if (!resync_udp()) {
+                    link_dirty_ = true;
+                    continue;  // burn this attempt; settle and probe again
+                }
                 link_dirty_ = false;
             }
             if (send(socket_fd_, frame.data(), frame.size(), MSG_NOSIGNAL) < 0) {
@@ -723,7 +736,16 @@ private:
                         reply.pop_back();
                     }
                     if (!reply.empty() && reply[0] == kReplyError) {
-                        return reply;  // error replies are always 2 data chars
+                        if (was_dirty) {
+                            // Just after a timeout, a stale error reply from
+                            // the timed-out command may still arrive: discard
+                            // it and retransmit rather than surfacing a
+                            // misleading rejection for THIS command.
+                            was_dirty = false;
+                            link_dirty_ = true;
+                            break;
+                        }
+                        return reply;
                     }
                     if (!reply.empty() && reply[0] == kReplyOk &&
                         (expected_data_len < 0 || static_cast<int>(reply.size()) - 1 == expected_data_len)) {
@@ -803,6 +825,43 @@ private:
     }
 
     // Blocking drain: absorb late-arriving datagrams for up to @p window_ms.
+    // Verify reply-stream identity after a timeout: ":e1" always answers with
+    // the motor-board version captured at connect. Returns true when the known
+    // reply is received (stream aligned); false when the probe times out or
+    // answers wrongly (caller settles and retries).
+    bool resync_udp() {
+        if (fw_reply_.empty()) {
+            return true;  // no baseline captured; fall back to drains only
+        }
+        const std::string probe = ":e1\r";
+        if (send(socket_fd_, probe.data(), probe.size(), MSG_NOSIGNAL) < 0) {
+            return false;
+        }
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+        while (std::chrono::steady_clock::now() < deadline) {
+            timeval tv{};
+            tv.tv_sec = 0;
+            tv.tv_usec = static_cast<long>(100) * 1000;
+            setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            char buf[64] = {};
+            ssize_t n =
+                recv(socket_fd_, buf, sizeof(buf) - 1, 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            if (n <= 0) {
+                continue;
+            }
+            std::string reply(buf, static_cast<std::size_t>(n));
+            while (!reply.empty() && (reply.back() == '\r' || reply.back() == '\n')) {
+                reply.pop_back();
+            }
+            if (reply == fw_reply_) {
+                return true;  // stream aligned on the known probe answer
+            }
+            // Stale reply from an earlier command — keep draining until the
+            // probe's answer arrives or the window closes.
+        }
+        return false;
+    }
+
     void settle_drain(int window_ms) {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(window_ms);
         char buf[64];
@@ -825,6 +884,8 @@ private:
     // Set after a UDP timeout/error: the next exchange runs a settle drain
     // before sending so a late reply cannot be mis-paired. Guarded by io_mutex_.
     bool link_dirty_ = false;
+    std::string fw_reply_;
+    std::atomic<int> response_timeout_ms_{1000};
 #endif
 };
 
