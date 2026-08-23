@@ -885,8 +885,10 @@ private:
     // before sending so a late reply cannot be mis-paired. Guarded by io_mutex_.
     bool link_dirty_ = false;
     std::string fw_reply_;
-    std::atomic<int> response_timeout_ms_{1000};
 #endif
+    // Outside the platform guard: connect()/default_timeout() touch it on
+    // every platform (the Windows stubs still compile against it).
+    std::atomic<int> response_timeout_ms_{1000};
 };
 
 // ── Public wrapper API ──────────────────────────────────────────────────────

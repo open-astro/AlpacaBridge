@@ -1610,13 +1610,10 @@ private:
     }
 
     void do_slew_to_ra_dec_locked(double ra, double dec) {
-        auto [axis1, axis2] = ra_dec_to_axis_degrees_locked(ra, dec);
         invalidate_position_cache_locked();
         slewing_cached_ = true;
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         restore_tracking_after_slew_ = tracking_;
-        (void)axis1;
-        (void)axis2;
         try {
             dispatch_predicted_goto_locked(ra, dec);
         } catch (...) {
