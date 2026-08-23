@@ -680,6 +680,7 @@ public:
                 homing_ = false;
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", "FindHome failed with unknown exception");
             }
         });
@@ -748,6 +749,7 @@ public:
                 parking_ = false;
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", "Park failed with unknown exception");
             }
         });
