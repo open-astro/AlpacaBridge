@@ -50,6 +50,7 @@
 #include <variant>
 #include <vector>
 #ifdef ALPACACORE_ENABLE_IOPTRON
+#include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
@@ -6937,6 +6938,40 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "ioptron" && device_type_str == "focuser") {
+#ifdef ALPACACORE_ENABLE_IOPTRON
+        // iEAF electronic focuser — USB-serial only, fixed 115200 baud.
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::FocuserDriver> focuser;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // No port specified with serial mode — fall through to auto-detect
+                int focuser_index = config.value("focuserIndex", 0);
+                focuser = alpacacore::vendor::ioptron::create_ieaf_focuser_by_index(device_number, focuser_index);
+            } else {
+                focuser = alpacacore::vendor::ioptron::create_ieaf_focuser(device_number, port_path);
+            }
+        } else {
+            // "auto" or unset — auto-detect
+            int focuser_index = config.value("focuserIndex", 0);
+            focuser = alpacacore::vendor::ioptron::create_ieaf_focuser_by_index(device_number, focuser_index);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
+            util::log_info("Registered iOptron iEAF focuser");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "iOptron support not enabled. Rebuild with -DALPACACORE_ENABLE_IOPTRON=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "synscan" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_SYNSCAN
         std::string conn_type = config.value("connectionType", "auto");
@@ -8329,6 +8364,14 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("gpioChip");
             copy_if_present("pwmFrequencyHz");
             copy_if_present("ports");
+        } else if (device_type == "focuser") {
+            // iEAF: USB-serial only, fixed baud — no baudRate/network fields.
+            copy_if_present("connectionType");
+            copy_if_present("focuserIndex");
+            std::string connection_type = config.value("connectionType", "");
+            if (connection_type == "serial") {
+                copy_if_present("portPath");
+            }
         } else {
             copy_if_present("connectionType");
             // mountIndex is read by the auto-detect registration path; without

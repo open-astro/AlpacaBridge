@@ -350,6 +350,22 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
+### iOptron
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| iEAF Electronic Focuser | USB/Serial |  | ConformU validation pending |
+
+<details>
+<summary><strong>iOptron Focuser Driver Notes</strong></summary>
+
+- **Protocol**: iEAF serial protocol (`:DeviceInfo#`, `:FI#`, `:FM`, `:FQ`, `:FZ`), no SDK required
+- **Connection**: USB/Serial via the built-in Prolific PL2303 bridge (067b:23d3), fixed 115200 baud. Auto-detection supported.
+- **Auto-detection**: Scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for Prolific adapters and probes with the `:DeviceInfo#` handshake (model code 2/3), which also distinguishes the iEAF from an iOptron mount on the same chip class.
+- **Not supported**: `StepSize` (hardware does not expose microns), temperature compensation
+
+</details>
+
 ### ToupTek
 
 | Model Series | Connection | Linux<br>(arm64) | Status |

@@ -1172,6 +1172,17 @@ Connection types: Serial (USB serial, 115200 baud default per v3.10 spec) and Ne
 - **ConformU 4.4 tests `Connect()` immediately after `Connected=false`** — an async disconnect must not drop a racing connect (AsyncConnectable now queues it; see `pending_connect_`). ConformU 4.3 never exercised this, so a 4.3 pass does not imply a 4.4 pass on the connect phase.
 - **Debugging discipline from this session**: mount "wedges" that survive reconnects but clear on a fresh flushed port open are usually leaked-byte desync or firmware state, not dead hardware; a mount that answers probes but fails mid-motion points at the USB link (here: loose cable + VMware passthrough drop under motor load). Reproduce failing ConformU members individually with `curl` against the live server before burning full ConformU runs.
 
+#### iEAF (Focuser)
+
+The iEAF electronic focuser has its own serial protocol and its own wrapper (`ioptron_ieaf_protocol_wrapper`) — it does **not** share `ioptron_protocol_wrapper` with the mount. Reference implementation: INDI core `drivers/focuser/ieaffocus.cpp`.
+
+- **Hardware**: built-in Prolific PL2303 USB-serial bridge (`067b:23d3`, "Prolific Technology, Inc. USB-Serial Controller"). Fixed 115200 8N1 — the config's baud field is ignored. No DTR-reset quirk (not an Arduino-class MCU), so no CH340-style HUPCL handling is needed.
+- **Handshake**: `:DeviceInfo#` → `"%6d%2d%4d#"` (position snapshot, model code, firmware/build). Model code **2 or 3 = iEAF**; anything else is rejected. This is also the auto-detect probe — important because the iOptron mount USB port enumerates as the same Prolific chip class, so the model-code check is what tells a mount and an iEAF apart on a box with both plugged in.
+- **Status**: `:FI#` → `"%7d%1d%5d%1d#"` = position, moving flag, temperature in **Kelvin × 100** (`t / 100.0 - 273.15` for °C), direction flag (0 = reversed).
+- **Blind commands**: `:FM%7u#` move-absolute (space-padded 7-wide, matching INDI), `:FQ#` abort, `:FZ#` set-current-position-as-zero, `:FR#` toggle direction (not used by the driver — ASCOM Focuser has no reverse property). No reply on any of these; completion is observed by polling `:FI#`.
+- **Range**: 0..99999 steps (INDI's FocusAbsPos max; the 7-digit move field could carry more but the hardware range is 5 digits). Step size in microns is not exposed — `StepSize` throws `PropertyNotImplemented`. No temperature compensation in hardware.
+- ConformU hardware validation pending (driver complete, unit + routing tests passing).
+
 #### iMate PowerBox (Switch)
 
 The iMate is iOptron's embedded astronomy computer (OrangePi 3 LTS / Allwinner H6, arm64). Its "PowerBox" accessory exposes switchable DC power ports. This is a **local GPIO** device, completely independent of the mount RS-232 protocol — AlpacaBridge runs *on* the iMate and toggles GPIO directly. It does **not** share `ioptron_protocol_wrapper`; it has a dedicated `ioptron_powerbox_wrapper` (libgpiod, `/dev/gpiochip1`).
