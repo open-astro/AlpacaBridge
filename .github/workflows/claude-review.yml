@@ -111,16 +111,33 @@ jobs:
               "✅ Approved" if no significant issues, or
               "⚠️ Issues found" if there are things to address.
 
-            Post your review as a SINGLE top-level comment. To post it: first
-            write the full review text to /tmp/review.md with the Write tool,
-            then run exactly `gh pr comment <PR NUMBER> --body-file /tmp/review.md`.
-            Do NOT use --body with command substitution ($(...)/backticks/heredocs)
-            — the permission rules reject any command containing substitution, and
-            the review will silently fail to post.
-            Do not submit the review text as a chat message.
+            When you are done, write the FULL review text to /tmp/review.md
+            with the Write tool. Do NOT attempt to post it yourself — a
+            workflow step posts that file as the PR comment after you finish.
+            The file is the deliverable: if it is missing, the run fails.
+            Ignore files under AlpacaCore/conformu/ (validation logs, not
+            code).
           claude_args: |
             --model sonnet
-            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+
+      # The agent used to post its own review via a permission-gated
+      # `gh pr comment`; on large diffs it reliably ended its run with the
+      # review stranded as chat text instead (observed on PR #209: six runs,
+      # 10 permission denials each, no comment ever posted). Posting is now a
+      # deterministic workflow step: the agent only writes /tmp/review.md
+      # (same runner, /tmp persists between steps) and this step publishes it.
+      - name: Post the review comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -s /tmp/review.md ]; then
+            echo "::warning::Agent did not produce /tmp/review.md — nothing to post (the assert step will fail unless this PR edits the workflow itself)."
+            exit 0
+          fi
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --body-file /tmp/review.md
 
       # Ported from openastro-ara #862/#863: the action exits 0 even when the
       # agent never manages to post its comment, so a green check could exist
