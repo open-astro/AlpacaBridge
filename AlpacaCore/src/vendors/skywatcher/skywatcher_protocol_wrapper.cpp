@@ -87,6 +87,29 @@ std::string format_mc_version(const std::string& data) {
     return oss.str();
 }
 
+// Expected "=" reply payload length for each command word, used by the UDP
+// transport to reject a mis-paired stale reply (a duplicate ACK from a
+// retransmitted command otherwise pairs itself with the NEXT command --
+// seen on Wave 100i Wi-Fi as ':f' answered by a bare '='). -1 = unknown.
+int expected_reply_data_len(char command) {
+    switch (command) {
+        case 'e': case 'a': case 'b': case 'j': case 'h': case 'i': case 'D':
+        case 'q':
+            return 6;
+        case 'f':
+            return 3;
+        case 'g':
+            return 2;
+        case 'c':
+            return -1;
+        case 'E': case 'F': case 'G': case 'S': case 'I': case 'J': case 'K':
+        case 'L': case 'O': case 'P': case 'V': case 'W':
+            return 0;
+        default:
+            return -1;
+    }
+}
+
 std::string mc_error_message(const std::string& code) {
     // Error codes from the MC command set; unknown codes are surfaced raw.
     if (code == "0") return "Unknown command";
@@ -213,11 +236,12 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
 bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
     auto descriptor = alpacacore::util::read_raw_tty_usb_descriptor(port_path);
     if (!descriptor) return false;
-    // Wave-series mounts expose a CP210x/CH340-class USB-serial bridge; also
-    // accept the classic EQDIRECT cable chips.
+    // Wave-series mounts expose an STM32 CDC-ACM virtual COM port (0483:5740,
+    // /dev/ttyACM*); also accept the classic EQDIRECT cable chips.
     return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "CH340", "CH341", "1a86",
-                      "Silicon_Labs", "USB_Serial", "USB-Serial"});
+        *descriptor, {"STM32", "STMicroelectronics", "0483", "Prolific", "PL2303", "067b",
+                      "FTDI", "CP210", "CH340", "CH341", "1a86", "Silicon_Labs",
+                      "USB_Serial", "USB-Serial"});
 }
 #endif  // _WIN32
 
@@ -234,6 +258,8 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
         for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
             const std::string& name = sym.name;
             bool is_candidate =
+                (name.find("STM32") != std::string::npos) ||
+                (name.find("STMicroelectronics") != std::string::npos) ||
                 (name.find("Prolific") != std::string::npos) || (name.find("PL2303") != std::string::npos) ||
                 (name.find("067b") != std::string::npos) || (name.find("FTDI") != std::string::npos) ||
                 (name.find("CP210") != std::string::npos) || (name.find("CH340") != std::string::npos) ||
@@ -258,8 +284,14 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
     // Raw /dev/ttyUSB* fallback: udev by-id naming collides for serial-number-
     // less adapters, silently dropping one of two identical dongles from by-id
     // (same rationale as the SynScan/Gemini scans).
+    std::vector<std::string> raw_candidates;
     for (int i = 0; i < 10; ++i) {
-        std::string port = "/dev/ttyUSB" + std::to_string(i);
+        // Wave mounts enumerate as CDC-ACM (/dev/ttyACM*); EQDIRECT cables as
+        // /dev/ttyUSB*.
+        raw_candidates.push_back("/dev/ttyACM" + std::to_string(i));
+        raw_candidates.push_back("/dev/ttyUSB" + std::to_string(i));
+    }
+    for (const std::string& port : raw_candidates) {
         if (!alpacacore::util::path_exists(port)) continue;
         std::error_code canon_ec;
         std::string resolved = std::filesystem::canonical(port, canon_ec).string();
@@ -453,7 +485,7 @@ public:
         return connected_;
     }
 
-    std::string exchange(const std::string& frame, int timeout_ms) {
+    std::string exchange(const std::string& frame, int timeout_ms, int expected_data_len = -1) {
         std::lock_guard<std::mutex> lock(io_mutex_);
         if (!connected_) {
             throw AlpacaException("Not connected to Sky-Watcher motor controller",
@@ -462,7 +494,7 @@ public:
         if (info_.type == ConnectionType::Serial) {
             return exchange_serial(frame, timeout_ms);
         }
-        return exchange_udp(frame, timeout_ms);
+        return exchange_udp(frame, timeout_ms, expected_data_len);
     }
 
     int default_timeout() const {
@@ -564,7 +596,7 @@ private:
         // Verify the controller answers before declaring the link up: UDP
         // "connect" succeeds even with nothing listening.
         try {
-            std::string reply = exchange_udp(":e1\r", default_timeout());
+            std::string reply = exchange_udp(":e1\r", default_timeout(), 6);
             if (reply.empty() || reply[0] != kReplyOk) {
                 close(socket_fd_);
                 socket_fd_ = -1;
@@ -615,32 +647,77 @@ private:
 #endif
     }
 
-    std::string exchange_udp(const std::string& frame, int timeout_ms) {
+    std::string exchange_udp(const std::string& frame, int timeout_ms, int expected_data_len) {
 #ifndef _WIN32
         for (int attempt = 0; attempt < kUdpRetries; ++attempt) {
             // Drain any stale datagram (a late reply to a timed-out command)
             // before sending, so replies can't get off-by-one.
             drain_udp();
+            if (link_dirty_) {
+                // A previous exchange timed out, so its reply may still be in
+                // flight and would otherwise be consumed as THIS command's
+                // reply — the mis-pairing that garbled positions and made the
+                // mount swing erratically over Wi-Fi. Soak up late arrivals
+                // for a settle window before trusting the stream again.
+                settle_drain(300);
+                link_dirty_ = false;
+            }
             if (send(socket_fd_, frame.data(), frame.size(), MSG_NOSIGNAL) < 0) {
-                throw AlpacaException("UDP send failed: " + std::string(std::strerror(errno)));
-            }
-            timeval tv{};
-            tv.tv_sec = timeout_ms / 1000;
-            tv.tv_usec = (timeout_ms % 1000) * 1000;
-            setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            char buf[64] = {};
-            ssize_t n = recv(socket_fd_, buf, sizeof(buf) - 1, 0);
-            if (n > 0) {
-                std::string reply(buf, static_cast<std::size_t>(n));
-                while (!reply.empty() && (reply.back() == '\r' || reply.back() == '\n')) {
-                    reply.pop_back();
+                link_dirty_ = true;
+                // A Wi-Fi drop/rejoin can change the interface's IP address,
+                // permanently invalidating a connect()ed datagram socket
+                // (every send then fails ENETUNREACH even after the link is
+                // back). Rebuild the socket and retry instead of wedging until
+                // the client power-cycles the connection.
+                if ((errno == ENETUNREACH || errno == EADDRNOTAVAIL || errno == EHOSTUNREACH) &&
+                    rebuild_udp_socket() &&
+                    send(socket_fd_, frame.data(), frame.size(), MSG_NOSIGNAL) >= 0) {
+                    ALPACA_LOG_WARN("SkyWatcher",
+                                    "UDP socket went stale (interface address changed); rebuilt and resent");
+                } else {
+                    throw AlpacaException("UDP send failed: " + std::string(std::strerror(errno)));
                 }
-                return reply;
             }
-            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                throw AlpacaException("UDP receive failed: " + std::string(std::strerror(errno)));
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+            while (true) {
+                auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+                if (remaining.count() <= 0) {
+                    break;  // timeout — retransmit
+                }
+                timeval tv{};
+                tv.tv_sec = static_cast<time_t>(remaining.count() / 1000);
+                tv.tv_usec = static_cast<suseconds_t>((remaining.count() % 1000) * 1000);
+                setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                char buf[64] = {};
+                ssize_t n = recv(socket_fd_, buf, sizeof(buf) - 1, 0);
+                if (n > 0) {
+                    std::string reply(buf, static_cast<std::size_t>(n));
+                    while (!reply.empty() && (reply.back() == '\r' || reply.back() == '\n')) {
+                        reply.pop_back();
+                    }
+                    if (!reply.empty() && reply[0] == kReplyError) {
+                        return reply;  // error replies are always 2 data chars
+                    }
+                    if (!reply.empty() && reply[0] == kReplyOk &&
+                        (expected_data_len < 0 ||
+                         static_cast<int>(reply.size()) - 1 == expected_data_len)) {
+                        return reply;
+                    }
+                    // Wrong shape for THIS command (a mis-paired duplicate ACK
+                    // from a retransmission) or non-protocol garbage: discard
+                    // and keep waiting for the matching reply.
+                    continue;
+                }
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+                    break;  // timeout — retransmit
+                }
+                if (n < 0) {
+                    link_dirty_ = true;
+                    throw AlpacaException("UDP receive failed: " + std::string(std::strerror(errno)));
+                }
             }
-            // timeout — retransmit
+            link_dirty_ = true;
         }
         throw AlpacaException("Timeout waiting for motor controller reply to '" + frame + "' after " +
                               std::to_string(kUdpRetries) + " attempts");
@@ -661,6 +738,55 @@ private:
             }
         }
     }
+
+    // Recreate the connect()ed datagram socket against the stored peer after
+    // the kernel invalidated the old one (interface address change). Returns
+    // false if the peer cannot be resolved/connected right now.
+    bool rebuild_udp_socket() {
+        if (socket_fd_ >= 0) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+        }
+        socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (socket_fd_ < 0) {
+            return false;
+        }
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(static_cast<uint16_t>(info_.udp_port));
+        if (inet_pton(AF_INET, info_.host.c_str(), &addr.sin_addr) <= 0) {
+            addrinfo hints{};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_DGRAM;
+            addrinfo* result = nullptr;
+            if (getaddrinfo(info_.host.c_str(), nullptr, &hints, &result) != 0 || !result) {
+                close(socket_fd_);
+                socket_fd_ = -1;
+                return false;
+            }
+            addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
+            freeaddrinfo(result);
+        }
+        if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+            return false;
+        }
+        return true;
+    }
+
+    // Blocking drain: absorb late-arriving datagrams for up to @p window_ms.
+    void settle_drain(int window_ms) {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(window_ms);
+        char buf[64];
+        while (std::chrono::steady_clock::now() < deadline) {
+            timeval tv{};
+            tv.tv_sec = 0;
+            tv.tv_usec = 50 * 1000;
+            setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            recv(socket_fd_, buf, sizeof(buf), 0);
+        }
+    }
 #endif
 
     mutable std::mutex io_mutex_;
@@ -669,6 +795,9 @@ private:
 #ifndef _WIN32
     int serial_fd_ = -1;
     int socket_fd_ = -1;
+    // Set after a UDP timeout/error: the next exchange runs a settle drain
+    // before sending so a late reply cannot be mis-paired. Guarded by io_mutex_.
+    bool link_dirty_ = false;
 #endif
 };
 
@@ -708,7 +837,7 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
     frame.push_back(kFrameEnd);
 
     int timeout = timeout_ms_override > 0 ? timeout_ms_override : pimpl_->default_timeout();
-    std::string reply = pimpl_->exchange(frame, timeout);
+    std::string reply = pimpl_->exchange(frame, timeout, expected_reply_data_len(command));
     if (!reply.empty() && reply[0] == kReplyOk) {
         return reply.substr(1);
     }
@@ -812,6 +941,14 @@ void SkyWatcherProtocolWrapper::set_autoguide_speed(int axis, int speed_code) {
         throw AlpacaException("Autoguide speed code must be 0-4", AlpacaError::InvalidValue);
     }
     send_command('P', axis, std::string(1, static_cast<char>('0' + speed_code)));
+}
+
+uint32_t SkyWatcherProtocolWrapper::get_feature(int axis, uint32_t inquiry) {
+    return decode_u24(send_command('q', axis, encode_u24(inquiry)));
+}
+
+void SkyWatcherProtocolWrapper::set_feature(int axis, uint32_t command) {
+    send_command('W', axis, encode_u24(command));
 }
 
 } // namespace alpacacore::vendor::skywatcher

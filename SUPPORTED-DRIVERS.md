@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-08-14
+## Updated 2026-08-23
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -118,6 +118,26 @@ This document lists all hardware vendors and device types that are verified to w
 - **Dew heater / fan / tail LED**: cooled cameras expose an anti-fog dew heater, radiator fan, and the tail indicator LED through the **ToupTek Thermal Switch** device (see Switch Drivers) — `switchType: thermal`, bound by `cameraIndex`, sharing the camera's SDK handle so it runs alongside the camera. Elements are capability-probed per model.
 - **Binning**: 1×/2×/3×/4×. Odd bin factors need an even sensor-ROI span, which the driver handles by padding the ROI to even (the SDK floor-bins it back to the requested pixel count).
 - **FullWellCapacity**: reported as the ADU saturation value; the true electron full well is a sensor-datasheet figure the SDK does not expose (see readout modes above for the ~51 ke⁻ / ~100 ke⁻ IMX571 modes).
+
+</details>
+
+### Sky-Watcher Wave (Direct Motor Controller)
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Wave 100i | USB, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/SkyWatcher/Wave%20100i/) |
+
+<details>
+<summary><strong>Sky-Watcher Wave Driver Notes</strong></summary>
+
+- **Protocol**: Sky-Watcher Motor Controller Command Set (see `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md`) — talks directly to the mount's motor board, no hand controller or SynScan app required. Distinct from the `synscan` hand-controller driver.
+- **Connection**: USB (the mount's own USB port, an STM32 CDC-ACM virtual COM port at `/dev/ttyACM*`) or the mount's built-in Wi-Fi (UDP port 11880, AP address 192.168.4.1). `connectionType: "auto"` scans serial ports first (including `/dev/ttyACM0`–`9`), then runs Wi-Fi discovery (AP probe + UDP broadcast).
+- **Site required**: The motor controller stores no site or time. Set Site Latitude/Longitude in the device config (or via the Alpaca setters) — with the site unset ConformU aborts its slew tests with "highest elevation available is below the horizon".
+- **Pointing math**: All in the driver — axis counts to RA/Dec via CPR read at connect, LST computed host-side, GEM-style pier-side branches, sidereal tracking via computed step periods. Sync uses the controller's native set-position command. Pulse guiding adjusts the RA step period in place while tracking (the axis never stops); Dec pulses are software-timed speed-mode nudges. Park and MoveAxis(0) are asynchronous initiators.
+- **Tested model**: Wave 100i, motor board firmware 3.58.68, on Linux arm64 (USB).
+- **AutoHome**: FindHome runs the SynScan-style AutoHome procedure using the mount's home index sensors, re-anchoring the position counters to the physical home mark regardless of the power-on position. Requires the home-index feature bit (Wave 100i reports it on both axes).
+- **Tracking**: Sidereal, Lunar, and Solar drive rates. RA/Dec tracking rate offsets (comet/satellite tracking) are not yet supported.
+- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing violations on BOTH transports (USB serial and Wi-Fi UDP; Raspberry Pi CM4, mount AP) on the same final build, including the physically measured pulse-guide, sync-return, and slew-accuracy checks. When connecting over the mount's Wi-Fi AP from a single-radio SBC, disable any hotspot sharing that radio (dual-role AP+client causes link flapping and UDP loss).
 
 </details>
 

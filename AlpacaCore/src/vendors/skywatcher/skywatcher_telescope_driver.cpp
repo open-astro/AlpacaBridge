@@ -41,14 +41,27 @@ constexpr uint32_t kHomeCounts = 0x800000;
 constexpr uint32_t kCountsMask = 0xFFFFFF;
 constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
+// ASCOM DriveRates: 0 = Sidereal, 1 = Lunar, 2 = Solar (3 = King unsupported).
+// Standard drive rates (INDI TRACKRATE_* constants), arcsec/s over 3600.
+constexpr double kLunarDegPerSec = 14.511415 / 3600.0;
+constexpr double kSolarDegPerSec = 15.0 / 3600.0;
 // ~800x sidereal, the classic Sky-Watcher maximum slew rate.
 constexpr double kMaxMoveAxisRateDegPerSec = 800.0 * kSiderealDegPerSec;
 // Above ~128x sidereal the controller needs high-speed (fast) mode.
 constexpr double kFastModeThresholdDegPerSec = 128.0 * kSiderealDegPerSec;
 constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
-constexpr auto kPulseGuidePositionGrace = std::chrono::milliseconds(3000);
 constexpr auto kAxisStopTimeout = std::chrono::seconds(5);
+// AutoHome (home index sensor) constants — SynScan/EQMod ":q"/":W" extended
+// commands. Indexer reads: 0 = armed below the index, 0xFFFFFF = armed above,
+// anything else = the count at which the sensor edge latched.
+constexpr uint32_t kFeatureInquiry = 0x000001;
+constexpr uint32_t kIndexerInquiry = 0x000000;
+constexpr uint32_t kIndexerReset = 0x000008;
+constexpr uint32_t kIndexerAbove = 0xFFFFFF;
+// Hunt speeds (EQMod uses 800x for the coarse pass, 400x for the detect pass).
+constexpr double kAutoHomeCoarseRateDegPerSec = 800.0 * kSiderealDegPerSec;
+constexpr double kAutoHomeDetectRateDegPerSec = 400.0 * kSiderealDegPerSec;
 
 double wrap_degrees(double deg) {
     double wrapped = std::fmod(deg, 360.0);
@@ -81,7 +94,10 @@ double wrap_hour_angle(double hours) {
 double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
                                          double longitude_degrees) {
     using namespace std::chrono;
-    double days_since_epoch = duration_cast<seconds>(utc_time.time_since_epoch()).count() / 86400.0;
+    // Sub-second resolution matters: whole-second truncation stepped LST (and
+    // so RA) in 15 arcsec jumps, +-0.1 RA-s/s of jitter over a 10 s window.
+    double days_since_epoch =
+        duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
     double jd = 2440587.5 + days_since_epoch;
     double t = (jd - 2451545.0) / 36525.0;
     double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0)
@@ -213,6 +229,18 @@ public:
             axis_params_[0] = protocol.get_axis_parameters(kAxisRa);
             axis_params_[1] = protocol.get_axis_parameters(kAxisDec);
 
+            // Feature inquiry (":q" data 0x000001): bit 0x04 = home index
+            // sensor. Wave 100i reports it on both axes (0x100C); older
+            // boards reject ":q" entirely, so failure just disables AutoHome.
+            has_home_indexer_ = false;
+            try {
+                uint32_t ra_features = protocol.get_feature(kAxisRa, kFeatureInquiry);
+                uint32_t dec_features = protocol.get_feature(kAxisDec, kFeatureInquiry);
+                has_home_indexer_ = (ra_features & 0x04) && (dec_features & 0x04);
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                // ":q" unsupported on this motor board.
+            }
+
             // First power-up: position registers default to the home offset but
             // the controller reports "not initialized" and rejects motion until
             // ":F" is sent. Only stamp the home position when uninitialized so a
@@ -334,7 +362,7 @@ public:
         return az;
     }
 
-    bool get_can_find_home() const override { return false; }
+    bool get_can_find_home() const override { return true; }
     bool get_can_park() const override { return true; }
     bool get_can_pulse_guide() const override { return true; }
 
@@ -376,6 +404,10 @@ public:
 
     double get_declination_rate() const override { return 0.0; }
 
+    // RA/Dec tracking-rate offsets are DEFERRED: ConformU 4.5's measured-rate
+    // tests exposed a physical Dec-axis undershoot at mid rates and count-read
+    // glitches that need hardware time to resolve (see AGENTS.md). The
+    // supporting math (dead reckoning, LST-compensated gotos) shipped anyway.
     void set_declination_rate(double rate) override {
         (void)rate;
         throw AlpacaException("Declination rate not supported", AlpacaError::PropertyNotImplemented);
@@ -561,15 +593,25 @@ public:
         target_set_ = true;
     }
 
-    int get_tracking_rate() const override { return 0; }
-
-    void set_tracking_rate(int rate) override {
-        (void)rate;
-        // TODO: Lunar/solar tracking via adjusted step period once validated.
-        throw AlpacaException("Tracking rates not supported", AlpacaError::PropertyNotImplemented);
+    int get_tracking_rate() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return tracking_rate_;
     }
 
-    std::vector<int> get_tracking_rates() const override { return {0}; }
+    void set_tracking_rate(int rate) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        if (rate < 0 || rate > 2) {
+            throw AlpacaException("Unsupported tracking rate", AlpacaError::InvalidValue);
+        }
+        double previous = effective_ra_rate_locked();
+        tracking_rate_ = rate;
+        if (tracking_) {
+            apply_ra_tracking_rate_locked(previous);
+        }
+    }
+
+    std::vector<int> get_tracking_rates() const override { return {0, 1, 2}; }
 
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -584,24 +626,147 @@ public:
         utc_offset_ = utc - std::chrono::system_clock::now();
     }
 
+    // FindHome is an asynchronous initiator (ITelescopeV4). The Wave has no
+    // home sensor, but the controller's power-on index (counts 0x800000,
+    // counterweight down pointing at the pole) IS the home position, so homing
+    // is a goto to axis angles 0,0. AtHome flips true (and Slewing false) in
+    // the same locked step when the goto lands.
     void find_home() override {
-        throw AlpacaException("FindHome not supported", AlpacaError::MethodNotImplemented);
+        reap_slew_task();
+        reap_pulse_task();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("FindHome");
+            if (homing_) {
+                return;  // already homing
+            }
+            if (at_home_ && !get_hardware_slewing_locked()) {
+                return;  // already at home
+            }
+            invalidate_position_cache_locked();
+            slewing_cached_ = true;
+            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            restore_tracking_after_slew_ = false;
+            manual_axis_slewing_[0] = false;
+            manual_axis_slewing_[1] = false;
+            homing_ = true;
+        }
+
+        std::lock_guard<std::mutex> tlock(task_mutex_);
+        if (slew_task_thread_.joinable()) {
+            slew_task_cancel_.store(true);
+            task_cv_.notify_all();
+            slew_task_thread_.join();
+            slew_task_cancel_.store(false);
+        }
+        slew_task_thread_ = std::thread([this]() {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (!connected_ || slew_task_cancel_.load()) {
+                homing_ = false;
+                return;
+            }
+            try {
+                if (has_home_indexer_) {
+                    // True AutoHome: hunt the home index sensors and re-anchor
+                    // the count frame to the physical home mark.
+                    run_autohome(lock);
+                    set_tracking_locked(false);
+                    refresh_position_cache_locked(true);
+                    at_home_ = true;
+                } else {
+                    // No sensors: goto the power-on index (counts kHomeCounts).
+                    dispatch_goto_locked(0.0, 0.0);
+                    wait_for_slew_complete(lock);
+                    set_tracking_locked(false);
+                    // Verify we actually landed at home (an AbortSlew mid-home
+                    // stops the axes wherever they are) before claiming AtHome.
+                    refresh_position_cache_locked(true);
+                    at_home_ = std::abs(cached_ra_axis_deg_) < 0.1 &&
+                               std::abs(cached_dec_axis_deg_) < 0.1;
+                }
+                homing_ = false;
+            } catch (const std::exception& ex) {
+                homing_ = false;
+                slewing_cached_ = false;
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                ALPACA_LOG_WARN("SkyWatcher", std::string("FindHome failed: ") + ex.what());
+            } catch (...) {
+                homing_ = false;
+                slewing_cached_ = false;
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                ALPACA_LOG_WARN("SkyWatcher", "FindHome failed with unknown exception");
+            }
+        });
     }
 
+    // Park is an asynchronous initiator (ITelescopeV4): dispatch the park slew
+    // in the background and return inside the STANDARD response target; AtPark
+    // turns true when the slew completes and tracking is stopped.
     void park() override {
-        std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        if (!park_position_set_) {
-            // Default park = the mount's home position (pole, weights down).
-            park_ra_axis_deg_ = 0.0;
-            park_dec_axis_deg_ = 0.0;
-            park_position_set_ = true;
+        reap_slew_task();
+        reap_pulse_task();
+        double target_ra_axis = 0.0;
+        double target_dec_axis = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            if (parked_ || parking_) {
+                return;  // calling Park twice is harmless
+            }
+            if (!park_position_set_) {
+                // Default park = the mount's home position (pole, weights down).
+                park_ra_axis_deg_ = 0.0;
+                park_dec_axis_deg_ = 0.0;
+                park_position_set_ = true;
+            }
+            target_ra_axis = park_ra_axis_deg_;
+            target_dec_axis = park_dec_axis_deg_;
+            invalidate_position_cache_locked();
+            slewing_cached_ = true;
+            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            restore_tracking_after_slew_ = false;
+            manual_axis_slewing_[0] = false;
+            manual_axis_slewing_[1] = false;
+            parking_ = true;
         }
-        do_slew_to_axis_locked(park_ra_axis_deg_, park_dec_axis_deg_);
-        wait_for_slew_complete(lock);
-        set_tracking_locked(false);
-        parked_ = true;
-        at_home_ = park_ra_axis_deg_ == 0.0 && park_dec_axis_deg_ == 0.0;
+
+        std::lock_guard<std::mutex> tlock(task_mutex_);
+        if (slew_task_thread_.joinable()) {
+            slew_task_cancel_.store(true);
+            task_cv_.notify_all();
+            slew_task_thread_.join();
+            slew_task_cancel_.store(false);
+        }
+        slew_task_thread_ = std::thread([this, target_ra_axis, target_dec_axis]() {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (!connected_ || slew_task_cancel_.load()) {
+                parking_ = false;
+                return;
+            }
+            try {
+                dispatch_goto_locked(target_ra_axis, target_dec_axis);
+                wait_for_slew_complete(lock);
+                set_tracking_locked(false);
+                // AtPark and Slewing flip in the same locked step: no window
+                // where a poller can see Slewing false with AtPark false.
+                parked_ = true;
+                parking_ = false;
+                at_home_ = target_ra_axis == 0.0 && target_dec_axis == 0.0;
+            } catch (const std::exception& ex) {
+                parking_ = false;
+                slewing_cached_ = false;
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                ALPACA_LOG_WARN("SkyWatcher", std::string("Park failed: ") + ex.what());
+            } catch (...) {
+                parking_ = false;
+                slewing_cached_ = false;
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                ALPACA_LOG_WARN("SkyWatcher", "Park failed with unknown exception");
+            }
+        });
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -609,6 +774,7 @@ public:
         bool ra_rate_adjust = false;
         double dec_rate_deg_per_sec = 0.0;
         double ra_pulse_rate_deg_per_sec = 0.0;
+        double ra_restore_rate_deg_per_sec = kSiderealDegPerSec;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -639,8 +805,11 @@ public:
                 // the RA axis keeps tracking, so only DEC accumulates.
                 axis = kAxisDec;
                 dec_rate_deg_per_sec = direction == 0 ? guide_rate_.dec : -guide_rate_.dec;
-                // GEM DEC direction flips on the west-pointing branch.
-                if (cached_dec_axis_deg_ < 0.0) {
+                // dec = 90 - a2 on the east-pointing branch (a2 >= 0): guide
+                // North (+Dec) is NEGATIVE axis motion there (same sign rule
+                // as the DeclinationRate offset, confirmed by ConformU 4.5
+                // measured-rate tests).
+                if (cached_dec_axis_deg_ >= 0.0) {
                     dec_rate_deg_per_sec = -dec_rate_deg_per_sec;
                 }
                 double delta_deg = guide_rate_.dec * duration_sec;
@@ -653,25 +822,16 @@ public:
                 axis = kAxisRa;
                 ra_rate_adjust = tracking_;
                 double adjust = direction == 2 ? -guide_rate_.ra : guide_rate_.ra;
-                ra_pulse_rate_deg_per_sec = kSiderealDegPerSec + adjust;
+                ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
+                ra_pulse_rate_deg_per_sec = ra_restore_rate_deg_per_sec + adjust;
                 double delta_hours = (guide_rate_.ra * duration_sec) / kHoursToDegrees;
                 if (direction == 3) delta_hours = -delta_hours;
                 target_ra_hours_ = wrap_hours(target_ra_hours_ + delta_hours);
             }
 
-            position_override_until_ =
-                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuidePositionGrace;
-
-            auto& protocol = SkyWatcherProtocolWrapper::instance();
-            if (axis == kAxisDec) {
-                start_speed_motion_locked(kAxisDec, dec_rate_deg_per_sec);
-            } else if (ra_rate_adjust) {
-                protocol.set_step_period(kAxisRa, tracking_step_period_for(ra_pulse_rate_deg_per_sec));
-            } else {
-                // Not tracking: nudge the RA axis directly like DEC.
-                double rate = direction == 2 ? -guide_rate_.ra : guide_rate_.ra;
-                start_speed_motion_locked(kAxisRa, rate);
-            }
+            // No read freeze during the pulse: ConformU 4.5 measures the
+            // physical pulse displacement (Dec moved, RA unchanged), and the
+            // dead-reckoned live reads report exactly that.
 
             pulse_guiding_active_ = true;
             pulse_guide_end_time_ = now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
@@ -688,23 +848,66 @@ public:
             pulse_task_cancel_.store(false);
         }
         const bool restore_tracking = ra_rate_adjust;
-        pulse_task_thread_ = std::thread([this, axis, duration, restore_tracking]() {
-            auto stop_axis = [this, axis, restore_tracking]() {
+        const double dec_rate = dec_rate_deg_per_sec;
+        const double ra_pulse_rate = ra_pulse_rate_deg_per_sec;
+        pulse_task_thread_ = std::thread([this, axis, duration, restore_tracking, direction, dec_rate,
+                                          ra_pulse_rate, ra_restore_rate_deg_per_sec]() {
+            // PulseGuide is an asynchronous initiator (ITelescopeV4): the axis
+            // dispatch (which can stop-and-wait a ramping axis, plus UDP
+            // retries) runs here so pulse_guide() returns inside the STANDARD
+            // response target. IsPulseGuiding is already true.
+            try {
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto& proto = SkyWatcherProtocolWrapper::instance();
+                if (axis == kAxisDec) {
+                    start_speed_motion_locked(kAxisDec, dec_rate);
+                } else if (restore_tracking) {
+                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_pulse_rate));
+                } else {
+                    // Not tracking: nudge the RA axis directly like DEC.
+                    double rate = direction == 2 ? -guide_rate_.ra : guide_rate_.ra;
+                    start_speed_motion_locked(kAxisRa, rate);
+                }
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
+                std::lock_guard<std::mutex> lock(mutex_);
+                pulse_guiding_active_ = false;
+                return;
+            } catch (...) {
+                ALPACA_LOG_WARN("SkyWatcher", "PulseGuide dispatch failed with unknown exception");
+                std::lock_guard<std::mutex> lock(mutex_);
+                pulse_guiding_active_ = false;
+                return;
+            }
+            auto stop_axis = [this, axis, restore_tracking, ra_restore_rate_deg_per_sec]() {
                 auto& proto = SkyWatcherProtocolWrapper::instance();
                 if (restore_tracking) {
-                    // RA pulse over a live tracking axis: restore the sidereal
+                    // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped.
-                    proto.set_step_period(kAxisRa, tracking_step_period_for(kSiderealDegPerSec));
+                    proto.set_step_period(kAxisRa,
+                                          tracking_step_period_for(ra_restore_rate_deg_per_sec));
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
                 } else {
                     proto.stop_motion(axis);
+                    // Zero the dead-reckoning rate: this direct stop bypasses
+                    // stop_axis_and_wait_locked, and a stale rate kept the
+                    // reads drifting after the pulse ended (ConformU 4.5 pulse
+                    // displacement tests read phantom motion).
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    cmd_axis_rate_deg_s_[axis - 1] = 0.0;
+                    invalidate_position_cache_locked();
                 }
             };
             if (!task_wait_for(std::chrono::milliseconds(duration), pulse_task_cancel_)) {
-                try {
-                    stop_axis();
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
-                    // Cancellation path — the caller is tearing the connection down.
-                }
+                // Cancelled by a reaper (a new pulse/slew/park/home/moveaxis/
+                // abort/disconnect). DO NOT touch the hardware here: the
+                // reaper stops or re-commands the axes itself, and a stop or
+                // step-period restore landing mid-goto corrupted the next
+                // operation (ConformU: "declination axis did not move" on the
+                // first pulse after a slew).
+                std::lock_guard<std::mutex> lock(mutex_);
+                pulse_guiding_active_ = false;
                 return;
             }
             // The stop/restore MUST land or the axis runs away at guide rate.
@@ -749,30 +952,35 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        reap_slew_task();  // also clears a leftover AbortSlew cancellation
+        reap_pulse_task();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SlewToCoordinates");
         validate_ra_dec(ra, dec, "SlewToCoordinates");
-        do_slew_to_ra_dec_locked(ra, dec);
-        wait_for_slew_complete(lock);
+        goto_in_progress_ = true;
+        try {
+            do_slew_to_ra_dec_locked(ra, dec);
+            wait_for_slew_complete(lock);
+            refine_goto_landing(lock, ra, dec);
+        } catch (...) {
+            goto_in_progress_ = false;
+            throw;
+        }
+        goto_in_progress_ = false;
         restore_tracking_after_slew_locked();
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        // Cancel + join any previous slew dispatch task first (without mutex_).
+        // Cancel + join any previous slew or pulse task first (without mutex_):
+        // a stale pulse timer firing mid-goto corrupts the slew.
         reap_slew_task();
-        double target_ra_axis = 0.0;
-        double target_dec_axis = 0.0;
+        reap_pulse_task();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
-
-            auto [axis1, axis2] = ra_dec_to_axis_degrees_locked(ra, dec);
-            target_ra_axis = axis1;
-            target_dec_axis = axis2;
-
             invalidate_position_cache_locked();
             slewing_cached_ = true;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
@@ -794,23 +1002,28 @@ public:
             slew_task_thread_.join();
             slew_task_cancel_.store(false);
         }
-        slew_task_thread_ = std::thread([this, target_ra_axis, target_dec_axis]() {
+        slew_task_thread_ = std::thread([this, ra, dec]() {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!connected_ || slew_task_cancel_.load()) {
                 return;
             }
+            goto_in_progress_ = true;
             try {
-                dispatch_goto_locked(target_ra_axis, target_dec_axis);
+                dispatch_predicted_goto_locked(ra, dec);
                 // Poll for completion so tracking restarts after the goto —
                 // releasing the mutex between polls so GETs stay responsive.
                 wait_for_slew_complete(lock);
+                refine_goto_landing(lock, ra, dec);
+                goto_in_progress_ = false;
                 restore_tracking_after_slew_locked();
             } catch (const std::exception& ex) {
+                goto_in_progress_ = false;
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Async slew failed: ") + ex.what());
             } catch (...) {
+                goto_in_progress_ = false;
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
@@ -834,21 +1047,33 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        reap_pulse_task();
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
         validate_ra_dec(ra, dec, "SyncToCoordinates");
 
         auto& protocol = SkyWatcherProtocolWrapper::instance();
-        auto [axis1, axis2] = ra_dec_to_axis_degrees_locked(ra, dec);
 
         // ":E" requires the motors fully stopped — pause tracking around the
         // position write, then resume. This is the mount's native sync (the
         // controller's own position register moves), never a driver offset.
+        //
+        // ORDER MATTERS: the axis frame must be computed AFTER the axis has
+        // stopped, aimed at the moment tracking RESUMES — the sky keeps
+        // moving while the counts are frozen, and a frame computed before the
+        // stop is stale by the whole pause (stop ramp + writes + restart,
+        // ~1-3 s = 15-45 arcsec of RA; seen by ConformU as a constant
+        // ~79 arcsec return error together with the old post-sync freeze).
         const bool was_tracking = tracking_;
         if (was_tracking) {
             stop_axis_and_wait_locked(kAxisRa);
         }
+        // Aim the frame at the expected restart moment (two ":E" writes plus
+        // the tracking start sequence).
+        constexpr double kSyncRestartLatencySeconds = 0.25;
+        auto [axis1, axis2] = ra_dec_to_axis_degrees_locked(
+            ra, dec, was_tracking ? kSyncRestartLatencySeconds * kLstHoursPerSecond : 0.0);
         protocol.set_position(kAxisRa, degrees_to_counts(axis1, axis_params_[0].counts_per_revolution));
         protocol.set_position(kAxisDec, degrees_to_counts(axis2, axis_params_[1].counts_per_revolution));
         if (was_tracking) {
@@ -859,7 +1084,8 @@ public:
         target_dec_degrees_ = dec;
         target_set_ = true;
         invalidate_position_cache_locked();
-        position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        // No post-sync read freeze: live reads land on the synced frame.
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
     }
 
     void sync_to_target() override {
@@ -870,43 +1096,136 @@ public:
     }
 
     void unpark() override {
+        // Cancel an in-flight park first (without mutex_ -- the park task
+        // takes it): Unpark during a park must win, not race the task's
+        // parked_ = true assignment.
+        bool was_parking = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            was_parking = parking_;
+        }
+        if (was_parking) {
+            reap_slew_task();
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        if (was_parking) {
+            // The park slew may still be moving the axes; stop them.
+            try {
+                auto& protocol = SkyWatcherProtocolWrapper::instance();
+                protocol.stop_motion(kAxisRa);
+                protocol.stop_motion(kAxisDec);
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                // Best effort; status polling still reports the true state.
+            }
+            slewing_cached_ = false;
+            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        }
+        parking_ = false;
         parked_ = false;
     }
 
     bool get_can_move_axis(int axis) const override { return axis == 0 || axis == 1; }
 
     void move_axis(int axis, double rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("MoveAxis");
-        if (axis != 0 && axis != 1) {
-            throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
+        reap_pulse_task();
+        // Join any previous stop-completion task first, WITHOUT mutex_ held
+        // (the task takes mutex_).
+        reap_stop_task();
+        bool need_stop_task = false;
+        int channel = kAxisRa;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("MoveAxis");
+            if (axis != 0 && axis != 1) {
+                throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
+            }
+            if (std::isnan(rate) || std::isinf(rate)) {
+                throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
+            }
+            if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
+                throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
+            }
+
+            channel = axis == 0 ? kAxisRa : kAxisDec;
+            constexpr double kStopEpsilon = 1e-9;
+            const bool moving = std::abs(rate) > kStopEpsilon;
+            if (moving) {
+                parked_ = false;
+                at_home_ = false;
+                // Command the motion BEFORE publishing the Slewing flag: if the
+                // transport throws (seen as UDP timeouts over a flaky Wi-Fi
+                // link), a pre-set flag is never cleared and Slewing wedges
+                // true forever (ConformU Wi-Fi finding).
+                start_speed_motion_locked(channel, rate);
+                manual_axis_slewing_[axis] = true;
+            } else if (manual_axis_slewing_[axis]) {
+                // MoveAxis(axis, 0) on a moving axis is an asynchronous
+                // initiator: issue the stop and return inside the STANDARD
+                // response target. A background task keeps Slewing true until
+                // the axis reports fully stopped (the deceleration ramp can
+                // exceed 1 s), then restores the previous tracking state per
+                // ASCOM.
+                SkyWatcherProtocolWrapper::instance().stop_motion(channel);
+                need_stop_task = true;
+            }
+            // MoveAxis(axis, 0) on an axis with no manual motion is a no-op:
+            // Slewing must read false immediately, and tracking (if running on
+            // the RA axis) continues untouched per the ASCOM restore-tracking
+            // semantics. Raising the flag here and clearing it via the status
+            // poll failed ConformU over Wi-Fi, where the poll round-trip
+            // outlasted the checker's window.
+            invalidate_position_cache_locked();
         }
-        if (std::isnan(rate) || std::isinf(rate)) {
-            throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
-        }
-        if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
+        if (!need_stop_task) {
+            return;
         }
 
-        const int channel = axis == 0 ? kAxisRa : kAxisDec;
-        constexpr double kStopEpsilon = 1e-9;
-        const bool moving = std::abs(rate) > kStopEpsilon;
-        manual_axis_slewing_[axis] = moving;
-        if (moving) {
-            parked_ = false;
-            at_home_ = false;
-            start_speed_motion_locked(channel, rate);
-        } else {
-            stop_axis_and_wait_locked(channel);
+        std::lock_guard<std::mutex> tlock(task_mutex_);
+        if (stop_task_thread_.joinable()) {
+            stop_task_cancel_.store(true);
+            task_cv_.notify_all();
+            stop_task_thread_.join();
+            stop_task_cancel_.store(false);
+        }
+        stop_task_thread_ = std::thread([this, channel, axis]() {
+            auto& protocol = SkyWatcherProtocolWrapper::instance();
+            auto deadline = std::chrono::steady_clock::now() + kAxisStopTimeout;
+            bool stopped = false;
+            while (std::chrono::steady_clock::now() < deadline) {
+                try {
+                    if (!protocol.inquire_status(channel).running) {
+                        stopped = true;
+                        break;
+                    }
+                } catch (...) {
+                    // Transient poll failure; keep trying until the deadline.
+                }
+                if (!task_wait_for(std::chrono::milliseconds(50), stop_task_cancel_)) {
+                    return;  // cancelled by disconnect/destruction
+                }
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || stop_task_cancel_.load()) {
+                return;
+            }
+            manual_axis_slewing_[axis] = false;
+            if (!stopped) {
+                ALPACA_LOG_WARN("SkyWatcher", "MoveAxis stop: axis " + std::to_string(channel) +
+                                                  " still reported running at timeout");
+            }
             // ASCOM: MoveAxis(axis, 0) restores the previous tracking state.
             if (channel == kAxisRa && tracking_) {
-                set_tracking_locked(true);
+                try {
+                    set_tracking_locked(true);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("SkyWatcher",
+                                    std::string("MoveAxis stop: failed to restore tracking: ") + e.what());
+                }
             }
-        }
-        invalidate_position_cache_locked();
+        });
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -928,12 +1247,25 @@ public:
     }
 
     void abort_slew() override {
+        reap_pulse_task();
+        // Cancel an in-flight async slew/refinement (the task joins later via
+        // reap; the flag makes its waits and the refine loop exit promptly —
+        // without this, the refinement re-slews after the abort's stop).
+        slew_task_cancel_.store(true);
+        task_cv_.notify_all();
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("AbortSlew");
         auto& protocol = SkyWatcherProtocolWrapper::instance();
-        protocol.stop_motion(kAxisRa);
-        protocol.stop_motion(kAxisDec);
+        // Instant stop (":L") rather than the ramped ":K": AbortSlew's contract
+        // is to stop NOW, and the ramp-down from an 800x slew otherwise leaves
+        // the axes reporting a GOTO in progress for over a second, which the
+        // next ConformU test observes as Slewing stuck true.
+        protocol.instant_stop(kAxisRa);
+        protocol.instant_stop(kAxisDec);
+        cmd_axis_rate_deg_s_[0] = 0.0;
+        cmd_axis_rate_deg_s_[1] = 0.0;
+        goto_in_progress_ = false;
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         position_override_until_ = std::chrono::steady_clock::time_point::min();
@@ -997,6 +1329,12 @@ private:
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
+        parking_ = false;
+        homing_ = false;
+        goto_in_progress_ = false;
+        tracking_rate_ = 0;
+        cmd_axis_rate_deg_s_[0] = 0.0;
+        cmd_axis_rate_deg_s_[1] = 0.0;
         position_cache_valid_ = false;
     }
 
@@ -1014,8 +1352,18 @@ private:
     // reversed) is likewise unvalidated.
 
     std::pair<double, double> compute_ra_dec_locked() const {
-        double a1 = cached_ra_axis_deg_;
-        double a2 = cached_dec_axis_deg_;
+        // Dead-reckon between hardware reads: while an axis runs at a
+        // commanded speed rate, extrapolate the cached angle by rate x
+        // elapsed. Raw counts quantize at ~0.31 arcsec and the cache is up to
+        // kPositionCacheTtl stale -- reporting the commanded model keeps RA
+        // steady under tracking (no LST-vs-stale-HA sawtooth) and resolves
+        // sub-count offset rates. Goto/stop paths zero the commanded rates,
+        // so a slewing or idle axis reports the raw cached angle.
+        double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                  last_position_update_).count();
+        dt = std::clamp(dt, 0.0, 5.0);
+        double a1 = cached_ra_axis_deg_ + cmd_axis_rate_deg_s_[0] * dt;
+        double a2 = cached_dec_axis_deg_ + cmd_axis_rate_deg_s_[1] * dt;
         double dec = 0.0;
         double ha_hours = 0.0;
         if (a2 >= 0.0) {
@@ -1033,8 +1381,10 @@ private:
         return {ra, std::clamp(dec, -90.0, 90.0)};
     }
 
-    std::pair<double, double> ra_dec_to_axis_degrees_locked(double ra, double dec) const {
-        double lst = compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_);
+    std::pair<double, double> ra_dec_to_axis_degrees_locked(double ra, double dec,
+                                                             double lst_advance_hours = 0.0) const {
+        double lst = compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_) +
+                     lst_advance_hours;
         double ha = wrap_hour_angle(lst - ra);
         double dec_mech = hemisphere_south_locked() ? -dec : dec;
         double a1 = 0.0;
@@ -1074,6 +1424,8 @@ private:
     // ── Position cache ──────────────────────────────────────────────────────
 
     void invalidate_position_cache_locked() const { position_cache_valid_ = false; }
+
+
 
     void refresh_position_cache_locked(bool force) const {
         auto now = std::chrono::steady_clock::now();
@@ -1115,7 +1467,7 @@ private:
         // Callers hold mutex_ or run from the pulse task after setup under it;
         // axis_params_ is immutable after connect.
         const AxisParameters& params = axis_params_[0];
-        double counts_per_sec = rate_deg_per_sec * params.counts_per_revolution / 360.0;
+        double counts_per_sec = std::abs(rate_deg_per_sec) * params.counts_per_revolution / 360.0;
         double preset = static_cast<double>(params.timer_frequency) / counts_per_sec;
         preset = std::clamp(preset, 1.0, static_cast<double>(kCountsMask));
         return static_cast<uint32_t>(std::lround(preset));
@@ -1127,6 +1479,7 @@ private:
 
     void stop_axis_and_wait_locked(int channel) {
         auto& protocol = SkyWatcherProtocolWrapper::instance();
+        cmd_axis_rate_deg_s_[channel - 1] = 0.0;
         protocol.stop_motion(channel);
         auto deadline = std::chrono::steady_clock::now() + kAxisStopTimeout;
         while (std::chrono::steady_clock::now() < deadline) {
@@ -1154,13 +1507,42 @@ private:
         protocol.set_motion_mode(channel, fast ? '3' : '1', direction_char(rate));
         protocol.set_step_period(channel, step_period_for_locked(channel, rate, fast));
         protocol.start_motion(channel);
+        cmd_axis_rate_deg_s_[channel - 1] = rate;
+    }
+
+    // Base drive rate for the selected ASCOM DriveRate.
+    double base_tracking_rate_locked() const {
+        switch (tracking_rate_) {
+            case 1: return kLunarDegPerSec;
+            case 2: return kSolarDegPerSec;
+            default: return kSiderealDegPerSec;
+        }
+    }
+
+    // RA drive rate for the selected DriveRate (rate offsets are deferred).
+    double effective_ra_rate_locked() const { return base_tracking_rate_locked(); }
+
+    // Re-command the RA axis after a rate change. In-place step-period writes
+    // are only legal while the direction is unchanged; a sign flip (or a
+    // stopped/reversed axis) needs a full stop-and-restart.
+    void apply_ra_tracking_rate_locked(double previous_effective) {
+        double eff = effective_ra_rate_locked();
+        if (eff != 0.0 && previous_effective != 0.0 &&
+            (eff > 0.0) == (previous_effective > 0.0)) {
+            auto& protocol = SkyWatcherProtocolWrapper::instance();
+            protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
+            cmd_axis_rate_deg_s_[0] = eff;  // keep dead reckoning on the new rate
+        } else {
+            start_speed_motion_locked(kAxisRa, eff);
+        }
     }
 
     void set_tracking_locked(bool tracking) {
         if (tracking) {
-            // Sidereal tracking: RA axis in the direction of increasing hour
-            // angle (positive axis angle by this driver's convention).
-            start_speed_motion_locked(kAxisRa, kSiderealDegPerSec);
+            // Track: RA axis in the direction of increasing hour angle
+            // (positive axis angle by this driver's convention) at the
+            // selected drive rate plus any RightAscensionRate offset.
+            start_speed_motion_locked(kAxisRa, effective_ra_rate_locked());
         } else {
             stop_axis_and_wait_locked(kAxisRa);
         }
@@ -1170,6 +1552,8 @@ private:
 
     void dispatch_goto_locked(double target_ra_axis_deg, double target_dec_axis_deg) {
         auto& protocol = SkyWatcherProtocolWrapper::instance();
+        cmd_axis_rate_deg_s_[0] = 0.0;
+        cmd_axis_rate_deg_s_[1] = 0.0;
         stop_axis_and_wait_locked(kAxisRa);
         stop_axis_and_wait_locked(kAxisDec);
         refresh_position_cache_locked(true);
@@ -1197,6 +1581,55 @@ private:
         protocol.start_motion(kAxisDec);
     }
 
+    // LST advances 24 sidereal hours per sidereal day of SI seconds.
+    static constexpr double kLstHoursPerSecond = 24.0 / 86164.0905;
+    static constexpr double kGotoRampSeconds = 2.5;
+    // After the goto lands, the RA axis sits stopped while tracking restarts
+    // (~0.7 s); aim that far ahead so the drift-back lands ON target.
+    static constexpr double kTrackingResumeSeconds = 0.7;
+    // Landing deadband per axis (~8 arcsec; ConformU checks RA to 10 arcsec).
+    static constexpr double kLandingDeadbandDeg = 8.0 / 3600.0;
+
+    // First goto aimed at the ARRIVAL-time sky position: estimate the slew
+    // duration from the distance and advance the LST used for the axis
+    // target. An uncompensated goto lands east by the slew duration
+    // (~3 arcmin of RA for a long slew on the Wave 100i).
+    void dispatch_predicted_goto_locked(double ra, double dec) {
+        refresh_position_cache_locked(true);
+        auto [p1, p2] = ra_dec_to_axis_degrees_locked(ra, dec);
+        double dist = std::max(std::abs(p1 - cached_ra_axis_deg_),
+                               std::abs(p2 - cached_dec_axis_deg_));
+        double est_seconds = dist / kMaxMoveAxisRateDegPerSec + kGotoRampSeconds + kTrackingResumeSeconds;
+        auto [t1, t2] = ra_dec_to_axis_degrees_locked(ra, dec, est_seconds * kLstHoursPerSecond);
+        dispatch_goto_locked(t1, t2);
+    }
+
+    // After the first goto lands, close the residual (prediction error) with
+    // short re-gotos until inside the deadband. Slewing is held true across
+    // the inter-goto gaps via slew_force_until_.
+    void refine_goto_landing(std::unique_lock<std::mutex>& lock, double ra, double dec) {
+        for (int iter = 0; iter < 3; ++iter) {
+            if (slew_task_cancel_.load()) {
+                break;  // AbortSlew/unpark/disconnect cancelled the slew
+            }
+            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            refresh_position_cache_locked(true);
+            // Judge the landing against the target ADVANCED by the resume
+            // window -- the mount deliberately lands ahead (see above).
+            auto [n1, n2] = ra_dec_to_axis_degrees_locked(
+                ra, dec, kTrackingResumeSeconds * kLstHoursPerSecond);
+            if (std::abs(n1 - cached_ra_axis_deg_) <= kLandingDeadbandDeg &&
+                std::abs(n2 - cached_dec_axis_deg_) <= kLandingDeadbandDeg) {
+                break;
+            }
+            slewing_cached_ = true;
+            dispatch_predicted_goto_locked(ra, dec);
+            wait_for_slew_complete(lock);
+        }
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        slewing_cached_ = false;
+    }
+
     void do_slew_to_ra_dec_locked(double ra, double dec) {
         auto [axis1, axis2] = ra_dec_to_axis_degrees_locked(ra, dec);
         invalidate_position_cache_locked();
@@ -1204,7 +1637,18 @@ private:
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         restore_tracking_after_slew_ = tracking_;
-        dispatch_goto_locked(axis1, axis2);
+        (void)axis1;
+        (void)axis2;
+        try {
+            dispatch_predicted_goto_locked(ra, dec);
+        } catch (...) {
+            // Dispatch failed before the mount started moving: clear the
+            // pre-published slew state so Slewing cannot wedge true.
+            slewing_cached_ = false;
+            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            restore_tracking_after_slew_ = false;
+            throw;
+        }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
         target_set_ = true;
@@ -1220,7 +1664,13 @@ private:
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         restore_tracking_after_slew_ = false;
-        dispatch_goto_locked(axis1_deg, axis2_deg);
+        try {
+            dispatch_goto_locked(axis1_deg, axis2_deg);
+        } catch (...) {
+            slewing_cached_ = false;
+            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            throw;
+        }
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
     }
@@ -1239,6 +1689,21 @@ private:
     }
 
     bool get_slewing_locked() const {
+        // A park in progress reports Slewing until AtPark flips in the same
+        // locked step -- ConformU polls Slewing for park completion, and a
+        // fast (localhost) poller caught the gap between the slew ending and
+        // parked_ being set, declaring the park failed.
+        if (parking_ || homing_ || goto_in_progress_) {
+            return true;
+        }
+        return get_hardware_slewing_locked();
+    }
+
+    // Hardware/manual slewing state WITHOUT the parking_ override. The park
+    // task's own wait_for_slew_complete must poll this variant: polling
+    // get_slewing_locked() while parking_ is set can never see "stopped" and
+    // times out at 180s (AtPark stays false -- ConformU Park failure).
+    bool get_hardware_slewing_locked() const {
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
@@ -1259,9 +1724,169 @@ private:
         }
         if (was_slewing && !slewing_cached_) {
             invalidate_position_cache_locked();
-            position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         }
         return slewing_cached_;
+    }
+
+    // ── AutoHome (home index sensors) ───────────────────────────────────────
+    // Port of the SynScan/EQMod AutoHome procedure (indi-eqmod eqmodbase.cpp).
+    // The Wave's home index sensor latches the axis count when the axis sweeps
+    // past the physical home mark. Reading the indexer (":q" data 0x000000)
+    // returns 0 (armed, currently below the index), 0xFFFFFF (armed, above),
+    // or the latched count; ":W" data 0x000008 re-arms it. The procedure hunts
+    // the sensor edge on both axes, always makes the final approach from below
+    // (consistent direction kills backlash), then re-stamps the position
+    // registers to kHomeCounts at the sensed mark — re-anchoring the count
+    // frame to the physical home regardless of where the mount was powered on.
+    // TODO: Validate AutoHome direction conventions in the southern hemisphere
+    // (start_speed_motion_locked flips the RA sign there).
+
+    void autohome_sleep(std::unique_lock<std::mutex>& lock, std::chrono::milliseconds d) const {
+        lock.unlock();
+        std::this_thread::sleep_for(d);
+        lock.lock();
+        check_connected();
+        if (slew_task_cancel_.load()) {
+            throw AlpacaException("AutoHome cancelled");
+        }
+    }
+
+    void autohome_wait_axes_stopped(std::unique_lock<std::mutex>& lock) const {
+        auto& proto = SkyWatcherProtocolWrapper::instance();
+        const auto start = std::chrono::steady_clock::now();
+        while (proto.inquire_status(kAxisRa).running || proto.inquire_status(kAxisDec).running) {
+            if (std::chrono::steady_clock::now() - start > std::chrono::seconds(300)) {
+                throw AlpacaException("AutoHome: axes did not stop");
+            }
+            autohome_sleep(lock, std::chrono::milliseconds(250));
+        }
+    }
+
+    void run_autohome(std::unique_lock<std::mutex>& lock) {
+        auto& proto = SkyWatcherProtocolWrapper::instance();
+        const int axes[2] = {kAxisRa, kAxisDec};
+        auto read_idx = [&](int i) { return proto.get_feature(axes[i], kIndexerInquiry); };
+        auto reset_idx = [&](int i) { proto.set_feature(axes[i], kIndexerReset); };
+        auto axis_deg = [&](int i) { return i == 0 ? cached_ra_axis_deg_ : cached_dec_axis_deg_; };
+        auto idx_to_deg = [&](int i, uint32_t counts) {
+            return counts_to_degrees(counts, axis_params_[i].counts_per_revolution);
+        };
+
+        // Phase 1: stop everything, arm the indexers, pick directions from the
+        // armed reading (0 = below the index -> move down first, away from it),
+        // and step 5 degrees off so the edge is approached cleanly.
+        ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 1: arming home indexers");
+        stop_axis_and_wait_locked(kAxisRa);
+        stop_axis_and_wait_locked(kAxisDec);
+        tracking_ = false;
+        bool up[2];
+        for (int i = 0; i < 2; ++i) {
+            reset_idx(i);
+            up[i] = read_idx(i) == 0;
+        }
+        refresh_position_cache_locked(true);
+        dispatch_goto_locked(axis_deg(0) + (up[0] ? -5.0 : 5.0),
+                             axis_deg(1) + (up[1] ? -5.0 : 5.0));
+        autohome_wait_axes_stopped(lock);
+
+        // Phase 2: if the 5-degree step swept PAST the index (latched), move a
+        // further 5 degrees in the same direction, then re-arm and re-read the
+        // side (0 now means above -> hunt downward).
+        bool swept[2];
+        for (int i = 0; i < 2; ++i) {
+            uint32_t v = read_idx(i);
+            swept[i] = v != 0 && v != kIndexerAbove;
+        }
+        if (swept[0] || swept[1]) {
+            ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 2: stepping past a latched index");
+            refresh_position_cache_locked(true);
+            dispatch_goto_locked(axis_deg(0) + (swept[0] ? (up[0] ? -5.0 : 5.0) : 0.0),
+                                 axis_deg(1) + (swept[1] ? (up[1] ? -5.0 : 5.0) : 0.0));
+            autohome_wait_axes_stopped(lock);
+            for (int i = 0; i < 2; ++i) {
+                if (swept[i]) {
+                    reset_idx(i);
+                    up[i] = read_idx(i) != 0;
+                }
+            }
+        }
+
+        // Phase 3: any axis above the index hunts downward at the coarse rate
+        // until the indexer reports the below side, runs 3 s further, stops,
+        // and re-arms — every axis now sits below its index.
+        if (!up[0] || !up[1]) {
+            ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 3: coarse hunt below the index");
+            bool hunting[2] = {!up[0], !up[1]};
+            for (int i = 0; i < 2; ++i) {
+                if (hunting[i]) {
+                    start_speed_motion_locked(axes[i], -kAutoHomeCoarseRateDegPerSec);
+                }
+            }
+            std::chrono::steady_clock::time_point edge_at[2];
+            bool edge[2] = {false, false};
+            const auto start = std::chrono::steady_clock::now();
+            while (hunting[0] || hunting[1]) {
+                if (std::chrono::steady_clock::now() - start > std::chrono::seconds(300)) {
+                    throw AlpacaException("AutoHome: coarse hunt timed out");
+                }
+                for (int i = 0; i < 2; ++i) {
+                    if (!hunting[i]) continue;
+                    if (!edge[i] && read_idx(i) != kIndexerAbove) {
+                        edge[i] = true;
+                        edge_at[i] = std::chrono::steady_clock::now();
+                    }
+                    if (edge[i] &&
+                        std::chrono::steady_clock::now() - edge_at[i] > std::chrono::seconds(3)) {
+                        stop_axis_and_wait_locked(axes[i]);
+                        reset_idx(i);
+                        up[i] = true;
+                        hunting[i] = false;
+                    }
+                }
+                autohome_sleep(lock, std::chrono::milliseconds(200));
+            }
+        }
+
+        // Phase 4: sweep upward at the detect rate; the indexer latches the
+        // exact count of the home mark as each axis crosses it.
+        ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 4: detecting the home index");
+        uint32_t home_idx[2] = {0, 0};
+        bool latched[2] = {false, false};
+        start_speed_motion_locked(kAxisRa, kAutoHomeDetectRateDegPerSec);
+        start_speed_motion_locked(kAxisDec, kAutoHomeDetectRateDegPerSec);
+        const auto detect_start = std::chrono::steady_clock::now();
+        while (!latched[0] || !latched[1]) {
+            if (std::chrono::steady_clock::now() - detect_start > std::chrono::seconds(300)) {
+                proto.stop_motion(kAxisRa);
+                proto.stop_motion(kAxisDec);
+                throw AlpacaException("AutoHome: index detect timed out");
+            }
+            for (int i = 0; i < 2; ++i) {
+                if (latched[i]) continue;
+                uint32_t v = read_idx(i);
+                if (v != 0) {
+                    home_idx[i] = v;
+                    latched[i] = true;
+                    stop_axis_and_wait_locked(axes[i]);
+                }
+            }
+            autohome_sleep(lock, std::chrono::milliseconds(150));
+        }
+        ALPACA_LOG_INFO("SkyWatcher",
+                        "AutoHome: index latched at RA=" + std::to_string(home_idx[0]) +
+                            " Dec=" + std::to_string(home_idx[1]));
+
+        // Phase 5+6: back 10 degrees below the latched mark, then approach it
+        // from below and stamp the position registers to the home offset.
+        dispatch_goto_locked(idx_to_deg(0, home_idx[0]) - 10.0,
+                             idx_to_deg(1, home_idx[1]) - 10.0);
+        autohome_wait_axes_stopped(lock);
+        dispatch_goto_locked(idx_to_deg(0, home_idx[0]), idx_to_deg(1, home_idx[1]));
+        autohome_wait_axes_stopped(lock);
+        proto.set_position(kAxisRa, kHomeCounts);
+        proto.set_position(kAxisDec, kHomeCounts);
+        invalidate_position_cache_locked();
+        ALPACA_LOG_INFO("SkyWatcher", "AutoHome: complete, count frame re-anchored to home");
     }
 
     // Poll for slew completion, RELEASING the mutex around every sleep so a
@@ -1278,7 +1903,13 @@ private:
             check_connected();
         };
         while (true) {
-            bool slewing = get_slewing_locked();
+            if (slew_task_cancel_.load()) {
+                // A reap (unpark cancelling an in-flight park, or a newer async
+                // slew) wants this waiter gone; abandon the wait promptly so
+                // the join is bounded.
+                throw AlpacaException("Slew wait cancelled");
+            }
+            bool slewing = get_hardware_slewing_locked();
             if (slewing) {
                 saw_slewing = true;
             }
@@ -1297,7 +1928,9 @@ private:
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         invalidate_position_cache_locked();
-        position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        // No post-slew position freeze: gotos are LST-compensated and refined
+        // (see goto helpers), so live reads land on target -- freezing them
+        // corrupted ConformU's rate-offset endpoint measurements instead.
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
@@ -1314,13 +1947,16 @@ private:
     void cancel_async_tasks() {
         slew_task_cancel_.store(true);
         pulse_task_cancel_.store(true);
+        stop_task_cancel_.store(true);
         task_cv_.notify_all();
         std::thread slew_thread;
         std::thread pulse_thread;
+        std::thread stop_thread;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
             slew_thread = std::move(slew_task_thread_);
             pulse_thread = std::move(pulse_task_thread_);
+            stop_thread = std::move(stop_task_thread_);
         }
         if (slew_thread.joinable()) {
             slew_thread.join();
@@ -1328,6 +1964,23 @@ private:
         if (pulse_thread.joinable()) {
             pulse_thread.join();
         }
+        if (stop_thread.joinable()) {
+            stop_thread.join();
+        }
+    }
+
+    void reap_stop_task() {
+        stop_task_cancel_.store(true);
+        task_cv_.notify_all();
+        std::thread prev;
+        {
+            std::lock_guard<std::mutex> tlock(task_mutex_);
+            prev = std::move(stop_task_thread_);
+        }
+        if (prev.joinable()) {
+            prev.join();
+        }
+        stop_task_cancel_.store(false);
     }
 
     void reap_slew_task() {
@@ -1402,6 +2055,16 @@ private:
     mutable bool pulse_guiding_active_ = false;
     mutable std::chrono::steady_clock::time_point pulse_guide_end_time_{};
 
+    mutable bool parking_ = false;
+    mutable bool homing_ = false;
+    // True from goto dispatch until the landing refinement finishes: Slewing
+    // must not flicker false mid-refinement (the timed slew_force_until_
+    // expired during a slow refine iteration, ConformU proceeded, and the
+    // next refinement goto fought its pulse-guide test for the motors).
+    mutable bool goto_in_progress_ = false;
+    bool has_home_indexer_ = false;
+    int tracking_rate_ = 0;                       // ASCOM DriveRate (0/1/2)
+    mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     bool park_position_set_ = false;
     double park_ra_axis_deg_ = 0.0;
     double park_dec_axis_deg_ = 0.0;
@@ -1416,8 +2079,10 @@ private:
     mutable std::condition_variable task_cv_;
     std::thread slew_task_thread_;
     std::thread pulse_task_thread_;
+    std::thread stop_task_thread_;
     mutable std::atomic<bool> slew_task_cancel_{false};
     mutable std::atomic<bool> pulse_task_cancel_{false};
+    mutable std::atomic<bool> stop_task_cancel_{false};
 };
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(

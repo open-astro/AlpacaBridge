@@ -253,6 +253,17 @@ the previous round's fix**, not new bugs. Before pushing any fix:
   has re-opened PRs it approved. Treat *"no confirmed bugs + ConformU 0/0/0 + all
   gates green"* as the merge bar, not a literal zero-finding run.
 
+### ConformU telescope runs: bare mount only (SAFETY)
+
+Never run the ConformU telescope suite with an OTA mounted. ConformU 4.5 commands 40+
+maximum-rate slews (extended rate-offset tests at HA +/-9 and +/-3, MoveAxis at the full
+AxisRates maximum, extended pulse-guide slews, SideOfPier model tests alternating across the
+meridian), deliberate mid-slew aborts, and targets placed halfway to the horizon; recorded
+mid-slew arcs on a Wave 100i dipped to ~5 degrees altitude. A mounted scope risks pier
+strikes, cable snags, and balance failures; strain-wave mounts have no clutch to slip.
+Validate on a bare mount, always. (The large swings during a run are ConformU's designed
+choreography, not a driver fault — verify by checking that every slew lands on target.)
+
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
 | Throw | When |
@@ -1041,8 +1052,102 @@ datagrams before each send so replies cannot get off-by-one.
   on either axis (a tracking axis is not slewing).
 - Connect sequence: `:e` version, `:a`/`:b`/`:g` per axis, then `:F` init (with `:E` home
   stamp) ONLY when the status reports not-initialized — never re-stamp an aligned session.
+- **Wave USB port is STM32 CDC-ACM** (`0483:5740`, `/dev/ttyACM*`, by-id name
+  `usb-STMicroelectronics_STM32_Virtual_ComPort_...`), NOT a ttyUSB bridge chip. The
+  auto-detect scan must include STM32/STMicroelectronics in the candidate filters and probe
+  `/dev/ttyACM0-9` as well as `/dev/ttyUSB0-9`. Baud rate is irrelevant on CDC-ACM.
+  Hardware-verified: `:e1` on the Wave 100i replies `=033A44` (MC firmware 3.58.68).
+- **Park and MoveAxis(axis, 0) are asynchronous initiators** (ConformU 4.5 STANDARD timing,
+  1 s target): a blocking park slew (19 s) and a blocking stop-and-wait in MoveAxis(0)
+  (1.2 s deceleration ramp) both failed timing on real Wave 100i hardware. Park dispatches
+  the slew in the background (AtPark turns true on completion); MoveAxis(0) issues the stop,
+  keeps Slewing true via the manual flag, and a background task clears it and restores
+  tracking once the axis reports stopped. This applies to every telescope driver.
+- ConformU needs a real site: with lat/long left at 0,0 the CheckMethods slew tests abort
+  with "highest elevation available is below the horizon". Set the observing site in the
+  web UI before validating.
 - Web UI: `skywatcher`-prefixed field names; network field is `udpPort` (NOT `tcpPort`).
-- ConformU validation on Wave 100i (USB + Wi-Fi separately) pending.
+- ConformU 4.5.0 validated on Wave 100i over **both transports** (Linux arm64): USB (dev PC)
+  and Wi-Fi UDP (Raspberry Pi CM4 joined to the mount AP) — 0 errors, 0 issues, 0 timing
+  violations each; slews within the ±10 arcsec tolerance.
+- **Async-initiator self-deadlock trap (Park)**: making `Slewing` report true while
+  `parking_` (so pollers never see the Slewing-false/AtPark-false gap) breaks the park
+  task itself if its completion wait polls the same accessor — it can never observe
+  "stopped" and times out (ConformU: "Failed to park within 300 seconds"). The internal
+  wait must poll a hardware-only variant (`get_hardware_slewing_locked`).
+- **PulseGuide is also an async initiator**: the axis dispatch (stop-and-wait on a
+  ramping axis + possible UDP retries) took 1.79 s synchronously; it now runs inside the
+  background pulse task with `IsPulseGuiding` already true at return.
+- **AutoHome (home index sensors)**: the Wave reports feature bit 0x04 (":q" data
+  0x000001 -> 0x100C) on both axes. FindHome ports the EQMod AutoHome procedure:
+  arm the indexer (":W" data 0x000008), read it (":q" data 0x000000 -> 0 below /
+  0xFFFFFF above / latched count), hunt the edge, approach from below, then
+  `:E`-stamp kHomeCounts at the sensed mark. Count-frame home (goto 0,0) is the
+  fallback for boards without the bit — and is NOT physically meaningful unless
+  the mount was powered on at home (a killed ConformU run mid-sync can shift the
+  frame; this is why AutoHome matters).
+- **Tracking rates**: Lunar/Solar are just different step-period constants
+  (live `:I` change while tracking). **RA/Dec rate OFFSETS are deferred**: a
+  full implementation (effective-rate fold-in, pier-side Dec sign flip,
+  duty-cycling below the 0.26 arcsec/s slow-mode floor `T1=0xFFFFFF`, modeled
+  reads) passed manual endpoint measurements but failed ConformU's chained
+  measured-rate tests with a REAL physical Dec undershoot (commanded 40 as/s,
+  encoder counts showed ~16) plus impossible ~45 arcsec RA count jumps between
+  reads 60 ms apart right after in-place `:I` writes. Needs bench time with the
+  motion recorder before re-attempting.
+- **No read freezes — ever**: the old 10 s post-slew/post-sync/pulse position
+  overrides masked a real GOTO landing error (~3 arcmin east: axis targets were
+  computed with LST at dispatch, not arrival) and corrupted every ConformU 4.5
+  endpoint measurement (rates, pulse displacement, sync return). Cures that
+  replaced them: (1) gotos aim at the ARRIVAL-time LST and refine to an
+  8 arcsec deadband; (2) reads dead-reckon `cached + commanded rate x elapsed`
+  between hardware polls (kills the LST-vs-stale-cache sawtooth and count
+  quantization); (3) LST uses sub-second time (whole-second truncation stepped
+  RA in 15 arcsec jumps); (4) sync computes its frame AFTER the axes stop,
+  aimed at the tracking-restart moment (a pre-stop frame is stale by the whole
+  1-3 s pause -- ConformU saw a constant ~79 arcsec return error).
+- ConformU 4.5 **physically measures pulse-guide displacement** (Dec moved,
+  RA unchanged) -- a driver that freezes reads during the pulse fails with
+  "The declination axis did not move".
+- **Slewing must be a STATE FLAG spanning the whole goto + landing refinement**
+  (`goto_in_progress_`, same pattern as `parking_`/`homing_`), never a timed
+  hold: the 3 s `slew_force_until_` expired during a slow refine iteration
+  (axis stop-waits take seconds), Slewing flickered false, ConformU started
+  its pulse test, and the next refinement goto dragged the axes back to the
+  slew target ("declination axis did not move", phantom RA drift, the
+  constant ~79 arcsec sync-return error). Diagnosed by logging every motion
+  frame (:G/:I/:J/:K) at WARN and killing ConformU at the first issue -- the
+  trace showed three refinement gotos interleaved with the pulse.
+- **Reap the pulse task at every motion boundary** (slews, park, home,
+  moveaxis, sync, abort): ConformU's dual-axis pulse test leaves a live pulse
+  timer that otherwise fires its stop/step-period restore into the middle of
+  the next goto. A CANCELLED pulse task must not touch the hardware -- the
+  canceller stops or re-commands the axes itself.
+- **AbortSlew must cancel the async slew task** (set `slew_task_cancel_`,
+  join later via reap) or the landing refinement re-slews after the abort;
+  every slew entry point reaps first, which also resets the flag.
+- Debug technique: a watchdog loop that `pkill`s ConformU at the FIRST logged
+  issue preserves the exact journal window and stops the mount from grinding
+  through a failed run.
+- The shipped images log at WARNING: `ALPACA_LOG_INFO` never reaches
+  journalctl on the test rigs -- temporary debug instrumentation must log at
+  WARN or it silently vanishes.
+- **Wi-Fi UDP field lessons** (Wave AP + SBC): (1) a single-radio SBC running hotspot
+  (`ap0`) + client (`wlan0`) dual-role flaps the link — disable the hotspot while the
+  mount Wi-Fi is in use (and beware hotspot subnets clashing with the mount's
+  192.168.4.x); (2) an AP rejoin can change the local address, invalidating a
+  `connect()`ed datagram socket (`ENETUNREACH`) — the wrapper rebuilds the socket and
+  resends once; (3) retransmit duplicates cause reply mis-pairing — defenses are
+  drain-before-send, a settle drain after any timeout, and per-command expected reply
+  length validation; (4) run ConformU on the SBC itself (localhost), not across the LAN —
+  VM-to-SBC jitter alone produces FAST-target (0.1 s) violations.
+- **Disconnect all stray Alpaca clients before a ConformU run**: the per-client Connected
+  registry keeps the device physically connected for other ClientIDs, so leftover test
+  sessions carry state (targets, tracking) into ConformU's "first time use" checks.
+- Deploy note: the systemd service executes `/usr/bin/alpacabridge` — install the built
+  `alpacahttp_server` there (NOT `/usr/local/bin/`), and verify with
+  `md5sum /usr/bin/alpacabridge` after restart; a wedged park/slew thread can hang
+  `systemctl stop` (use `systemctl kill -s SIGKILL`).
 
 ### iOptron
 

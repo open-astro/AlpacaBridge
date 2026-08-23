@@ -121,13 +121,20 @@ int main(int argc, char* argv[]) {
     // Give threads a moment to fully exit
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
+    // Destroy registered devices BEFORE exiting: driver destructors cancel and
+    // JOIN their async task threads (slew/park/home/pulse) and stop the motors.
+    // Skipping this and calling exit() ran static destructors (including the
+    // protocol wrapper singletons) under still-running task threads — observed
+    // as a SIGSEGV on systemctl stop while a SkyWatcher AutoHome was in flight.
+    alpacacore::management::DeviceRegistry::instance().clear();
+
     alpacahttp::util::log_info("Server stopped");
-    
+
     // Flush any remaining log output
     std::cout.flush();
     std::cerr.flush();
-    
+
     // Use exit() to ensure process terminates even if there are lingering threads
-    // This is safe since we've already stopped all services
+    // (all device task threads were joined by the registry clear above).
     exit(0);
 }

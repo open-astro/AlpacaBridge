@@ -117,6 +117,8 @@ public:
     void stop_motion(int axis);                            // ":K"
     void instant_stop(int axis);                           // ":L"
     void set_autoguide_speed(int axis, int speed_code);    // ":P" 0=1x..4=0.125x
+    uint32_t get_feature(int axis, uint32_t inquiry);      // ":q" (features / home index)
+    void set_feature(int axis, uint32_t command);          // ":W" (reset home index etc.)
 
     // Nibble-swapped hex encode/decode per the MC data format
     // (0x123456 <-> "563412", 0x12 <-> "12").

@@ -59,7 +59,7 @@ TEST_CASE("SkyWatcher Telescope Driver - Defaults", "[skywatcher][telescope][uni
     REQUIRE_FALSE(driver->get_can_slew_alt_az_async());
     REQUIRE(driver->get_can_sync());
     REQUIRE_FALSE(driver->get_can_sync_alt_az());
-    REQUIRE_FALSE(driver->get_can_find_home());
+    REQUIRE(driver->get_can_find_home());
     REQUIRE(driver->get_can_park());
     REQUIRE(driver->get_can_unpark());
     REQUIRE(driver->get_can_set_park());
@@ -234,7 +234,9 @@ TEST_CASE("SkyWatcher Telescope Driver - Axis rate ranges", "[skywatcher][telesc
 TEST_CASE("SkyWatcher Telescope Driver - Unsupported methods", "[skywatcher][telescope][unit]") {
     auto driver = make_driver(0);
 
-    require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::MethodNotImplemented);
+    // FindHome is supported (goto to the power-on index); unconnected it
+    // must raise NotConnected like every other motion method.
+    require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); },
                          alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); },
@@ -243,10 +245,12 @@ TEST_CASE("SkyWatcher Telescope Driver - Unsupported methods", "[skywatcher][tel
                          alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&] { driver->set_side_of_pier(0); },
                          alpacacore::AlpacaError::PropertyNotImplemented);
+    // Rate offsets are deferred (see AGENTS.md); drive rates are supported
+    // and raise NotConnected when unconnected.
     require_alpaca_error([&] { driver->set_declination_rate(1.0); },
                          alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_right_ascension_rate(1.0); },
                          alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_tracking_rate(1); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
+                         alpacacore::AlpacaError::NotConnected);
 }

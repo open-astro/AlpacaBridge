@@ -636,6 +636,11 @@ Apply any vendor-specific quirks, workarounds, or conventions documented there.
 
 ## Step 10 — ConformU validation (MANDATORY — both platforms)
 
+**SAFETY: never run the telescope ConformU suite with an OTA mounted.** The suite slews at
+maximum rate to targets halfway to the horizon, aborts mid-slew, and forces meridian flips;
+mid-slew arcs can dip to ~5 degrees altitude. Validate on a bare mount. See /conformu for the
+full hard rule.
+
 After the driver builds and unit tests pass, the user MUST run ConformU against the driver with real hardware on **both target platforms**. A driver is NOT complete until it has ConformU results for both architectures.
 
 **ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Current version: 4.3.0.
