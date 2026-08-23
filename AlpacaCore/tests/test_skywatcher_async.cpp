@@ -25,6 +25,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -113,8 +114,11 @@ TEST_CASE("SkyWatcher async - Park completes and Unpark cancels an in-flight par
     REQUIRE_FALSE(driver->get_at_park());
 
     // Unpark DURING a park must win the race and leave the mount unparked.
+    // Wait until the park task has actually started the slew so the race
+    // window is genuinely exercised, not skipped by a fast dispatch.
     mount.jump_axis_degrees(1, 25.0);
     driver->park();
+    REQUIRE(wait_until([&] { return mount.axis_running(1) || mount.axis_running(2); }, 5000));
     driver->unpark();
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
