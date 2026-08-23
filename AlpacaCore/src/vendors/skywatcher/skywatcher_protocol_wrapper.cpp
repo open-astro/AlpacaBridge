@@ -740,8 +740,8 @@ private:
                             // Just after a timeout, a stale error reply from
                             // the timed-out command may still arrive: discard
                             // it and retransmit rather than surfacing a
-                            // misleading rejection for THIS command.
-                            was_dirty = false;
+                            // misleading rejection for THIS command. (The next
+                            // attempt recomputes was_dirty from link_dirty_.)
                             link_dirty_ = true;
                             break;
                         }
