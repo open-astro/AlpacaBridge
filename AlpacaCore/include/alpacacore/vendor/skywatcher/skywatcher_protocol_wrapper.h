@@ -42,10 +42,7 @@ struct SkyWatcherHostInfo {
 // broadcast on local subnets for a responding motor controller.
 std::vector<SkyWatcherHostInfo> discover_skywatcher_hosts(int timeout_ms = 1500);
 
-enum class ConnectionType {
-    Serial,
-    Network
-};
+enum class ConnectionType : std::uint8_t { Serial, Network };
 
 struct ConnectionInfo {
     ConnectionType type = ConnectionType::Serial;
@@ -68,12 +65,12 @@ inline constexpr int kAxisDec = 2;
 
 // Decoded ":f" status reply.
 struct AxisStatus {
-    bool speed_mode = false;   // true = Speed(Tracking) mode, false = GOTO mode
-    bool ccw = false;          // true = rotating in the decreasing-counts direction
-    bool fast = false;         // true = high-speed slewing
-    bool running = false;      // motor energized and moving
-    bool blocked = false;      // axis blocked (stall / clutch)
-    bool init_done = false;    // ":F" initialization completed
+    bool speed_mode = false;  // true = Speed(Tracking) mode, false = GOTO mode
+    bool ccw = false;         // true = rotating in the decreasing-counts direction
+    bool fast = false;        // true = high-speed slewing
+    bool running = false;     // motor energized and moving
+    bool blocked = false;     // axis blocked (stall / clutch)
+    bool init_done = false;   // ":F" initialization completed
     bool level_switch_on = false;
 };
 
@@ -95,30 +92,29 @@ public:
     // Low-level framed exchange: sends ":<cmd><axis><data>\r", returns the
     // payload of a "=" response (without the leading "=" or trailing CR).
     // Throws AlpacaException on transport failure or a "!" error reply.
-    std::string send_command(char command, int axis, const std::string& data = "",
-                             int timeout_ms_override = 0);
+    std::string send_command(char command, int axis, const std::string& data = "", int timeout_ms_override = 0);
     // Fire the command and return the raw reply without "!"-to-exception
     // mapping (for CommandString passthrough).
     std::string send_raw_command(const std::string& frame, int timeout_ms_override = 0);
 
     // ── Inquiries ──
-    std::string get_motor_board_version();          // ":e" axis 1
-    AxisParameters get_axis_parameters(int axis);   // ":a"/":b"/":g"
-    uint32_t inquire_position(int axis);            // ":j" (24-bit counts)
-    AxisStatus inquire_status(int axis);            // ":f"
+    std::string get_motor_board_version();         // ":e" axis 1
+    AxisParameters get_axis_parameters(int axis);  // ":a"/":b"/":g"
+    uint32_t inquire_position(int axis);           // ":j" (24-bit counts)
+    AxisStatus inquire_status(int axis);           // ":f"
 
     // ── Motion ──
-    void set_position(int axis, uint32_t counts);          // ":E" (sync)
-    void initialization_done(int axis);                    // ":F"
+    void set_position(int axis, uint32_t counts);               // ":E" (sync)
+    void initialization_done(int axis);                         // ":F"
     void set_motion_mode(int axis, char mode, char direction);  // ":G"
-    void set_goto_target(int axis, uint32_t counts);       // ":S"
-    void set_step_period(int axis, uint32_t t1_preset);    // ":I"
-    void start_motion(int axis);                           // ":J"
-    void stop_motion(int axis);                            // ":K"
-    void instant_stop(int axis);                           // ":L"
-    void set_autoguide_speed(int axis, int speed_code);    // ":P" 0=1x..4=0.125x
-    uint32_t get_feature(int axis, uint32_t inquiry);      // ":q" (features / home index)
-    void set_feature(int axis, uint32_t command);          // ":W" (reset home index etc.)
+    void set_goto_target(int axis, uint32_t counts);            // ":S"
+    void set_step_period(int axis, uint32_t t1_preset);         // ":I"
+    void start_motion(int axis);                                // ":J"
+    void stop_motion(int axis);                                 // ":K"
+    void instant_stop(int axis);                                // ":L"
+    void set_autoguide_speed(int axis, int speed_code);         // ":P" 0=1x..4=0.125x
+    uint32_t get_feature(int axis, uint32_t inquiry);           // ":q" (features / home index)
+    void set_feature(int axis, uint32_t command);               // ":W" (reset home index etc.)
 
     // Nibble-swapped hex encode/decode per the MC data format
     // (0x123456 <-> "563412", 0x12 <-> "12").
@@ -133,4 +129,4 @@ private:
     std::unique_ptr<Impl> pimpl_;
 };
 
-} // namespace alpacacore::vendor::skywatcher
+}  // namespace alpacacore::vendor::skywatcher

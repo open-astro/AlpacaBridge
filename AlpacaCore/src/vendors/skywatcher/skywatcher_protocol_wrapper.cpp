@@ -28,6 +28,7 @@
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
+
 #include <filesystem>
 #endif
 
@@ -59,9 +60,7 @@ int hex_nibble(char c) {
     return -1;
 }
 
-char nibble_hex(uint32_t v) {
-    return static_cast<char>(v < 10 ? '0' + v : 'A' + (v - 10));
-}
+char nibble_hex(uint32_t v) { return static_cast<char>(v < 10 ? '0' + v : 'A' + (v - 10)); }
 
 std::string format_mc_version(const std::string& data) {
     // ":e" replies with 6 hex chars. TODO: validate the byte order of the
@@ -93,7 +92,13 @@ std::string format_mc_version(const std::string& data) {
 // seen on Wave 100i Wi-Fi as ':f' answered by a bare '='). -1 = unknown.
 int expected_reply_data_len(char command) {
     switch (command) {
-        case 'e': case 'a': case 'b': case 'j': case 'h': case 'i': case 'D':
+        case 'e':
+        case 'a':
+        case 'b':
+        case 'j':
+        case 'h':
+        case 'i':
+        case 'D':
         case 'q':
             return 6;
         case 'f':
@@ -102,8 +107,18 @@ int expected_reply_data_len(char command) {
             return 2;
         case 'c':
             return -1;
-        case 'E': case 'F': case 'G': case 'S': case 'I': case 'J': case 'K':
-        case 'L': case 'O': case 'P': case 'V': case 'W':
+        case 'E':
+        case 'F':
+        case 'G':
+        case 'S':
+        case 'I':
+        case 'J':
+        case 'K':
+        case 'L':
+        case 'O':
+        case 'P':
+        case 'V':
+        case 'W':
             return 0;
         default:
             return -1;
@@ -123,7 +138,7 @@ std::string mc_error_message(const std::string& code) {
     return "Motor controller error code " + code;
 }
 
-} // namespace
+}  // namespace
 
 std::string SkyWatcherProtocolWrapper::encode_u24(uint32_t value) {
     // 0x123456 -> "563412": low byte first, each byte high-nibble-first.
@@ -145,8 +160,9 @@ uint32_t SkyWatcherProtocolWrapper::decode_u24(const std::string& data) {
     // "563412" -> bytes 0x56, 0x34, 0x12 -> 0x123456
     static constexpr int kByteShift[3] = {0, 8, 16};
     for (int b = 0; b < 3; ++b) {
-        int hi = hex_nibble(data[static_cast<std::size_t>(b * 2)]);
-        int lo = hex_nibble(data[static_cast<std::size_t>(b * 2 + 1)]);
+        auto idx = static_cast<std::size_t>(b) * 2;
+        int hi = hex_nibble(data[idx]);
+        int lo = hex_nibble(data[idx + 1]);
         if (hi < 0 || lo < 0) {
             throw AlpacaException("Motor controller reply is not hex: '" + data + "'");
         }
@@ -168,7 +184,7 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
         return "";
     }
 
-    struct termios tty{};
+    struct termios tty {};
     if (tcgetattr(fd, &tty) != 0) {
         close(fd);
         return "";
@@ -239,13 +255,12 @@ bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
     // Wave-series mounts expose an STM32 CDC-ACM virtual COM port (0483:5740,
     // /dev/ttyACM*); also accept the classic EQDIRECT cable chips.
     return alpacacore::util::usb_tty_descriptor_matches(
-        *descriptor, {"STM32", "STMicroelectronics", "0483", "Prolific", "PL2303", "067b",
-                      "FTDI", "CP210", "CH340", "CH341", "1a86", "Silicon_Labs",
-                      "USB_Serial", "USB-Serial"});
+        *descriptor, {"STM32", "STMicroelectronics", "0483", "Prolific", "PL2303", "067b", "FTDI", "CP210", "CH340",
+                      "CH341", "1a86", "Silicon_Labs", "USB_Serial", "USB-Serial"});
 }
 #endif  // _WIN32
 
-} // namespace
+}  // namespace
 
 std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
     std::vector<SkyWatcherPortInfo> results;
@@ -258,8 +273,7 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
         for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
             const std::string& name = sym.name;
             bool is_candidate =
-                (name.find("STM32") != std::string::npos) ||
-                (name.find("STMicroelectronics") != std::string::npos) ||
+                (name.find("STM32") != std::string::npos) || (name.find("STMicroelectronics") != std::string::npos) ||
                 (name.find("Prolific") != std::string::npos) || (name.find("PL2303") != std::string::npos) ||
                 (name.find("067b") != std::string::npos) || (name.find("FTDI") != std::string::npos) ||
                 (name.find("CP210") != std::string::npos) || (name.find("CH340") != std::string::npos) ||
@@ -271,11 +285,22 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
-            ALPACA_LOG_INFO("SkyWatcher", "Probing " + resolved + " (" + name + ")...");
+            {
+                std::string msg = "Probing ";
+                msg += resolved;
+                msg += " (";
+                msg += name;
+                msg += ")...";
+                ALPACA_LOG_INFO("SkyWatcher", msg);
+            }
             std::string fw = probe_skywatcher_port(resolved, 9600);
             if (!fw.empty()) {
-                ALPACA_LOG_INFO("SkyWatcher", "Found Sky-Watcher motor controller on " + resolved +
-                                                  " (MC firmware " + fw + ")");
+                std::string msg = "Found Sky-Watcher motor controller on ";
+                msg += resolved;
+                msg += " (MC firmware ";
+                msg += fw;
+                msg += ")";
+                ALPACA_LOG_INFO("SkyWatcher", msg);
                 results.push_back({resolved, name, fw});
             }
         }
@@ -302,8 +327,12 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
         ALPACA_LOG_INFO("SkyWatcher", "Probing " + resolved + "...");
         std::string fw = probe_skywatcher_port(resolved, 9600);
         if (!fw.empty()) {
-            ALPACA_LOG_INFO("SkyWatcher", "Found Sky-Watcher motor controller on " + resolved +
-                                              " (MC firmware " + fw + ")");
+            std::string msg = "Found Sky-Watcher motor controller on ";
+            msg += resolved;
+            msg += " (MC firmware ";
+            msg += fw;
+            msg += ")";
+            ALPACA_LOG_INFO("SkyWatcher", msg);
             results.push_back({resolved, "", fw});
         }
     }
@@ -332,7 +361,7 @@ std::string probe_skywatcher_udp(const std::string& host, int port, int timeout_
     }
     timeval tv{};
     tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    tv.tv_usec = static_cast<long>(timeout_ms % 1000) * 1000;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     const char probe[] = ":e1\r";
@@ -367,7 +396,7 @@ void broadcast_discover(std::vector<SkyWatcherHostInfo>& results, int port, int 
     setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on));
     timeval tv{};
     tv.tv_sec = 0;
-    tv.tv_usec = 200 * 1000;
+    tv.tv_usec = static_cast<long>(200) * 1000;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     const char probe[] = ":e1\r";
@@ -427,7 +456,7 @@ void broadcast_discover(std::vector<SkyWatcherHostInfo>& results, int port, int 
 }
 #endif  // _WIN32
 
-} // namespace
+}  // namespace
 
 std::vector<SkyWatcherHostInfo> discover_skywatcher_hosts(int timeout_ms) {
     std::vector<SkyWatcherHostInfo> results;
@@ -452,9 +481,7 @@ class SkyWatcherProtocolWrapper::Impl {
 public:
     Impl() = default;
 
-    ~Impl() {
-        disconnect();
-    }
+    ~Impl() { disconnect(); }
 
     bool connect(const ConnectionInfo& info) {
         std::lock_guard<std::mutex> lock(io_mutex_);
@@ -488,8 +515,7 @@ public:
     std::string exchange(const std::string& frame, int timeout_ms, int expected_data_len = -1) {
         std::lock_guard<std::mutex> lock(io_mutex_);
         if (!connected_) {
-            throw AlpacaException("Not connected to Sky-Watcher motor controller",
-                                  AlpacaError::NotConnected);
+            throw AlpacaException("Not connected to Sky-Watcher motor controller", AlpacaError::NotConnected);
         }
         if (info_.type == ConnectionType::Serial) {
             return exchange_serial(frame, timeout_ms);
@@ -497,9 +523,7 @@ public:
         return exchange_udp(frame, timeout_ms, expected_data_len);
     }
 
-    int default_timeout() const {
-        return info_.response_timeout_ms > 0 ? info_.response_timeout_ms : 1000;
-    }
+    int default_timeout() const { return info_.response_timeout_ms > 0 ? info_.response_timeout_ms : 1000; }
 
 private:
     void disconnect_locked() {
@@ -523,7 +547,7 @@ private:
             ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + std::strerror(errno));
             return false;
         }
-        struct termios tty{};
+        struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
@@ -626,7 +650,8 @@ private:
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         while (std::chrono::steady_clock::now() < deadline) {
             char ch = 0;
-            ssize_t r = read(serial_fd_, &ch, 1);
+            // Serialized transport: one in-flight command per link, bounded by VTIME.
+            ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
             if (r == 1) {
                 if (ch == kFrameEnd) {
                     return reply;
@@ -669,8 +694,7 @@ private:
                 // (every send then fails ENETUNREACH even after the link is
                 // back). Rebuild the socket and retry instead of wedging until
                 // the client power-cycles the connection.
-                if ((errno == ENETUNREACH || errno == EADDRNOTAVAIL || errno == EHOSTUNREACH) &&
-                    rebuild_udp_socket() &&
+                if ((errno == ENETUNREACH || errno == EADDRNOTAVAIL || errno == EHOSTUNREACH) && rebuild_udp_socket() &&
                     send(socket_fd_, frame.data(), frame.size(), MSG_NOSIGNAL) >= 0) {
                     ALPACA_LOG_WARN("SkyWatcher",
                                     "UDP socket went stale (interface address changed); rebuilt and resent");
@@ -680,8 +704,8 @@ private:
             }
             auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
             while (true) {
-                auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    deadline - std::chrono::steady_clock::now());
+                auto remaining =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
                 if (remaining.count() <= 0) {
                     break;  // timeout — retransmit
                 }
@@ -690,7 +714,9 @@ private:
                 tv.tv_usec = static_cast<suseconds_t>((remaining.count() % 1000) * 1000);
                 setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
                 char buf[64] = {};
-                ssize_t n = recv(socket_fd_, buf, sizeof(buf) - 1, 0);
+                // Serialized transport: bounded by SO_RCVTIMEO.
+                ssize_t n =
+                    recv(socket_fd_, buf, sizeof(buf) - 1, 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
                 if (n > 0) {
                     std::string reply(buf, static_cast<std::size_t>(n));
                     while (!reply.empty() && (reply.back() == '\r' || reply.back() == '\n')) {
@@ -700,8 +726,7 @@ private:
                         return reply;  // error replies are always 2 data chars
                     }
                     if (!reply.empty() && reply[0] == kReplyOk &&
-                        (expected_data_len < 0 ||
-                         static_cast<int>(reply.size()) - 1 == expected_data_len)) {
+                        (expected_data_len < 0 || static_cast<int>(reply.size()) - 1 == expected_data_len)) {
                         return reply;
                     }
                     // Wrong shape for THIS command (a mis-paired duplicate ACK
@@ -732,7 +757,9 @@ private:
     void drain_udp() {
         char buf[64];
         while (true) {
-            ssize_t n = recv(socket_fd_, buf, sizeof(buf), MSG_DONTWAIT);
+            // MSG_DONTWAIT: non-blocking drain, never actually blocks.
+            ssize_t n =
+                recv(socket_fd_, buf, sizeof(buf), MSG_DONTWAIT);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
             if (n <= 0) {
                 break;
             }
@@ -782,9 +809,9 @@ private:
         while (std::chrono::steady_clock::now() < deadline) {
             timeval tv{};
             tv.tv_sec = 0;
-            tv.tv_usec = 50 * 1000;
+            tv.tv_usec = static_cast<long>(50) * 1000;
             setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            recv(socket_fd_, buf, sizeof(buf), 0);
+            recv(socket_fd_, buf, sizeof(buf), 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
         }
     }
 #endif
@@ -811,17 +838,11 @@ SkyWatcherProtocolWrapper& SkyWatcherProtocolWrapper::instance() {
     return wrapper;
 }
 
-bool SkyWatcherProtocolWrapper::connect(const ConnectionInfo& info) {
-    return pimpl_->connect(info);
-}
+bool SkyWatcherProtocolWrapper::connect(const ConnectionInfo& info) { return pimpl_->connect(info); }
 
-void SkyWatcherProtocolWrapper::disconnect() {
-    pimpl_->disconnect();
-}
+void SkyWatcherProtocolWrapper::disconnect() { pimpl_->disconnect(); }
 
-bool SkyWatcherProtocolWrapper::is_connected() const {
-    return pimpl_->is_connected();
-}
+bool SkyWatcherProtocolWrapper::is_connected() const { return pimpl_->is_connected(); }
 
 std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, const std::string& data,
                                                     int timeout_ms_override) {
@@ -842,11 +863,11 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
         return reply.substr(1);
     }
     if (!reply.empty() && reply[0] == kReplyError) {
-        throw AlpacaException("Motor controller rejected '" + std::string(1, command) +
-                              std::to_string(axis) + "': " + mc_error_message(reply.substr(1)));
+        throw AlpacaException("Motor controller rejected '" + std::string(1, command) + std::to_string(axis) +
+                              "': " + mc_error_message(reply.substr(1)));
     }
-    throw AlpacaException("Malformed motor controller reply to '" + std::string(1, command) +
-                          std::to_string(axis) + "': '" + reply + "'");
+    throw AlpacaException("Malformed motor controller reply to '" + std::string(1, command) + std::to_string(axis) +
+                          "': '" + reply + "'");
 }
 
 std::string SkyWatcherProtocolWrapper::send_raw_command(const std::string& frame, int timeout_ms_override) {
@@ -869,8 +890,7 @@ AxisParameters SkyWatcherProtocolWrapper::get_axis_parameters(int axis) {
     params.timer_frequency = decode_u24(send_command('b', axis));
     params.high_speed_ratio = decode_u24(send_command('g', axis) + "0000") & 0xFF;
     if (params.counts_per_revolution == 0 || params.timer_frequency == 0) {
-        throw AlpacaException("Motor controller reported zero CPR or timer frequency on axis " +
-                              std::to_string(axis));
+        throw AlpacaException("Motor controller reported zero CPR or timer frequency on axis " + std::to_string(axis));
     }
     if (params.high_speed_ratio == 0) {
         params.high_speed_ratio = 1;
@@ -878,9 +898,7 @@ AxisParameters SkyWatcherProtocolWrapper::get_axis_parameters(int axis) {
     return params;
 }
 
-uint32_t SkyWatcherProtocolWrapper::inquire_position(int axis) {
-    return decode_u24(send_command('j', axis));
-}
+uint32_t SkyWatcherProtocolWrapper::inquire_position(int axis) { return decode_u24(send_command('j', axis)); }
 
 AxisStatus SkyWatcherProtocolWrapper::inquire_status(int axis) {
     std::string data = send_command('f', axis);
@@ -904,13 +922,9 @@ AxisStatus SkyWatcherProtocolWrapper::inquire_status(int axis) {
     return status;
 }
 
-void SkyWatcherProtocolWrapper::set_position(int axis, uint32_t counts) {
-    send_command('E', axis, encode_u24(counts));
-}
+void SkyWatcherProtocolWrapper::set_position(int axis, uint32_t counts) { send_command('E', axis, encode_u24(counts)); }
 
-void SkyWatcherProtocolWrapper::initialization_done(int axis) {
-    send_command('F', axis);
-}
+void SkyWatcherProtocolWrapper::initialization_done(int axis) { send_command('F', axis); }
 
 void SkyWatcherProtocolWrapper::set_motion_mode(int axis, char mode, char direction) {
     send_command('G', axis, std::string(1, mode) + std::string(1, direction));
@@ -924,17 +938,11 @@ void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset) {
     send_command('I', axis, encode_u24(t1_preset));
 }
 
-void SkyWatcherProtocolWrapper::start_motion(int axis) {
-    send_command('J', axis);
-}
+void SkyWatcherProtocolWrapper::start_motion(int axis) { send_command('J', axis); }
 
-void SkyWatcherProtocolWrapper::stop_motion(int axis) {
-    send_command('K', axis);
-}
+void SkyWatcherProtocolWrapper::stop_motion(int axis) { send_command('K', axis); }
 
-void SkyWatcherProtocolWrapper::instant_stop(int axis) {
-    send_command('L', axis);
-}
+void SkyWatcherProtocolWrapper::instant_stop(int axis) { send_command('L', axis); }
 
 void SkyWatcherProtocolWrapper::set_autoguide_speed(int axis, int speed_code) {
     if (speed_code < 0 || speed_code > 4) {
@@ -951,4 +959,4 @@ void SkyWatcherProtocolWrapper::set_feature(int axis, uint32_t command) {
     send_command('W', axis, encode_u24(command));
 }
 
-} // namespace alpacacore::vendor::skywatcher
+}  // namespace alpacacore::vendor::skywatcher

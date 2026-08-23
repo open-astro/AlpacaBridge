@@ -14,6 +14,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
+
 #include <memory>
 #include <optional>
 
@@ -26,19 +27,14 @@ namespace alpacacore::vendor::skywatcher {
 // stores no site or time information, so the site must be provided via
 // configuration or the SiteLatitude/SiteLongitude setters.
 
-std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    std::optional<double> site_latitude_deg = std::nullopt,
-    std::optional<double> site_longitude_deg = std::nullopt,
-    std::optional<double> site_elevation_m = std::nullopt);
+std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                             std::optional<double> site_latitude_deg = std::nullopt,
+                                                             std::optional<double> site_longitude_deg = std::nullopt,
+                                                             std::optional<double> site_elevation_m = std::nullopt);
 
 // Auto-detect: scan serial ports first, then Wi-Fi discovery (UDP 11880).
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(
-    int device_number,
-    int mount_index = 0,
-    std::optional<double> site_latitude_deg = std::nullopt,
-    std::optional<double> site_longitude_deg = std::nullopt,
-    std::optional<double> site_elevation_m = std::nullopt);
+    int device_number, int mount_index = 0, std::optional<double> site_latitude_deg = std::nullopt,
+    std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt);
 
-} // namespace alpacacore::vendor::skywatcher
+}  // namespace alpacacore::vendor::skywatcher

@@ -207,8 +207,7 @@ void Server::run_server() {
             util::SocketHandle fd = socket(AF_INET, SOCK_STREAM, 0);
             if (fd != util::kInvalidSocket) {
                 int ropt = 1;
-                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&ropt),
-                           sizeof(ropt));
+                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&ropt), sizeof(ropt));
                 if (bind(fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) == 0 &&
                     listen(fd, 10) == 0) {
                     server_fd_.store(fd);
@@ -222,7 +221,7 @@ void Server::run_server() {
         }
         return false;
     };
-    
+
     // Start worker thread pool for handling concurrent requests
     std::size_t pool_size = config_.thread_pool_size();
     worker_threads_.reserve(pool_size);

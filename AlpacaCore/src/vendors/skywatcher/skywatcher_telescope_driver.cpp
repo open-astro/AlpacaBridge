@@ -91,17 +91,14 @@ double wrap_hour_angle(double hours) {
     return wrapped;
 }
 
-double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
-                                         double longitude_degrees) {
+double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time, double longitude_degrees) {
     using namespace std::chrono;
     // Sub-second resolution matters: whole-second truncation stepped LST (and
     // so RA) in 15 arcsec jumps, +-0.1 RA-s/s of jitter over a 10 s window.
-    double days_since_epoch =
-        duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
+    double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
     double jd = 2440587.5 + days_since_epoch;
     double t = (jd - 2451545.0) / 36525.0;
-    double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0)
-                  + 0.000387933 * t * t - (t * t * t) / 38710000.0;
+    double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0) + 0.000387933 * t * t - (t * t * t) / 38710000.0;
     double lst = gmst + longitude_degrees;
     lst = std::fmod(lst, 360.0);
     if (lst < 0.0) {
@@ -121,13 +118,12 @@ uint32_t degrees_to_counts(double degrees, uint32_t cpr) {
     return (kHomeCounts + static_cast<uint32_t>(delta)) & kCountsMask;
 }
 
-} // namespace
+}  // namespace
 
 class SkyWatcherTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
 public:
     SkyWatcherTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
-                              std::optional<double> site_latitude_deg,
-                              std::optional<double> site_longitude_deg,
+                              std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                               std::optional<double> site_elevation_m)
         : AsyncConnectable("SkyWatcher"),
           device_number_(device_number),
@@ -146,8 +142,10 @@ public:
         cancel_async_tasks();
         if (connected_) {
             try {
-                set_connected(false);
-            } catch (...) {
+                // Qualified: virtual dispatch is already gone in a destructor.
+                SkyWatcherTelescopeDriver::set_connected(false);
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                // Destructor: nothing useful to do with a disconnect failure.
             }
         }
     }
@@ -158,17 +156,11 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
 
-    std::string get_unique_id() const override {
-        return "SkyWatcher_" + std::to_string(device_number_);
-    }
+    std::string get_unique_id() const override { return "SkyWatcher_" + std::to_string(device_number_); }
 
-    std::string get_description() const override {
-        return "Sky-Watcher Motor Controller Mount Driver";
-    }
+    std::string get_description() const override { return "Sky-Watcher Motor Controller Mount Driver"; }
 
-    std::string get_driver_info() const override {
-        return "AlpacaCore SkyWatcher Driver v0.1";
-    }
+    std::string get_driver_info() const override { return "AlpacaCore SkyWatcher Driver v0.1"; }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
@@ -222,7 +214,7 @@ public:
                 std::string version = protocol.get_motor_board_version();
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 firmware_cache_ = version;
-            } catch (...) {
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
                 // TODO: Confirm ":e" reliability on Wave 100i over both transports.
             }
 
@@ -257,14 +249,16 @@ public:
             // ConformU fast-response targets.
             try {
                 refresh_position_cache_locked(true);
-            } catch (...) {
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                // Cache warm-up only; reads will retry on demand.
             }
         } else {
             // Best effort: never leave an axis moving on disconnect.
             try {
                 protocol.stop_motion(kAxisRa);
                 protocol.stop_motion(kAxisDec);
-            } catch (...) {
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                // Best effort; status polling still reports the true state.
             }
             protocol.disconnect();
             connected_ = false;
@@ -392,8 +386,7 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
-            !get_slewing_locked()) {
+        if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
             return std::clamp(target_dec_degrees_, -90.0, 90.0);
         }
         refresh_position_cache_locked(false);
@@ -445,8 +438,7 @@ public:
         double ra_fraction = rate.ra / kSiderealDegPerSec;
         double dec_fraction = rate.dec / kSiderealDegPerSec;
         if (ra_fraction < 0.0 || ra_fraction > 1.0 || dec_fraction < 0.0 || dec_fraction > 1.0) {
-            throw AlpacaException("Guide rate must be between 0 and 1x sidereal",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
         }
         guide_rate_ = rate;
     }
@@ -454,8 +446,7 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
-            !get_slewing_locked()) {
+        if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
             return target_ra_hours_;
         }
         refresh_position_cache_locked(false);
@@ -521,8 +512,7 @@ public:
 
     void set_site_elevation(double elevation) override {
         if (elevation < -300.0 || elevation > 10000.0) {
-            throw AlpacaException("SiteElevation must be in range -300 to 10000 meters",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("SiteElevation must be in range -300 to 10000 meters", AlpacaError::InvalidValue);
         }
         site_elevation_m_ = elevation;
     }
@@ -534,8 +524,7 @@ public:
 
     void set_site_latitude(double latitude) override {
         if (latitude < -90.0 || latitude > 90.0) {
-            throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
         site_latitude_ = latitude;
@@ -548,8 +537,7 @@ public:
 
     void set_site_longitude(double longitude) override {
         if (longitude < -180.0 || longitude > 180.0) {
-            throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
         site_longitude_ = longitude;
@@ -570,8 +558,7 @@ public:
 
     void set_target_declination(double dec) override {
         if (dec < -90.0 || dec > 90.0) {
-            throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
         target_dec_degrees_ = dec;
         target_set_ = true;
@@ -586,8 +573,7 @@ public:
 
     void set_target_right_ascension(double ra) override {
         if (ra < 0.0 || ra >= 24.0) {
-            throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours", AlpacaError::InvalidValue);
         }
         target_ra_hours_ = ra;
         target_set_ = true;
@@ -683,8 +669,7 @@ public:
                     // Verify we actually landed at home (an AbortSlew mid-home
                     // stops the axes wherever they are) before claiming AtHome.
                     refresh_position_cache_locked(true);
-                    at_home_ = std::abs(cached_ra_axis_deg_) < 0.1 &&
-                               std::abs(cached_dec_axis_deg_) < 0.1;
+                    at_home_ = std::abs(cached_ra_axis_deg_) < 0.1 && std::abs(cached_dec_axis_deg_) < 0.1;
                 }
                 homing_ = false;
             } catch (const std::exception& ex) {
@@ -850,8 +835,8 @@ public:
         const bool restore_tracking = ra_rate_adjust;
         const double dec_rate = dec_rate_deg_per_sec;
         const double ra_pulse_rate = ra_pulse_rate_deg_per_sec;
-        pulse_task_thread_ = std::thread([this, axis, duration, restore_tracking, direction, dec_rate,
-                                          ra_pulse_rate, ra_restore_rate_deg_per_sec]() {
+        pulse_task_thread_ = std::thread([this, axis, duration, restore_tracking, direction, dec_rate, ra_pulse_rate,
+                                          ra_restore_rate_deg_per_sec]() {
             // PulseGuide is an asynchronous initiator (ITelescopeV4): the axis
             // dispatch (which can stop-and-wait a ramping axis, plus UDP
             // retries) runs here so pulse_guide() returns inside the STANDARD
@@ -884,8 +869,7 @@ public:
                 if (restore_tracking) {
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped.
-                    proto.set_step_period(kAxisRa,
-                                          tracking_step_period_for(ra_restore_rate_deg_per_sec));
+                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec));
                     std::lock_guard<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
                 } else {
@@ -928,11 +912,9 @@ public:
                 }
             }
             if (!stopped) {
-                ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " +
-                                                   std::to_string(kStopAttempts) + " attempts on axis " +
-                                                   std::to_string(axis) +
-                                                   " — axis may still be moving (mount runaway risk): " +
-                                                   last_error);
+                ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
+                                                   " attempts on axis " + std::to_string(axis) +
+                                                   " — axis may still be moving (mount runaway risk): " + last_error);
                 std::lock_guard<std::mutex> lock(mutex_);
                 pulse_guiding_active_ = false;
                 if (connected_) {
@@ -1200,7 +1182,7 @@ public:
                         stopped = true;
                         break;
                     }
-                } catch (...) {
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
                     // Transient poll failure; keep trying until the deadline.
                 }
                 if (!task_wait_for(std::chrono::milliseconds(50), stop_task_cancel_)) {
@@ -1359,8 +1341,7 @@ private:
         // steady under tracking (no LST-vs-stale-HA sawtooth) and resolves
         // sub-count offset rates. Goto/stop paths zero the commanded rates,
         // so a slewing or idle axis reports the raw cached angle.
-        double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                  last_position_update_).count();
+        double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - last_position_update_).count();
         dt = std::clamp(dt, 0.0, 5.0);
         double a1 = cached_ra_axis_deg_ + cmd_axis_rate_deg_s_[0] * dt;
         double a2 = cached_dec_axis_deg_ + cmd_axis_rate_deg_s_[1] * dt;
@@ -1382,9 +1363,9 @@ private:
     }
 
     std::pair<double, double> ra_dec_to_axis_degrees_locked(double ra, double dec,
-                                                             double lst_advance_hours = 0.0) const {
-        double lst = compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_) +
-                     lst_advance_hours;
+                                                            double lst_advance_hours = 0.0) const {
+        double lst =
+            compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_) + lst_advance_hours;
         double ha = wrap_hour_angle(lst - ra);
         double dec_mech = hemisphere_south_locked() ? -dec : dec;
         double a1 = 0.0;
@@ -1407,12 +1388,12 @@ private:
         double ha_rad = wrap_hour_angle(lst - ra) * kHoursToDegrees * std::numbers::pi / 180.0;
         double dec_rad = dec * std::numbers::pi / 180.0;
         double lat_rad = site_latitude_ * std::numbers::pi / 180.0;
-        double sin_alt = std::sin(dec_rad) * std::sin(lat_rad) +
-                         std::cos(dec_rad) * std::cos(lat_rad) * std::cos(ha_rad);
+        double sin_alt =
+            std::sin(dec_rad) * std::sin(lat_rad) + std::cos(dec_rad) * std::cos(lat_rad) * std::cos(ha_rad);
         sin_alt = std::clamp(sin_alt, -1.0, 1.0);
         double alt_rad = std::asin(sin_alt);
-        double cos_az = (std::sin(dec_rad) - std::sin(alt_rad) * std::sin(lat_rad)) /
-                        (std::cos(alt_rad) * std::cos(lat_rad));
+        double cos_az =
+            (std::sin(dec_rad) - std::sin(alt_rad) * std::sin(lat_rad)) / (std::cos(alt_rad) * std::cos(lat_rad));
         cos_az = std::clamp(cos_az, -1.0, 1.0);
         double az_deg = std::acos(cos_az) * 180.0 / std::numbers::pi;
         if (std::sin(ha_rad) > 0.0) {
@@ -1424,8 +1405,6 @@ private:
     // ── Position cache ──────────────────────────────────────────────────────
 
     void invalidate_position_cache_locked() const { position_cache_valid_ = false; }
-
-
 
     void refresh_position_cache_locked(bool force) const {
         auto now = std::chrono::steady_clock::now();
@@ -1513,9 +1492,12 @@ private:
     // Base drive rate for the selected ASCOM DriveRate.
     double base_tracking_rate_locked() const {
         switch (tracking_rate_) {
-            case 1: return kLunarDegPerSec;
-            case 2: return kSolarDegPerSec;
-            default: return kSiderealDegPerSec;
+            case 1:
+                return kLunarDegPerSec;
+            case 2:
+                return kSolarDegPerSec;
+            default:
+                return kSiderealDegPerSec;
         }
     }
 
@@ -1527,8 +1509,7 @@ private:
     // stopped/reversed axis) needs a full stop-and-restart.
     void apply_ra_tracking_rate_locked(double previous_effective) {
         double eff = effective_ra_rate_locked();
-        if (eff != 0.0 && previous_effective != 0.0 &&
-            (eff > 0.0) == (previous_effective > 0.0)) {
+        if (eff != 0.0 && previous_effective != 0.0 && (eff > 0.0) == (previous_effective > 0.0)) {
             auto& protocol = SkyWatcherProtocolWrapper::instance();
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             cmd_axis_rate_deg_s_[0] = eff;  // keep dead reckoning on the new rate
@@ -1597,8 +1578,7 @@ private:
     void dispatch_predicted_goto_locked(double ra, double dec) {
         refresh_position_cache_locked(true);
         auto [p1, p2] = ra_dec_to_axis_degrees_locked(ra, dec);
-        double dist = std::max(std::abs(p1 - cached_ra_axis_deg_),
-                               std::abs(p2 - cached_dec_axis_deg_));
+        double dist = std::max(std::abs(p1 - cached_ra_axis_deg_), std::abs(p2 - cached_dec_axis_deg_));
         double est_seconds = dist / kMaxMoveAxisRateDegPerSec + kGotoRampSeconds + kTrackingResumeSeconds;
         auto [t1, t2] = ra_dec_to_axis_degrees_locked(ra, dec, est_seconds * kLstHoursPerSecond);
         dispatch_goto_locked(t1, t2);
@@ -1616,8 +1596,7 @@ private:
             refresh_position_cache_locked(true);
             // Judge the landing against the target ADVANCED by the resume
             // window -- the mount deliberately lands ahead (see above).
-            auto [n1, n2] = ra_dec_to_axis_degrees_locked(
-                ra, dec, kTrackingResumeSeconds * kLstHoursPerSecond);
+            auto [n1, n2] = ra_dec_to_axis_degrees_locked(ra, dec, kTrackingResumeSeconds * kLstHoursPerSecond);
             if (std::abs(n1 - cached_ra_axis_deg_) <= kLandingDeadbandDeg &&
                 std::abs(n2 - cached_dec_axis_deg_) <= kLandingDeadbandDeg) {
                 break;
@@ -1719,7 +1698,7 @@ private:
             // while either axis is running in GOTO mode. A tracking axis
             // (speed mode) is NOT slewing.
             slewing_cached_ = (ra.running && !ra.speed_mode) || (dec.running && !dec.speed_mode);
-        } catch (...) {
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
             // Keep last known state if polling times out.
         }
         if (was_slewing && !slewing_cached_) {
@@ -1785,8 +1764,7 @@ private:
             up[i] = read_idx(i) == 0;
         }
         refresh_position_cache_locked(true);
-        dispatch_goto_locked(axis_deg(0) + (up[0] ? -5.0 : 5.0),
-                             axis_deg(1) + (up[1] ? -5.0 : 5.0));
+        dispatch_goto_locked(axis_deg(0) + (up[0] ? -5.0 : 5.0), axis_deg(1) + (up[1] ? -5.0 : 5.0));
         autohome_wait_axes_stopped(lock);
 
         // Phase 2: if the 5-degree step swept PAST the index (latched), move a
@@ -1835,8 +1813,7 @@ private:
                         edge[i] = true;
                         edge_at[i] = std::chrono::steady_clock::now();
                     }
-                    if (edge[i] &&
-                        std::chrono::steady_clock::now() - edge_at[i] > std::chrono::seconds(3)) {
+                    if (edge[i] && std::chrono::steady_clock::now() - edge_at[i] > std::chrono::seconds(3)) {
                         stop_axis_and_wait_locked(axes[i]);
                         reset_idx(i);
                         up[i] = true;
@@ -1872,14 +1849,12 @@ private:
             }
             autohome_sleep(lock, std::chrono::milliseconds(150));
         }
-        ALPACA_LOG_INFO("SkyWatcher",
-                        "AutoHome: index latched at RA=" + std::to_string(home_idx[0]) +
-                            " Dec=" + std::to_string(home_idx[1]));
+        ALPACA_LOG_INFO("SkyWatcher", "AutoHome: index latched at RA=" + std::to_string(home_idx[0]) +
+                                          " Dec=" + std::to_string(home_idx[1]));
 
         // Phase 5+6: back 10 degrees below the latched mark, then approach it
         // from below and stamp the position registers to the home offset.
-        dispatch_goto_locked(idx_to_deg(0, home_idx[0]) - 10.0,
-                             idx_to_deg(1, home_idx[1]) - 10.0);
+        dispatch_goto_locked(idx_to_deg(0, home_idx[0]) - 10.0, idx_to_deg(1, home_idx[1]) - 10.0);
         autohome_wait_axes_stopped(lock);
         dispatch_goto_locked(idx_to_deg(0, home_idx[0]), idx_to_deg(1, home_idx[1]));
         autohome_wait_axes_stopped(lock);
@@ -2043,8 +2018,7 @@ private:
     mutable bool parked_ = false;
     mutable bool at_home_ = false;
     mutable bool slewing_cached_ = false;
-    mutable std::chrono::steady_clock::time_point slew_force_until_ =
-        std::chrono::steady_clock::time_point::min();
+    mutable std::chrono::steady_clock::time_point slew_force_until_ = std::chrono::steady_clock::time_point::min();
     mutable std::chrono::steady_clock::time_point position_override_until_ =
         std::chrono::steady_clock::time_point::min();
     mutable bool manual_axis_slewing_[2] = {false, false};
@@ -2063,7 +2037,7 @@ private:
     // next refinement goto fought its pulse-guide test for the motors).
     mutable bool goto_in_progress_ = false;
     bool has_home_indexer_ = false;
-    int tracking_rate_ = 0;                       // ASCOM DriveRate (0/1/2)
+    int tracking_rate_ = 0;                               // ASCOM DriveRate (0/1/2)
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     bool park_position_set_ = false;
     double park_ra_axis_deg_ = 0.0;
@@ -2085,58 +2059,51 @@ private:
     mutable std::atomic<bool> stop_task_cancel_{false};
 };
 
-std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m) {
-    return std::make_unique<SkyWatcherTelescopeDriver>(device_number, connection_info,
-                                                       site_latitude_deg, site_longitude_deg,
-                                                       site_elevation_m);
+std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                             std::optional<double> site_latitude_deg,
+                                                             std::optional<double> site_longitude_deg,
+                                                             std::optional<double> site_elevation_m) {
+    return std::make_unique<SkyWatcherTelescopeDriver>(device_number, connection_info, site_latitude_deg,
+                                                       site_longitude_deg, site_elevation_m);
 }
 
-std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(
-    int device_number,
-    int mount_index,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m) {
-
+std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_number, int mount_index,
+                                                                  std::optional<double> site_latitude_deg,
+                                                                  std::optional<double> site_longitude_deg,
+                                                                  std::optional<double> site_elevation_m) {
     auto ports = enumerate_skywatcher_ports();
     if (!ports.empty()) {
         if (mount_index < 0 || mount_index >= static_cast<int>(ports.size())) {
-            throw AlpacaException("Mount index " + std::to_string(mount_index) +
-                                  " out of range (found " + std::to_string(ports.size()) + " mount(s))");
+            throw AlpacaException("Mount index " + std::to_string(mount_index) + " out of range (found " +
+                                  std::to_string(ports.size()) + " mount(s))");
         }
         const auto& port = ports[static_cast<std::size_t>(mount_index)];
-        ALPACA_LOG_INFO("SkyWatcher", "Auto-detected mount on " + port.port_path +
-                        " (MC fw " + port.firmware_version + ")");
+        ALPACA_LOG_INFO("SkyWatcher",
+                        "Auto-detected mount on " + port.port_path + " (MC fw " + port.firmware_version + ")");
         ConnectionInfo conn;
         conn.type = ConnectionType::Serial;
         conn.port_path = port.port_path;
-        return create_skywatcher_telescope(device_number, conn, site_latitude_deg,
-                                           site_longitude_deg, site_elevation_m);
+        return create_skywatcher_telescope(device_number, conn, site_latitude_deg, site_longitude_deg,
+                                           site_elevation_m);
     }
 
     auto hosts = discover_skywatcher_hosts();
     if (hosts.empty()) {
-        throw AlpacaException("No Sky-Watcher motor controller found on any serial port or via "
-                              "Wi-Fi discovery (UDP 11880).");
+        throw AlpacaException(
+            "No Sky-Watcher motor controller found on any serial port or via "
+            "Wi-Fi discovery (UDP 11880).");
     }
     if (mount_index < 0 || mount_index >= static_cast<int>(hosts.size())) {
-        throw AlpacaException("Mount index " + std::to_string(mount_index) +
-                              " out of range (found " + std::to_string(hosts.size()) + " mount(s))");
+        throw AlpacaException("Mount index " + std::to_string(mount_index) + " out of range (found " +
+                              std::to_string(hosts.size()) + " mount(s))");
     }
     const auto& host = hosts[static_cast<std::size_t>(mount_index)];
-    ALPACA_LOG_INFO("SkyWatcher", "Auto-detected mount at " + host.host +
-                    " (MC fw " + host.firmware_version + ")");
+    ALPACA_LOG_INFO("SkyWatcher", "Auto-detected mount at " + host.host + " (MC fw " + host.firmware_version + ")");
     ConnectionInfo conn;
     conn.type = ConnectionType::Network;
     conn.host = host.host;
     conn.udp_port = host.udp_port;
-    return create_skywatcher_telescope(device_number, conn, site_latitude_deg,
-                                       site_longitude_deg, site_elevation_m);
+    return create_skywatcher_telescope(device_number, conn, site_latitude_deg, site_longitude_deg, site_elevation_m);
 }
 
-} // namespace alpacacore::vendor::skywatcher
+}  // namespace alpacacore::vendor::skywatcher

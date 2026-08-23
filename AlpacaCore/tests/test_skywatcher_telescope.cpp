@@ -42,7 +42,7 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int device_number = 0) 
     return sw::create_skywatcher_telescope(device_number, conn);
 }
 
-} // namespace
+}  // namespace
 
 TEST_CASE("SkyWatcher Telescope Driver - Defaults", "[skywatcher][telescope][unit]") {
     auto driver = make_driver(0);
@@ -98,12 +98,9 @@ TEST_CASE("SkyWatcher Telescope Driver - Not connected throws", "[skywatcher][te
     require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->get_is_pulse_guiding(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&] { driver->slew_to_coordinates(12.0, 45.0); },
-                         alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&] { driver->slew_to_coordinates_async(12.0, 45.0); },
-                         alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 45.0); },
-                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->slew_to_coordinates(12.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(12.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->sync_to_coordinates(12.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->move_axis(0, 1.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->pulse_guide(0, 100); }, alpacacore::AlpacaError::NotConnected);
@@ -128,8 +125,7 @@ TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][tele
 
     REQUIRE_THROWS(driver->get_target_right_ascension());
     REQUIRE_THROWS(driver->get_target_declination());
-    require_alpaca_error([&] { driver->get_target_right_ascension(); },
-                         alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
 
     driver->set_target_right_ascension(12.5);
     driver->set_target_declination(-30.25);
@@ -159,33 +155,20 @@ TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][tele
 TEST_CASE("SkyWatcher Telescope Driver - Value range validation", "[skywatcher][telescope][unit]") {
     auto driver = make_driver(0);
 
-    require_alpaca_error([&] { driver->set_target_right_ascension(-0.1); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_target_right_ascension(24.0); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_target_declination(-90.1); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_target_declination(90.1); },
-                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_right_ascension(-0.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_declination(-90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
 
-    require_alpaca_error([&] { driver->set_site_latitude(-90.1); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_site_latitude(90.1); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_site_longitude(-180.1); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_site_longitude(180.1); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_site_elevation(-300.1); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_site_elevation(10000.1); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_slew_settle_time(-1); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_aperture_diameter(-1.0); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->set_focal_length(-1.0); },
-                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_site_latitude(-90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_site_latitude(90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_site_longitude(-180.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_site_longitude(180.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_site_elevation(-300.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_site_elevation(10000.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_slew_settle_time(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_aperture_diameter(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_focal_length(-1.0); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - State machine", "[skywatcher][telescope][unit]") {
@@ -225,10 +208,8 @@ TEST_CASE("SkyWatcher Telescope Driver - Axis rate ranges", "[skywatcher][telesc
     // InvalidValue (not MethodNotImplemented) per ASCOM semantics.
     auto tertiary_ranges = driver->get_axis_rate_ranges(2);
     REQUIRE(tertiary_ranges.empty());
-    require_alpaca_error([&] { driver->get_axis_rate_range(2); },
-                         alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { driver->get_axis_rate_ranges(5); },
-                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->get_axis_rate_range(2); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->get_axis_rate_ranges(5); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - Unsupported methods", "[skywatcher][telescope][unit]") {
@@ -237,20 +218,15 @@ TEST_CASE("SkyWatcher Telescope Driver - Unsupported methods", "[skywatcher][tel
     // FindHome is supported (goto to the power-on index); unconnected it
     // must raise NotConnected like every other motion method.
     require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); },
-                         alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->slew_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&] { driver->slew_to_alt_az_async(45.0, 180.0); },
                          alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); },
-                         alpacacore::AlpacaError::MethodNotImplemented);
-    require_alpaca_error([&] { driver->set_side_of_pier(0); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
+    require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
     // Rate offsets are deferred (see AGENTS.md); drive rates are supported
     // and raise NotConnected when unconnected.
-    require_alpaca_error([&] { driver->set_declination_rate(1.0); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { driver->set_right_ascension_rate(1.0); },
                          alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_tracking_rate(1); },
-                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_tracking_rate(1); }, alpacacore::AlpacaError::NotConnected);
 }
