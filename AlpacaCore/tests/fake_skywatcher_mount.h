@@ -106,6 +106,13 @@ public:
         return (static_cast<double>(a.counts) - static_cast<double>(kHome)) * 360.0 / kCpr;
     }
 
+    /// Number of ":J" start commands received for an axis (regression: no
+    /// motor start may reach the controller after an AbortSlew returns).
+    int start_count(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).start_count;
+    }
+
     bool axis_running(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
@@ -155,6 +162,7 @@ private:
         // Home indexer: 0 = armed below the index, 0xFFFFFF = armed above,
         // else the latched count of the crossing.
         uint32_t indexer = 0;
+        int start_count = 0;
         int64_t home_index_counts = kHome;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
 
@@ -287,6 +295,7 @@ private:
                 return "=";
             }
             case 'J':
+                ++a.start_count;
                 a.running = true;
                 if (a.in_goto) {
                     a.goto_target &= 0xFFFFFF;

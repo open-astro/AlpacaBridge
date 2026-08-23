@@ -235,4 +235,35 @@ TEST_CASE("SkyWatcher async - reads stay responsive while an axis stop is rampin
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - AbortSlew during the dispatch stop-wait kills the goto", "[skywatcher][async]") {
+    // PR #216 review race: a goto dispatch stop-waits a ramping axis with the
+    // mutex released; an AbortSlew landing in that window must supersede the
+    // dispatch — the old code re-commanded the aborted goto afterwards.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);  // wide unlock window during dispatch
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);  // RA axis moving: dispatch must stop-wait it
+
+    double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 4.0 + 24.0, 24.0), 30.0);
+    // Abort while the dispatch is still ramping the RA axis down.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->abort_slew();
+    REQUIRE_FALSE(driver->get_slewing());
+    int ra_starts = mount.start_count(1);
+    int dec_starts = mount.start_count(2);
+
+    // The superseded dispatch must never re-command the goto — not even a
+    // brief start-then-stop burst: NO ":J" may reach the controller after
+    // AbortSlew returned (PR #216 round-2 finding).
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    REQUIRE(mount.start_count(1) == ra_starts);
+    REQUIRE(mount.start_count(2) == dec_starts);
+    REQUIRE_FALSE(driver->get_slewing());
+    REQUIRE_FALSE(mount.axis_running(1));
+    REQUIRE_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

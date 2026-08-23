@@ -674,6 +674,7 @@ public:
                 homing_ = false;
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", std::string("FindHome failed: ") + ex.what());
             } catch (...) {
                 homing_ = false;
@@ -741,6 +742,7 @@ public:
                 parking_ = false;
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Park failed: ") + ex.what());
             } catch (...) {
                 parking_ = false;
@@ -1001,11 +1003,13 @@ public:
                 goto_in_progress_ = false;
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Async slew failed: ") + ex.what());
             } catch (...) {
                 goto_in_progress_ = false;
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", "Async slew failed with unknown exception");
             }
         });
@@ -1046,8 +1050,10 @@ public:
         // ~79 arcsec return error together with the old post-sync freeze).
         const bool was_tracking = tracking_;
         if (was_tracking) {
-            ++motion_generation_;
-            stop_axis_and_wait_locked(lock, kAxisRa);
+            const uint64_t gen = ++motion_generation_;
+            if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
+                throw AlpacaException("Sync superseded by a concurrent motion command");
+            }
         }
         // Aim the frame at the expected restart moment (two ":E" writes plus
         // the tracking start sequence).
@@ -1235,6 +1241,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("AbortSlew");
+        // AbortSlew is itself a motion command: bump the generation so any
+        // stop-wait sleeping in an unlock window observes the supersession
+        // and its dispatch aborts BEFORE sending new motor commands (the
+        // cancel flag alone only catches it after the re-dispatch).
+        ++motion_generation_;
         auto& protocol = SkyWatcherProtocolWrapper::instance();
         // Instant stop (":L") rather than the ramped ":K": AbortSlew's contract
         // is to stop NOW, and the ramp-down from an 800x slew otherwise leaves
@@ -1463,24 +1474,33 @@ private:
     // concurrent Alpaca GET. The motion generation guards the unlock windows:
     // if another command claims the axes while we slept, the wait is no
     // longer ours to finish.
-    void stop_axis_and_wait_locked(std::unique_lock<std::mutex>& lock, int channel) {
+    // Returns true when the axis stopped and the caller's motion command is
+    // still the current one; false when the wait was superseded (a newer
+    // motion command bumped the generation — AbortSlew included — or the
+    // slew task was cancelled) — the caller MUST NOT issue further motor
+    // commands for its now-stale operation (PR #216 review: an AbortSlew
+    // landing in the unlock window otherwise saw its goto re-dispatched).
+    [[nodiscard]] bool stop_axis_and_wait_locked(std::unique_lock<std::mutex>& lock, int channel, uint64_t gen) {
         auto& protocol = SkyWatcherProtocolWrapper::instance();
         cmd_axis_rate_deg_s_[channel - 1] = 0.0;
         protocol.stop_motion(channel);
-        const uint64_t gen = motion_generation_;
         auto deadline = std::chrono::steady_clock::now() + kAxisStopTimeout;
         while (std::chrono::steady_clock::now() < deadline) {
+            // Generation only: slew_task_cancel_ stays stale-true between an
+            // AbortSlew and the next reap, and must not poison unrelated
+            // commands (ConformU: Tracking Write failed "Motion superseded").
+            // AbortSlew bumps the generation, which is the supersession signal.
+            if (motion_generation_ != gen) {
+                return false;
+            }
             AxisStatus status = protocol.inquire_status(channel);
             if (!status.running) {
-                return;
+                return true;
             }
             lock.unlock();
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             lock.lock();
             check_connected();
-            if (motion_generation_ != gen) {
-                return;  // superseded by a newer motion command
-            }
         }
         throw AlpacaException("Timed out waiting for axis " + std::to_string(channel) + " to stop");
     }
@@ -1489,8 +1509,10 @@ private:
     // wants the axis re-commanded from stopped).
     void start_speed_motion_locked(std::unique_lock<std::mutex>& lock, int channel, double signed_rate_deg_per_sec) {
         auto& protocol = SkyWatcherProtocolWrapper::instance();
-        ++motion_generation_;
-        stop_axis_and_wait_locked(lock, channel);
+        const uint64_t gen = ++motion_generation_;
+        if (!stop_axis_and_wait_locked(lock, channel, gen)) {
+            throw AlpacaException("Motion superseded before dispatch");
+        }
         const bool fast = std::abs(signed_rate_deg_per_sec) > kFastModeThresholdDegPerSec;
         // Motion mode: '1' = speed slow, '3' = speed fast.
         double rate = signed_rate_deg_per_sec;
@@ -1540,8 +1562,12 @@ private:
             // selected drive rate plus any RightAscensionRate offset.
             start_speed_motion_locked(lock, kAxisRa, effective_ra_rate_locked());
         } else {
-            ++motion_generation_;
-            stop_axis_and_wait_locked(lock, kAxisRa);
+            const uint64_t gen = ++motion_generation_;
+            if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
+                // A newer motion command took the axes while the mutex was
+                // released: it owns the tracking state now — do not stomp it.
+                throw AlpacaException("Tracking change superseded by a concurrent motion command");
+            }
         }
         tracking_ = tracking;
         invalidate_position_cache_locked();
@@ -1550,11 +1576,16 @@ private:
     void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg,
                               double target_dec_axis_deg) {
         auto& protocol = SkyWatcherProtocolWrapper::instance();
-        ++motion_generation_;
+        const uint64_t gen = ++motion_generation_;
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
-        stop_axis_and_wait_locked(lock, kAxisRa);
-        stop_axis_and_wait_locked(lock, kAxisDec);
+        // A single generation spans BOTH stop-waits and the goto commands
+        // below: if either wait is superseded (AbortSlew bumps the
+        // generation too), the whole dispatch aborts before any new motor
+        // command is sent.
+        if (!stop_axis_and_wait_locked(lock, kAxisRa, gen) || !stop_axis_and_wait_locked(lock, kAxisDec, gen)) {
+            throw AlpacaException("Slew superseded before dispatch");
+        }
         refresh_position_cache_locked(true);
 
         struct AxisGoto {
@@ -1757,9 +1788,12 @@ private:
         // armed reading (0 = below the index -> move down first, away from it),
         // and step 5 degrees off so the edge is approached cleanly.
         ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 1: arming home indexers");
-        ++motion_generation_;
-        stop_axis_and_wait_locked(lock, kAxisRa);
-        stop_axis_and_wait_locked(lock, kAxisDec);
+        {
+            const uint64_t gen = ++motion_generation_;
+            if (!stop_axis_and_wait_locked(lock, kAxisRa, gen) || !stop_axis_and_wait_locked(lock, kAxisDec, gen)) {
+                throw AlpacaException("AutoHome cancelled");
+            }
+        }
         tracking_ = false;
         bool up[2];
         for (int i = 0; i < 2; ++i) {
@@ -1817,7 +1851,12 @@ private:
                         edge_at[i] = std::chrono::steady_clock::now();
                     }
                     if (edge[i] && std::chrono::steady_clock::now() - edge_at[i] > std::chrono::seconds(3)) {
-                        stop_axis_and_wait_locked(lock, axes[i]);
+                        {
+                            const uint64_t gen = ++motion_generation_;
+                            if (!stop_axis_and_wait_locked(lock, axes[i], gen)) {
+                                throw AlpacaException("AutoHome cancelled");
+                            }
+                        }
                         reset_idx(i);
                         up[i] = true;
                         hunting[i] = false;
@@ -1847,7 +1886,12 @@ private:
                 if (v != 0) {
                     home_idx[i] = v;
                     latched[i] = true;
-                    stop_axis_and_wait_locked(lock, axes[i]);
+                    {
+                        const uint64_t gen = ++motion_generation_;
+                        if (!stop_axis_and_wait_locked(lock, axes[i], gen)) {
+                            throw AlpacaException("AutoHome cancelled");
+                        }
+                    }
                 }
             }
             autohome_sleep(lock, std::chrono::milliseconds(150));
@@ -1920,6 +1964,26 @@ private:
         std::unique_lock<std::mutex> tlock(task_mutex_);
         task_cv_.wait_for(tlock, d, [&] { return cancel.load(); });
         return !cancel.load();
+    }
+
+    // A slew/park/home task that dies CANCELLED may have launched its goto
+    // before the cancel landed (abort in the pre-dispatch window): the goto
+    // must not keep running. Best effort — an aborting reaper re-commands or
+    // has already stopped the axes; running this before the reaper's join
+    // returns keeps the two orderings consistent.
+    void stop_axes_if_cancelled_locked() {
+        if (!slew_task_cancel_.load() || !connected_) {
+            return;
+        }
+        try {
+            auto& protocol = SkyWatcherProtocolWrapper::instance();
+            protocol.instant_stop(kAxisRa);
+            protocol.instant_stop(kAxisDec);
+            cmd_axis_rate_deg_s_[0] = 0.0;
+            cmd_axis_rate_deg_s_[1] = 0.0;
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
+            // Best effort; the axes were already stopped by the aborter.
+        }
     }
 
     void cancel_async_tasks() {

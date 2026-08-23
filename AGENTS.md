@@ -1132,6 +1132,13 @@ datagrams before each send so replies cannot get off-by-one.
 - The shipped images log at WARNING: `ALPACA_LOG_INFO` never reaches
   journalctl on the test rigs -- temporary debug instrumentation must log at
   WARN or it silently vanishes.
+- **CM4 `ondemand` CPU governor causes ~100 ms single-member FAST blips**
+  early in ConformU runs (first request burst pays the clock ramp; even the
+  I/O-free EquatorialSystem getter blipped). Three consecutive runs each had
+  exactly one such blip until the governor was pinned to `performance` --
+  then 0 timing violations. Same class as the RK3568's `interactive`
+  governor (that image got `openastro-cpufreq.service`); consider the same
+  for the CM4 image. Not Wi-Fi: power save was off and the BSSID pinned.
 - **Wi-Fi UDP field lessons** (Wave AP + SBC): (1) a single-radio SBC running hotspot
   (`ap0`) + client (`wlan0`) dual-role flaps the link — disable the hotspot while the
   mount Wi-Fi is in use (and beware hotspot subnets clashing with the mount's
