@@ -121,6 +121,14 @@ public:
             static_cast<int64_t>(kHome) - a.frame_shift + static_cast<int64_t>(std::llround(deg * kCpr / 360.0));
     }
 
+    /// Simulate deceleration: ":K" keeps the axis running (at its current
+    /// rate) for this long before it reports stopped — the window in which
+    /// the driver's stop-waits poll (issue #212 coverage).
+    void set_stop_ramp_ms(int ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ramp_ms_ = ms;
+    }
+
     /// Move the simulated axes instantly (test setup).
     void jump_axis_degrees(int axis, double deg) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -140,6 +148,8 @@ private:
         uint32_t t1 = 0;
         int64_t goto_target = kHome;
         int64_t frame_shift = 0;  // physical = counts + frame_shift
+        std::chrono::steady_clock::time_point stop_at{};  // ramped ":K" deadline
+        bool stopping = false;
         bool in_goto = false;
         bool init_done = true;
         // Home indexer: 0 = armed below the index, 0xFFFFFF = armed above,
@@ -151,6 +161,11 @@ private:
         void advance(std::chrono::steady_clock::time_point t) {
             double dt = std::chrono::duration<double>(t - last).count();
             last = t;
+            if (stopping && t >= stop_at) {
+                running = false;
+                stopping = false;
+                in_goto = false;
+            }
             if (!running || dt <= 0.0) {
                 return;
             }
@@ -277,9 +292,18 @@ private:
                     a.goto_target &= 0xFFFFFF;
                 }
                 return "=";
-            case 'K':  // ramped stop — modeled as immediate for determinism
-            case 'L':
+            case 'K':  // ramped stop: keeps running for stop_ramp_ms_ first
+                if (a.running && stop_ramp_ms_ > 0) {
+                    a.stopping = true;
+                    a.stop_at = now() + std::chrono::milliseconds(stop_ramp_ms_);
+                } else {
+                    a.running = false;
+                    a.in_goto = false;
+                }
+                return "=";
+            case 'L':  // instant stop
                 a.running = false;
+                a.stopping = false;
                 a.in_goto = false;
                 return "=";
             case 'q': {
@@ -328,6 +352,7 @@ private:
     std::atomic<bool> stop_{false};
     std::thread thread_;
     std::mutex mutex_;
+    int stop_ramp_ms_ = 0;
     Axis axes_[2];
 };
 

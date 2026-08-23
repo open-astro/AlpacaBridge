@@ -415,12 +415,12 @@ public:
     }
 
     void set_tracking(bool tracking) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         if (tracking) {
             check_not_parked_locked("Tracking");
         }
-        set_tracking_locked(tracking);
+        set_tracking_locked(lock, tracking);
     }
 
     double get_focal_length() const override { return focal_length_m_; }
@@ -584,7 +584,7 @@ public:
     }
 
     void set_tracking_rate(int rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         if (rate < 0 || rate > 2) {
             throw AlpacaException("Unsupported tracking rate", AlpacaError::InvalidValue);
@@ -592,7 +592,7 @@ public:
         double previous = effective_ra_rate_locked();
         tracking_rate_ = rate;
         if (tracking_) {
-            apply_ra_tracking_rate_locked(previous);
+            apply_ra_tracking_rate_locked(lock, previous);
         }
     }
 
@@ -656,14 +656,14 @@ public:
                     // True AutoHome: hunt the home index sensors and re-anchor
                     // the count frame to the physical home mark.
                     run_autohome(lock);
-                    set_tracking_locked(false);
+                    set_tracking_locked(lock, false);
                     refresh_position_cache_locked(true);
                     at_home_ = true;
                 } else {
                     // No sensors: goto the power-on index (counts kHomeCounts).
-                    dispatch_goto_locked(0.0, 0.0);
+                    dispatch_goto_locked(lock, 0.0, 0.0);
                     wait_for_slew_complete(lock);
-                    set_tracking_locked(false);
+                    set_tracking_locked(lock, false);
                     // Verify we actually landed at home (an AbortSlew mid-home
                     // stops the axes wherever they are) before claiming AtHome.
                     refresh_position_cache_locked(true);
@@ -729,9 +729,9 @@ public:
                 return;
             }
             try {
-                dispatch_goto_locked(target_ra_axis, target_dec_axis);
+                dispatch_goto_locked(lock, target_ra_axis, target_dec_axis);
                 wait_for_slew_complete(lock);
-                set_tracking_locked(false);
+                set_tracking_locked(lock, false);
                 // AtPark and Slewing flip in the same locked step: no window
                 // where a poller can see Slewing false with AtPark false.
                 parked_ = true;
@@ -832,10 +832,10 @@ public:
             // retries) runs here so pulse_guide() returns inside the STANDARD
             // response target. IsPulseGuiding is already true.
             try {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::unique_lock<std::mutex> lock(mutex_);
                 auto& proto = SkyWatcherProtocolWrapper::instance();
                 if (axis == kAxisDec) {
-                    start_speed_motion_locked(kAxisDec, dec_rate);
+                    start_speed_motion_locked(lock, kAxisDec, dec_rate);
                 } else if (restore_tracking && !pulse_restart) {
                     proto.set_step_period(kAxisRa, tracking_step_period_for(ra_pulse_rate));
                     cmd_axis_rate_deg_s_[0] = ra_pulse_rate;
@@ -843,11 +843,11 @@ public:
                     // Pulse rate is non-positive (direction reversal): a live
                     // ":I" write cannot reverse the axis — stop and restart in
                     // the pulse direction instead.
-                    start_speed_motion_locked(kAxisRa, ra_pulse_rate);
+                    start_speed_motion_locked(lock, kAxisRa, ra_pulse_rate);
                 } else {
                     // Not tracking: nudge the RA axis directly like DEC.
                     double rate = direction == 2 ? -guide_rate_.ra : guide_rate_.ra;
-                    start_speed_motion_locked(kAxisRa, rate);
+                    start_speed_motion_locked(lock, kAxisRa, rate);
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
@@ -870,8 +870,8 @@ public:
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
                 } else if (restore_tracking) {
                     // Reversed pulse: full stop-and-restart back to the drive rate.
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    start_speed_motion_locked(kAxisRa, ra_restore_rate_deg_per_sec);
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    start_speed_motion_locked(lock, kAxisRa, ra_restore_rate_deg_per_sec);
                 } else {
                     proto.stop_motion(axis);
                     // Zero the dead-reckoning rate: this direct stop bypasses
@@ -942,7 +942,7 @@ public:
         validate_ra_dec(ra, dec, "SlewToCoordinates");
         goto_in_progress_ = true;
         try {
-            do_slew_to_ra_dec_locked(ra, dec);
+            do_slew_to_ra_dec_locked(lock, ra, dec);
             wait_for_slew_complete(lock);
             refine_goto_landing(lock, ra, dec);
         } catch (...) {
@@ -950,7 +950,7 @@ public:
             throw;
         }
         goto_in_progress_ = false;
-        restore_tracking_after_slew_locked();
+        restore_tracking_after_slew_locked(lock);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -990,13 +990,13 @@ public:
             }
             goto_in_progress_ = true;
             try {
-                dispatch_predicted_goto_locked(ra, dec);
+                dispatch_predicted_goto_locked(lock, ra, dec);
                 // Poll for completion so tracking restarts after the goto —
                 // releasing the mutex between polls so GETs stay responsive.
                 wait_for_slew_complete(lock);
                 refine_goto_landing(lock, ra, dec);
                 goto_in_progress_ = false;
-                restore_tracking_after_slew_locked();
+                restore_tracking_after_slew_locked(lock);
             } catch (const std::exception& ex) {
                 goto_in_progress_ = false;
                 slewing_cached_ = false;
@@ -1027,7 +1027,7 @@ public:
 
     void sync_to_coordinates(double ra, double dec) override {
         reap_pulse_task();
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
         validate_ra_dec(ra, dec, "SyncToCoordinates");
@@ -1046,7 +1046,8 @@ public:
         // ~79 arcsec return error together with the old post-sync freeze).
         const bool was_tracking = tracking_;
         if (was_tracking) {
-            stop_axis_and_wait_locked(kAxisRa);
+            ++motion_generation_;
+            stop_axis_and_wait_locked(lock, kAxisRa);
         }
         // Aim the frame at the expected restart moment (two ":E" writes plus
         // the tracking start sequence).
@@ -1056,7 +1057,7 @@ public:
         protocol.set_position(kAxisRa, degrees_to_counts(axis1, axis_params_[0].counts_per_revolution));
         protocol.set_position(kAxisDec, degrees_to_counts(axis2, axis_params_[1].counts_per_revolution));
         if (was_tracking) {
-            set_tracking_locked(true);
+            set_tracking_locked(lock, true);
         }
 
         target_ra_hours_ = ra;
@@ -1114,7 +1115,7 @@ public:
         bool need_stop_task = false;
         int channel = kAxisRa;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("MoveAxis");
             if (axis != 0 && axis != 1) {
@@ -1137,7 +1138,7 @@ public:
                 // transport throws (seen as UDP timeouts over a flaky Wi-Fi
                 // link), a pre-set flag is never cleared and Slewing wedges
                 // true forever (ConformU Wi-Fi finding).
-                start_speed_motion_locked(channel, rate);
+                start_speed_motion_locked(lock, channel, rate);
                 manual_axis_slewing_[axis] = true;
             } else if (manual_axis_slewing_[axis]) {
                 // MoveAxis(axis, 0) on a moving axis is an asynchronous
@@ -1185,7 +1186,7 @@ public:
                     return;  // cancelled by disconnect/destruction
                 }
             }
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             if (!connected_ || stop_task_cancel_.load()) {
                 return;
             }
@@ -1197,7 +1198,7 @@ public:
             // ASCOM: MoveAxis(axis, 0) restores the previous tracking state.
             if (channel == kAxisRa && tracking_) {
                 try {
-                    set_tracking_locked(true);
+                    set_tracking_locked(lock, true);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("SkyWatcher",
                                     std::string("MoveAxis stop: failed to restore tracking: ") + e.what());
@@ -1456,26 +1457,40 @@ private:
     // Positive axis rates (increasing axis angle) map to increasing counts.
     static char direction_char(double signed_rate) { return signed_rate >= 0.0 ? '0' : '1'; }
 
-    void stop_axis_and_wait_locked(int channel) {
+    // Stop one axis and poll until the controller reports it stationary,
+    // RELEASING the mutex around every sleep (issue #212): the ramp-down can
+    // take over a second, and holding mutex_ through it blocked every
+    // concurrent Alpaca GET. The motion generation guards the unlock windows:
+    // if another command claims the axes while we slept, the wait is no
+    // longer ours to finish.
+    void stop_axis_and_wait_locked(std::unique_lock<std::mutex>& lock, int channel) {
         auto& protocol = SkyWatcherProtocolWrapper::instance();
         cmd_axis_rate_deg_s_[channel - 1] = 0.0;
         protocol.stop_motion(channel);
+        const uint64_t gen = motion_generation_;
         auto deadline = std::chrono::steady_clock::now() + kAxisStopTimeout;
         while (std::chrono::steady_clock::now() < deadline) {
             AxisStatus status = protocol.inquire_status(channel);
             if (!status.running) {
                 return;
             }
+            lock.unlock();
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            lock.lock();
+            check_connected();
+            if (motion_generation_ != gen) {
+                return;  // superseded by a newer motion command
+            }
         }
         throw AlpacaException("Timed out waiting for axis " + std::to_string(channel) + " to stop");
     }
 
     // Start speed-mode motion at a signed rate on one axis (assumes the caller
     // wants the axis re-commanded from stopped).
-    void start_speed_motion_locked(int channel, double signed_rate_deg_per_sec) {
+    void start_speed_motion_locked(std::unique_lock<std::mutex>& lock, int channel, double signed_rate_deg_per_sec) {
         auto& protocol = SkyWatcherProtocolWrapper::instance();
-        stop_axis_and_wait_locked(channel);
+        ++motion_generation_;
+        stop_axis_and_wait_locked(lock, channel);
         const bool fast = std::abs(signed_rate_deg_per_sec) > kFastModeThresholdDegPerSec;
         // Motion mode: '1' = speed slow, '3' = speed fast.
         double rate = signed_rate_deg_per_sec;
@@ -1507,36 +1522,39 @@ private:
     // Re-command the RA axis after a rate change. In-place step-period writes
     // are only legal while the direction is unchanged; a sign flip (or a
     // stopped/reversed axis) needs a full stop-and-restart.
-    void apply_ra_tracking_rate_locked(double previous_effective) {
+    void apply_ra_tracking_rate_locked(std::unique_lock<std::mutex>& lock, double previous_effective) {
         double eff = effective_ra_rate_locked();
         if (eff != 0.0 && previous_effective != 0.0 && (eff > 0.0) == (previous_effective > 0.0)) {
             auto& protocol = SkyWatcherProtocolWrapper::instance();
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             cmd_axis_rate_deg_s_[0] = eff;  // keep dead reckoning on the new rate
         } else {
-            start_speed_motion_locked(kAxisRa, eff);
+            start_speed_motion_locked(lock, kAxisRa, eff);
         }
     }
 
-    void set_tracking_locked(bool tracking) {
+    void set_tracking_locked(std::unique_lock<std::mutex>& lock, bool tracking) {
         if (tracking) {
             // Track: RA axis in the direction of increasing hour angle
             // (positive axis angle by this driver's convention) at the
             // selected drive rate plus any RightAscensionRate offset.
-            start_speed_motion_locked(kAxisRa, effective_ra_rate_locked());
+            start_speed_motion_locked(lock, kAxisRa, effective_ra_rate_locked());
         } else {
-            stop_axis_and_wait_locked(kAxisRa);
+            ++motion_generation_;
+            stop_axis_and_wait_locked(lock, kAxisRa);
         }
         tracking_ = tracking;
         invalidate_position_cache_locked();
     }
 
-    void dispatch_goto_locked(double target_ra_axis_deg, double target_dec_axis_deg) {
+    void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg,
+                              double target_dec_axis_deg) {
         auto& protocol = SkyWatcherProtocolWrapper::instance();
+        ++motion_generation_;
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
-        stop_axis_and_wait_locked(kAxisRa);
-        stop_axis_and_wait_locked(kAxisDec);
+        stop_axis_and_wait_locked(lock, kAxisRa);
+        stop_axis_and_wait_locked(lock, kAxisDec);
         refresh_position_cache_locked(true);
 
         struct AxisGoto {
@@ -1575,13 +1593,13 @@ private:
     // duration from the distance and advance the LST used for the axis
     // target. An uncompensated goto lands east by the slew duration
     // (~3 arcmin of RA for a long slew on the Wave 100i).
-    void dispatch_predicted_goto_locked(double ra, double dec) {
+    void dispatch_predicted_goto_locked(std::unique_lock<std::mutex>& lock, double ra, double dec) {
         refresh_position_cache_locked(true);
         auto [p1, p2] = ra_dec_to_axis_degrees_locked(ra, dec);
         double dist = std::max(std::abs(p1 - cached_ra_axis_deg_), std::abs(p2 - cached_dec_axis_deg_));
         double est_seconds = dist / kMaxMoveAxisRateDegPerSec + kGotoRampSeconds + kTrackingResumeSeconds;
         auto [t1, t2] = ra_dec_to_axis_degrees_locked(ra, dec, est_seconds * kLstHoursPerSecond);
-        dispatch_goto_locked(t1, t2);
+        dispatch_goto_locked(lock, t1, t2);
     }
 
     // After the first goto lands, close the residual (prediction error) with
@@ -1602,20 +1620,20 @@ private:
                 break;
             }
             slewing_cached_ = true;
-            dispatch_predicted_goto_locked(ra, dec);
+            dispatch_predicted_goto_locked(lock, ra, dec);
             wait_for_slew_complete(lock);
         }
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         slewing_cached_ = false;
     }
 
-    void do_slew_to_ra_dec_locked(double ra, double dec) {
+    void do_slew_to_ra_dec_locked(std::unique_lock<std::mutex>& lock, double ra, double dec) {
         invalidate_position_cache_locked();
         slewing_cached_ = true;
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         restore_tracking_after_slew_ = tracking_;
         try {
-            dispatch_predicted_goto_locked(ra, dec);
+            dispatch_predicted_goto_locked(lock, ra, dec);
         } catch (...) {
             // Dispatch failed before the mount started moving: clear the
             // pre-published slew state so Slewing cannot wedge true.
@@ -1633,29 +1651,13 @@ private:
         at_home_ = false;
     }
 
-    void do_slew_to_axis_locked(double axis1_deg, double axis2_deg) {
-        invalidate_position_cache_locked();
-        slewing_cached_ = true;
-        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-        restore_tracking_after_slew_ = false;
-        try {
-            dispatch_goto_locked(axis1_deg, axis2_deg);
-        } catch (...) {
-            slewing_cached_ = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            throw;
-        }
-        manual_axis_slewing_[0] = false;
-        manual_axis_slewing_[1] = false;
-    }
-
     // Some controllers stop tracking during a GOTO and do not resume; always
     // re-issue tracking after a completed slew when it was on (project lesson).
-    void restore_tracking_after_slew_locked() {
+    void restore_tracking_after_slew_locked(std::unique_lock<std::mutex>& lock) {
         if (restore_tracking_after_slew_) {
             restore_tracking_after_slew_ = false;
             try {
-                set_tracking_locked(true);
+                set_tracking_locked(lock, true);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Failed to restore tracking after slew: ") + e.what());
             }
@@ -1755,8 +1757,9 @@ private:
         // armed reading (0 = below the index -> move down first, away from it),
         // and step 5 degrees off so the edge is approached cleanly.
         ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 1: arming home indexers");
-        stop_axis_and_wait_locked(kAxisRa);
-        stop_axis_and_wait_locked(kAxisDec);
+        ++motion_generation_;
+        stop_axis_and_wait_locked(lock, kAxisRa);
+        stop_axis_and_wait_locked(lock, kAxisDec);
         tracking_ = false;
         bool up[2];
         for (int i = 0; i < 2; ++i) {
@@ -1764,7 +1767,7 @@ private:
             up[i] = read_idx(i) == 0;
         }
         refresh_position_cache_locked(true);
-        dispatch_goto_locked(axis_deg(0) + (up[0] ? -5.0 : 5.0), axis_deg(1) + (up[1] ? -5.0 : 5.0));
+        dispatch_goto_locked(lock, axis_deg(0) + (up[0] ? -5.0 : 5.0), axis_deg(1) + (up[1] ? -5.0 : 5.0));
         autohome_wait_axes_stopped(lock);
 
         // Phase 2: if the 5-degree step swept PAST the index (latched), move a
@@ -1778,7 +1781,7 @@ private:
         if (swept[0] || swept[1]) {
             ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 2: stepping past a latched index");
             refresh_position_cache_locked(true);
-            dispatch_goto_locked(axis_deg(0) + (swept[0] ? (up[0] ? -5.0 : 5.0) : 0.0),
+            dispatch_goto_locked(lock, axis_deg(0) + (swept[0] ? (up[0] ? -5.0 : 5.0) : 0.0),
                                  axis_deg(1) + (swept[1] ? (up[1] ? -5.0 : 5.0) : 0.0));
             autohome_wait_axes_stopped(lock);
             for (int i = 0; i < 2; ++i) {
@@ -1797,7 +1800,7 @@ private:
             bool hunting[2] = {!up[0], !up[1]};
             for (int i = 0; i < 2; ++i) {
                 if (hunting[i]) {
-                    start_speed_motion_locked(axes[i], -kAutoHomeCoarseRateDegPerSec);
+                    start_speed_motion_locked(lock, axes[i], -kAutoHomeCoarseRateDegPerSec);
                 }
             }
             std::chrono::steady_clock::time_point edge_at[2];
@@ -1814,7 +1817,7 @@ private:
                         edge_at[i] = std::chrono::steady_clock::now();
                     }
                     if (edge[i] && std::chrono::steady_clock::now() - edge_at[i] > std::chrono::seconds(3)) {
-                        stop_axis_and_wait_locked(axes[i]);
+                        stop_axis_and_wait_locked(lock, axes[i]);
                         reset_idx(i);
                         up[i] = true;
                         hunting[i] = false;
@@ -1829,8 +1832,8 @@ private:
         ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 4: detecting the home index");
         uint32_t home_idx[2] = {0, 0};
         bool latched[2] = {false, false};
-        start_speed_motion_locked(kAxisRa, kAutoHomeDetectRateDegPerSec);
-        start_speed_motion_locked(kAxisDec, kAutoHomeDetectRateDegPerSec);
+        start_speed_motion_locked(lock, kAxisRa, kAutoHomeDetectRateDegPerSec);
+        start_speed_motion_locked(lock, kAxisDec, kAutoHomeDetectRateDegPerSec);
         const auto detect_start = std::chrono::steady_clock::now();
         while (!latched[0] || !latched[1]) {
             if (std::chrono::steady_clock::now() - detect_start > std::chrono::seconds(300)) {
@@ -1844,7 +1847,7 @@ private:
                 if (v != 0) {
                     home_idx[i] = v;
                     latched[i] = true;
-                    stop_axis_and_wait_locked(axes[i]);
+                    stop_axis_and_wait_locked(lock, axes[i]);
                 }
             }
             autohome_sleep(lock, std::chrono::milliseconds(150));
@@ -1854,9 +1857,9 @@ private:
 
         // Phase 5+6: back 10 degrees below the latched mark, then approach it
         // from below and stamp the position registers to the home offset.
-        dispatch_goto_locked(idx_to_deg(0, home_idx[0]) - 10.0, idx_to_deg(1, home_idx[1]) - 10.0);
+        dispatch_goto_locked(lock, idx_to_deg(0, home_idx[0]) - 10.0, idx_to_deg(1, home_idx[1]) - 10.0);
         autohome_wait_axes_stopped(lock);
-        dispatch_goto_locked(idx_to_deg(0, home_idx[0]), idx_to_deg(1, home_idx[1]));
+        dispatch_goto_locked(lock, idx_to_deg(0, home_idx[0]), idx_to_deg(1, home_idx[1]));
         autohome_wait_axes_stopped(lock);
         proto.set_position(kAxisRa, kHomeCounts);
         proto.set_position(kAxisDec, kHomeCounts);
@@ -2038,6 +2041,7 @@ private:
     bool has_home_indexer_ = false;
     int tracking_rate_ = 0;                               // ASCOM DriveRate (0/1/2)
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
+    uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
     bool park_position_set_ = false;
     double park_ra_axis_deg_ = 0.0;
     double park_dec_axis_deg_ = 0.0;

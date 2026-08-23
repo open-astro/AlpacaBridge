@@ -205,4 +205,34 @@ TEST_CASE("SkyWatcher async - AbortSlew cancels the slew task without a refineme
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - reads stay responsive while an axis stop is ramping", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);  // real Wave axes take ~1 s to decelerate
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->move_axis(0, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    driver->move_axis(0, 0.0);  // async stop: the mount now ramps down for 800 ms
+
+    // Issue #212: the stop-wait must RELEASE the driver mutex between polls,
+    // so concurrent position reads answer promptly while the axis ramps.
+    int slow_reads = 0;
+    for (int i = 0; i < 6; ++i) {
+        auto t0 = std::chrono::steady_clock::now();
+        static_cast<void>(driver->get_right_ascension());
+        static_cast<void>(driver->get_slewing());
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+        if (ms.count() > 250) {
+            ++slow_reads;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    REQUIRE(slow_reads == 0);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
+    REQUIRE(wait_until([&] { return driver->get_tracking(); }, 5000));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
