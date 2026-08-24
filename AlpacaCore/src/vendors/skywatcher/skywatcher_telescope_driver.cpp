@@ -1817,7 +1817,10 @@ private:
             bool burst_started = false;
             try {
                 std::unique_lock<std::mutex> lock(mutex_);
-                if (dec_duty_rate_deg_s_ != rate) continue;
+                // Re-check ownership under THIS lock: a goto/park/home/pulse
+                // dispatched since the go-gate must not be superseded by the
+                // burst's own start (mirrors the burst-end recheck below).
+                if (dec_duty_rate_deg_s_ != rate || !connected_ || !tracking_ || axes_busy_locked()) continue;
                 start_speed_motion_locked(lock, kAxisDec, rate > 0.0 ? floor_rate : -floor_rate);
                 burst_gen = motion_generation_;  // owned by THIS burst
                 burst_started = true;
