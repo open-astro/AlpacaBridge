@@ -50,6 +50,7 @@
 #include <variant>
 #include <vector>
 #ifdef ALPACACORE_ENABLE_IOPTRON
+#include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
@@ -6976,6 +6977,61 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "ioptron" && device_type_str == "filterwheel") {
+#ifdef ALPACACORE_ENABLE_IOPTRON
+        // iEFW-15 / iEFW-18 filter wheel — USB-serial only, fixed 115200 baud.
+        // Slot count comes from the wheel's handshake, not from config.
+        std::string conn_type = config.value("connectionType", "auto");
+        // "iefw15" (default) or "iefw18": sets the reported device name; the
+        // slot count is always read from the wheel.
+        std::string model = config.value("model", "iefw15");
+
+        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
+                return false;
+            }
+            wheel = alpacacore::vendor::ioptron::create_iefw_filterwheel(device_number, port_path, model);
+        } else {
+            // "auto" or unset — auto-detect at connect
+            int wheel_index = config.value("filterwheelIndex", 0);
+            if (wheel_index < 0) {
+                error_message = "filterwheelIndex must be >= 0.";
+                return false;
+            }
+            wheel = alpacacore::vendor::ioptron::create_iefw_filterwheel_by_index(device_number, wheel_index, model);
+        }
+
+        if (config.contains("filterNames")) {
+            const auto& names_value = config.at("filterNames");
+            if (!names_value.is_array()) {
+                error_message = "iOptron filter wheel filterNames must be an array";
+                return false;
+            }
+            for (const auto& name : names_value) {
+                if (!name.is_string()) {
+                    error_message = "iOptron filter wheel filterNames must be an array of strings";
+                    return false;
+                }
+            }
+            wheel->set_names(names_value.get<std::vector<std::string>>());
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
+            util::log_info("Registered iOptron iEFW filter wheel");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "iOptron support not enabled. Rebuild with -DALPACACORE_ENABLE_IOPTRON=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "synscan" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_SYNSCAN
         std::string conn_type = config.value("connectionType", "auto");
@@ -8368,6 +8424,16 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("gpioChip");
             copy_if_present("pwmFrequencyHz");
             copy_if_present("ports");
+        } else if (device_type == "filterwheel") {
+            // iEFW: USB-serial only, fixed baud — no baudRate/network fields.
+            copy_if_present("connectionType");
+            copy_if_present("model");
+            copy_if_present("filterwheelIndex");
+            copy_if_present("filterNames");
+            std::string connection_type = config.value("connectionType", "");
+            if (connection_type == "serial") {
+                copy_if_present("portPath");
+            }
         } else if (device_type == "focuser") {
             // iEAF / iAFS2/3: USB-serial only, fixed baud — no baudRate/network fields.
             copy_if_present("connectionType");

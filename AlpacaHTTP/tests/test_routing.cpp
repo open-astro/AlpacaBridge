@@ -1589,6 +1589,28 @@ int main() {
         EXPECT(cfg.value("focuserIndex", -1) == 2);
         remove_device(router, "ioptron", "focuser", 9622);
     }
+    {
+        // ioptron / filterwheel (iEFW) — serial mode persists portPath (no
+        // baudRate: fixed 115200), auto mode persists filterwheelIndex, and
+        // filterNames survive sanitize_device_config.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "ioptron"},
+                                           {"deviceType", "filterwheel"},
+                                           {"deviceNumber", 9623},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB8"},
+                                           {"filterwheelIndex", 1},
+                                           {"model", "iefw18"},
+                                           {"filterNames", {"L", "R", "G", "B", "Ha"}}},
+                                          "FilterWheel", 9623);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("model", "") == "iefw18");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB8");
+        EXPECT(cfg.value("filterwheelIndex", -1) == 1);
+        EXPECT(cfg.contains("filterNames") && cfg["filterNames"].size() == 5);
+        remove_device(router, "ioptron", "filterwheel", 9623);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN
