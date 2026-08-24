@@ -490,4 +490,33 @@ TEST_CASE("SkyWatcher async - duty burst end does not truncate a concurrent Dec 
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - idempotent SetTracking/rate rewrites do not churn the offset", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->set_declination_rate(10.0);  // continuous offset motion
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    int stops = mount.stop_count(2);
+    int starts = mount.start_count(2);
+
+    // Keep-alive reassertion and same-value rewrites: common ASCOM client
+    // behavior — must leave the running Dec offset motion untouched.
+    for (int i = 0; i < 3; ++i) {
+        driver->set_tracking(true);
+        driver->set_declination_rate(10.0);
+        driver->set_right_ascension_rate(0.0);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    REQUIRE(mount.stop_count(2) == stops);
+    REQUIRE(mount.start_count(2) == starts);
+    REQUIRE(mount.axis_running(2));
+
+    driver->set_declination_rate(0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

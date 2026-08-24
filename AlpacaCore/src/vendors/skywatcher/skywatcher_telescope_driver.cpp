@@ -415,6 +415,19 @@ public:
     // bench-disproven (axis tracks 5-320 as/s within 0.2%; no ":I" read
     // glitches) — both were artifacts of the pre-#216 refinement-goto races.
     void set_declination_rate(double rate) override {
+        {
+            // Idempotence check BEFORE reaping: a same-value rewrite must not
+            // tear down a running duty worker it would never restart.
+            std::unique_lock<std::mutex> lock(mutex_);
+            check_connected();
+            if (tracking_rate_ != 0) {
+                throw AlpacaException("DeclinationRate can only be set at the Sidereal drive rate",
+                                      AlpacaError::InvalidOperation);
+            }
+            if (rate == dec_rate_arcsec_per_sec_) {
+                return;  // idempotent rewrite: leave the running motion alone
+            }
+        }
         reap_dec_duty_task();
         bool need_duty = false;
         {
@@ -449,6 +462,13 @@ public:
             check_connected();
             if (tracking) {
                 check_not_parked_locked("Tracking");
+            }
+            if (tracking == tracking_) {
+                // Keep-alive reassertion (many clients poll-set Tracking):
+                // the requested state already holds — do not stop/restart
+                // the axes or churn the duty worker. MoveAxis restore needs
+                // the restart and calls set_tracking_locked directly.
+                return;
             }
             set_tracking_locked(lock, tracking);
             need_duty = tracking_ && dec_duty_rate_deg_s_ != 0.0;
@@ -518,6 +538,9 @@ public:
         if (tracking_rate_ != 0) {
             throw AlpacaException("RightAscensionRate can only be set at the Sidereal drive rate",
                                   AlpacaError::InvalidOperation);
+        }
+        if (rate == ra_rate_sec_per_sidereal_sec_) {
+            return;  // idempotent rewrite
         }
         double previous = effective_ra_rate_locked();
         ra_rate_sec_per_sidereal_sec_ = rate;
