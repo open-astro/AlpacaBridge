@@ -77,8 +77,32 @@ fi
   docs/AlpacaDeviceAPI_v1.yaml` command so it stays content-identical to upstream (LF-normalized),
   but note it as non-breaking.
 
+### Step 0b — Probe for a newer major spec version (v2+)
+
+The diff above only proves our v1 copy matches upstream's v1 file. ASCOM revises the spec
+in place (Platform 7's Connect/Disconnect/DeviceState went into the same v1 YAML), so the
+diff catches in-place revisions — but it would never notice if ASCOM published a brand-new
+`AlpacaDeviceAPI_v2.yaml` alongside v1. Probe for that explicitly:
+
+```bash
+for v in v2 v3; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" "https://www.ascom-standards.org/api/AlpacaDeviceAPI_${v}.yaml")
+  echo "AlpacaDeviceAPI_${v}.yaml -> HTTP $code"
+done
+echo "--- spec files referenced by the Swagger index page ---"
+curl -fsSL "https://ascom-standards.org/api/" | grep -oiE 'AlpacaDeviceAPI_v[0-9]+\.(yaml|json)' | sort -u
+```
+
+- All probes 404 and the index page references only `AlpacaDeviceAPI_v1.yaml` → v1 is still
+  the current published spec; continue.
+- A newer version exists (HTTP 200, or the index page references a v2+ file) → STOP and tell
+  the user before writing any code. Fetch the new spec, summarize what changed for the device
+  type being built, and ask whether to vendor it (as a new `docs/AlpacaDeviceAPI_v<N>.yaml`
+  alongside v1) and build against it. Do not silently keep building against v1.
+- Network failure → warn and proceed with v1, same as the main check.
+
 Do not skip this step even when the user passes a vendor + device type as arguments — the spec
-check always runs first.
+check (including the v2+ probe) always runs first.
 
 ## Step 1 — Ask the user what they are building
 

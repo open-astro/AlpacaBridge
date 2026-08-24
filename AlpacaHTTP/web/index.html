@@ -215,6 +215,44 @@
                         </tbody>
                     </table>
                   </div>
+
+                  <div id="ioptron-focuser-config" style="display: none;">
+                    <h3>iOptron iEAF / iAFS2/3 Focuser Configuration</h3>
+                    <small style="color: #666;">USB-serial connection at a fixed 115200 baud. Covers the iEAF and the iAFS2/3 (same protocol). Auto-detect scans for the focuser's Prolific USB-serial adapter and verifies it with the device handshake.</small>
+
+                    <div class="form-group">
+                        <label for="ioptron-ieaf-model">Model:</label>
+                        <select id="ioptron-ieaf-model" name="ioptronIeafModel">
+                            <option value="ieaf">iEAF Electronic Focuser</option>
+                            <option value="iafs2">iAFS2/3 Automatic Focuser (2" or 3")</option>
+                        </select>
+                        <small>Both models use the same protocol. This sets the device name reported to clients.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ioptron-ieaf-connection-type">Connection Type:</label>
+                        <select id="ioptron-ieaf-connection-type" name="ioptronIeafConnectionType">
+                            <option value="auto">Auto-Detect (Recommended)</option>
+                            <option value="serial">Serial Port</option>
+                        </select>
+                    </div>
+
+                    <div id="ioptron-ieaf-auto-config" class="connection-config">
+                        <div class="form-group">
+                            <label for="ioptron-ieaf-focuser-index">Focuser Index:</label>
+                            <input type="number" id="ioptron-ieaf-focuser-index" name="ioptronIeafFocuserIndex" value="0" min="0">
+                            <small>0-based index when more than one iEAF / iAFS2/3 is detected</small>
+                        </div>
+                    </div>
+
+                    <div id="ioptron-ieaf-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="ioptron-ieaf-port-path">Serial Port:</label>
+                            <input type="text" id="ioptron-ieaf-port-path" name="ioptronIeafPortPath" placeholder="/dev/ttyUSB0">
+                            <small>Leave blank to auto-detect</small>
+                        </div>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- SynScan Telescope Configuration -->

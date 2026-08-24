@@ -1569,6 +1569,26 @@ int main() {
         EXPECT(cfg.value("mountIndex", -1) == 1);
         remove_device(router, "ioptron", "telescope", 9615);
     }
+    {
+        // ioptron / focuser (iEAF) — serial mode persists portPath (no
+        // baudRate: the iEAF runs at a fixed 115200) and auto mode persists
+        // focuserIndex through sanitize_device_config.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "ioptron"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9622},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB7"},
+                                           {"focuserIndex", 2},
+                                           {"model", "iafs2"}},
+                                          "Focuser", 9622);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("model", "") == "iafs2");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB7");
+        EXPECT(cfg.value("focuserIndex", -1) == 2);
+        remove_device(router, "ioptron", "focuser", 9622);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN
