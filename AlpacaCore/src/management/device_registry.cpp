@@ -12,6 +12,7 @@
 
 #include <alpacacore/device_registry.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/rig_identity.h>
 #include <algorithm>
 #include <mutex>
 
@@ -143,8 +144,12 @@ std::vector<DeviceCapabilities> DeviceRegistry::get_all_device_capabilities() co
         DeviceCapabilities cap;
         cap.type = entry.type;
         cap.device_number = entry.number;
-        cap.name = entry.device->get_name();
-        cap.unique_id = entry.device->get_unique_id();
+        // Stamp the per-board rig ID (same 4 hex as the image's WiFi SSID
+        // suffix) so two OpenAstro boards on one LAN are distinguishable in
+        // client device pickers (DeviceName) and never collide on UniqueID.
+        // Drivers keep returning their bare per-process IDs.
+        cap.name = rig::prefix_device_name(entry.device->get_name());
+        cap.unique_id = rig::scope_unique_id(entry.device->get_unique_id());
         cap.description = entry.device->get_description();
         cap.driver_info = entry.device->get_driver_info();
         cap.driver_version = entry.device->get_driver_version();

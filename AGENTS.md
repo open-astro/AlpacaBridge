@@ -412,6 +412,16 @@ and delegates. `connect()` calls `disconnect_locked()`; external callers call
 `disconnect()`. All protocol wrappers follow this (gemini/ioptron/synscan/
 celestron/bisque/zwo-mount).
 
+### Per-board identity (`util/rig_identity.h`): never hand-roll board names
+
+Multi-board LANs are a real deployment (two ASIAIR-class boxes, star parties). Drivers return bare per-process `get_unique_id()` / `get_name()` values (`GEMINI_FLATPANEL_0`); `DeviceRegistry::get_all_device_capabilities()` is the ONE place that stamps the per-board rig ID onto what clients see (`DeviceName` = `XXXX: name`, `UniqueID` = `id-XXXX`). Do not add the ID inside drivers, and do not strip it in the router. Rules that came out of the design:
+
+- The four hex characters MUST match the OS images' WiFi SSID suffix (last four of the wlan0 MAC, `openastro-ssid` in openastro-raspberrypi / openastro-touptek-stellavita / rk-flashtool). One ID for the user to recognize: join `OpenAstro-915D`, pick `915D:` devices. If the images change their scheme, change `rig_identity.cpp` in the same PR.
+- Prefix, never suffix, on `DeviceName`: NINA's device combo box truncates at the tail, so a suffix is exactly what gets cut off on a long camera name.
+- No user-facing free-text "rig name" in `DeviceName` or `ServerName`: long names hit the same truncation, and `ProfileName` already exists for Ara (Windows clients never read it). `ServerName` defaults to `OpenAstro-XXXX`; config/env override still works.
+- `ALPACACORE_RIG_ID` env forces the ID for tests and scripted installs; the helper is cached for the process lifetime, so set it before the first call.
+- Changing the `UniqueID` scheme is a client-visible change (NINA profiles re-select devices); call it out in the CHANGELOG.
+
 ### Auto-detect failure message (`util/auto_detect.h`)
 
 Serial port enumeration is POSIX-only, so the `enumerate_*_ports()` helpers return

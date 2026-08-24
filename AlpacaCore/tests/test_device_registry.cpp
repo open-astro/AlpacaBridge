@@ -12,6 +12,7 @@
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/device_registry.h>
+#include <alpacacore/util/rig_identity.h>
 #include <alpacacore/focuser_driver.h>
 
 #include <algorithm>
@@ -197,9 +198,13 @@ TEST_CASE("DeviceRegistry reports device capabilities", "[registry]") {
                             });
     };
 
-    auto cap0 = find_by_unique_id("scope-0");
+    // Registry stamps the per-board rig ID: "-XXXX" on UniqueID and "XXXX: "
+    // on DeviceName (see util/rig_identity.h). Drivers stay bare.
+    const std::string& rid = alpacacore::rig::rig_id();
+    REQUIRE(rid.size() == 4);
+    auto cap0 = find_by_unique_id("scope-0-" + rid);
     REQUIRE(cap0 != caps.end());
-    REQUIRE(cap0->name == "Scope0");
+    REQUIRE(cap0->name == rid + ": Scope0");
     REQUIRE(cap0->driver_info == "fake driver");
     REQUIRE(cap0->driver_version == "0.0.1");
     REQUIRE(cap0->interface_version == 1);

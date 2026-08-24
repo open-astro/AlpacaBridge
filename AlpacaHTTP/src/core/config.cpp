@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacahttp/config.h>
+#include <alpacacore/util/rig_identity.h>
 #include <fstream>
 #include <cstdlib>
 #include <algorithm>
@@ -292,6 +293,10 @@ void Config::apply_environment_overrides() {
     const char* server_name_env = std::getenv("ALPACAHTTP_SERVER_NAME");
     if (server_name_env) {
         server_name_ = server_name_env;
+    } else if (server_name_ == kDefaultServerName) {
+        // Per-board default matching the image's WiFi SSID (OpenAstro-XXXX)
+        // so clients that list ServerName show which board answered.
+        server_name_ = "OpenAstro-" + alpacacore::rig::rig_id();
     }
 
     const char* manufacturer_env = std::getenv("ALPACAHTTP_MANUFACTURER");

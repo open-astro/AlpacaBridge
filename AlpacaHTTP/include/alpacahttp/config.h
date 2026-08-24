@@ -73,7 +73,8 @@ private:
     std::uint16_t http_port_ = 6800;
     bool discovery_enabled_ = true;
     LogLevel log_level_ = LogLevel::WARNING;
-    std::string server_name_ = "AlpacaHTTP";
+    static constexpr const char* kDefaultServerName = "AlpacaHTTP";
+    std::string server_name_ = kDefaultServerName;
     std::string manufacturer_ = "OpenAstro.net";
     std::string location_ = "";
     std::string profile_name_ = "";

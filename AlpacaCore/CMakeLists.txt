@@ -74,6 +74,7 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/threading.cpp
     src/core/util/error_handling.cpp
     src/core/util/units.cpp
+    src/core/util/rig_identity.cpp
 )
 
 # Driver sources
