@@ -760,6 +760,7 @@ function startEditDevice(device) {
     } else if (vendor === 'ioptron' && deviceType === 'focuser') {
         // iEAF: USB-serial only, fixed 115200 baud.
         const ieafConnectionType = config.connectionType || 'auto';
+        setFormValue('ioptron-ieaf-model', config.model || 'ieaf');
         setFormValue('ioptron-ieaf-connection-type', ieafConnectionType);
         if (ieafConnectionType === 'serial') {
             setFormValue('ioptron-ieaf-port-path', config.portPath);
@@ -3053,6 +3054,7 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'ioptron' && normalizeDeviceType(deviceData.deviceType) === 'focuser') {
         // iEAF: USB-serial only, fixed baud — no baudRate/network fields.
         deviceData.connectionType = formData.get('ioptronIeafConnectionType') || 'auto';
+        deviceData.model = formData.get('ioptronIeafModel') || 'ieaf';
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('ioptronIeafPortPath');
         } else {

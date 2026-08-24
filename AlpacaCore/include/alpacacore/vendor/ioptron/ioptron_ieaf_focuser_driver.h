@@ -27,12 +27,15 @@ namespace alpacacore::vendor::ioptron {
  *
  * @param device_number Alpaca device number
  * @param serial_port Serial port path (e.g., "/dev/ttyUSB0")
+ * @param model "ieaf" (default) or "iafs2": sets the reported device name; the
+ *              protocol is identical for both
  * @return Unique pointer to focuser driver
  */
-std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std::string& serial_port);
+std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std::string& serial_port,
+                                                   const std::string& model = "ieaf");
 
 /**
- * @brief Create an iOptron iEAF focuser driver by auto-detecting the serial port.
+ * @brief Create an iOptron iEAF / iAFS2/3 focuser driver by auto-detecting the serial port.
  *
  * Scans for Prolific PL2303-class USB-serial adapters and probes each with
  * the :DeviceInfo# handshake. The focuser_index selects which detected
@@ -40,8 +43,10 @@ std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std:
  *
  * @param device_number Alpaca device number
  * @param focuser_index 0-based index into the list of detected focusers
+ * @param model "ieaf" (default) or "iafs2": sets the reported device name
  * @return Unique pointer to focuser driver
  */
-std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index = 0);
+std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index = 0,
+                                                            const std::string& model = "ieaf");
 
 }  // namespace alpacacore::vendor::ioptron

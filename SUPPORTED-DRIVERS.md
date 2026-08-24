@@ -355,14 +355,15 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | iEAF Electronic Focuser | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iEAF/) |
+| iAFS2/3 Automatic Focuser (2" and 3" models) | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iAFS2/) |
 
 <details>
 <summary><strong>iOptron Focuser Driver Notes</strong></summary>
 
-- **Protocol**: iEAF serial protocol (`:DeviceInfo#`, `:FI#`, `:FM`, `:FQ`, `:FZ`), no SDK required
-- **Connection**: USB/Serial via the built-in Prolific PL2303 bridge (067b:23d3), fixed 115200 baud. Auto-detection supported.
+- **Protocol**: iEAF serial protocol (`:DeviceInfo#`, `:FI#`, `:FM`, `:FQ`, `:FZ`), no SDK required. The iAFS2/3 speaks the identical protocol and is served by the same driver; the web UI Model selector (iEAF / iAFS2/3) sets the reported device name. The `:DeviceInfo#` handshake accepts both model codes (2 = iEAF, 3 = iAFS2/3).
+- **Connection**: USB/Serial via the built-in Prolific PL2303 bridge (iEAF 067b:23d3, iAFS2/3 067b:23a3 "ATEN Serial Bridge"), fixed 115200 baud. Auto-detection supported.
 - **Auto-detection**: Scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for Prolific adapters and probes with the `:DeviceInfo#` handshake (model code 2/3), which also distinguishes the iEAF from an iOptron mount on the same chip class.
-- **Tested model**: iEAF (model code 2, firmware 100) on Raspberry Pi, Linux arm64, ConformU 4.5.0: 0 errors, 0 issues, all members within timing targets
+- **Tested models**: iEAF (model code 2, firmware 100) and iAFS2 (model code 3) on Raspberry Pi, Linux arm64, ConformU 4.5.0: 0 errors, 0 issues, all members within timing targets for both
 - **Not supported**: `StepSize` (hardware does not expose microns), temperature compensation
 - **Protocol quirks**: `:FM`/`:FQ`/`:FZ` reply with a single `1` ack byte (no `#`), which the wrapper consumes so it cannot prefix the next `:FI#` frame. Status reads are served from a 100 ms cache so `DeviceState` costs one serial round trip.
 

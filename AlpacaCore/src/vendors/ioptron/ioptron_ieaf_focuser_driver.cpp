@@ -39,7 +39,9 @@ public:
           device_number_(device_number),
           config_(std::move(config)),
           connected_(false),
-          protocol_() {}
+          protocol_() {
+        model_name_ = model_name_for(config_.model);
+    }
 
     ~IeafFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -56,13 +58,15 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "iOptron iEAF"; }
+    // Name/Description follow the user-selected model (iEAF vs iAFS2/3 share
+    // one protocol and one driver; the config "model" key picks the wording).
+    std::string get_name() const override { return "iOptron " + model_name(); }
 
     DeviceType get_device_type() const override { return DeviceType::Focuser; }
 
     std::string get_unique_id() const override { return "IOPTRON_IEAF_" + std::to_string(device_number_); }
 
-    std::string get_description() const override { return "iOptron iEAF Electronic Focuser Driver"; }
+    std::string get_description() const override { return "iOptron " + model_name() + " Electronic Focuser Driver"; }
 
     std::string get_driver_info() const override { return "AlpacaCore iOptron iEAF Focuser Driver"; }
 
@@ -119,7 +123,8 @@ public:
                 firmware_ = info.firmware > 0 ? std::to_string(info.firmware) : std::string();
             }
             connected_.store(true);
-            ALPACA_LOG_INFO("iOptron", "iEAF focuser connected");
+            ALPACA_LOG_INFO("iOptron",
+                            model_name_ + " focuser connected (model code " + std::to_string(info.model) + ")");
         } else {
             protocol_.disconnect();
             {
@@ -240,20 +245,30 @@ private:
     // firmware_ has its OWN mutex, NOT the base's connection mutex:
     // set_connected() runs on the connection thread and caches firmware, while
     // the base joins that thread — sharing one mutex would deadlock.
+    // Config "model": "iafs2" -> iAFS2/3, anything else -> iEAF (the default).
+    // Fixed at construction, so no locking needed.
+    const std::string& model_name() const { return model_name_; }
+
+    static std::string model_name_for(const std::string& model) { return model == "iafs2" ? "iAFS2/3" : "iEAF"; }
+
     mutable std::mutex firmware_mutex_;
-    std::string firmware_;  // captured at connect; web-UI only (guarded by firmware_mutex_)
+    std::string firmware_;    // captured at connect; web-UI only (guarded by firmware_mutex_)
+    std::string model_name_;  // "iEAF" / "iAFS2/3" from config; fixed after construction
     mutable std::mutex status_mutex_;
     mutable std::optional<IeafStatus> status_cache_;
     mutable std::chrono::steady_clock::time_point status_cache_time_{};
 };
 
-std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std::string& serial_port) {
+std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std::string& serial_port,
+                                                   const std::string& model) {
     IeafConnectionConfig config;
     config.serial_port = serial_port;
+    config.model = model;
     return std::make_unique<IeafFocuserDriver>(device_number, std::move(config));
 }
 
-std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index) {
+std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index,
+                                                            const std::string& model) {
     auto ports = enumerate_ieaf_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("iOptron iEAF focuser"),
@@ -271,6 +286,7 @@ std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, i
 
     IeafConnectionConfig config;
     config.serial_port = port.port_path;
+    config.model = model;
     return std::make_unique<IeafFocuserDriver>(device_number, std::move(config));
 }
 
