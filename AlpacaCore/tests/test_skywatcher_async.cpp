@@ -266,32 +266,36 @@ TEST_CASE("SkyWatcher async - AbortSlew during the dispatch stop-wait kills the 
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - superseded dispatch still stops BOTH axes", "[skywatcher][async]") {
-    // PR #216 round-4 finding: a short-circuited || skipped Dec's stop
-    // command when RA's stop-wait was superseded by a NON-abort interferer
-    // (SetTracking/MoveAxis from another client) — Dec kept moving.
+TEST_CASE("SkyWatcher async - superseded dispatch neither strands nor clobbers the other axis", "[skywatcher][async]") {
+    // PR #216 rounds 4+6: when RA's stop-wait is superseded mid-dispatch,
+    // the dispatch must abort without emitting stale stops — a MoveAxis that
+    // legitimately claimed Dec during the wait keeps its motion (round 6),
+    // and the abandoned dispatch leaves no inconsistent Slewing/tracking
+    // bookkeeping behind (round 4).
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     mount.set_stop_ramp_ms(800);
     auto driver = connected_driver(mount);
     driver->set_tracking(true);
 
-    int dec_stops_before = mount.stop_count(2);
     double lst = driver->get_sidereal_time();
     driver->slew_to_coordinates_async(std::fmod(lst - 3.0 + 24.0, 24.0), 25.0);
-    // While the dispatch stop-waits the ramping RA axis, supersede it with a
-    // tracking change (bumps the motion generation; does NOT stop Dec itself).
+    // While the dispatch stop-waits the ramping RA axis, a concurrent client
+    // starts a Dec MoveAxis — bumping the generation and claiming the axes.
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    try {
-        driver->set_tracking(false);
-    } catch (...) {
-        // May itself report supersession in the scramble; irrelevant here.
-    }
+    driver->move_axis(1, 1.0);
+    int dec_stops_after_claim = mount.stop_count(2);
 
-    // Dec must have received its stop command from the superseded dispatch.
-    REQUIRE(wait_until([&] { return mount.stop_count(2) > dec_stops_before; }, 5000));
-    REQUIRE(wait_until([&] { return !mount.axis_running(1) && !mount.axis_running(2); }, 10000));
-    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    // Dec's fresh motion must SURVIVE the aborted dispatch: no stale stop.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    REQUIRE(mount.stop_count(2) == dec_stops_after_claim);
+    REQUIRE(mount.axis_running(2));
+    REQUIRE(driver->get_slewing());  // the manual Dec motion reports Slewing
+
+    // And the normal MoveAxis stop path still cleans up consistently.
+    driver->move_axis(1, 0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 10000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
     driver->set_connected(false);
 }
 

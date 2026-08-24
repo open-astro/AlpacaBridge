@@ -1493,6 +1493,14 @@ private:
     // commands for its now-stale operation (PR #216 review: an AbortSlew
     // landing in the unlock window otherwise saw its goto re-dispatched).
     [[nodiscard]] bool stop_axis_and_wait_locked(std::unique_lock<std::mutex>& lock, int channel, uint64_t gen) {
+        // Never emit a stop for a STALE generation (PR #216 round-6): when a
+        // dispatch's first axis wait was superseded, a newer command may have
+        // legitimately started motion on the second axis — a stale stop here
+        // would silently kill it while its bookkeeping says it is running.
+        // The newer generation owns the axes now, whatever their state.
+        if (motion_generation_ != gen) {
+            return false;
+        }
         auto& protocol = SkyWatcherProtocolWrapper::instance();
         cmd_axis_rate_deg_s_[channel - 1] = 0.0;
         protocol.stop_motion(channel);
@@ -1595,11 +1603,11 @@ private:
         // below: if either wait is superseded (AbortSlew bumps the
         // generation too), the whole dispatch aborts before any new motor
         // command is sent.
-        // Evaluate BOTH waits unconditionally: each issues its axis's stop
-        // command as its first action, and a short-circuit would leave the
-        // second axis physically moving when the first wait is superseded
-        // (PR #216 round-4 finding — only AbortSlew masked it by stopping
-        // both axes itself).
+        // Evaluate BOTH waits unconditionally (round-4 finding: a short-
+        // circuit skipped the second axis entirely) — while the stale-
+        // generation gate inside the wait ensures a superseded dispatch
+        // never emits stops that could clobber the superseding command's
+        // fresh motion (round-6 finding).
         const bool ra_stopped = stop_axis_and_wait_locked(lock, kAxisRa, gen);
         const bool dec_stopped = stop_axis_and_wait_locked(lock, kAxisDec, gen);
         if (!ra_stopped || !dec_stopped) {
