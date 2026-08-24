@@ -438,9 +438,12 @@ public:
                                       AlpacaError::InvalidOperation);
             }
             dec_rate_arcsec_per_sec_ = rate;
-            refresh_position_cache_locked(true);  // fresh model anchor
+            const bool busy = axes_busy_locked();
+            if (!busy) {
+                refresh_position_cache_locked(true);  // fresh model anchor
+            }
             if (tracking_) {
-                apply_dec_rate_offset_locked(lock);
+                apply_dec_rate_offset_locked(lock, /*defer_motion=*/busy);
             }
             need_duty = dec_duty_rate_deg_s_ != 0.0;
         }
@@ -541,6 +544,13 @@ public:
         }
         if (rate == ra_rate_sec_per_sidereal_sec_) {
             return;  // idempotent rewrite
+        }
+        if (axes_busy_locked()) {
+            // A goto/park/home/pulse/manual motion owns the RA axis: store
+            // the rate only — the operation's restore path re-applies the
+            // effective (offset-folded) drive rate when it releases the axis.
+            ra_rate_sec_per_sidereal_sec_ = rate;
+            return;
         }
         double previous = effective_ra_rate_locked();
         ra_rate_sec_per_sidereal_sec_ = rate;
@@ -1545,6 +1555,15 @@ private:
 
     void invalidate_position_cache_locked() const { position_cache_valid_ = false; }
 
+    // True while a goto/park/home/pulse/manual motion owns the axes: rate
+    // setters must not issue motion then (they would hijack the axis and
+    // make get_hardware_slewing_locked read "not slewing" mid-goto); the
+    // stored rates are applied by the post-slew/pulse/MoveAxis restores.
+    bool axes_busy_locked() const {
+        return goto_in_progress_ || parking_ || homing_ || slewing_cached_ || pulse_guiding_active_ ||
+               manual_axis_slewing_[0] || manual_axis_slewing_[1];
+    }
+
     bool rate_offsets_active_locked() const {
         return ra_rate_sec_per_sidereal_sec_ != 0.0 || dec_rate_arcsec_per_sec_ != 0.0;
     }
@@ -1717,15 +1736,15 @@ private:
     // between apply events keeps the stale sign until the next goto, pulse,
     // tracking toggle, or rate write re-applies it. Long unattended sessions
     // near the pole should re-set DeclinationRate after a meridian flip.
-    void apply_dec_rate_offset_locked(std::unique_lock<std::mutex>& lock) {
+    void apply_dec_rate_offset_locked(std::unique_lock<std::mutex>& lock, bool defer_motion = false) {
         double rate = dec_rate_arcsec_per_sec_ / 3600.0;
         if (rate == 0.0) {
             dec_duty_rate_deg_s_ = 0.0;
-            if (dec_offset_running_) {
+            if (dec_offset_running_ && !defer_motion) {
                 const uint64_t gen = ++motion_generation_;
                 static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
-                dec_offset_running_ = false;
             }
+            dec_offset_running_ = false;
             return;
         }
         refresh_position_cache_locked(false);
@@ -1737,13 +1756,26 @@ private:
         double floor_rate = slow_mode_floor_rate_locked(kAxisDec) * kSlowModeFloorPad;
         if (std::abs(rate) >= floor_rate) {
             dec_duty_rate_deg_s_ = 0.0;
+            if (defer_motion) {
+                // Continuous motion starts when the busy operation's restore
+                // path re-applies (restore_tracking_after_slew_/pulse end/
+                // MoveAxis stop all funnel through here without defer).
+                dec_offset_running_ = false;
+                return;
+            }
             start_speed_motion_locked(lock, kAxisDec, rate);
         } else {
-            if (dec_offset_running_) {
+            if (dec_offset_running_ && !defer_motion) {
                 const uint64_t gen = ++motion_generation_;
                 static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
             }
             dec_duty_rate_deg_s_ = rate;
+            if (defer_motion) {
+                // The duty worker's go-gate idles until the axes are free;
+                // do not touch cmd_axis_rate_deg_s_ mid-goto.
+                dec_offset_running_ = false;
+                return;
+            }
             cmd_axis_rate_deg_s_[1] = rate;  // dead-reckon the requested average
         }
         dec_offset_running_ = true;
@@ -1765,8 +1797,7 @@ private:
                     break;
                 }
                 floor_rate = slow_mode_floor_rate_locked(kAxisDec);
-                go = connected_ && tracking_ && !parking_ && !homing_ && !goto_in_progress_ && !slewing_cached_ &&
-                     !pulse_guiding_active_ && !manual_axis_slewing_[0] && !manual_axis_slewing_[1];
+                go = connected_ && tracking_ && !axes_busy_locked();
             }
             if (!go) {
                 if (!task_wait_for(std::chrono::milliseconds(500), dec_duty_cancel_)) {

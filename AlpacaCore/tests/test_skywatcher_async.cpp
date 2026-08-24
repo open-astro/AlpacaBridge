@@ -519,4 +519,35 @@ TEST_CASE("SkyWatcher async - idempotent SetTracking/rate rewrites do not churn 
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - rate setters during a goto defer instead of hijacking it", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    double lst = driver->get_sidereal_time();
+    double target_ra = std::fmod(lst - 2.0 + 24.0, 24.0);
+    driver->slew_to_coordinates_async(target_ra, 40.0);
+    REQUIRE(driver->get_slewing());
+
+    // Mid-flight rate writes must not replace the goto motion with
+    // tracking-rate motion (which would read as "not slewing" and leave the
+    // mount silently off-target).
+    driver->set_declination_rate(10.0);
+    driver->set_right_ascension_rate(1.0);
+    REQUIRE(driver->get_slewing());
+
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
+    REQUIRE(std::abs(driver->get_declination() - 40.0) < 0.05);
+
+    // The deferred Dec offset is live after the landing restore.
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 5000));
+    REQUIRE(driver->get_declination_rate() == 10.0);
+    REQUIRE(driver->get_right_ascension_rate() == 1.0);
+
+    driver->set_declination_rate(0.0);
+    driver->set_right_ascension_rate(0.0);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
