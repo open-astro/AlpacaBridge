@@ -47,6 +47,9 @@ constexpr double kLunarDegPerSec = 14.511415 / 3600.0;
 // RightAscensionRate is in seconds of RA per SIDEREAL second (ASCOM):
 // 1 s RA = 15 arcsec, scaled sidereal->SI by 86164.1/86400.
 constexpr double kRaRateSecondsToDegPerSec = 15.0 / (0.9972695663 * 3600.0);
+// Dec rates within this factor of the slow-mode floor are duty-cycled rather
+// than run continuously (":I" already pinned at 0xFFFFFF cannot go slower).
+constexpr double kSlowModeFloorPad = 1.02;
 constexpr double kSolarDegPerSec = 15.0 / 3600.0;
 // ~800x sidereal, the classic Sky-Watcher maximum slew rate.
 constexpr double kMaxMoveAxisRateDegPerSec = 800.0 * kSiderealDegPerSec;
@@ -456,9 +459,15 @@ public:
     }
 
     // (Re)start the duty-cycle worker for a sub-floor DeclinationRate. Call
-    // with no mutexes held; reaps any previous worker first.
+    // with no mutexes held. The whole reap+create sequence is serialized by
+    // duty_lifecycle_mutex_ so two concurrent setters can never reassign a
+    // still-joinable std::thread (std::terminate). The join itself must NOT
+    // happen under task_mutex_ — the worker's task_wait_for reacquires it on
+    // wake, so joining while holding it deadlocks; the lifecycle mutex is
+    // never taken by the worker, only by setters.
     void start_dec_duty_thread() {
-        reap_dec_duty_task();
+        std::lock_guard<std::mutex> lifecycle(duty_lifecycle_mutex_);
+        reap_dec_duty_locked_lifecycle();
         std::lock_guard<std::mutex> tlock(task_mutex_);
         dec_duty_thread_ = std::thread([this]() { dec_duty_loop(); });
     }
@@ -1700,7 +1709,9 @@ private:
         if (cached_dec_axis_deg_ >= 0.0) {
             rate = -rate;
         }
-        double floor_rate = slow_mode_floor_rate_locked(kAxisDec) * 1.02;
+        // Rates within kSlowModeFloorPad of the floor still duty-cycle: an
+        // ":I" value pinned at 0xFFFFFF cannot resolve them continuously.
+        double floor_rate = slow_mode_floor_rate_locked(kAxisDec) * kSlowModeFloorPad;
         if (std::abs(rate) >= floor_rate) {
             dec_duty_rate_deg_s_ = 0.0;
             start_speed_motion_locked(lock, kAxisDec, rate);
@@ -1742,6 +1753,10 @@ private:
             }
             // ~140 ms stop-landing overrun measured on hardware; shorten the
             // wait so the physical on-duration matches the duty fraction.
+            // The RAW floor is correct here (the burst physically runs at
+            // it); rates inside the kSlowModeFloorPad margin just compute an
+            // on-time near/above the period and the clamp makes them
+            // effectively continuous.
             auto on_time = std::chrono::milliseconds(
                 std::clamp(static_cast<int>(3000.0 * std::abs(rate) / floor_rate) - 140, 50, 3000));
             uint64_t burst_gen = 0;
@@ -1790,6 +1805,13 @@ private:
     }
 
     void reap_dec_duty_task() {
+        std::lock_guard<std::mutex> lifecycle(duty_lifecycle_mutex_);
+        reap_dec_duty_locked_lifecycle();
+    }
+
+    // Requires duty_lifecycle_mutex_. Moves the thread slot out under
+    // task_mutex_ and joins with only the lifecycle mutex held.
+    void reap_dec_duty_locked_lifecycle() {
         dec_duty_cancel_.store(true);
         task_cv_.notify_all();
         std::thread prev;
@@ -2391,13 +2413,14 @@ private:
     // next refinement goto fought its pulse-guide test for the motors).
     mutable bool goto_in_progress_ = false;
     bool has_home_indexer_ = false;
-    int tracking_rate_ = 0;
+    int tracking_rate_ = 0;                      // ASCOM DriveRate (0/1/2)
     double ra_rate_sec_per_sidereal_sec_ = 0.0;  // RightAscensionRate
     double dec_rate_arcsec_per_sec_ = 0.0;       // DeclinationRate
     double dec_duty_rate_deg_s_ = 0.0;           // sub-floor Dec rate (duty-cycled)
     bool dec_offset_running_ = false;
     std::thread dec_duty_thread_;
-    std::atomic<bool> dec_duty_cancel_{false};            // ASCOM DriveRate (0/1/2)
+    std::atomic<bool> dec_duty_cancel_{false};
+    std::mutex duty_lifecycle_mutex_;                     // serializes duty-worker reap+create
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
     bool park_position_set_ = false;
