@@ -44,6 +44,9 @@ constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
 // ASCOM DriveRates: 0 = Sidereal, 1 = Lunar, 2 = Solar (3 = King unsupported).
 // Standard drive rates (INDI TRACKRATE_* constants), arcsec/s over 3600.
 constexpr double kLunarDegPerSec = 14.511415 / 3600.0;
+// RightAscensionRate is in seconds of RA per SIDEREAL second (ASCOM):
+// 1 s RA = 15 arcsec, scaled sidereal->SI by 86164.1/86400.
+constexpr double kRaRateSecondsToDegPerSec = 15.0 * 0.9972695663 / 3600.0;
 constexpr double kSolarDegPerSec = 15.0 / 3600.0;
 // ~800x sidereal, the classic Sky-Watcher maximum slew rate.
 constexpr double kMaxMoveAxisRateDegPerSec = 800.0 * kSiderealDegPerSec;
@@ -374,11 +377,11 @@ public:
         return pulse_guiding_active_;
     }
 
-    bool get_can_set_declination_rate() const override { return false; }
+    bool get_can_set_declination_rate() const override { return true; }
     bool get_can_set_guide_rates() const override { return true; }
     bool get_can_set_park() const override { return true; }
     bool get_can_set_pier_side() const override { return false; }
-    bool get_can_set_right_ascension_rate() const override { return false; }
+    bool get_can_set_right_ascension_rate() const override { return true; }
     bool get_can_set_tracking() const override { return true; }
     bool get_can_slew_alt_az() const override { return false; }
     bool get_can_slew_alt_az_async() const override { return false; }
@@ -397,15 +400,38 @@ public:
         return std::clamp(dec, -90.0, 90.0);
     }
 
-    double get_declination_rate() const override { return 0.0; }
+    double get_declination_rate() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return dec_rate_arcsec_per_sec_;
+    }
 
-    // RA/Dec tracking-rate offsets are DEFERRED: ConformU 4.5's measured-rate
-    // tests exposed a physical Dec-axis undershoot at mid rates and count-read
-    // glitches that need hardware time to resolve (see AGENTS.md). The
-    // supporting math (dead reckoning, LST-compensated gotos) shipped anyway.
+    // DeclinationRate (arcsec/s): while tracking, the Dec axis runs a
+    // speed-mode motion at the offset rate; rates below the slow-mode floor
+    // (~0.26 arcsec/s, ":I" clamps at 0xFFFFFF) are produced by duty-cycling.
+    // Issue #214 re-attempt: the previously-suspected hardware anomalies were
+    // bench-disproven (axis tracks 5-320 as/s within 0.2%; no ":I" read
+    // glitches) — both were artifacts of the pre-#216 refinement-goto races.
     void set_declination_rate(double rate) override {
-        (void)rate;
-        throw AlpacaException("Declination rate not supported", AlpacaError::PropertyNotImplemented);
+        reap_dec_duty_task();
+        bool need_duty = false;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            check_connected();
+            if (tracking_rate_ != 0) {
+                throw AlpacaException("DeclinationRate can only be set at the Sidereal drive rate",
+                                      AlpacaError::InvalidOperation);
+            }
+            dec_rate_arcsec_per_sec_ = rate;
+            refresh_position_cache_locked(true);  // fresh model anchor
+            if (tracking_) {
+                apply_dec_rate_offset_locked(lock);
+            }
+            need_duty = dec_duty_rate_deg_s_ != 0.0;
+        }
+        if (need_duty) {
+            std::lock_guard<std::mutex> tlock(task_mutex_);
+            dec_duty_thread_ = std::thread([this]() { dec_duty_loop(); });
+        }
     }
 
     bool get_tracking() const override {
@@ -415,12 +441,27 @@ public:
     }
 
     void set_tracking(bool tracking) override {
-        std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        if (tracking) {
-            check_not_parked_locked("Tracking");
+        bool need_duty = false;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            check_connected();
+            if (tracking) {
+                check_not_parked_locked("Tracking");
+            }
+            set_tracking_locked(lock, tracking);
+            need_duty = tracking_ && dec_duty_rate_deg_s_ != 0.0;
         }
-        set_tracking_locked(lock, tracking);
+        if (need_duty) {
+            start_dec_duty_thread();
+        }
+    }
+
+    // (Re)start the duty-cycle worker for a sub-floor DeclinationRate. Call
+    // with no mutexes held; reaps any previous worker first.
+    void start_dec_duty_thread() {
+        reap_dec_duty_task();
+        std::lock_guard<std::mutex> tlock(task_mutex_);
+        dec_duty_thread_ = std::thread([this]() { dec_duty_loop(); });
     }
 
     double get_focal_length() const override { return focal_length_m_; }
@@ -454,11 +495,28 @@ public:
         return ra;
     }
 
-    double get_right_ascension_rate() const override { return 0.0; }
+    double get_right_ascension_rate() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ra_rate_sec_per_sidereal_sec_;
+    }
 
+    // RightAscensionRate (seconds of RA per sidereal second): folded into the
+    // RA drive rate. Positive rate = RA increasing = axis advancing SLOWER
+    // (RA = LST - HA), so the offset is SUBTRACTED; a large offset reverses
+    // the axis, which needs a stop-and-restart (":I" cannot change direction).
     void set_right_ascension_rate(double rate) override {
-        (void)rate;
-        throw AlpacaException("Right ascension rate not supported", AlpacaError::PropertyNotImplemented);
+        std::unique_lock<std::mutex> lock(mutex_);
+        check_connected();
+        if (tracking_rate_ != 0) {
+            throw AlpacaException("RightAscensionRate can only be set at the Sidereal drive rate",
+                                  AlpacaError::InvalidOperation);
+        }
+        double previous = effective_ra_rate_locked();
+        ra_rate_sec_per_sidereal_sec_ = rate;
+        refresh_position_cache_locked(true);  // fresh model anchor
+        if (tracking_) {
+            apply_ra_tracking_rate_locked(lock, previous);
+        }
     }
 
     int get_side_of_pier() const override {
@@ -591,8 +649,13 @@ public:
         }
         double previous = effective_ra_rate_locked();
         tracking_rate_ = rate;
+        // ASCOM contract: changing the drive rate zeroes the rate offsets.
+        ra_rate_sec_per_sidereal_sec_ = 0.0;
+        dec_rate_arcsec_per_sec_ = 0.0;
+        dec_duty_rate_deg_s_ = 0.0;
         if (tracking_) {
             apply_ra_tracking_rate_locked(lock, previous);
+            apply_dec_rate_offset_locked(lock);
         }
     }
 
@@ -1333,6 +1396,10 @@ private:
         homing_ = false;
         goto_in_progress_ = false;
         tracking_rate_ = 0;
+        ra_rate_sec_per_sidereal_sec_ = 0.0;
+        dec_rate_arcsec_per_sec_ = 0.0;
+        dec_duty_rate_deg_s_ = 0.0;
+        dec_offset_running_ = false;
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
         position_cache_valid_ = false;
@@ -1360,7 +1427,9 @@ private:
         // sub-count offset rates. Goto/stop paths zero the commanded rates,
         // so a slewing or idle axis reports the raw cached angle.
         double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - last_position_update_).count();
-        dt = std::clamp(dt, 0.0, 5.0);
+        // Offsets hold the model anchor for the whole offset session; without
+        // offsets the cache re-anchors within seconds, so clamp tight.
+        dt = std::clamp(dt, 0.0, rate_offsets_active_locked() && tracking_ ? 3600.0 : 5.0);
         double a1 = cached_ra_axis_deg_ + cmd_axis_rate_deg_s_[0] * dt;
         double a2 = cached_dec_axis_deg_ + cmd_axis_rate_deg_s_[1] * dt;
         double dec = 0.0;
@@ -1424,9 +1493,20 @@ private:
 
     void invalidate_position_cache_locked() const { position_cache_valid_ = false; }
 
+    bool rate_offsets_active_locked() const {
+        return ra_rate_sec_per_sidereal_sec_ != 0.0 || dec_rate_arcsec_per_sec_ != 0.0;
+    }
+
     void refresh_position_cache_locked(bool force) const {
         auto now = std::chrono::steady_clock::now();
         if (!force && position_cache_valid_ && (now - last_position_update_) < kPositionCacheTtl) {
+            return;
+        }
+        // While rate offsets run, serve the dead-reckoned model instead of
+        // re-anchoring on hardware counts: duty-cycled Dec bursts and the
+        // offset RA rate make raw reads jitter around the commanded average.
+        // Offset entry points and motion commands force a fresh anchor.
+        if (!force && position_cache_valid_ && rate_offsets_active_locked() && tracking_) {
             return;
         }
         auto& protocol = SkyWatcherProtocolWrapper::instance();
@@ -1558,8 +1638,129 @@ private:
         }
     }
 
-    // RA drive rate for the selected DriveRate (rate offsets are deferred).
-    double effective_ra_rate_locked() const { return base_tracking_rate_locked(); }
+    // RA drive rate with the RightAscensionRate offset folded in. Positive
+    // offset = RA increasing = axis SLOWER (RA = LST - HA) -> subtract.
+    double effective_ra_rate_locked() const {
+        return base_tracking_rate_locked() - ra_rate_sec_per_sidereal_sec_ * kRaRateSecondsToDegPerSec;
+    }
+
+    // Slowest achievable slow-mode rate (":I" clamps at 0xFFFFFF): ~0.26
+    // arcsec/s on the Wave 100i. Sub-floor Dec offsets are duty-cycled.
+    double slow_mode_floor_rate_locked(int channel) const {
+        const AxisParameters& params = axis_params_[channel - 1];
+        return static_cast<double>(params.timer_frequency) * 360.0 /
+               (static_cast<double>(params.counts_per_revolution) * static_cast<double>(kCountsMask));
+    }
+
+    // Start/stop/duty the Dec-axis offset motion for DeclinationRate. Sign:
+    // dec = 90 - a2 on the east-pointing branch (a2 >= 0) -> +Dec is NEGATIVE
+    // axis motion there (ConformU 4.5 measured-rate confirmed).
+    void apply_dec_rate_offset_locked(std::unique_lock<std::mutex>& lock) {
+        double rate = dec_rate_arcsec_per_sec_ / 3600.0;
+        if (rate == 0.0) {
+            dec_duty_rate_deg_s_ = 0.0;
+            if (dec_offset_running_) {
+                const uint64_t gen = ++motion_generation_;
+                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
+                dec_offset_running_ = false;
+            }
+            return;
+        }
+        refresh_position_cache_locked(false);
+        if (cached_dec_axis_deg_ >= 0.0) {
+            rate = -rate;
+        }
+        double floor_rate = slow_mode_floor_rate_locked(kAxisDec) * 1.02;
+        if (std::abs(rate) >= floor_rate) {
+            dec_duty_rate_deg_s_ = 0.0;
+            start_speed_motion_locked(lock, kAxisDec, rate);
+        } else {
+            if (dec_offset_running_) {
+                const uint64_t gen = ++motion_generation_;
+                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
+            }
+            dec_duty_rate_deg_s_ = rate;
+            cmd_axis_rate_deg_s_[1] = rate;  // dead-reckon the requested average
+        }
+        dec_offset_running_ = true;
+    }
+
+    // Duty-cycle worker for sub-floor Dec rates: floor-rate bursts sized to
+    // the requested average. Exits when the duty rate returns to zero; idles
+    // while tracking is off or a slew/park/home owns the axes.
+    void dec_duty_loop() {
+        constexpr auto kDutyPeriod = std::chrono::milliseconds(3000);
+        while (!dec_duty_cancel_.load()) {
+            double rate = 0.0;
+            double floor_rate = 0.0;
+            bool go = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                rate = dec_duty_rate_deg_s_;
+                if (rate == 0.0) {
+                    break;
+                }
+                floor_rate = slow_mode_floor_rate_locked(kAxisDec);
+                go = connected_ && tracking_ && !parking_ && !homing_ && !goto_in_progress_ && !slewing_cached_ &&
+                     !manual_axis_slewing_[0] && !manual_axis_slewing_[1];
+            }
+            if (!go) {
+                if (!task_wait_for(std::chrono::milliseconds(500), dec_duty_cancel_)) {
+                    break;
+                }
+                continue;
+            }
+            // ~140 ms stop-landing overrun measured on hardware; shorten the
+            // wait so the physical on-duration matches the duty fraction.
+            auto on_time = std::chrono::milliseconds(
+                std::clamp(static_cast<int>(3000.0 * std::abs(rate) / floor_rate) - 140, 50, 3000));
+            try {
+                std::unique_lock<std::mutex> lock(mutex_);
+                if (dec_duty_rate_deg_s_ != rate) continue;
+                start_speed_motion_locked(lock, kAxisDec, rate > 0.0 ? floor_rate : -floor_rate);
+                cmd_axis_rate_deg_s_[1] = rate;
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                // Superseded or transport hiccup; next cycle re-evaluates.
+            }
+            if (!task_wait_for(on_time, dec_duty_cancel_)) break;
+            try {
+                std::unique_lock<std::mutex> lock(mutex_);
+                if (dec_duty_rate_deg_s_ == rate && !goto_in_progress_ && !parking_ && !homing_) {
+                    const uint64_t gen = ++motion_generation_;
+                    static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
+                    cmd_axis_rate_deg_s_[1] = rate;  // still the average rate
+                }
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            }
+            if (!task_wait_for(kDutyPeriod - on_time, dec_duty_cancel_)) break;
+        }
+        // Never leave the axis creeping on exit.
+        try {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (connected_ && dec_offset_running_ && dec_duty_rate_deg_s_ == 0.0) {
+                return;  // apply() already stopped it
+            }
+            if (connected_) {
+                const uint64_t gen = ++motion_generation_;
+                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
+            }
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        }
+    }
+
+    void reap_dec_duty_task() {
+        dec_duty_cancel_.store(true);
+        task_cv_.notify_all();
+        std::thread prev;
+        {
+            std::lock_guard<std::mutex> tlock(task_mutex_);
+            prev = std::move(dec_duty_thread_);
+        }
+        if (prev.joinable()) {
+            prev.join();
+        }
+        dec_duty_cancel_.store(false);
+    }
 
     // Re-command the RA axis after a rate change. In-place step-period writes
     // are only legal while the direction is unchanged; a sign flip (or a
@@ -1581,12 +1782,18 @@ private:
             // (positive axis angle by this driver's convention) at the
             // selected drive rate plus any RightAscensionRate offset.
             start_speed_motion_locked(lock, kAxisRa, effective_ra_rate_locked());
+            apply_dec_rate_offset_locked(lock);
         } else {
             const uint64_t gen = ++motion_generation_;
             if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
                 // A newer motion command took the axes while the mutex was
                 // released: it owns the tracking state now — do not stomp it.
                 throw AlpacaException("Tracking change superseded by a concurrent motion command");
+            }
+            if (dec_offset_running_) {
+                const uint64_t dgen = ++motion_generation_;
+                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, dgen));
+                dec_offset_running_ = false;
             }
         }
         tracking_ = tracking;
@@ -2020,15 +2227,18 @@ private:
         slew_task_cancel_.store(true);
         pulse_task_cancel_.store(true);
         stop_task_cancel_.store(true);
+        dec_duty_cancel_.store(true);
         task_cv_.notify_all();
         std::thread slew_thread;
         std::thread pulse_thread;
         std::thread stop_thread;
+        std::thread duty_thread;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
             slew_thread = std::move(slew_task_thread_);
             pulse_thread = std::move(pulse_task_thread_);
             stop_thread = std::move(stop_task_thread_);
+            duty_thread = std::move(dec_duty_thread_);
         }
         if (slew_thread.joinable()) {
             slew_thread.join();
@@ -2039,6 +2249,10 @@ private:
         if (stop_thread.joinable()) {
             stop_thread.join();
         }
+        if (duty_thread.joinable()) {
+            duty_thread.join();
+        }
+        dec_duty_cancel_.store(false);
     }
 
     void reap_stop_task() {
@@ -2133,7 +2347,13 @@ private:
     // next refinement goto fought its pulse-guide test for the motors).
     mutable bool goto_in_progress_ = false;
     bool has_home_indexer_ = false;
-    int tracking_rate_ = 0;                               // ASCOM DriveRate (0/1/2)
+    int tracking_rate_ = 0;
+    double ra_rate_sec_per_sidereal_sec_ = 0.0;  // RightAscensionRate
+    double dec_rate_arcsec_per_sec_ = 0.0;       // DeclinationRate
+    double dec_duty_rate_deg_s_ = 0.0;           // sub-floor Dec rate (duty-cycled)
+    bool dec_offset_running_ = false;
+    std::thread dec_duty_thread_;
+    std::atomic<bool> dec_duty_cancel_{false};            // ASCOM DriveRate (0/1/2)
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
     bool park_position_set_ = false;

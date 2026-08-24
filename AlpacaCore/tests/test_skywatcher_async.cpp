@@ -322,4 +322,88 @@ TEST_CASE("SkyWatcher async - MoveAxis stop restore yields to a newer tracking c
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - DeclinationRate drives Dec with the east-branch sign", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    // At the power-on position the Dec axis angle is 0 (east branch, a2 >= 0),
+    // where dec = 90 - a2: +DeclinationRate must move the axis NEGATIVE.
+    driver->set_declination_rate(10.0);  // arcsec/s, well above the ~0.26 floor
+    REQUIRE(driver->get_declination_rate() == 10.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    double start = mount.physical_degrees(2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    double moved_arcsec = (mount.physical_degrees(2) - start) * 3600.0;
+    REQUIRE(moved_arcsec < -10.0);
+    REQUIRE(moved_arcsec > -40.0);
+
+    // Zeroing the rate stops the offset motion.
+    driver->set_declination_rate(0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - RightAscensionRate offset is subtracted from the drive", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    // +10 s/sidereal-s = +150 arcsec/s of RA drift; sidereal is ~15 arcsec/s,
+    // so the RA axis must REVERSE (RA = LST - HA -> offset subtracts).
+    driver->set_right_ascension_rate(10.0);
+    REQUIRE(driver->get_right_ascension_rate() == 10.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    double start = mount.physical_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    REQUIRE(mount.physical_degrees(1) < start);
+
+    driver->set_right_ascension_rate(0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    double resume = mount.physical_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    REQUIRE(mount.physical_degrees(1) > resume);  // back to plain sidereal
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - rate offsets require Sidereal and zero on drive-rate change", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->set_tracking_rate(1);  // Lunar
+    REQUIRE_THROWS_AS(driver->set_declination_rate(1.0), alpacacore::AlpacaException);
+    REQUIRE_THROWS_AS(driver->set_right_ascension_rate(1.0), alpacacore::AlpacaException);
+
+    driver->set_tracking_rate(0);  // Sidereal
+    driver->set_declination_rate(5.0);
+    driver->set_right_ascension_rate(2.0);
+    driver->set_tracking_rate(1);  // ASCOM: drive-rate change zeroes offsets
+    REQUIRE(driver->get_declination_rate() == 0.0);
+    REQUIRE(driver->get_right_ascension_rate() == 0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - sub-floor DeclinationRate duty-cycles the axis", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    int starts = mount.start_count(2);
+    int stops = mount.stop_count(2);
+    driver->set_declination_rate(0.1);  // below the ~0.26 arcsec/s slow-mode floor
+    // ~1.0s bursts on a 3s period: expect at least two on/off cycles in 7.5s.
+    REQUIRE(wait_until([&] { return mount.start_count(2) >= starts + 2 && mount.stop_count(2) >= stops + 2; }, 7500));
+
+    driver->set_declination_rate(0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

@@ -1087,14 +1087,18 @@ datagrams before each send so replies cannot get off-by-one.
   the mount was powered on at home (a killed ConformU run mid-sync can shift the
   frame; this is why AutoHome matters).
 - **Tracking rates**: Lunar/Solar are just different step-period constants
-  (live `:I` change while tracking). **RA/Dec rate OFFSETS are deferred**: a
-  full implementation (effective-rate fold-in, pier-side Dec sign flip,
-  duty-cycling below the 0.26 arcsec/s slow-mode floor `T1=0xFFFFFF`, modeled
-  reads) passed manual endpoint measurements but failed ConformU's chained
-  measured-rate tests with a REAL physical Dec undershoot (commanded 40 as/s,
-  encoder counts showed ~16) plus impossible ~45 arcsec RA count jumps between
-  reads 60 ms apart right after in-place `:I` writes. Needs bench time with the
-  motion recorder before re-attempting.
+  (live `:I` change while tracking). **RA/Dec rate OFFSETS are supported**
+  (issue #214): RightAscensionRate is SUBTRACTED from the drive rate
+  (RA = LST − HA), DeclinationRate flips sign on the east branch (a2 ≥ 0,
+  dec = 90 − a2), sub-floor Dec rates duty-cycle floor-rate bursts on a 3 s
+  period (~140 ms stop-landing compensation), reads hold the dead-reckoned
+  model while offsets run, and offsets zero on a drive-rate change (setters
+  throw InvalidOperation off Sidereal). The two "hardware anomalies" that
+  originally deferred this (Dec undershoot 40→16 as/s; ~45 arcsec RA count
+  jumps after in-place `:I` writes) were bench-DISPROVEN on 2026-08-23: direct
+  UDP measurements show Dec tracks 5–320 as/s within 0.2% and zero `:j` count
+  glitches across 120 reads interleaved with `:I` writes. Both symptoms were
+  artifacts of the pre-#216 refinement-goto races, not the motor controller.
 - **No read freezes — ever**: the old 10 s post-slew/post-sync/pulse position
   overrides masked a real GOTO landing error (~3 arcmin east: axis targets were
   computed with LST at dispatch, not arrival) and corrupted every ConformU 4.5
