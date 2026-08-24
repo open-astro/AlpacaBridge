@@ -25,19 +25,28 @@ struct IeafConnectionConfig {
     std::string serial_port;   // e.g., "/dev/ttyUSB0"
     int baud_rate = 115200;    // iEAF fixed rate
     int serial_timeout_s = 4;  // matches INDI iEAFFOCUS_TIMEOUT
+    // User-selected model for Name/Description: "ieaf" (default) or "iafs2".
+    // Identical protocol either way; the handshake accepts both model codes.
+    std::string model = "ieaf";
 };
 
 /**
  * @brief Identity returned by the :DeviceInfo# handshake.
  *
- * Response is "%6d%2d%4d#": position snapshot, model code (2 or 3 = iEAF),
- * and a 4-digit firmware/build number.
+ * Response is "%6d%2d%4d#": position snapshot, model code (2 = iEAF,
+ * 3 = iAFS2/3; both speak the identical protocol), and a 4-digit
+ * firmware/build number.
  */
 struct IeafDeviceInfo {
     std::int32_t position = 0;
     std::int32_t model = 0;
     std::int32_t firmware = 0;
 };
+
+/**
+ * @brief True when a :DeviceInfo# model code belongs to this driver (2 or 3).
+ */
+bool is_ieaf_model(std::int32_t model);
 
 /**
  * @brief One :FI# status snapshot.

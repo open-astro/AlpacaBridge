@@ -6940,8 +6940,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "ioptron" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        // iEAF electronic focuser — USB-serial only, fixed 115200 baud.
+        // iEAF / iAFS2/3 electronic focuser — USB-serial only, fixed 115200 baud.
         std::string conn_type = config.value("connectionType", "auto");
+        // "ieaf" (default) or "iafs2": identical protocol, sets the reported
+        // device name.
+        std::string model = config.value("model", "ieaf");
 
         std::unique_ptr<alpacacore::FocuserDriver> focuser;
         if (conn_type == "serial") {
@@ -6949,14 +6952,15 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (port_path.empty()) {
                 // No port specified with serial mode — fall through to auto-detect
                 int focuser_index = config.value("focuserIndex", 0);
-                focuser = alpacacore::vendor::ioptron::create_ieaf_focuser_by_index(device_number, focuser_index);
+                focuser =
+                    alpacacore::vendor::ioptron::create_ieaf_focuser_by_index(device_number, focuser_index, model);
             } else {
-                focuser = alpacacore::vendor::ioptron::create_ieaf_focuser(device_number, port_path);
+                focuser = alpacacore::vendor::ioptron::create_ieaf_focuser(device_number, port_path, model);
             }
         } else {
             // "auto" or unset — auto-detect
             int focuser_index = config.value("focuserIndex", 0);
-            focuser = alpacacore::vendor::ioptron::create_ieaf_focuser_by_index(device_number, focuser_index);
+            focuser = alpacacore::vendor::ioptron::create_ieaf_focuser_by_index(device_number, focuser_index, model);
         }
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
@@ -8365,9 +8369,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("pwmFrequencyHz");
             copy_if_present("ports");
         } else if (device_type == "focuser") {
-            // iEAF: USB-serial only, fixed baud — no baudRate/network fields.
+            // iEAF / iAFS2/3: USB-serial only, fixed baud — no baudRate/network fields.
             copy_if_present("connectionType");
             copy_if_present("focuserIndex");
+            copy_if_present("model");
             std::string connection_type = config.value("connectionType", "");
             if (connection_type == "serial") {
                 copy_if_present("portPath");

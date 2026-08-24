@@ -1,0 +1,86 @@
+18:18:13.583 ASCOM Universal Device Conformance Checker Version 4.5.0.53834, Build time: Thu 06 August 2026 04:40:43
+18:18:13.583
+18:18:13.584 Operating system is Debian GNU/Linux 13 (trixie), Processor is ARM 64bit, Application is 64bit.
+18:18:13.584
+18:18:13.584 Alpaca device: iOptron iAFS2 (127.0.0.1:6800 Focuser/0)
+18:18:13.584
+18:18:13.584 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 6800, Alpaca device number: 0
+18:18:13.585 CreateDevice                        INFO     Alpaca device created OK
+18:18:13.585 CreateDevice                        INFO     Successfully created driver
+18:18:14.596 CreateDevice                        OK       Found a valid interface version: 4
+18:18:14.596 CreateDevice                        OK       Driver instance created successfully
+18:18:14.597
+18:18:14.598 Connect to device
+18:18:14.828 Connected                           OK       Connected to device successfully using Connected = True
+18:18:15.447 Connected                           OK       Disconnected from device successfully using Connected = False
+18:18:15.982 Connect                             OK       Connected to device successfully using Connect()
+18:18:15.985
+18:18:15.985 Common Driver Methods
+18:18:15.985 InterfaceVersion                    OK       4
+18:18:15.989 Connected                           OK       True
+18:18:15.994 Description                         OK       iOptron iAFS2 Electronic Focuser Driver
+18:18:15.999 DriverInfo                          OK       AlpacaCore iOptron iEAF Focuser Driver
+18:18:16.006 DriverVersion                       OK       3.5.1
+18:18:16.012 Name                                OK       iOptron iAFS2
+18:18:16.013
+18:18:16.019 SupportedActions                    OK       Driver returned an empty action list
+18:18:16.019 Action                              INFO     Conform cannot test the Action method
+18:18:16.020
+18:18:16.037 DeviceState                         OK       Received 4 operational state properties.
+18:18:16.037 DeviceState                         OK         IsMoving = False
+18:18:16.038 DeviceState                         OK         Position = 24199
+18:18:16.038 DeviceState                         OK         Temperature = 24.25
+18:18:16.038 DeviceState                         OK         TimeStamp = 24/08/2026 00:18:16
+18:18:16.038 DeviceState                         OK       Found all expected operational properties
+18:18:16.038
+18:18:16.038 Properties
+18:18:16.043 Absolute                            OK       True
+18:18:16.055 IsMoving                            OK       False
+18:18:16.071 MaxStep                             OK       99999
+18:18:16.081 MaxIncrement                        OK       99999
+18:18:16.088 Position                            OK       24199
+18:18:16.098 StepSize                            OK       Optional member returned a NotImplementedException error.
+18:18:16.106 TempCompAvailable                   OK       False
+18:18:16.110 TempComp Read                       OK       False
+18:18:16.117 TempComp Write                      OK       Temperature compensation is not available and a NotImplementedException error was generated as expected
+18:18:16.146 Temperature                         OK       24.25
+18:18:16.146
+18:18:16.147 Methods
+18:18:16.176 Halt                                OK       Focuser halted OK
+18:18:25.293 Move - TempComp False               OK       Absolute move OK
+18:18:34.357
+18:18:34.359 Disconnect from device
+18:18:34.503 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+18:18:34.525
+18:18:34.536 Conformance test has finished
+18:18:34.538
+18:18:34.539 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!
+18:18:34.539
+18:18:34.540 Timing Summary                               See Help for further information.
+18:18:34.541 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+18:18:34.541 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+18:18:34.542 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+18:18:34.542 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+18:18:34.542
+18:18:34.542 Connect                                      At 18:18:15.460 Connect                  0.012 seconds. ✓ (STANDARD)
+18:18:34.542 InterfaceVersion                             At 18:18:15.985 InterfaceVersion         0.000 seconds. ✓ (FAST)
+18:18:34.543 Connected                                    At 18:18:15.988 Connected                0.003 seconds. ✓ (FAST)
+18:18:34.543 Description                                  At 18:18:15.993 Description              0.004 seconds. ✓ (FAST)
+18:18:34.543 DriverInfo                                   At 18:18:15.999 DriverInfo               0.005 seconds. ✓ (FAST)
+18:18:34.543 DriverVersion                                At 18:18:16.005 DriverVersion            0.005 seconds. ✓ (FAST)
+18:18:34.543 Name                                         At 18:18:16.012 Name                     0.005 seconds. ✓ (FAST)
+18:18:34.543 SupportedActions                             At 18:18:16.019 SupportedActions         0.006 seconds. ✓ (FAST)
+18:18:34.544 DeviceState                                  At 18:18:16.037 DeviceState              0.017 seconds. ✓ (FAST)
+18:18:34.544 Absolute                                     At 18:18:16.043 Absolute                 0.005 seconds. ✓ (FAST)
+18:18:34.544 IsMoving                                     At 18:18:16.054 IsMoving                 0.010 seconds. ✓ (FAST)
+18:18:34.544 MaxStep                                      At 18:18:16.071 MaxStep                  0.016 seconds. ✓ (FAST)
+18:18:34.544 MaxIncrement                                 At 18:18:16.081 MaxIncrement             0.009 seconds. ✓ (FAST)
+18:18:34.544 Position                                     At 18:18:16.087 Position                 0.006 seconds. ✓ (FAST)
+18:18:34.544 TempCompAvailable                            At 18:18:16.106 TempCompAvailable        0.008 seconds. ✓ (FAST)
+18:18:34.544 TempComp Read                                At 18:18:16.109 TempComp Read            0.003 seconds. ✓ (FAST)
+18:18:34.544 Temperature                                  At 18:18:16.145 Temperature              0.018 seconds. ✓ (FAST)
+18:18:34.544 Halt                                         At 18:18:16.176 Halt                     0.029 seconds. ✓ (STANDARD)
+18:18:34.544 Move to 34198                                At 18:18:16.234 Move to 34198            0.012 seconds. ✓ (STANDARD)
+18:18:34.544 Disconnect                                   At 18:18:34.480 Disconnect               0.111 seconds. ✓ (STANDARD)
+18:18:34.545
+18:18:34.545 Congratulations, all members returned within their target response times!!

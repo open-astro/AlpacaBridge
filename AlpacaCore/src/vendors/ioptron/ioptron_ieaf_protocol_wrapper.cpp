@@ -57,17 +57,19 @@ bool parse_device_info(const std::string& resp, IeafDeviceInfo& out) {
     return true;
 }
 
+}  // namespace
+
 bool is_ieaf_model(std::int32_t model) {
-    // Model codes 2 and 3 identify the iEAF (INDI ieaffocus.cpp).
+    // Model code 2 = iEAF, 3 = iAFS2/3 (INDI ieaffocus.cpp, INDIGO
+    // indigo_focuser_ioptron.c). Same protocol either way.
     return model == 2 || model == 3;
 }
-
-}  // namespace
 
 // Probe a serial port with the :DeviceInfo# handshake. Returns true (and
 // fills `info`) only if the reply parses and reports an iEAF model code.
 //
-// The iEAF ships with a Prolific PL2303 USB-serial bridge (067b:23d3) wired
+// The iEAF ships with a Prolific PL2303 USB-serial bridge (067b:23d3; the
+// iAFS2/3 uses 067b:23a3, "ATEN Serial Bridge") wired
 // straight to the focuser MCU — no Arduino-style DTR reset on open, so no
 // CH340 HUPCL dance is needed here.
 static bool probe_port(const std::string& port_path, IeafDeviceInfo& info) {
@@ -183,7 +185,8 @@ std::vector<IeafPortInfo> enumerate_ieaf_ports() {
         for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
             const std::string& name = sym.name;
 
-            // Prolific PL2303 USB-serial bridge (067b:23d3) used by the iEAF.
+            // Prolific PL2303 USB-serial bridge (067b:23d3 iEAF, 067b:23a3
+            // iAFS2/3). Match on the 067b vendor ID / names, never a product ID.
             bool is_candidate =
                 (name.find("Prolific") != std::string::npos) || (name.find("PL2303") != std::string::npos) ||
                 (name.find("067b") != std::string::npos) || (name.find("USB-Serial") != std::string::npos) ||
