@@ -106,6 +106,20 @@ public:
         return (static_cast<double>(a.counts) - static_cast<double>(kHome)) * 360.0 / kCpr;
     }
 
+    /// Number of ":J" start commands received for an axis (regression: no
+    /// motor start may reach the controller after an AbortSlew returns).
+    int start_count(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).start_count;
+    }
+
+    /// Number of ":K"/":L" stop commands received for an axis (regression:
+    /// a superseded goto dispatch must still stop BOTH axes).
+    int stop_count(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).stop_count;
+    }
+
     bool axis_running(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
@@ -119,6 +133,14 @@ public:
         Axis& a = ax(axis);
         a.home_index_counts =
             static_cast<int64_t>(kHome) - a.frame_shift + static_cast<int64_t>(std::llround(deg * kCpr / 360.0));
+    }
+
+    /// Simulate deceleration: ":K" keeps the axis running (at its current
+    /// rate) for this long before it reports stopped — the window in which
+    /// the driver's stop-waits poll (issue #212 coverage).
+    void set_stop_ramp_ms(int ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ramp_ms_ = ms;
     }
 
     /// Move the simulated axes instantly (test setup).
@@ -140,17 +162,26 @@ private:
         uint32_t t1 = 0;
         int64_t goto_target = kHome;
         int64_t frame_shift = 0;  // physical = counts + frame_shift
+        std::chrono::steady_clock::time_point stop_at{};  // ramped ":K" deadline
+        bool stopping = false;
         bool in_goto = false;
         bool init_done = true;
         // Home indexer: 0 = armed below the index, 0xFFFFFF = armed above,
         // else the latched count of the crossing.
         uint32_t indexer = 0;
+        int start_count = 0;
+        int stop_count = 0;
         int64_t home_index_counts = kHome;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
 
         void advance(std::chrono::steady_clock::time_point t) {
             double dt = std::chrono::duration<double>(t - last).count();
             last = t;
+            if (stopping && t >= stop_at) {
+                running = false;
+                stopping = false;
+                in_goto = false;
+            }
             if (!running || dt <= 0.0) {
                 return;
             }
@@ -272,14 +303,26 @@ private:
                 return "=";
             }
             case 'J':
+                ++a.start_count;
                 a.running = true;
                 if (a.in_goto) {
                     a.goto_target &= 0xFFFFFF;
                 }
                 return "=";
-            case 'K':  // ramped stop — modeled as immediate for determinism
-            case 'L':
+            case 'K':  // ramped stop: keeps running for stop_ramp_ms_ first
+                ++a.stop_count;
+                if (a.running && stop_ramp_ms_ > 0) {
+                    a.stopping = true;
+                    a.stop_at = now() + std::chrono::milliseconds(stop_ramp_ms_);
+                } else {
+                    a.running = false;
+                    a.in_goto = false;
+                }
+                return "=";
+            case 'L':  // instant stop
+                ++a.stop_count;
                 a.running = false;
+                a.stopping = false;
                 a.in_goto = false;
                 return "=";
             case 'q': {
@@ -328,6 +371,7 @@ private:
     std::atomic<bool> stop_{false};
     std::thread thread_;
     std::mutex mutex_;
+    int stop_ramp_ms_ = 0;
     Axis axes_[2];
 };
 

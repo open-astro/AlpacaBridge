@@ -205,4 +205,121 @@ TEST_CASE("SkyWatcher async - AbortSlew cancels the slew task without a refineme
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - reads stay responsive while an axis stop is ramping", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);  // real Wave axes take ~1 s to decelerate
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->move_axis(0, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    driver->move_axis(0, 0.0);  // async stop: the mount now ramps down for 800 ms
+
+    // Issue #212: the stop-wait must RELEASE the driver mutex between polls,
+    // so concurrent position reads answer promptly while the axis ramps.
+    int slow_reads = 0;
+    for (int i = 0; i < 6; ++i) {
+        auto t0 = std::chrono::steady_clock::now();
+        static_cast<void>(driver->get_right_ascension());
+        static_cast<void>(driver->get_slewing());
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+        if (ms.count() > 250) {
+            ++slow_reads;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    REQUIRE(slow_reads == 0);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
+    REQUIRE(wait_until([&] { return driver->get_tracking(); }, 5000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - AbortSlew during the dispatch stop-wait kills the goto", "[skywatcher][async]") {
+    // PR #216 review race: a goto dispatch stop-waits a ramping axis with the
+    // mutex released; an AbortSlew landing in that window must supersede the
+    // dispatch — the old code re-commanded the aborted goto afterwards.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);  // wide unlock window during dispatch
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);  // RA axis moving: dispatch must stop-wait it
+
+    double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 4.0 + 24.0, 24.0), 30.0);
+    // Abort while the dispatch is still ramping the RA axis down.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->abort_slew();
+    REQUIRE_FALSE(driver->get_slewing());
+    int ra_starts = mount.start_count(1);
+    int dec_starts = mount.start_count(2);
+
+    // The superseded dispatch must never re-command the goto — not even a
+    // brief start-then-stop burst: NO ":J" may reach the controller after
+    // AbortSlew returned (PR #216 round-2 finding).
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    REQUIRE(mount.start_count(1) == ra_starts);
+    REQUIRE(mount.start_count(2) == dec_starts);
+    REQUIRE_FALSE(driver->get_slewing());
+    REQUIRE_FALSE(mount.axis_running(1));
+    REQUIRE_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - superseded dispatch neither strands nor clobbers the other axis", "[skywatcher][async]") {
+    // PR #216 rounds 4+6: when RA's stop-wait is superseded mid-dispatch,
+    // the dispatch must abort without emitting stale stops — a MoveAxis that
+    // legitimately claimed Dec during the wait keeps its motion (round 6),
+    // and the abandoned dispatch leaves no inconsistent Slewing/tracking
+    // bookkeeping behind (round 4).
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 3.0 + 24.0, 24.0), 25.0);
+    // While the dispatch stop-waits the ramping RA axis, a concurrent client
+    // starts a Dec MoveAxis — bumping the generation and claiming the axes.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->move_axis(1, 1.0);
+    int dec_stops_after_claim = mount.stop_count(2);
+
+    // Dec's fresh motion must SURVIVE the aborted dispatch: no stale stop.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    REQUIRE(mount.stop_count(2) == dec_stops_after_claim);
+    REQUIRE(mount.axis_running(2));
+    REQUIRE(driver->get_slewing());  // the manual Dec motion reports Slewing
+
+    // And the normal MoveAxis stop path still cleans up consistently.
+    driver->move_axis(1, 0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 10000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - MoveAxis stop restore yields to a newer tracking command", "[skywatcher][async]") {
+    // PR #216 round-5 finding: the MoveAxis(0) background restore-tracking
+    // task must not re-start tracking that a concurrent SetTracking(false)
+    // stopped while the task was polling the deceleration.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->move_axis(0, 2.0);
+    REQUIRE(driver->get_slewing());
+    driver->move_axis(0, 0.0);  // async stop; restore task polls the ramp
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->set_tracking(false);  // newer motion command supersedes the restore
+
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    REQUIRE_FALSE(driver->get_tracking());
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 5000));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
