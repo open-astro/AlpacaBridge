@@ -1680,6 +1680,11 @@ private:
     // Start/stop/duty the Dec-axis offset motion for DeclinationRate. Sign:
     // dec = 90 - a2 on the east-pointing branch (a2 >= 0) -> +Dec is NEGATIVE
     // axis motion there (ConformU 4.5 measured-rate confirmed).
+    // TODO(#214 follow-up): the sign is evaluated at (re)apply time and held;
+    // a session whose dec axis crosses the branch boundary (a2 through 0)
+    // between apply events keeps the stale sign until the next goto, pulse,
+    // tracking toggle, or rate write re-applies it. Long unattended sessions
+    // near the pole should re-set DeclinationRate after a meridian flip.
     void apply_dec_rate_offset_locked(std::unique_lock<std::mutex>& lock) {
         double rate = dec_rate_arcsec_per_sec_ / 3600.0;
         if (rate == 0.0) {
@@ -1739,10 +1744,14 @@ private:
             // wait so the physical on-duration matches the duty fraction.
             auto on_time = std::chrono::milliseconds(
                 std::clamp(static_cast<int>(3000.0 * std::abs(rate) / floor_rate) - 140, 50, 3000));
+            uint64_t burst_gen = 0;
+            bool burst_started = false;
             try {
                 std::unique_lock<std::mutex> lock(mutex_);
                 if (dec_duty_rate_deg_s_ != rate) continue;
                 start_speed_motion_locked(lock, kAxisDec, rate > 0.0 ? floor_rate : -floor_rate);
+                burst_gen = motion_generation_;  // owned by THIS burst
+                burst_started = true;
                 cmd_axis_rate_deg_s_[1] = rate;
             } catch (...) {  // NOLINT(bugprone-empty-catch)
                 // Superseded or transport hiccup; next cycle re-evaluates.
@@ -1750,9 +1759,14 @@ private:
             if (!task_wait_for(on_time, dec_duty_cancel_)) break;
             try {
                 std::unique_lock<std::mutex> lock(mutex_);
-                if (dec_duty_rate_deg_s_ == rate && !goto_in_progress_ && !parking_ && !homing_) {
-                    const uint64_t gen = ++motion_generation_;
-                    static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
+                // Only stop the motion this burst itself started: a fresher
+                // generation means a pulse/MoveAxis/goto took the axis while
+                // the burst timer ran — the newer command owns it now, and
+                // stop_axis_and_wait_locked abandons on the stale generation.
+                if (burst_started && dec_duty_rate_deg_s_ == rate && motion_generation_ == burst_gen &&
+                    !goto_in_progress_ && !parking_ && !homing_ && !pulse_guiding_active_ && !manual_axis_slewing_[0] &&
+                    !manual_axis_slewing_[1]) {
+                    static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, burst_gen));
                     cmd_axis_rate_deg_s_[1] = rate;  // still the average rate
                 }
             } catch (...) {  // NOLINT(bugprone-empty-catch)

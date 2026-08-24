@@ -460,4 +460,34 @@ TEST_CASE("SkyWatcher async - sub-floor DeclinationRate duty-cycles the axis", "
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - duty burst end does not truncate a concurrent Dec pulse", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    // 0.2 arcsec/s is sub-floor: ~2.2 s bursts on a 3 s period, so a pulse
+    // dispatched inside a burst overlaps the burst's own end-of-burst stop.
+    driver->set_declination_rate(0.2);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 7500));
+
+    double before = mount.physical_degrees(2);
+    driver->pulse_guide(0, 1500);  // North, 1.5 s at the 0.5x default rate
+    REQUIRE(driver->get_is_pulse_guiding());
+    // Mid-pulse (when the burst's off-timer fires) the axis must still run.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    REQUIRE(driver->get_is_pulse_guiding());
+    REQUIRE(mount.axis_running(2));
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10000));
+    // Full-length pulse displacement (~11 arcsec), not a truncated one.
+    double moved_arcsec = (mount.physical_degrees(2) - before) * 3600.0;
+    REQUIRE(moved_arcsec < -6.0);
+    REQUIRE(moved_arcsec > -20.0);
+
+    driver->set_declination_rate(0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
