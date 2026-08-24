@@ -228,6 +228,28 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## FilterWheel Drivers
 
+### iOptron
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| iEFW-15 (5 slots) | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iEFW-15/) |
+| iEFW-18 (8 slots) | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iEFW-18/) |
+
+<details>
+<summary><strong>iOptron Filter Wheel Driver Notes</strong></summary>
+
+- **Protocol**: iEFW serial protocol (`:DeviceInfo#`, `:FW1#`, `:WP#`, `:WMnn#`), no SDK required. Reference: INDI `drivers/filter_wheel/ioptron_wheel.cpp`.
+- **Connection**: USB/Serial via the built-in Prolific PL2303 bridge (067b:23a3), fixed 115200 baud. Auto-detection supported.
+- **Tested models**: iEFW-15 (model code 99, 5 slots) and iEFW-18 (model code 98, 8 slots), firmware 100 / `:FW1#` 241010241010, on Raspberry Pi, Linux arm64, ConformU 4.5.0: 0 errors, 0 issues, all members within timing targets for both
+- **Auto-detection**: Scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for Prolific adapters and probes with the `:DeviceInfo#` handshake; only model codes 99 (iEFW-15) and 98 (iEFW-18) are accepted, so an iOptron mount or iEAF/iAFS focuser on the same chip class is skipped.
+- **Model / slot count**: the web UI Model selector (iEFW-15 / iEFW-18) sets the reported device name and pre-selects the slot picker; the slot count actually used is read from the wheel's model code at connect (a mismatch is logged as a warning).
+- **Filter names / focus offsets**: stored in the AlpacaBridge config (ZWO EFW conventions). Offsets stored on the wheel (`:WF`, set via iOptron's own software) seed `FocusOffsets` at connect when the config supplies none; config overrides and nothing is written back (Player One convention).
+- **Position**: reports `-1` while the wheel is moving, per the ASCOM IFilterWheel contract.
+- **Known hardware limitation**: the wheel's IR slot sensor stays lit whenever the wheel has power, independent of commands or polling, so the driver cannot switch it off (no such command exists; iOptron says a board revision is needed). If dark frames show a leak, shield the sensor window from the aperture side with black flocking or opaque tape.
+- **iEFW-18 is 8 usable slots, not the 9 advertised**: it is two stacked 5-slot wheels, each with one unthreaded open slot so the other wheel's filter can be selected, giving 8 filter positions. The firmware reports 8 (model code 98) and the driver follows the firmware. A filter change may rotate both wheels, so some moves take noticeably longer than others.
+
+</details>
+
 ### Player One
 
 | Model Series | Connection | Linux<br>(arm64) | Status |

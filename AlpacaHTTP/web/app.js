@@ -344,6 +344,7 @@ const INDEX_FIELDS = [
     { fieldId: 'astroasis-focuser-index', vendor: 'astroasis', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'astroasis-hid-path' },
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'ioptron-ieaf-focuser-index', vendor: 'ioptron', deviceType: 'focuser', configKey: 'focuserIndex' },
+    { fieldId: 'ioptron-filterwheel-index', vendor: 'ioptron', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
     // Same configKey as the Lite field above: panelIndex is an index into
     // enumerate_gemini_flatpanel_ports(), a scan shared by both models, so
@@ -755,6 +756,28 @@ function startEditDevice(device) {
                     pwmCheckbox.checked = config.ports[i].pwm === true;
                 }
             });
+        }
+        updateIoptronConfigFields();
+    } else if (vendor === 'ioptron' && deviceType === 'filterwheel') {
+        // iEFW: USB-serial only, fixed 115200 baud.
+        const iefwConnectionType = config.connectionType || 'auto';
+        setFormValue('ioptron-filterwheel-model', config.model || 'iefw15');
+        setFormValue('ioptron-filterwheel-connection-type', iefwConnectionType);
+        if (iefwConnectionType === 'serial') {
+            setFormValue('ioptron-filterwheel-port-path', config.portPath);
+        } else if (config.filterwheelIndex !== undefined && config.filterwheelIndex !== null) {
+            setFormValue('ioptron-filterwheel-index', config.filterwheelIndex);
+        }
+        const iefwConnectionTypeEl = document.getElementById('ioptron-filterwheel-connection-type');
+        if (iefwConnectionTypeEl) {
+            iefwConnectionTypeEl.dispatchEvent(new Event('change'));
+        }
+        const ioptronFilterNamesField = document.getElementById('ioptron-filter-names');
+        if (ioptronFilterNamesField) {
+            ioptronFilterNamesField.value = Array.isArray(config.filterNames)
+                ? config.filterNames.join('\n')
+                : '';
+            ioptronFilterwheelSlotUI.syncSlotsFromTextarea();
         }
         updateIoptronConfigFields();
     } else if (vendor === 'ioptron' && deviceType === 'focuser') {
@@ -2007,9 +2030,9 @@ function updateVendorOptions() {
     }
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
-        // iOptron provides the mount (telescope), the iMate PowerBox (switch)
-        // and the iEAF electronic focuser.
-        const ioptronAllowed = isTelescope || isSwitch || isFocuser;
+        // iOptron provides the mount (telescope), the iMate PowerBox (switch),
+        // the iEAF / iAFS2/3 focusers and the iEFW filter wheel.
+        const ioptronAllowed = isTelescope || isSwitch || isFocuser || isFilterWheel;
         ioptronOption.disabled = !ioptronAllowed;
         ioptronOption.hidden = !ioptronAllowed;
     }
@@ -2099,7 +2122,7 @@ function updateVendorOptions() {
     if (!isFocuser && vendorSelect.value === 'astroasis') {
         vendorSelect.value = '';
     }
-    if (!isTelescope && !isSwitch && !isFocuser && vendorSelect.value === 'ioptron') {
+    if (!isTelescope && !isSwitch && !isFocuser && !isFilterWheel && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
     }
     if (!isTelescope && vendorSelect.value === 'synscan') {
@@ -2277,16 +2300,19 @@ function updateIoptronConfigFields() {
     const telescopeSection = document.getElementById('ioptron-telescope-config');
     const switchSection = document.getElementById('ioptron-switch-config');
     const focuserSection = document.getElementById('ioptron-focuser-config');
-    if (!telescopeSection || !switchSection || !focuserSection) {
+    const filterwheelSection = document.getElementById('ioptron-filterwheel-config');
+    if (!telescopeSection || !switchSection || !focuserSection || !filterwheelSection) {
         return;
     }
     const deviceTypeSelect = document.getElementById('device-type');
     const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
     const isSwitch = deviceType === 'switch';
     const isFocuser = deviceType === 'focuser';
-    telescopeSection.style.display = (isSwitch || isFocuser) ? 'none' : 'block';
+    const isFilterWheel = deviceType === 'filterwheel';
+    telescopeSection.style.display = (isSwitch || isFocuser || isFilterWheel) ? 'none' : 'block';
     switchSection.style.display = isSwitch ? 'block' : 'none';
     focuserSection.style.display = isFocuser ? 'block' : 'none';
+    filterwheelSection.style.display = isFilterWheel ? 'block' : 'none';
 }
 
 const ioptronConnectionType = document.getElementById('ioptron-connection-type');
@@ -2295,6 +2321,30 @@ if (ioptronConnectionType) {
         const type = this.value;
         document.getElementById('ioptron-serial-config').style.display = type === 'serial' ? 'block' : 'none';
         document.getElementById('ioptron-network-config').style.display = type === 'network' ? 'block' : 'none';
+    });
+}
+
+// Picking the iEFW model pre-selects the matching slot count so the filter
+// name pickers appear without a second click (the wheel still reports its own
+// slot count at connect).
+const ioptronFilterwheelModel = document.getElementById('ioptron-filterwheel-model');
+if (ioptronFilterwheelModel) {
+    ioptronFilterwheelModel.addEventListener('change', function() {
+        const slotSelect = document.getElementById('ioptron-filterwheel-slot-count');
+        if (!slotSelect) {
+            return;
+        }
+        slotSelect.value = this.value === 'iefw18' ? '8' : '5';
+        slotSelect.dispatchEvent(new Event('change'));
+    });
+}
+
+const ioptronFilterwheelConnectionType = document.getElementById('ioptron-filterwheel-connection-type');
+if (ioptronFilterwheelConnectionType) {
+    ioptronFilterwheelConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('ioptron-filterwheel-auto-config').style.display = type === 'serial' ? 'none' : 'block';
+        document.getElementById('ioptron-filterwheel-serial-config').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -2471,6 +2521,13 @@ const touptekFilterwheelSlotUI = createFilterwheelSlotUI({
     customInputId: 'touptek-filterwheel-slot-custom',
     slotListId: 'touptek-filterwheel-slot-list',
     namesTextareaId: 'touptek-filter-names'
+});
+
+const ioptronFilterwheelSlotUI = createFilterwheelSlotUI({
+    countSelectId: 'ioptron-filterwheel-slot-count',
+    customInputId: 'ioptron-filterwheel-slot-custom',
+    slotListId: 'ioptron-filterwheel-slot-list',
+    namesTextareaId: 'ioptron-filter-names'
 });
 
 const wandererFilterwheelSlotUI = createFilterwheelSlotUI({
@@ -3051,6 +3108,22 @@ document.getElementById('device-form').addEventListener('submit', async function
             { pwm: dc1Pwm },
             { pwm: dc2Pwm },
         ];
+    } else if (deviceData.vendor === 'ioptron' && normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
+        // iEFW: USB-serial only, fixed baud — no baudRate/network fields.
+        deviceData.connectionType = formData.get('ioptronFilterwheelConnectionType') || 'auto';
+        deviceData.model = formData.get('ioptronFilterwheelModel') || 'iefw15';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('ioptronFilterwheelPortPath') || '';
+        } else {
+            const wheelIndex = readOptionalNumber(formData, 'ioptronFilterwheelIndex');
+            deviceData.filterwheelIndex = wheelIndex !== null ? wheelIndex : 0;
+        }
+        // Raw token (expandShorthand=false): the server-side C++ expansion is
+        // slot-count-aware and handles "LRGBSHOC" itself.
+        const ioptronFilterNames = parseFilterNamesInput(formData.get('ioptronFilterNames'), false);
+        if (ioptronFilterNames.length > 0) {
+            deviceData.filterNames = ioptronFilterNames;
+        }
     } else if (deviceData.vendor === 'ioptron' && normalizeDeviceType(deviceData.deviceType) === 'focuser') {
         // iEAF: USB-serial only, fixed baud — no baudRate/network fields.
         deviceData.connectionType = formData.get('ioptronIeafConnectionType') || 'auto';
