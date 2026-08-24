@@ -2293,18 +2293,15 @@ private:
         slew_task_cancel_.store(true);
         pulse_task_cancel_.store(true);
         stop_task_cancel_.store(true);
-        dec_duty_cancel_.store(true);
         task_cv_.notify_all();
         std::thread slew_thread;
         std::thread pulse_thread;
         std::thread stop_thread;
-        std::thread duty_thread;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
             slew_thread = std::move(slew_task_thread_);
             pulse_thread = std::move(pulse_task_thread_);
             stop_thread = std::move(stop_task_thread_);
-            duty_thread = std::move(dec_duty_thread_);
         }
         if (slew_thread.joinable()) {
             slew_thread.join();
@@ -2315,10 +2312,10 @@ private:
         if (stop_thread.joinable()) {
             stop_thread.join();
         }
-        if (duty_thread.joinable()) {
-            duty_thread.join();
-        }
-        dec_duty_cancel_.store(false);
+        // The duty worker goes through the lifecycle mutex like every other
+        // reap+create path, so a disconnect racing a setter serializes with
+        // it instead of joining a freshly-started worker out from under it.
+        reap_dec_duty_task();
     }
 
     void reap_stop_task() {
