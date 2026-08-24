@@ -429,8 +429,7 @@ public:
             need_duty = dec_duty_rate_deg_s_ != 0.0;
         }
         if (need_duty) {
-            std::lock_guard<std::mutex> tlock(task_mutex_);
-            dec_duty_thread_ = std::thread([this]() { dec_duty_loop(); });
+            start_dec_duty_thread();
         }
     }
 
@@ -1526,8 +1525,13 @@ private:
         // While rate offsets run, serve the dead-reckoned model instead of
         // re-anchoring on hardware counts: duty-cycled Dec bursts and the
         // offset RA rate make raw reads jitter around the commanded average.
-        // Offset entry points and motion commands force a fresh anchor.
-        if (!force && position_cache_valid_ && rate_offsets_active_locked() && tracking_) {
+        // Offset entry points and motion commands force a fresh anchor, and
+        // the hold is bounded: past kOffsetModelHold the model would pin at
+        // the dt clamp and the reported position would silently freeze, so
+        // fall through and take a fresh hardware anchor instead.
+        constexpr auto kOffsetModelHold = std::chrono::minutes(30);
+        if (!force && position_cache_valid_ && rate_offsets_active_locked() && tracking_ &&
+            (now - last_position_update_) < kOffsetModelHold) {
             return;
         }
         auto& protocol = SkyWatcherProtocolWrapper::instance();
@@ -1755,11 +1759,13 @@ private:
             }
             if (!task_wait_for(kDutyPeriod - on_time, dec_duty_cancel_)) break;
         }
-        // Never leave the axis creeping on exit.
+        // Never leave the axis creeping on exit. A zeroed duty rate means
+        // whoever cleared it already stopped the axis; only a cancel with the
+        // rate still set (disconnect mid-burst) needs the safety stop.
         try {
             std::unique_lock<std::mutex> lock(mutex_);
-            if (connected_ && dec_offset_running_ && dec_duty_rate_deg_s_ == 0.0) {
-                return;  // apply() already stopped it
+            if (dec_duty_rate_deg_s_ == 0.0) {
+                return;
             }
             if (connected_) {
                 const uint64_t gen = ++motion_generation_;
@@ -1816,6 +1822,9 @@ private:
                 static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, dgen));
                 dec_offset_running_ = false;
             }
+            // Let the duty worker exit while tracking is off; re-enabling
+            // tracking recomputes the duty rate and restarts it.
+            dec_duty_rate_deg_s_ = 0.0;
         }
         tracking_ = tracking;
         invalidate_position_cache_locked();

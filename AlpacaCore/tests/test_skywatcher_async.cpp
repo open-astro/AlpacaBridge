@@ -444,6 +444,17 @@ TEST_CASE("SkyWatcher async - sub-floor DeclinationRate duty-cycles the axis", "
     // ~1.0s bursts on a 3s period: expect at least two on/off cycles in 7.5s.
     REQUIRE(wait_until([&] { return mount.start_count(2) >= starts + 2 && mount.stop_count(2) >= stops + 2; }, 7500));
 
+    // Tracking off stops the bursts (the worker exits instead of idling).
+    driver->set_tracking(false);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    int idle_starts = mount.start_count(2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(3500));
+    REQUIRE(mount.start_count(2) == idle_starts);
+
+    // Tracking back on resumes duty-cycling from the stored DeclinationRate.
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.start_count(2) > idle_starts; }, 7500));
+
     driver->set_declination_rate(0.0);
     REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
     driver->set_connected(false);
