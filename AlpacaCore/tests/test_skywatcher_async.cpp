@@ -389,6 +389,49 @@ TEST_CASE("SkyWatcher async - rate offsets require Sidereal and zero on drive-ra
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - Dec pulse guide restores an active DeclinationRate offset", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east branch, well away from the pole
+
+    driver->set_declination_rate(10.0);  // continuous (above-floor) offset
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+
+    driver->pulse_guide(0, 600);  // North pulse pre-empts the offset motion
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10000));
+
+    // The offset motion must resume by itself after the pulse ends.
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    double start = mount.physical_degrees(2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    REQUIRE((mount.physical_degrees(2) - start) * 3600.0 < -7.0);  // still ~-10 as/s
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - MoveAxis Dec stop restores an active DeclinationRate offset", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east branch, well away from the pole
+
+    driver->set_declination_rate(10.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+
+    driver->move_axis(1, 1.0);  // manual Dec nudge
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    driver->move_axis(1, 0.0);  // stop task must re-apply the offset
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
+
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 5000));
+    double start = mount.physical_degrees(2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    REQUIRE((mount.physical_degrees(2) - start) * 3600.0 < -7.0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - sub-floor DeclinationRate duty-cycles the axis", "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());

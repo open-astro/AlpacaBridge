@@ -46,7 +46,7 @@ constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
 constexpr double kLunarDegPerSec = 14.511415 / 3600.0;
 // RightAscensionRate is in seconds of RA per SIDEREAL second (ASCOM):
 // 1 s RA = 15 arcsec, scaled sidereal->SI by 86164.1/86400.
-constexpr double kRaRateSecondsToDegPerSec = 15.0 * 0.9972695663 / 3600.0;
+constexpr double kRaRateSecondsToDegPerSec = 15.0 / (0.9972695663 * 3600.0);
 constexpr double kSolarDegPerSec = 15.0 / 3600.0;
 // ~800x sidereal, the classic Sky-Watcher maximum slew rate.
 constexpr double kMaxMoveAxisRateDegPerSec = 800.0 * kSiderealDegPerSec;
@@ -945,9 +945,20 @@ public:
                     // stop_axis_and_wait_locked, and a stale rate kept the
                     // reads drifting after the pulse ended (ConformU 4.5 pulse
                     // displacement tests read phantom motion).
-                    std::lock_guard<std::mutex> lock(mutex_);
+                    std::unique_lock<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[axis - 1] = 0.0;
                     invalidate_position_cache_locked();
+                    // A Dec pulse pre-empted any DeclinationRate offset
+                    // motion: re-apply it so guiding corrections don't
+                    // silently cancel comet/satellite tracking.
+                    if (axis == kAxisDec && tracking_ && dec_rate_arcsec_per_sec_ != 0.0) {
+                        try {
+                            apply_dec_rate_offset_locked(lock);
+                        } catch (const std::exception& e) {
+                            ALPACA_LOG_WARN("SkyWatcher",
+                                            std::string("Pulse end: failed to restore Dec rate offset: ") + e.what());
+                        }
+                    }
                 }
             };
             if (!task_wait_for(std::chrono::milliseconds(duration), pulse_task_cancel_)) {
@@ -1283,6 +1294,16 @@ public:
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("SkyWatcher",
                                     std::string("MoveAxis stop: failed to restore tracking: ") + e.what());
+                }
+            } else if (channel == kAxisDec && tracking_ && dec_rate_arcsec_per_sec_ != 0.0 &&
+                       motion_generation_ == stop_task_generation) {
+                // Same restore contract for Dec: a manual nudge must not
+                // silently cancel an active DeclinationRate offset.
+                try {
+                    apply_dec_rate_offset_locked(lock);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("SkyWatcher",
+                                    std::string("MoveAxis stop: failed to restore Dec rate offset: ") + e.what());
                 }
             }
         });
@@ -1702,7 +1723,7 @@ private:
                 }
                 floor_rate = slow_mode_floor_rate_locked(kAxisDec);
                 go = connected_ && tracking_ && !parking_ && !homing_ && !goto_in_progress_ && !slewing_cached_ &&
-                     !manual_axis_slewing_[0] && !manual_axis_slewing_[1];
+                     !pulse_guiding_active_ && !manual_axis_slewing_[0] && !manual_axis_slewing_[1];
             }
             if (!go) {
                 if (!task_wait_for(std::chrono::milliseconds(500), dec_duty_cancel_)) {
