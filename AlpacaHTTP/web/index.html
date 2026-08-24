@@ -253,6 +253,66 @@
                         </div>
                     </div>
                   </div>
+
+                  <div id="ioptron-filterwheel-config" style="display: none;">
+                    <h3>iOptron iEFW Filter Wheel Configuration</h3>
+                    <small style="color: #666;">iEFW-15 (5 slots) and iEFW-18 (8 slots). USB-serial connection at a fixed 115200 baud. Auto-detect scans for the wheel's Prolific USB-serial adapter and verifies it with the device handshake.</small>
+
+                    <div class="form-group">
+                        <label for="ioptron-filterwheel-model">Model:</label>
+                        <select id="ioptron-filterwheel-model" name="ioptronFilterwheelModel">
+                            <option value="iefw15">iEFW-15 (5 slots)</option>
+                            <option value="iefw18">iEFW-18 (8 slots, two stacked 5-slot wheels)</option>
+                        </select>
+                        <small>Sets the device name and pre-selects the slot count below. The wheel reports its own slot count when it connects; a mismatch is logged.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ioptron-filterwheel-connection-type">Connection Type:</label>
+                        <select id="ioptron-filterwheel-connection-type" name="ioptronFilterwheelConnectionType">
+                            <option value="auto">Auto-Detect (Recommended)</option>
+                            <option value="serial">Serial Port</option>
+                        </select>
+                    </div>
+
+                    <div id="ioptron-filterwheel-auto-config" class="connection-config">
+                        <div class="form-group">
+                            <label for="ioptron-filterwheel-index">Filter Wheel Index:</label>
+                            <input type="number" id="ioptron-filterwheel-index" name="ioptronFilterwheelIndex" value="0" min="0">
+                            <small>0-based index when more than one iEFW is detected</small>
+                        </div>
+                    </div>
+
+                    <div id="ioptron-filterwheel-serial-config" class="connection-config" style="display: none;">
+                        <div class="form-group">
+                            <label for="ioptron-filterwheel-port-path">Serial Port:</label>
+                            <input type="text" id="ioptron-filterwheel-port-path" name="ioptronFilterwheelPortPath" placeholder="/dev/ttyUSB0">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ioptron-filterwheel-slot-count">Filter Wheel Slots:</label>
+                        <div class="filterwheel-slot-controls">
+                            <select id="ioptron-filterwheel-slot-count">
+                                <option value="">Select slot count</option>
+                                <option value="5">5 slots (iEFW-15)</option>
+                                <option value="8">8 slots (iEFW-18)</option>
+                                <option value="custom">Custom</option>
+                            </select>
+                            <input type="number" id="ioptron-filterwheel-slot-custom" min="1" max="16" placeholder="Custom">
+                        </div>
+                        <small>Pick your model to build filter dropdowns.</small>
+                    </div>
+                    <div id="ioptron-filterwheel-slot-list" class="filterwheel-slot-list"></div>
+                    <details class="filterwheel-advanced">
+                        <summary>Advanced: edit filter names as lines</summary>
+                        <div class="form-group">
+                            <label for="ioptron-filter-names">Filter Names (optional):</label>
+                            <textarea id="ioptron-filter-names" name="ioptronFilterNames" rows="6" placeholder="Luminance&#10;Red&#10;Green&#10;Blue"></textarea>
+                            <small>One name per line. Leave blank for default names (Filter 1..N).</small>
+                        </div>
+                    </details>
+                  </div>
                 </div>
 
                 <!-- SynScan Telescope Configuration -->

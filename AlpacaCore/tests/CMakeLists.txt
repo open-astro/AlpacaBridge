@@ -59,7 +59,8 @@ if(TARGET alpacacore_skywatcher)
         test_skywatcher_async.cpp)
 endif()
 if(TARGET alpacacore_ioptron)
-    list(APPEND TEST_SOURCES test_ioptron_telescope.cpp test_ioptron_ieaf_focuser.cpp)
+    list(APPEND TEST_SOURCES test_ioptron_telescope.cpp test_ioptron_ieaf_focuser.cpp
+        test_ioptron_filterwheel.cpp)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_ioptron_concurrency_stress.cpp)
     # The PowerBox Switch test only builds when its driver was compiled in

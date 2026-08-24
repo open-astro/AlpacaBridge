@@ -14,6 +14,8 @@ if(ALPACACORE_ENABLE_IOPTRON)
         ioptron_telescope_driver.cpp
         ioptron_ieaf_protocol_wrapper.cpp
         ioptron_ieaf_focuser_driver.cpp
+        ioptron_iefw_protocol_wrapper.cpp
+        ioptron_filterwheel_driver.cpp
     )
 
     # Probe for libgpiod >= 2.0 (the iMate PowerBox Switch backend). pkg-config
