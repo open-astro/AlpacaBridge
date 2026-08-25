@@ -276,6 +276,29 @@ strikes, cable snags, and balance failures; strain-wave mounts have no clutch to
 Validate on a bare mount, always. (The large swings during a run are ConformU's designed
 choreography, not a driver fault — verify by checking that every slew lands on target.)
 
+### Telescope Park / MoveAxis(axis, 0) are asynchronous initiators (all drivers)
+
+ConformU 4.5 times `Park` (and every ITelescopeV4 initiator) against the 1 s STANDARD
+target and completes it by polling `AtPark`/`Slewing`. Never block through a park slew.
+The proven shape (SkyWatcher, then SynScan / Celestron / Bisque in issue #208): reap the
+slew task, snapshot the park target under the mutex, publish `slewing_cached_ = true` and a
+`parking_` flag, then dispatch the slew + completion poll + tracking stop in the joinable
+task thread, releasing the mutex between polls (`task_wait_for`, cancellable). `AtPark` and
+`Slewing` flip in the same locked step (the public `Slewing` getter returns true while
+`parking_`; the task polls the hardware through a separate `poll_hardware_slewing_locked`).
+Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
+stops the axes and joins the task); disconnect and the destructor cancel + join. Keep any
+pre-slew safety gate (Celestron alignment check) synchronous in `park()` so a refused park
+still throws instead of silently never reaching `AtPark`. Drivers with native park commands
+that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task — verified
+on the iOptron HAE29C with ConformU 4.5.0 (Park 11.5 s of motion, initiator well under 1 s).
+`MoveAxis(axis, 0)` must likewise send the stop and return; only add a background
+stop-completion task (SkyWatcher) when the mount has a deceleration ramp longer than the
+target. Hardware-free coverage lives in `tests/test_<vendor>_async_park.cpp` over
+`FakeMountServer`: the fake must answer the alignment/position probes the driver gates on
+(Celestron `J` → `1#`, SynScan/NexStar `e` → a parseable pair with Dec < 90°), or the park
+is refused before the GOTO is ever sent.
+
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
 | Throw | When |

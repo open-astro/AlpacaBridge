@@ -53,6 +53,7 @@ if(TARGET alpacacore_synscan)
     # follow-up): async slew / pulse-guide threads racing disconnect and
     # destruction; run under the sanitizers-tsan CI job (issue #101).
     list(APPEND TEST_SOURCES test_synscan_concurrency_stress.cpp)
+    list(APPEND TEST_SOURCES test_synscan_async_park.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
@@ -97,12 +98,14 @@ if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_telescope.cpp)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_celestron_concurrency_stress.cpp)
+    list(APPEND TEST_SOURCES test_celestron_async_park.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
     # Covers the mutex-guarded get_connected() driver shape in the [stress]
     # pool (PR #115 round-2 ABBA regression coverage).
     list(APPEND TEST_SOURCES test_bisque_concurrency_stress.cpp)
+    list(APPEND TEST_SOURCES test_bisque_async_park.cpp)
 endif()
 if(TARGET alpacacore_touptek)
     list(APPEND TEST_SOURCES test_touptek_camera.cpp)

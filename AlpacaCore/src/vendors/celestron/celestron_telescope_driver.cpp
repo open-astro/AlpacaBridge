@@ -268,6 +268,7 @@ public:
             tracking_mode_valid_ = false;
             target_set_ = false;
             parked_ = false;
+            parking_ = false;
             at_home_ = false;
             homing_ = false;
             pulse_guide_active_ = false;
@@ -411,6 +412,7 @@ public:
             }
             target_set_ = false;
             parked_ = false;
+            parking_ = false;
             at_home_ = false;
             homing_ = false;
             pulse_guide_active_ = false;
@@ -979,21 +981,142 @@ public:
         slewing_cached_ = true;
     }
 
+    // Park is an asynchronous initiator (ITelescopeV4; ConformU 4.5 times it
+    // against the 1 s STANDARD target): the park slew is dispatched in the
+    // slew task thread and this call returns at once. Slewing reports true
+    // until the mount reaches the park position and tracking is stopped, at
+    // which point AtPark flips true in the same locked step (no window where
+    // a poller sees Slewing false with AtPark false). Issue #208.
     void park() override {
-        std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        if (!park_position_set_) {
-            refresh_equatorial_cache_locked();
-            park_ra_hours_ = cached_ra_hours_;
-            park_dec_degrees_ = cached_dec_degrees_;
-            park_position_set_ = true;
+        double park_ra = 0.0;
+        double park_dec = 0.0;
+        // Cancel + join any previous slew task first. Must run without mutex_
+        // held: the task takes mutex_.
+        reap_slew_task();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            if (parked_ || parking_) {
+                return;  // ASCOM: Park on a parked (or parking) mount is harmless.
+            }
+            if (!park_position_set_) {
+                refresh_equatorial_cache_locked();
+                park_ra_hours_ = cached_ra_hours_;
+                park_dec_degrees_ = cached_dec_degrees_;
+                park_position_set_ = true;
+            }
+            park_ra = park_ra_hours_;
+            park_dec = park_dec_degrees_;
+            validate_ra_dec(park_ra, park_dec, "Park");
+            // Run the slew-safety gate synchronously so an unaligned mount
+            // still throws from Park (as the blocking implementation did)
+            // rather than silently never reaching AtPark.
+            check_slew_safety_locked("Park");
+            // Publish the slewing state before the task starts so a poller
+            // never sees Slewing false between Park returning and dispatch.
+            slewing_cached_ = true;
+            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            manual_axis_slewing_[0] = false;
+            manual_axis_slewing_[1] = false;
+            homing_ = false;
+            at_home_ = false;
+            parking_ = true;
         }
-        do_slew_to_coordinates_locked(park_ra_hours_, park_dec_degrees_);
-        wait_for_slew_complete(lock);
-        CelestronProtocolWrapper::instance().set_tracking_mode(0);
-        tracking_mode_cached_ = 0;
-        tracking_mode_valid_ = true;
-        parked_ = true;
+
+        std::lock_guard<std::mutex> tlock(task_mutex_);
+        if (slew_task_thread_.joinable()) {
+            slew_task_cancel_.store(true);
+            task_cv_.notify_all();
+            slew_task_thread_.join();
+            slew_task_cancel_.store(false);
+        }
+        slew_task_thread_ = std::thread([this, park_ra, park_dec]() {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (!connected_ || slew_task_cancel_.load() || !parking_) {
+                parking_ = false;
+                return;
+            }
+            try {
+                do_slew_to_coordinates_locked(park_ra, park_dec);
+            } catch (const std::exception& ex) {
+                fail_park_locked(std::string("Park slew dispatch failed: ") + ex.what());
+                return;
+            } catch (...) {
+                fail_park_locked("Park slew dispatch failed with unknown exception");
+                return;
+            }
+            // Poll for completion with mutex_ released between polls so the
+            // HTTP getters (Slewing, RightAscension, ...) stay responsive.
+            const auto timeout = std::chrono::seconds(120);
+            const auto start = std::chrono::steady_clock::now();
+            const auto start_grace = std::chrono::seconds(2);
+            bool saw_slewing = false;
+            while (true) {
+                lock.unlock();
+                const bool keep_going = task_wait_for(std::chrono::milliseconds(250), slew_task_cancel_);
+                lock.lock();
+                // Cancelled (disconnect / destruction / superseding slew),
+                // aborted, or unparked meanwhile: the canceller owns the state.
+                if (!keep_going || !connected_ || !parking_) {
+                    parking_ = false;
+                    return;
+                }
+                const bool slewing = poll_hardware_slewing_locked();
+                if (slewing) {
+                    saw_slewing = true;
+                } else {
+                    if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
+                        continue;
+                    }
+                    break;
+                }
+                if (std::chrono::steady_clock::now() - start > timeout) {
+                    fail_park_locked("Park slew timed out after 120s");
+                    return;
+                }
+            }
+            if (slew_settle_time_seconds_ > 0) {
+                lock.unlock();
+                const bool keep_going =
+                    task_wait_for(std::chrono::seconds(slew_settle_time_seconds_), slew_task_cancel_);
+                lock.lock();
+                if (!keep_going || !connected_ || !parking_) {
+                    parking_ = false;
+                    return;
+                }
+            }
+            try {
+                CelestronProtocolWrapper::instance().set_tracking_mode(0);
+                tracking_mode_cached_ = 0;
+                tracking_mode_valid_ = true;
+            } catch (const std::exception& ex) {
+                fail_park_locked(std::string("Park: stopping tracking failed: ") + ex.what());
+                return;
+            } catch (...) {
+                fail_park_locked("Park: stopping tracking failed with unknown exception");
+                return;
+            }
+            slewing_cached_ = false;
+            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            equatorial_cache_valid_ = false;
+            altaz_cache_valid_ = false;
+            flip_in_progress_ = false;
+            // AtPark and Slewing flip in the same locked step.
+            parked_ = true;
+            parking_ = false;
+        });
+    }
+
+    // Park task failure path: drop the parking state so Slewing/AtPark both
+    // read false and the caller can retry. mutex_ must be held.
+    void fail_park_locked(const std::string& message) {
+        parking_ = false;
+        slewing_cached_ = false;
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        flip_in_progress_ = false;
+        ALPACA_LOG_WARN("Celestron", message);
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -1373,9 +1496,32 @@ public:
     }
 
     void unpark() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        parked_ = false;
+        bool was_parking = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            parked_ = false;
+            was_parking = parking_;
+            if (was_parking) {
+                // Unpark during a park wins the race: stop the park slew and
+                // drop the parking state; the task below is then joined.
+                parking_ = false;
+                auto& protocol = CelestronProtocolWrapper::instance();
+                try {
+                    protocol.cancel_goto();
+                    protocol.move_axis_fixed_rate(0, 0);
+                    protocol.move_axis_fixed_rate(1, 0);
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                }
+                slewing_cached_ = false;
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                position_override_until_ = std::chrono::steady_clock::time_point::min();
+                flip_in_progress_ = false;
+            }
+        }
+        if (was_parking) {
+            reap_slew_task();  // without mutex_ held
+        }
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -1435,6 +1581,7 @@ public:
         protocol.move_axis_fixed_rate(0, 0);
         protocol.move_axis_fixed_rate(1, 0);
         homing_ = false;
+        parking_ = false;  // an aborted park never reaches AtPark
         slewing_cached_ = false;
         slew_aborted_ = true;
         flip_in_progress_ = false;
@@ -1590,6 +1737,15 @@ private:
     }
 
     bool get_slewing_locked() const {
+        // A park in flight reports Slewing until the park task flips AtPark
+        // (same locked step) — never Slewing false with AtPark false.
+        if (parking_) {
+            return true;
+        }
+        return poll_hardware_slewing_locked();
+    }
+
+    bool poll_hardware_slewing_locked() const {
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
@@ -2047,6 +2203,7 @@ private:
     bool has_focuser_ = false;
     std::vector<CelestronProtocolWrapper::BusDevice> detected_devices_;
     bool park_position_set_ = false;
+    mutable bool parking_ = false;  // park task in flight (Slewing true, AtPark false)
     double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
     double ra_slew_offset_hours_ = 0.0005; // ~27" initial seed for CGX-L fw 7.18 goto tracking deficit
