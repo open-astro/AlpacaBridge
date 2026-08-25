@@ -127,6 +127,24 @@ curl -sS --max-time 5 "http://<host>:<port>/management/v1/logfiles?ClientID=1&Cl
 
 Save the directory. Today's log file is named per the daily convention (check the Files list in the same response). Record `date -u +%H:%M:%S.%3N` as the **run-start baseline** — used in Step 5 to slice the log to just this test window.
 
+### 2f2. Telescope runs: target clock must be settled (HARD STOP while slewing)
+
+Telescope RA is `LST - HA` — LST comes from the target's system clock, so an NTP
+slew on the target distorts every RA-rate measurement while leaving Dec tests
+untouched (learned on PR #221: a freshly-rebooted Pi failed the +0.0033 s-RA/s
+RightAscensionRate test 31% low from ~1 ms/s of chrony slew; the Dec-only tests
+in the same run also showed phantom RA rates of +0.0004..+0.0017 s-RA/s).
+
+Before any Telescope run, check clock discipline on the TARGET:
+
+```bash
+ssh <user>@<host> 'chronyc tracking'
+```
+
+Require: `Leap status: Normal`, `System time` offset under ~0.001 s, and no
+large in-progress correction. After a reboot, wait until these hold (typically
+1-5 minutes) before starting the run. Skip this check for non-telescope devices.
+
 ### 2g. ConformU binary is available
 
 Search common locations in this order, stop at the first match:

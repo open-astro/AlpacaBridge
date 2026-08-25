@@ -550,4 +550,84 @@ TEST_CASE("SkyWatcher async - rate setters during a goto defer instead of hijack
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - ConformU chained measured-rate choreography (RA offset)", "[skywatcher][async]") {
+    // Mirrors ConformU 4.5's RightAscensionRate test: probe writes (including
+    // direction reversals), a slew, then a low-rate write with the achieved
+    // rate measured from reported RA over wall time. The 2026-08-23 hardware
+    // failure of this exact sequence was Pi clock slew, not the driver — this
+    // pins the driver side of it.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    for (double r : {0.0, 0.0033, -0.0033, 2.667, -2.667, 0.0}) {
+        driver->set_right_ascension_rate(r);
+    }
+    double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 2.0 + 24.0, 24.0), 40.0);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
+
+    driver->set_right_ascension_rate(0.0033);
+    double ra0 = driver->get_right_ascension();
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 8; ++i) {  // ConformU-style polling during the window
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        (void)driver->get_slewing();
+        (void)driver->get_declination();
+    }
+    double ra1 = driver->get_right_ascension();
+    double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    double rate = (ra1 - ra0) * 3600.0 / dt;  // seconds of RA per SI second
+    REQUIRE(rate > 0.0033 * 0.95);
+    REQUIRE(rate < 0.0033 * 1.08);  // sidereal factor puts the exact value ~0.27% high
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - RA offset canceling the drive stops the axis, not creeps", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    // Offset of exactly +1.0 s-RA per sidereal second cancels the sidereal
+    // drive: the axis must STOP (":I" would otherwise clamp at the ~0.26
+    // arcsec/s floor and creep). Reported RA then advances at the LST rate.
+    driver->set_right_ascension_rate(1.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 5000));
+    double phys0 = mount.physical_degrees(1);
+    double ra0 = driver->get_right_ascension();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    REQUIRE(std::abs(mount.physical_degrees(1) - phys0) * 3600.0 < 0.5);  // no creep
+    double drift = (driver->get_right_ascension() - ra0) * 3600.0 / 2.0;
+    REQUIRE(drift > 0.9);  // ~+1.0027 s-RA/s reported
+    REQUIRE(drift < 1.1);
+
+    driver->set_right_ascension_rate(0.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 5000));  // sidereal resumes
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - sub-floor effective RA rate duty-cycles the RA axis", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    // +0.99 s-RA/sidereal-s leaves ~0.15 arcsec/s of effective drive - below
+    // the slow-mode floor: the axis must duty-cycle, never run continuously
+    // at the clamped floor rate.
+    int starts = mount.start_count(1);
+    int stops = mount.stop_count(1);
+    driver->set_right_ascension_rate(0.99);
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts + 2 && mount.stop_count(1) >= stops + 2; }, 9000));
+
+    driver->set_right_ascension_rate(0.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 5000));  // back to continuous sidereal
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

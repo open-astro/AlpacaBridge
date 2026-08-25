@@ -428,7 +428,7 @@ public:
                 return;  // idempotent rewrite: leave the running motion alone
             }
         }
-        reap_dec_duty_task();
+        reap_duty_task();
         bool need_duty = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -448,7 +448,7 @@ public:
             need_duty = dec_duty_rate_deg_s_ != 0.0;
         }
         if (need_duty) {
-            start_dec_duty_thread();
+            start_duty_thread();
         }
     }
 
@@ -474,10 +474,10 @@ public:
                 return;
             }
             set_tracking_locked(lock, tracking);
-            need_duty = tracking_ && dec_duty_rate_deg_s_ != 0.0;
+            need_duty = tracking_ && (ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0);
         }
         if (need_duty) {
-            start_dec_duty_thread();
+            start_duty_thread();
         }
     }
 
@@ -488,11 +488,11 @@ public:
     // happen under task_mutex_ — the worker's task_wait_for reacquires it on
     // wake, so joining while holding it deadlocks; the lifecycle mutex is
     // never taken by the worker, only by setters.
-    void start_dec_duty_thread() {
+    void start_duty_thread() {
         std::lock_guard<std::mutex> lifecycle(duty_lifecycle_mutex_);
-        reap_dec_duty_locked_lifecycle();
+        reap_duty_locked_lifecycle();
         std::lock_guard<std::mutex> tlock(task_mutex_);
-        dec_duty_thread_ = std::thread([this]() { dec_duty_loop(); });
+        duty_thread_ = std::thread([this]() { duty_loop(); });
     }
 
     double get_focal_length() const override { return focal_length_m_; }
@@ -550,13 +550,30 @@ public:
             // the rate only — the operation's restore path re-applies the
             // effective (offset-folded) drive rate when it releases the axis.
             ra_rate_sec_per_sidereal_sec_ = rate;
+            double eff = effective_ra_rate_locked();
+            bool defer_duty =
+                tracking_ && eff != 0.0 && std::abs(eff) < slow_mode_floor_rate_locked(kAxisRa) * kSlowModeFloorPad;
+            if (defer_duty) {
+                // Pre-arm the duty rate (no hardware touch) so the worker
+                // started below takes over once the axes are free; the busy
+                // operation's restore re-derives the same regime.
+                ra_duty_rate_deg_s_ = eff;
+                lock.unlock();
+                start_duty_thread();
+            }
             return;
         }
         double previous = effective_ra_rate_locked();
         ra_rate_sec_per_sidereal_sec_ = rate;
         refresh_position_cache_locked(true);  // fresh model anchor
+        bool need_duty = false;
         if (tracking_) {
             apply_ra_tracking_rate_locked(lock, previous);
+            need_duty = ra_duty_rate_deg_s_ != 0.0;
+        }
+        if (need_duty) {
+            lock.unlock();
+            start_duty_thread();
         }
     }
 
@@ -693,6 +710,7 @@ public:
         // ASCOM contract: changing the drive rate zeroes the rate offsets.
         ra_rate_sec_per_sidereal_sec_ = 0.0;
         dec_rate_arcsec_per_sec_ = 0.0;
+        ra_duty_rate_deg_s_ = 0.0;
         dec_duty_rate_deg_s_ = 0.0;
         if (tracking_) {
             apply_ra_tracking_rate_locked(lock, previous);
@@ -901,7 +919,10 @@ public:
                 // (slow speed mode allows a live step-period change). East
                 // slows apparent RA drive, west speeds it.
                 axis = kAxisRa;
-                ra_rate_adjust = tracking_;
+                // In the duty regime the RA axis is stopped between bursts -
+                // a live step-period change would not move it. Use the direct
+                // nudge path; the worker resumes bursting after the pulse.
+                ra_rate_adjust = tracking_ && ra_duty_rate_deg_s_ == 0.0;
                 double adjust = direction == 2 ? -guide_rate_.ra : guide_rate_.ra;
                 ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
                 ra_pulse_rate_deg_per_sec = ra_restore_rate_deg_per_sec + adjust;
@@ -1460,6 +1481,7 @@ private:
         tracking_rate_ = 0;
         ra_rate_sec_per_sidereal_sec_ = 0.0;
         dec_rate_arcsec_per_sec_ = 0.0;
+        ra_duty_rate_deg_s_ = 0.0;
         dec_duty_rate_deg_s_ = 0.0;
         dec_offset_running_ = false;
         cmd_axis_rate_deg_s_[0] = 0.0;
@@ -1784,115 +1806,153 @@ private:
     // Duty-cycle worker for sub-floor Dec rates: floor-rate bursts sized to
     // the requested average. Exits when the duty rate returns to zero; idles
     // while tracking is off or a slew/park/home owns the axes.
-    void dec_duty_loop() {
+    // Duty-cycle worker for sub-floor offset rates on EITHER axis: floor-rate
+    // bursts sized so the average matches the requested rate, one interleaved
+    // state machine per axis on a 50 ms tick (the axes' bursts overlap freely
+    // — a near-stationary satellite can need both at once). Exits when both
+    // duty rates return to zero; idles an axis while tracking is off or a
+    // slew/park/home/pulse/manual motion owns the axes.
+    void duty_loop() {
         constexpr auto kDutyPeriod = std::chrono::milliseconds(3000);
-        while (!dec_duty_cancel_.load()) {
-            double rate = 0.0;
-            double floor_rate = 0.0;
-            bool go = false;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                rate = dec_duty_rate_deg_s_;
-                if (rate == 0.0) {
-                    break;
-                }
-                floor_rate = slow_mode_floor_rate_locked(kAxisDec);
-                go = connected_ && tracking_ && !axes_busy_locked();
-            }
-            if (!go) {
-                if (!task_wait_for(std::chrono::milliseconds(500), dec_duty_cancel_)) {
-                    break;
-                }
-                continue;
-            }
-            // ~140 ms stop-landing overrun measured on hardware; shorten the
-            // wait so the physical on-duration matches the duty fraction.
-            // The RAW floor is correct here (the burst physically runs at
-            // it); rates inside the kSlowModeFloorPad margin just compute an
-            // on-time near/above the period and the clamp makes them
-            // effectively continuous.
-            auto on_time = std::chrono::milliseconds(
-                std::clamp(static_cast<int>(3000.0 * std::abs(rate) / floor_rate) - 140, 50, 3000));
-            uint64_t burst_gen = 0;
-            bool burst_started = false;
+        struct AxisDuty {
+            bool bursting = false;
+            uint64_t gen = 0;
+            double rate = 0.0;  // the duty rate this burst was sized for
+            std::chrono::steady_clock::time_point burst_end{};
+            std::chrono::steady_clock::time_point next_start = std::chrono::steady_clock::time_point::min();
+        };
+        AxisDuty ax[2];
+        while (!duty_cancel_.load()) {
+            bool any_rate = false;
             try {
                 std::unique_lock<std::mutex> lock(mutex_);
-                // Re-check ownership under THIS lock: a goto/park/home/pulse
-                // dispatched since the go-gate must not be superseded by the
-                // burst's own start (mirrors the burst-end recheck below).
-                if (dec_duty_rate_deg_s_ != rate || !connected_ || !tracking_ || axes_busy_locked()) continue;
-                start_speed_motion_locked(lock, kAxisDec, rate > 0.0 ? floor_rate : -floor_rate);
-                burst_gen = motion_generation_;  // owned by THIS burst
-                burst_started = true;
-                cmd_axis_rate_deg_s_[1] = rate;
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
-                // Superseded or transport hiccup; next cycle re-evaluates.
-            }
-            if (!task_wait_for(on_time, dec_duty_cancel_)) break;
-            try {
-                std::unique_lock<std::mutex> lock(mutex_);
-                // Only stop the motion this burst itself started: a fresher
-                // generation means a pulse/MoveAxis/goto took the axis while
-                // the burst timer ran — the newer command owns it now, and
-                // stop_axis_and_wait_locked abandons on the stale generation.
-                if (burst_started && dec_duty_rate_deg_s_ == rate && motion_generation_ == burst_gen &&
-                    !goto_in_progress_ && !parking_ && !homing_ && !pulse_guiding_active_ && !manual_axis_slewing_[0] &&
-                    !manual_axis_slewing_[1]) {
-                    static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, burst_gen));
-                    cmd_axis_rate_deg_s_[1] = rate;  // still the average rate
+                for (int i = 0; i < 2; ++i) {
+                    const int channel = i + 1;
+                    double rate = duty_rate_locked(channel);
+                    if (rate != 0.0) {
+                        any_rate = true;
+                    }
+                    auto now = std::chrono::steady_clock::now();
+                    if (ax[i].bursting) {
+                        if (rate == ax[i].rate && now < ax[i].burst_end) {
+                            continue;
+                        }
+                        // Only stop the motion this burst itself started: a
+                        // fresher generation means a pulse/MoveAxis/goto took
+                        // the axis — the newer command owns it now.
+                        if (motion_generation_ == ax[i].gen && !axes_busy_locked()) {
+                            static_cast<void>(stop_axis_and_wait_locked(lock, channel, ax[i].gen));
+                            if (duty_rate_locked(channel) == ax[i].rate) {
+                                cmd_axis_rate_deg_s_[i] = ax[i].rate;  // still the average rate
+                            }
+                        }
+                        ax[i].bursting = false;
+                    } else if (rate != 0.0 && now >= ax[i].next_start && connected_ && tracking_ &&
+                               !axes_busy_locked()) {
+                        // ~140 ms stop-landing overrun measured on hardware;
+                        // shorten the wait so the physical on-duration matches
+                        // the duty fraction. The RAW floor is correct here
+                        // (the burst physically runs at it); rates inside the
+                        // kSlowModeFloorPad margin just compute an on-time
+                        // near/above the period and become continuous.
+                        double floor_rate = slow_mode_floor_rate_locked(channel);
+                        auto on_time = std::chrono::milliseconds(
+                            std::clamp(static_cast<int>(3000.0 * std::abs(rate) / floor_rate) - 140, 50, 3000));
+                        start_speed_motion_locked(lock, channel, rate > 0.0 ? floor_rate : -floor_rate);
+                        ax[i].gen = motion_generation_;  // owned by THIS burst
+                        ax[i].rate = rate;
+                        ax[i].bursting = true;
+                        ax[i].burst_end = std::chrono::steady_clock::now() + on_time;
+                        ax[i].next_start = std::chrono::steady_clock::now() + kDutyPeriod;
+                        cmd_axis_rate_deg_s_[i] = rate;
+                    }
                 }
             } catch (...) {  // NOLINT(bugprone-empty-catch)
+                // Superseded or transport hiccup; next tick re-evaluates.
             }
-            if (!task_wait_for(kDutyPeriod - on_time, dec_duty_cancel_)) break;
+            if (!any_rate) {
+                break;
+            }
+            if (!task_wait_for(std::chrono::milliseconds(50), duty_cancel_)) {
+                break;
+            }
         }
-        // Never leave the axis creeping on exit. A zeroed duty rate means
+        // Never leave an axis creeping on exit. A zeroed duty rate means
         // whoever cleared it already stopped the axis; only a cancel with the
         // rate still set (disconnect mid-burst) needs the safety stop.
         try {
             std::unique_lock<std::mutex> lock(mutex_);
-            if (dec_duty_rate_deg_s_ == 0.0) {
-                return;
-            }
-            if (connected_) {
-                const uint64_t gen = ++motion_generation_;
-                static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
+            for (int channel = 1; channel <= 2; ++channel) {
+                if (duty_rate_locked(channel) != 0.0 && connected_) {
+                    const uint64_t gen = ++motion_generation_;
+                    static_cast<void>(stop_axis_and_wait_locked(lock, channel, gen));
+                }
             }
         } catch (...) {  // NOLINT(bugprone-empty-catch)
         }
     }
 
-    void reap_dec_duty_task() {
+    double duty_rate_locked(int channel) const {
+        return channel == kAxisRa ? ra_duty_rate_deg_s_ : dec_duty_rate_deg_s_;
+    }
+
+    void reap_duty_task() {
         std::lock_guard<std::mutex> lifecycle(duty_lifecycle_mutex_);
-        reap_dec_duty_locked_lifecycle();
+        reap_duty_locked_lifecycle();
     }
 
     // Requires duty_lifecycle_mutex_. Moves the thread slot out under
     // task_mutex_ and joins with only the lifecycle mutex held.
-    void reap_dec_duty_locked_lifecycle() {
-        dec_duty_cancel_.store(true);
+    void reap_duty_locked_lifecycle() {
+        duty_cancel_.store(true);
         task_cv_.notify_all();
         std::thread prev;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
-            prev = std::move(dec_duty_thread_);
+            prev = std::move(duty_thread_);
         }
         if (prev.joinable()) {
             prev.join();
         }
-        dec_duty_cancel_.store(false);
+        duty_cancel_.store(false);
     }
 
     // Re-command the RA axis after a rate change. In-place step-period writes
     // are only legal while the direction is unchanged; a sign flip (or a
     // stopped/reversed axis) needs a full stop-and-restart.
+    // Drive the RA axis at the current effective rate, handling all three
+    // regimes: continuous speed motion at/above the slow-mode floor, a
+    // duty-cycled sub-floor rate (":I" clamps at 0xFFFFFF — issuing a
+    // sub-floor rate directly would silently creep at the floor rate), and
+    // an exact zero (offset cancels the drive: the axis must STOP, not
+    // creep). The duty worker must be running when this sets a duty rate —
+    // callers check duty rates after and start it outside the mutex.
+    void apply_ra_drive_locked(std::unique_lock<std::mutex>& lock) {
+        double eff = effective_ra_rate_locked();
+        double floor_rate = slow_mode_floor_rate_locked(kAxisRa) * kSlowModeFloorPad;
+        if (std::abs(eff) >= floor_rate) {
+            ra_duty_rate_deg_s_ = 0.0;
+            start_speed_motion_locked(lock, kAxisRa, eff);
+            return;
+        }
+        const uint64_t gen = ++motion_generation_;
+        static_cast<void>(stop_axis_and_wait_locked(lock, kAxisRa, gen));
+        ra_duty_rate_deg_s_ = eff;  // 0.0 = stay stopped; else the worker bursts
+        cmd_axis_rate_deg_s_[0] = eff;
+    }
+
     void apply_ra_tracking_rate_locked(std::unique_lock<std::mutex>& lock, double previous_effective) {
         double eff = effective_ra_rate_locked();
-        if (eff != 0.0 && previous_effective != 0.0 && (eff > 0.0) == (previous_effective > 0.0)) {
+        double floor_rate = slow_mode_floor_rate_locked(kAxisRa) * kSlowModeFloorPad;
+        if (std::abs(eff) >= floor_rate && std::abs(previous_effective) >= floor_rate &&
+            (eff > 0.0) == (previous_effective > 0.0)) {
+            // Same direction, both continuous: change the step period in
+            // place — the axis never stops.
             auto& protocol = SkyWatcherProtocolWrapper::instance();
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             cmd_axis_rate_deg_s_[0] = eff;  // keep dead reckoning on the new rate
         } else {
-            start_speed_motion_locked(lock, kAxisRa, eff);
+            apply_ra_drive_locked(lock);
         }
     }
 
@@ -1901,7 +1961,7 @@ private:
             // Track: RA axis in the direction of increasing hour angle
             // (positive axis angle by this driver's convention) at the
             // selected drive rate plus any RightAscensionRate offset.
-            start_speed_motion_locked(lock, kAxisRa, effective_ra_rate_locked());
+            apply_ra_drive_locked(lock);
             apply_dec_rate_offset_locked(lock);
         } else {
             const uint64_t gen = ++motion_generation_;
@@ -1916,7 +1976,9 @@ private:
                 dec_offset_running_ = false;
             }
             // Let the duty worker exit while tracking is off; re-enabling
-            // tracking recomputes the duty rate and restarts it.
+            // tracking recomputes the duty rates and restarts it. The RA stop
+            // above already halted the axis for a duty-regime RA offset.
+            ra_duty_rate_deg_s_ = 0.0;
             dec_duty_rate_deg_s_ = 0.0;
         }
         tracking_ = tracking;
@@ -2372,7 +2434,7 @@ private:
         // The duty worker goes through the lifecycle mutex like every other
         // reap+create path, so a disconnect racing a setter serializes with
         // it instead of joining a freshly-started worker out from under it.
-        reap_dec_duty_task();
+        reap_duty_task();
     }
 
     void reap_stop_task() {
@@ -2470,10 +2532,11 @@ private:
     int tracking_rate_ = 0;                      // ASCOM DriveRate (0/1/2)
     double ra_rate_sec_per_sidereal_sec_ = 0.0;  // RightAscensionRate
     double dec_rate_arcsec_per_sec_ = 0.0;       // DeclinationRate
+    double ra_duty_rate_deg_s_ = 0.0;            // sub-floor effective RA rate (duty-cycled)
     double dec_duty_rate_deg_s_ = 0.0;           // sub-floor Dec rate (duty-cycled)
     bool dec_offset_running_ = false;
-    std::thread dec_duty_thread_;
-    std::atomic<bool> dec_duty_cancel_{false};
+    std::thread duty_thread_;
+    std::atomic<bool> duty_cancel_{false};
     std::mutex duty_lifecycle_mutex_;                     // serializes duty-worker reap+create
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
