@@ -68,6 +68,18 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 
 ### Driver concurrency & lifecycle (read before writing a driver)
 
+**ConformU rate-offset tests and the position model (PR #221, 2026-08-25).** ConformU measures
+`RightAscensionRate`/`DeclinationRate` by sampling RA/Dec BEFORE the rate write and 10 s after it,
+with a 5% tolerance — at the 0.05 arcsec/s low rate that is 0.025 arcsec over 10 s. Any position
+discontinuity inside the rate setter fails it: a hardware re-anchor (`refresh_position_cache_locked(true)`)
+on a MOVING axis shifts the reported position by up to one encoder count (~0.31 arcsec on the Wave
+100i) plus start latency, which read as a 27% RA "rate" error, while the stationary Dec axis passed.
+Rate setters must re-anchor the dead-reckoning model in place (`anchor_model_locked()`), never on
+hardware. Also: ConformU runs ON the SBC over localhost — the dev VM's LAN path has 2-90 ms spikes
+that stamp constant `Can*` getters with 0.10x s FAST marks — and a Bash tool timeout kills a child
+ConformU mid-slew, so launch it detached (`setsid nohup`) and poll a done marker. Motor-controller
+mounts store no site: set SiteLatitude/Longitude first or ConformU aborts "below the horizon".
+
 **Apply this checklist up front.** ConformU is single-threaded and catches *none*
 of the races below — code review plus the TSan concurrency stress suite do
 (`[stress]` tests under the `sanitizers-tsan` CI job / `RUN_TSAN=1` pre-flight,
@@ -1087,14 +1099,18 @@ datagrams before each send so replies cannot get off-by-one.
   the mount was powered on at home (a killed ConformU run mid-sync can shift the
   frame; this is why AutoHome matters).
 - **Tracking rates**: Lunar/Solar are just different step-period constants
-  (live `:I` change while tracking). **RA/Dec rate OFFSETS are deferred**: a
-  full implementation (effective-rate fold-in, pier-side Dec sign flip,
-  duty-cycling below the 0.26 arcsec/s slow-mode floor `T1=0xFFFFFF`, modeled
-  reads) passed manual endpoint measurements but failed ConformU's chained
-  measured-rate tests with a REAL physical Dec undershoot (commanded 40 as/s,
-  encoder counts showed ~16) plus impossible ~45 arcsec RA count jumps between
-  reads 60 ms apart right after in-place `:I` writes. Needs bench time with the
-  motion recorder before re-attempting.
+  (live `:I` change while tracking). **RA/Dec rate OFFSETS are supported**
+  (issue #214): RightAscensionRate is SUBTRACTED from the drive rate
+  (RA = LST − HA), DeclinationRate flips sign on the east branch (a2 ≥ 0,
+  dec = 90 − a2), sub-floor Dec rates duty-cycle floor-rate bursts on a 3 s
+  period (~140 ms stop-landing compensation), reads hold the dead-reckoned
+  model while offsets run, and offsets zero on a drive-rate change (setters
+  throw InvalidOperation off Sidereal). The two "hardware anomalies" that
+  originally deferred this (Dec undershoot 40→16 as/s; ~45 arcsec RA count
+  jumps after in-place `:I` writes) were bench-DISPROVEN on 2026-08-23: direct
+  UDP measurements show Dec tracks 5–320 as/s within 0.2% and zero `:j` count
+  glitches across 120 reads interleaved with `:I` writes. Both symptoms were
+  artifacts of the pre-#216 refinement-goto races, not the motor controller.
 - **No read freezes — ever**: the old 10 s post-slew/post-sync/pulse position
   overrides masked a real GOTO landing error (~3 arcmin east: axis targets were
   computed with LST at dispatch, not arrival) and corrupted every ConformU 4.5

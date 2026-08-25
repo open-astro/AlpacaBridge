@@ -12,15 +12,16 @@ You DO NOT run ConformU — hand off to `/conformu` at the end. You DO NOT commi
 
 The user invoked this command with: $ARGUMENTS
 
-- First argument (if present) is the target host (e.g. `astro.lan`), second is the SSH user.
+- First argument (if present) is the target host (e.g. `openastro.lan`), second is the SSH user.
+- **Standard rig (do not re-ask):** host `openastro.lan` (future images may be `openastro-XXXX.lan` with a 4-hex MAC suffix; the name always starts with `openastro`), user `astro`, password `astro`, sudo needs the password (`echo astro | sudo -S ...`). `astro.lan` is the old hostname and no longer resolves.
 - Anything not provided is asked for in Step 1.
 
 ## Step 1 — Gather session inputs
 
 Ask **one at a time**, presenting arguments as defaults where given:
 
-1. **Target host** — the SBC's hostname or IP. Default to `astro.lan` (the project's standard test rig) if no argument was given.
-2. **SSH user** — the login user on the SBC. Must be able to `sudo` (installing a package and restarting a systemd service require it).
+1. **Target host** — default `openastro.lan`. If it does not resolve, `nmap -sn 192.168.1.0/24 | grep -i openastro` finds a suffixed name.
+2. **SSH user** — default `astro` (password `astro`). Must be able to `sudo` with that password.
 3. **Alpaca port** — default `6800`; used for the post-deploy verification.
 
 ### 1b. Validate the inputs (HARD STOP on failure)
@@ -55,11 +56,11 @@ Report the branch and any uncommitted changes. Uncommitted changes are ALLOWED (
 ### 2b. SSH reachability (never prompt for a password mid-flow)
 
 ```bash
-ssh -o BatchMode=yes -o ConnectTimeout=5 -- "<user>@<host>" 'echo ok && sudo -n true && dpkg --print-architecture'
+ssh -o BatchMode=yes -o ConnectTimeout=5 -- "<user>@<host>" 'echo ok && (sudo -n true 2>/dev/null || echo astro | sudo -S true 2>/dev/null) && echo sudo-ok && dpkg --print-architecture'
 ```
 
 - If the connection fails: stop and tell the user to check the host/network or set up key auth (`ssh-copy-id <user>@<host>`).
-- If `sudo -n true` fails (password required): stop and tell the user passwordless sudo is needed for unattended install/restart, or they can run the install commands from Step 4 manually.
+- If BatchMode fails for lack of keys: retry with `sshpass -p astro ssh ...` (and suggest `ssh-copy-id astro@<host>` once). If `sudo-ok` does not print: stop — the rig password is `astro`; anything else means this is not the standard rig.
 - If the architecture is not `arm64`: **STOP** — never install on a non-arm64 device.
 
 ### 2c. Local build prerequisites
@@ -93,7 +94,7 @@ The restart is structurally gated on the install having actually succeeded: the 
 
 ```bash
 scp -- "../alpacabridge_${VERSION}_arm64.deb" "<user>@<host>:/tmp/"
-ssh -- "<user>@<host>" "sudo dpkg -i /tmp/alpacabridge_${VERSION}_arm64.deb || sudo apt-get -y -f install"
+ssh -- "<user>@<host>" "echo astro | sudo -S dpkg -i /tmp/alpacabridge_${VERSION}_arm64.deb || echo astro | sudo -S apt-get -y -f install"
 ssh -- "<user>@<host>" "dpkg-query -W -f='\${Status} \${Version}\n' alpacabridge"
 ```
 
@@ -103,7 +104,7 @@ ssh -- "<user>@<host>" "dpkg-query -W -f='\${Status} \${Version}\n' alpacabridge
 Only after the gate passes:
 
 ```bash
-ssh -- "<user>@<host>" "sudo systemctl restart alpacabridge && rm -f /tmp/alpacabridge_${VERSION}_arm64.deb"
+ssh -- "<user>@<host>" "echo astro | sudo -S systemctl restart alpacabridge && rm -f /tmp/alpacabridge_${VERSION}_arm64.deb"
 ```
 
 - If the service fails to restart, pull the journal and show it:
@@ -129,7 +130,7 @@ Then confirm the reported server version matches the deployed VERSION:
 curl -sS --max-time 5 "http://<host>:<port>/management/v1/description" | jq .
 ```
 
-- **Version matches** → deploy verified.
+- **Version matches** → also confirm the BINARY, since iterating on a branch redeploys the same VERSION string: `md5sum` of `/usr/bin/alpacabridge` on the SBC must equal `dpkg-deb --fsys-tarfile ../alpacabridge_${VERSION}_arm64.deb | tar -xO ./usr/bin/alpacabridge | md5sum`. Match → deploy verified.
 - **Version differs or unreachable** → the device is NOT running the new build; diagnose (service status, journal) before letting anyone run ConformU.
 
 ## Step 6 — Hand off to /conformu

@@ -67,8 +67,8 @@ TEST_CASE("SkyWatcher Telescope Driver - Defaults", "[skywatcher][telescope][uni
     REQUIRE(driver->get_can_set_guide_rates());
     REQUIRE(driver->get_can_set_tracking());
     REQUIRE_FALSE(driver->get_can_set_pier_side());
-    REQUIRE_FALSE(driver->get_can_set_declination_rate());
-    REQUIRE_FALSE(driver->get_can_set_right_ascension_rate());
+    REQUIRE(driver->get_can_set_declination_rate());
+    REQUIRE(driver->get_can_set_right_ascension_rate());
     REQUIRE(driver->get_can_move_axis(0));
     REQUIRE(driver->get_can_move_axis(1));
     REQUIRE_FALSE(driver->get_can_move_axis(2));
@@ -223,10 +223,9 @@ TEST_CASE("SkyWatcher Telescope Driver - Unsupported methods", "[skywatcher][tel
                          alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&] { driver->sync_to_alt_az(45.0, 180.0); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&] { driver->set_side_of_pier(0); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    // Rate offsets are deferred (see AGENTS.md); drive rates are supported
-    // and raise NotConnected when unconnected.
-    require_alpaca_error([&] { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    require_alpaca_error([&] { driver->set_right_ascension_rate(1.0); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
+    // Rate offsets are supported; like every motion method they raise
+    // NotConnected when unconnected.
+    require_alpaca_error([&] { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_right_ascension_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_tracking_rate(1); }, alpacacore::AlpacaError::NotConnected);
 }
