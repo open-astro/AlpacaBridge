@@ -18,6 +18,7 @@
 #ifndef _WIN32
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 
@@ -154,6 +155,23 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     // The cancelled park task must never flip AtPark afterwards.
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));
     REQUIRE_FALSE(driver->get_at_park());
+
+    // A park in flight gates motion members like a completed park does, so a
+    // slew or axis jog cannot silently clobber it (ParkedException, 0x408).
+    driver->park();
+    REQUIRE(driver->get_slewing());
+    CHECK_THROWS_AS(driver->move_axis(0, 0.5), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->slew_to_coordinates_async(5.0, 20.0), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->sync_to_coordinates(5.0, 20.0), alpacacore::AlpacaException);
+    try {
+        driver->move_axis(0, 0.5);
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
+    }
+    REQUIRE(driver->get_slewing());  // the park is still in flight
+    driver->abort_slew();            // ...but AbortSlew may cancel it
+    REQUIRE_FALSE(driver->get_at_park());
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
 
     // Disconnect with a park in flight joins the task cleanly.
     driver->park();

@@ -1207,6 +1207,13 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        {
+            // Gate BEFORE reaping: reap_slew_task() would cancel a park in
+            // flight (clearing parking_) and let this slew clobber it.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("SlewToCoordinatesAsync");
+        }
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
         bool precise = false;
@@ -1388,7 +1395,7 @@ public:
     void abort_slew() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        check_not_parked_locked("AbortSlew");
+        check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
         auto& protocol = SynScanProtocolWrapper::instance();
         protocol.cancel_goto();
         protocol.move_axis_fixed_rate(0, 0);
@@ -1504,7 +1511,18 @@ private:
         pulse_task_cancel_.store(false);
     }
 
+    // A park in flight (parking_) gates the same members as a completed park:
+    // otherwise a slew/MoveAxis/sync issued right after the async Park would
+    // silently clobber it (and MoveAxis would jog an axis mid-GOTO). Only
+    // AbortSlew and Unpark are allowed through, and both cancel the park.
     void check_not_parked_locked(const char* operation) const {
+        if (parked_ || parking_) {
+            throw AlpacaException(std::string(operation) + " is not allowed while " + (parked_ ? "parked" : "parking"),
+                                  AlpacaError::InvalidWhileParked);
+        }
+    }
+
+    void check_not_fully_parked_locked(const char* operation) const {
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
