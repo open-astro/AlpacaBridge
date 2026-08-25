@@ -1008,9 +1008,17 @@ public:
         });
     }
 
-    // Park task failure path: drop the parking state so Slewing/AtPark both
-    // read false and the caller can retry. mutex_ must be held.
+    // Park task failure path: stop the hardware so the reported idle state
+    // (Slewing false, AtPark false) matches reality, then drop the parking
+    // state so the caller can retry. mutex_ must be held.
     void fail_park_locked(const std::string& message) {
+        try {
+            auto& protocol = SynScanProtocolWrapper::instance();
+            protocol.cancel_goto();
+            protocol.move_axis_fixed_rate(0, 0);
+            protocol.move_axis_fixed_rate(1, 0);
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        }
         parking_ = false;
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();

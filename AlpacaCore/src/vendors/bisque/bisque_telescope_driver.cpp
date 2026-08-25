@@ -650,6 +650,11 @@ public:
                     return;
                 }
                 if (std::chrono::steady_clock::now() - start > timeout) {
+                    // Stop the hardware so the reported idle state matches reality.
+                    try {
+                        BisqueProtocolWrapper::instance().abort();
+                    } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    }
                     parking_ = false;
                     slewing_cached_ = false;
                     slew_force_until_ = std::chrono::steady_clock::time_point::min();
@@ -783,6 +788,7 @@ public:
 
     void unpark() override {
         bool was_parking = false;
+        bool unpark_failed = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -798,13 +804,16 @@ public:
             }
             protocol.unpark();
             // Confirm unpark.
-            if (protocol.is_parked()) {
-                throw AlpacaException("Failed to unpark mount");
+            unpark_failed = protocol.is_parked();
+            if (!unpark_failed) {
+                parked_ = false;
             }
-            parked_ = false;
         }
         if (was_parking) {
-            reap_park_task();  // without mutex_ held
+            reap_park_task();  // without mutex_ held; join before any throw below
+        }
+        if (unpark_failed) {
+            throw AlpacaException("Failed to unpark mount");
         }
     }
 
