@@ -500,6 +500,19 @@ independently broken the same way, before it was centralised:
   `std::set<std::string>` (or `unordered_set`) populated as the `by-id` pass
   resolves each candidate, and skip any raw-fallback port already in that set
   — otherwise a port tried via `by-id` gets opened (and reset) a second time.
+- **Collect candidates first, then probe them concurrently (issue #218).** A
+  probe against a port that isn't this device (the iOptron mount shares the
+  Prolific chip class with the iEAF and iEFW; a mount controller often shares
+  CH340 with the Gemini gear) costs the full handshake timeout — ~5 s for the
+  iOptron probes, ~6 s for Gemini — so probing inside the scan loop made
+  auto-detect connect time grow linearly with adapter count. Both scan passes
+  now only append `{path, name}` to a `candidates` vector; a `std::thread` per
+  candidate then runs `probe_port()` into an index-matched results vector, and
+  the found ports are emitted in candidate order (so the auto-detect device
+  index stays deterministic). Wall time is bounded by one port's worst case.
+  Don't move the probe back into the scan loop when copying this pattern to a
+  new vendor, and keep the by-id/raw dedupe set — it is what stops two threads
+  opening the same port at once.
 
 ### Platform 7 InterfaceVersion + DeviceState
 

@@ -22,6 +22,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -169,6 +170,12 @@ std::vector<GeminiPortInfo> enumerate_gemini_ports() {
     // pass below never re-opens a port the by-id pass already tried.
     std::set<std::string> probed;
 
+    struct Candidate {
+        std::string path;
+        std::string name;  // by-id symlink name, empty for raw nodes
+    };
+    std::vector<Candidate> candidates;
+
     // Scan /dev/serial/by-id/ for USB-serial adapters
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
     if (alpacacore::util::path_exists(serial_by_id)) {
@@ -189,17 +196,7 @@ std::vector<GeminiPortInfo> enumerate_gemini_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
-            std::string probe_message = "Probing ";
-            probe_message.append(resolved).append(" (").append(name).append(")...");
-            ALPACA_LOG_INFO("Gemini", probe_message);
-
-            int fw = probe_port(resolved);
-            if (fw > 0) {
-                std::string found_message = "Found focuser on ";
-                found_message.append(resolved).append(" (firmware ").append(std::to_string(fw)).append(")");
-                ALPACA_LOG_INFO("Gemini", found_message);
-                results.push_back({resolved, name, fw});
-            }
+            candidates.push_back({resolved, name});
         }
     }
 
@@ -222,17 +219,27 @@ std::vector<GeminiPortInfo> enumerate_gemini_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_focuser_candidate(resolved)) continue;
         probed.insert(resolved);
+        candidates.push_back({resolved, ""});
+    }
 
-        std::string probe_message = "Probing ";
-        probe_message.append(resolved).append("...");
-        ALPACA_LOG_INFO("Gemini", probe_message);
-        int fw = probe_port(resolved);
-        if (fw > 0) {
-            std::string found_message = "Found focuser on ";
-            found_message.append(resolved).append(" (firmware ").append(std::to_string(fw)).append(")");
-            ALPACA_LOG_INFO("Gemini", found_message);
-            results.push_back({resolved, "", fw});
-        }
+    // Probe every candidate concurrently: a non-responsive port costs the full
+    // handshake timeout, so serial probing scaled linearly with adapter count
+    // (issue #218); one thread per port bounds the scan to one port's worst case.
+    std::vector<int> firmware(candidates.size(), 0);
+    std::vector<std::thread> workers;
+    workers.reserve(candidates.size());
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const auto& c = candidates[i];
+        ALPACA_LOG_INFO("Gemini", "Probing " + c.path + (c.name.empty() ? "" : " (" + c.name + ")") + "...");
+        workers.emplace_back([&, i] { firmware[i] = probe_port(candidates[i].path); });
+    }
+    for (auto& w : workers) w.join();
+
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        if (firmware[i] <= 0) continue;
+        const auto& c = candidates[i];
+        ALPACA_LOG_INFO("Gemini", "Found focuser on " + c.path + " (firmware " + std::to_string(firmware[i]) + ")");
+        results.push_back({c.path, c.name, firmware[i]});
     }
 #endif
 

@@ -24,6 +24,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifndef _WIN32
 #include <errno.h>
@@ -188,6 +189,12 @@ std::vector<IefwPortInfo> enumerate_iefw_ports() {
 #ifndef _WIN32
     std::set<std::string> probed;
 
+    struct Candidate {
+        std::string path;
+        std::string name;  // by-id symlink name, empty for raw nodes
+    };
+    std::vector<Candidate> candidates;
+
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
     if (alpacacore::util::path_exists(serial_by_id)) {
         for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
@@ -202,19 +209,7 @@ std::vector<IefwPortInfo> enumerate_iefw_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
-            std::string probe_msg = "Probing ";
-            probe_msg += resolved;
-            probe_msg += " (";
-            probe_msg += name;
-            probe_msg += ") for iEFW...";
-            ALPACA_LOG_INFO("iOptron", probe_msg);
-
-            IefwDeviceInfo info;
-            if (probe_port(resolved, info)) {
-                ALPACA_LOG_INFO("iOptron", "Found " + iefw_model_name(info.model) + " on " + resolved + " (firmware " +
-                                               std::to_string(info.firmware) + ")");
-                results.push_back({resolved, name, info});
-            }
+            candidates.push_back({resolved, name});
         }
     }
 
@@ -230,14 +225,31 @@ std::vector<IefwPortInfo> enumerate_iefw_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_iefw_candidate(resolved)) continue;
         probed.insert(resolved);
+        candidates.push_back({resolved, ""});
+    }
 
-        ALPACA_LOG_INFO("iOptron", "Probing " + resolved + " for iEFW...");
-        IefwDeviceInfo info;
-        if (probe_port(resolved, info)) {
-            ALPACA_LOG_INFO("iOptron", "Found " + iefw_model_name(info.model) + " on " + resolved + " (firmware " +
-                                           std::to_string(info.firmware) + ")");
-            results.push_back({resolved, "", info});
-        }
+    // Probe every candidate concurrently. A non-responsive port (an iOptron
+    // mount shares the same Prolific chip class) costs the full handshake
+    // timeout, so serial probing scaled linearly with adapter count (issue
+    // #218); one thread per port bounds the scan to a single port's worst case.
+    std::vector<IefwDeviceInfo> infos(candidates.size());
+    std::vector<char> found(candidates.size(), 0);
+    std::vector<std::thread> workers;
+    workers.reserve(candidates.size());
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const auto& c = candidates[i];
+        ALPACA_LOG_INFO("iOptron", "Probing " + c.path + (c.name.empty() ? "" : " (" + c.name + ")") + " for iEFW...");
+        workers.emplace_back([&, i] { found[i] = probe_port(candidates[i].path, infos[i]) ? 1 : 0; });
+    }
+    for (auto& w : workers) w.join();
+
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        if (!found[i]) continue;
+        const auto& c = candidates[i];
+        const auto& info = infos[i];
+        ALPACA_LOG_INFO("iOptron", "Found " + iefw_model_name(info.model) + " on " + c.path + " (firmware " +
+                                       std::to_string(info.firmware) + ")");
+        results.push_back({c.path, c.name, info});
     }
 #endif
 

@@ -23,6 +23,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -264,6 +265,12 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
     // means it audibly reboots twice.
     std::set<std::string> probed;
 
+    struct Candidate {
+        std::string path;
+        std::string name;  // by-id symlink name, empty for raw nodes
+    };
+    std::vector<Candidate> candidates;
+
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
     if (alpacacore::util::path_exists(serial_by_id)) {
         for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
@@ -292,18 +299,7 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
-
-            std::string probe_msg = "Probing ";
-            probe_msg += resolved;
-            probe_msg += " (";
-            probe_msg += name;
-            probe_msg += ") for a flat panel...";
-            ALPACA_LOG_INFO("Gemini", probe_msg);
-
-            if (probe_port(resolved)) {
-                ALPACA_LOG_INFO("Gemini", "Found flat panel on " + resolved);
-                results.push_back({resolved, name});
-            }
+            candidates.push_back({resolved, name});
         }
     }
 
@@ -343,13 +339,28 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
             if (probed.count(resolved) != 0) continue;
             if (!raw_port_looks_like_flatpanel_candidate(resolved)) continue;
             probed.insert(resolved);
-
-            ALPACA_LOG_INFO("Gemini", "Probing " + port + " for a flat panel...");
-            if (probe_port(port)) {
-                ALPACA_LOG_INFO("Gemini", "Found flat panel on " + port);
-                results.push_back({port, ""});
-            }
+            candidates.push_back({port, ""});
         }
+    }
+
+    // Probe every candidate concurrently: a non-responsive port costs the full
+    // handshake timeout, so serial probing scaled linearly with adapter count
+    // (issue #218); one thread per port bounds the scan to one port's worst case.
+    std::vector<char> found(candidates.size(), 0);
+    std::vector<std::thread> workers;
+    workers.reserve(candidates.size());
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const auto& c = candidates[i];
+        ALPACA_LOG_INFO("Gemini",
+                        "Probing " + c.path + (c.name.empty() ? "" : " (" + c.name + ")") + " for a flat panel...");
+        workers.emplace_back([&, i] { found[i] = probe_port(candidates[i].path) ? 1 : 0; });
+    }
+    for (auto& w : workers) w.join();
+
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        if (!found[i]) continue;
+        ALPACA_LOG_INFO("Gemini", "Found flat panel on " + candidates[i].path);
+        results.push_back({candidates[i].path, candidates[i].name});
     }
 #endif
 
