@@ -630,4 +630,27 @@ TEST_CASE("SkyWatcher async - sub-floor effective RA rate duty-cycles the RA axi
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - Dec rate change does not orphan a live RA duty cycle", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->set_right_ascension_rate(0.99);  // sub-floor effective RA: duty mode
+    int starts = mount.start_count(1);
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts + 1; }, 7500));
+
+    // A continuous (non-duty) Dec rate reaps the SHARED worker; it must be
+    // restarted for the still-active RA duty cycle.
+    driver->set_declination_rate(10.0);
+    starts = mount.start_count(1);
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts + 2; }, 9000));
+
+    driver->set_declination_rate(0.0);
+    driver->set_right_ascension_rate(0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

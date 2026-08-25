@@ -445,7 +445,7 @@ public:
             if (tracking_) {
                 apply_dec_rate_offset_locked(lock, /*defer_motion=*/busy);
             }
-            need_duty = dec_duty_rate_deg_s_ != 0.0;
+            need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
         }
         if (need_duty) {
             start_duty_thread();
@@ -896,6 +896,7 @@ public:
             }
 
             const auto now = std::chrono::steady_clock::now();
+            pulse_axis_ = direction <= 1 ? kAxisDec : kAxisRa;
 
             // Reads are live (dead-reckoned) during pulses — no frozen-target
             // accumulation, and pulses never rewrite the slew Target
@@ -1837,16 +1838,35 @@ private:
                         if (rate == ax[i].rate && now < ax[i].burst_end) {
                             continue;
                         }
-                        // Only stop the motion this burst itself started: a
-                        // fresher generation means a pulse/MoveAxis/goto took
-                        // the axis — the newer command owns it now.
-                        if (motion_generation_ == ax[i].gen && !axes_busy_locked()) {
-                            static_cast<void>(stop_axis_and_wait_locked(lock, channel, ax[i].gen));
+                        // Ownership is judged PER AXIS: a goto/park/home owns
+                        // both axes, a pulse or manual MoveAxis owns only its
+                        // own. The global generation cannot tell a same-axis
+                        // supersession from an unrelated other-axis command,
+                        // so a stale generation with no same-axis owner means
+                        // the burst still runs and must be stopped (with a
+                        // fresh generation) rather than left creeping at the
+                        // floor rate.
+                        bool same_axis_owner = goto_in_progress_ || parking_ || homing_ || slewing_cached_ ||
+                                               manual_axis_slewing_[i] ||
+                                               (pulse_guiding_active_ && pulse_axis_ == channel);
+                        if (rate == 0.0 || (motion_generation_ != ax[i].gen && same_axis_owner)) {
+                            // Zeroed by its owner, or a same-axis command took
+                            // the axis: nothing left for this burst to stop.
+                            ax[i].bursting = false;
+                        } else if (motion_generation_ == ax[i].gen && same_axis_owner) {
+                            // Same-axis operation is dispatching this tick;
+                            // it will supersede momentarily. Retry.
+                        } else {
+                            uint64_t stop_gen = ax[i].gen;
+                            if (motion_generation_ != ax[i].gen) {
+                                stop_gen = ++motion_generation_;  // cross-axis bump: still ours
+                            }
+                            static_cast<void>(stop_axis_and_wait_locked(lock, channel, stop_gen));
                             if (duty_rate_locked(channel) == ax[i].rate) {
                                 cmd_axis_rate_deg_s_[i] = ax[i].rate;  // still the average rate
                             }
+                            ax[i].bursting = false;
                         }
-                        ax[i].bursting = false;
                     } else if (rate != 0.0 && now >= ax[i].next_start && connected_ && tracking_ &&
                                !axes_busy_locked()) {
                         // ~140 ms stop-landing overrun measured on hardware;
@@ -2537,6 +2557,7 @@ private:
     bool dec_offset_running_ = false;
     std::thread duty_thread_;
     std::atomic<bool> duty_cancel_{false};
+    int pulse_axis_ = 0;                                  // axis owned by the in-flight pulse (burst-stop gate)
     std::mutex duty_lifecycle_mutex_;                     // serializes duty-worker reap+create
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
