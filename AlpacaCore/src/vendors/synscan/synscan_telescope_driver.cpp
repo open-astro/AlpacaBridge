@@ -285,6 +285,7 @@ public:
             tracking_mode_valid_ = false;
             target_set_ = false;
             parked_ = false;
+            parking_ = false;
             at_home_ = false;
             pulse_guiding_active_ = false;
             slewing_cached_ = false;
@@ -367,6 +368,7 @@ public:
             }
             target_set_ = false;
             parked_ = false;
+            parking_ = false;
             at_home_ = false;
             pulse_guiding_active_ = false;
             slewing_cached_ = false;
@@ -884,21 +886,165 @@ public:
         throw AlpacaException("FindHome not supported", AlpacaError::MethodNotImplemented);
     }
 
+    // Park is an asynchronous initiator (ITelescopeV4; ConformU 4.5 times it
+    // against the 1 s STANDARD target): the park slew is dispatched in the
+    // slew task thread and this call returns at once. Slewing reports true
+    // until the mount reaches the park position and tracking is stopped, at
+    // which point AtPark flips true in the same locked step (no window where
+    // a poller sees Slewing false with AtPark false). Issue #208.
     void park() override {
-        std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        if (!park_position_set_) {
-            refresh_equatorial_cache_locked();
-            park_ra_hours_ = cached_ra_hours_;
-            park_dec_degrees_ = cached_dec_degrees_;
-            park_position_set_ = true;
+        // Serialize against other initiators (SlewToCoordinatesAsync): the
+        // check-then-reap-then-spawn sequence must not interleave with
+        // another initiator's, or a park could be cancelled and restarted
+        // (or a slew could clobber a park) in the gap.
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            // Check BEFORE reaping: reap_slew_task() would cancel a park in
+            // flight (its task clears parking_), so a second Park would
+            // restart the slew instead of being the documented no-op.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            if (parked_ || parking_) {
+                return;  // calling Park twice (or while parking) is harmless
+            }
         }
-        do_slew_to_coordinates_locked(park_ra_hours_, park_dec_degrees_);
-        wait_for_slew_complete(lock);
-        SynScanProtocolWrapper::instance().set_tracking_mode(0);
-        tracking_mode_cached_ = 0;
-        tracking_mode_valid_ = true;
-        parked_ = true;
+        double park_ra = 0.0;
+        double park_dec = 0.0;
+        // Cancel + join any previous slew task first. Must run without mutex_
+        // held: the task takes mutex_.
+        reap_slew_task();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            if (parked_ || parking_) {
+                return;  // ASCOM: Park on a parked (or parking) mount is harmless.
+            }
+            if (!park_position_set_) {
+                refresh_equatorial_cache_locked();
+                park_ra_hours_ = cached_ra_hours_;
+                park_dec_degrees_ = cached_dec_degrees_;
+                park_position_set_ = true;
+            }
+            park_ra = park_ra_hours_;
+            park_dec = park_dec_degrees_;
+            validate_ra_dec(park_ra, park_dec, "Park");
+            // Publish the slewing state before the task starts so a poller
+            // never sees Slewing false between Park returning and dispatch.
+            slewing_cached_ = true;
+            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            manual_axis_slewing_[0] = false;
+            manual_axis_slewing_[1] = false;
+            at_home_ = false;
+            parking_ = true;
+        }
+
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (slew_task_thread_.joinable()) {
+            std::thread stale = std::move(slew_task_thread_);
+            tlock.unlock();
+            slew_task_cancel_.store(true);
+            task_cv_.notify_all();
+            stale.join();
+            slew_task_cancel_.store(false);
+            tlock.lock();
+        }
+        slew_task_thread_ = std::thread([this, park_ra, park_dec]() {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (!connected_ || slew_task_cancel_.load() || !parking_) {
+                parking_ = false;
+                return;
+            }
+            try {
+                do_slew_to_coordinates_locked(park_ra, park_dec);
+            } catch (const std::exception& ex) {
+                fail_park_locked(std::string("Park slew dispatch failed: ") + ex.what());
+                return;
+            } catch (...) {
+                fail_park_locked("Park slew dispatch failed with unknown exception");
+                return;
+            }
+            // Poll for completion with mutex_ released between polls so the
+            // HTTP getters (Slewing, RightAscension, ...) stay responsive.
+            const auto timeout = std::chrono::seconds(120);
+            const auto start = std::chrono::steady_clock::now();
+            const auto start_grace = std::chrono::seconds(2);
+            bool saw_slewing = false;
+            while (true) {
+                lock.unlock();
+                const bool keep_going = task_wait_for(std::chrono::milliseconds(250), slew_task_cancel_);
+                lock.lock();
+                // Cancelled (disconnect / destruction / superseding slew),
+                // aborted, or unparked meanwhile: the canceller owns the state.
+                if (!keep_going || !connected_ || !parking_) {
+                    parking_ = false;
+                    return;
+                }
+                const bool slewing = poll_hardware_slewing_locked();
+                if (slewing) {
+                    saw_slewing = true;
+                } else {
+                    if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
+                        continue;
+                    }
+                    break;
+                }
+                if (std::chrono::steady_clock::now() - start > timeout) {
+                    fail_park_locked("Park slew timed out after 120s");
+                    return;
+                }
+            }
+            if (slew_settle_time_seconds_ > 0) {
+                lock.unlock();
+                const bool keep_going =
+                    task_wait_for(std::chrono::seconds(slew_settle_time_seconds_), slew_task_cancel_);
+                lock.lock();
+                if (!keep_going || !connected_ || !parking_) {
+                    parking_ = false;
+                    return;
+                }
+            }
+            try {
+                SynScanProtocolWrapper::instance().set_tracking_mode(0);
+                tracking_mode_cached_ = 0;
+                tracking_mode_valid_ = true;
+            } catch (const std::exception& ex) {
+                fail_park_locked(std::string("Park: stopping tracking failed: ") + ex.what());
+                return;
+            } catch (...) {
+                fail_park_locked("Park: stopping tracking failed with unknown exception");
+                return;
+            }
+            slewing_cached_ = false;
+            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            equatorial_cache_valid_ = false;
+            altaz_cache_valid_ = false;
+            position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            // AtPark and Slewing flip in the same locked step.
+            parked_ = true;
+            parking_ = false;
+        });
+    }
+
+    // Park task failure path: stop the hardware so the reported idle state
+    // (Slewing false, AtPark false) matches reality, then drop the parking
+    // state so the caller can retry. mutex_ must be held.
+    void fail_park_locked(const std::string& message) {
+        try {
+            auto& protocol = SynScanProtocolWrapper::instance();
+            protocol.cancel_goto();
+            protocol.move_axis_fixed_rate(0, 0);
+            protocol.move_axis_fixed_rate(1, 0);
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
+        }
+        parking_ = false;
+        slewing_cached_ = false;
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        ALPACA_LOG_WARN("SynScan", message);
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -986,16 +1132,18 @@ public:
         // cancelled + joined on disconnect and in the destructor. Spawned
         // OUTSIDE mutex_ because its failure path takes mutex_.
         reap_pulse_task();
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (pulse_task_thread_.joinable()) {
-            // A racing caller spawned between our reap and this lock — cancel
-            // and join it INSIDE the same critical section as the assignment,
-            // so a joinable thread can never be overwritten (std::terminate)
-            // or joined from two threads (UB). [stress] telescope finding.
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (pulse_task_thread_.joinable()) {
+            std::thread stale = std::move(pulse_task_thread_);
+            tlock.unlock();
             pulse_task_cancel_.store(true);
             task_cv_.notify_all();
-            pulse_task_thread_.join();
+            stale.join();
             pulse_task_cancel_.store(false);
+            tlock.lock();
         }
         pulse_task_thread_ = std::thread([this, axis, duration, tracking_mode]() {
             if (!task_wait_for(std::chrono::milliseconds(duration), pulse_task_cancel_)) {
@@ -1074,6 +1222,14 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
+        {
+            // Gate BEFORE reaping: reap_slew_task() would cancel a park in
+            // flight (clearing parking_) and let this slew clobber it.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("SlewToCoordinatesAsync");
+        }
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
         bool precise = false;
@@ -1107,14 +1263,18 @@ public:
 
         // Dispatch in a joinable member thread (never detached), cancelled +
         // joined on disconnect and in the destructor.
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (slew_task_thread_.joinable()) {
-            // Racing SlewAsync between reap and this lock — see the pulse
-            // spawn above; join under the same critical section.
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (slew_task_thread_.joinable()) {
+            std::thread stale = std::move(slew_task_thread_);
+            tlock.unlock();
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
-            slew_task_thread_.join();
+            stale.join();
             slew_task_cancel_.store(false);
+            tlock.lock();
         }
         slew_task_thread_ = std::thread([this, ra_raw, dec_raw, precise]() {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1172,9 +1332,31 @@ public:
     }
 
     void unpark() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        parked_ = false;
+        bool was_parking = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            parked_ = false;
+            was_parking = parking_;
+            if (was_parking) {
+                // Unpark during a park wins the race: stop the park slew and
+                // drop the parking state; the task below is then joined.
+                parking_ = false;
+                auto& protocol = SynScanProtocolWrapper::instance();
+                try {
+                    protocol.cancel_goto();
+                    protocol.move_axis_fixed_rate(0, 0);
+                    protocol.move_axis_fixed_rate(1, 0);
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                }
+                slewing_cached_ = false;
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                position_override_until_ = std::chrono::steady_clock::time_point::min();
+            }
+        }
+        if (was_parking) {
+            reap_slew_task();  // without mutex_ held
+        }
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -1229,11 +1411,12 @@ public:
     void abort_slew() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        check_not_parked_locked("AbortSlew");
+        check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
         auto& protocol = SynScanProtocolWrapper::instance();
         protocol.cancel_goto();
         protocol.move_axis_fixed_rate(0, 0);
         protocol.move_axis_fixed_rate(1, 0);
+        parking_ = false;  // an aborted park never reaches AtPark
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         position_override_until_ = std::chrono::steady_clock::time_point::min();
@@ -1344,7 +1527,18 @@ private:
         pulse_task_cancel_.store(false);
     }
 
+    // A park in flight (parking_) gates the same members as a completed park:
+    // otherwise a slew/MoveAxis/sync issued right after the async Park would
+    // silently clobber it (and MoveAxis would jog an axis mid-GOTO). Only
+    // AbortSlew and Unpark are allowed through, and both cancel the park.
     void check_not_parked_locked(const char* operation) const {
+        if (parked_ || parking_) {
+            throw AlpacaException(std::string(operation) + " is not allowed while " + (parked_ ? "parked" : "parking"),
+                                  AlpacaError::InvalidWhileParked);
+        }
+    }
+
+    void check_not_fully_parked_locked(const char* operation) const {
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
@@ -1392,6 +1586,15 @@ private:
     }
 
     bool get_slewing_locked() const {
+        // A park in flight reports Slewing until the park task flips AtPark
+        // (same locked step) — never Slewing false with AtPark false.
+        if (parking_) {
+            return true;
+        }
+        return poll_hardware_slewing_locked();
+    }
+
+    bool poll_hardware_slewing_locked() const {
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
@@ -1640,11 +1843,16 @@ private:
     mutable std::chrono::steady_clock::time_point pulse_guide_end_time_;
 
     bool park_position_set_ = false;
+    mutable bool parking_ = false;  // park task in flight (Slewing true, AtPark false)
     double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
 
     // Background task threads — see the helpers above. task_mutex_ only guards
     // thread handles and the cv; it is never held across protocol I/O.
+    // Serializes the async initiators (park, slew_to_coordinates_async) so
+    // their check -> reap -> spawn sequences cannot interleave. Never held
+    // by the task threads and never taken while mutex_ is held.
+    std::mutex initiator_mutex_;
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;
     std::thread slew_task_thread_;

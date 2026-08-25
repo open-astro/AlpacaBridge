@@ -619,7 +619,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Wi-Fi reliability**: Network (TCP) connections drain stale acknowledgment bytes from blind commands to prevent buffer accumulation on the mount's Wi-Fi module. `IsPulseGuiding` uses lock-free atomics to meet the ConformU fast response target over high-latency links.
 - **Tested firmware**: Driver tested on **HEM27** with main board firmware **V240121** and hand controller firmware **V241201**, and on **HAE29C EQ** (model code 0036, current firmware as of 2026-07-14). Other firmware versions and models may work but have not been individually verified.
 - **HAE29C firmware quirks**: The driver carries three hardware-verified workarounds gated strictly to model code 0036 (other models are unaffected): (1) `:MP1#` park slews complete physically but never report status 6 — the driver sends `:ST0#` to finalize once the mount is stationary at the park target; (2) a park issued while already at the park position wedges the same way and gets the same finalizer; (3) GOTO stops compensating sidereal motion during its final ~1 s approach, settling ~11–16 arcsec east in RA — the driver closes the residual with a duration-computed pulse-guide trim (up to 3 iterations).
-- **ConformU**: HEM27 validated with ConformU 4.3.0 (USB and Wi-Fi); HAE29C validated with ConformU 4.4.0 (USB) — 0 errors, 0 issues, 0 timing violations, on Linux arm64.
+- **ConformU**: HEM27 validated with ConformU 4.3.0 (USB and Wi-Fi); HAE29C validated with ConformU 4.5.0 (USB, 2026-08-25; Park and MoveAxis stop verified against the 1 s asynchronous-initiator target) — 0 errors, 0 issues, 0 timing violations, on Linux arm64.
 
 </details>
 

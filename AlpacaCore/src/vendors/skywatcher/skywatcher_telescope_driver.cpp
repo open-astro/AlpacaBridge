@@ -761,12 +761,18 @@ public:
             homing_ = true;
         }
 
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (slew_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (slew_task_thread_.joinable()) {
+            std::thread stale = std::move(slew_task_thread_);
+            tlock.unlock();
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
-            slew_task_thread_.join();
+            stale.join();
             slew_task_cancel_.store(false);
+            tlock.lock();
         }
         slew_task_thread_ = std::thread([this]() {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -813,6 +819,21 @@ public:
     // in the background and return inside the STANDARD response target; AtPark
     // turns true when the slew completes and tracking is stopped.
     void park() override {
+        // Serialize against other initiators (SlewToCoordinatesAsync): the
+        // check-then-reap-then-spawn sequence must not interleave with
+        // another initiator's, or a park could be cancelled and restarted
+        // (or a slew could clobber a park) in the gap.
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            // Check BEFORE reaping: reap_slew_task() would cancel a park in
+            // flight (its task clears parking_), so a second Park would
+            // restart the slew instead of being the documented no-op.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            if (parked_ || parking_) {
+                return;  // calling Park twice (or while parking) is harmless
+            }
+        }
         reap_slew_task();
         reap_pulse_task();
         double target_ra_axis = 0.0;
@@ -840,12 +861,18 @@ public:
             parking_ = true;
         }
 
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (slew_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (slew_task_thread_.joinable()) {
+            std::thread stale = std::move(slew_task_thread_);
+            tlock.unlock();
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
-            slew_task_thread_.join();
+            stale.join();
             slew_task_cancel_.store(false);
+            tlock.lock();
         }
         slew_task_thread_ = std::thread([this, target_ra_axis, target_dec_axis]() {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -945,12 +972,18 @@ public:
 
         // Stop-the-pulse timer thread — joinable member thread, never detached.
         reap_pulse_task();
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (pulse_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (pulse_task_thread_.joinable()) {
+            std::thread stale = std::move(pulse_task_thread_);
+            tlock.unlock();
             pulse_task_cancel_.store(true);
             task_cv_.notify_all();
-            pulse_task_thread_.join();
+            stale.join();
             pulse_task_cancel_.store(false);
+            tlock.lock();
         }
         const bool restore_tracking = ra_rate_adjust;
         const double dec_rate = dec_rate_deg_per_sec;
@@ -1096,6 +1129,14 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
+        {
+            // Gate BEFORE reaping: reap_slew_task() would cancel a park in
+            // flight (clearing parking_) and let this slew clobber it.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("SlewToCoordinatesAsync");
+        }
         // Cancel + join any previous slew or pulse task first (without mutex_):
         // a stale pulse timer firing mid-goto corrupts the slew.
         reap_slew_task();
@@ -1118,12 +1159,18 @@ public:
             at_home_ = false;
         }
 
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (slew_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (slew_task_thread_.joinable()) {
+            std::thread stale = std::move(slew_task_thread_);
+            tlock.unlock();
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
-            slew_task_thread_.join();
+            stale.join();
             slew_task_cancel_.store(false);
+            tlock.lock();
         }
         slew_task_thread_ = std::thread([this, ra, dec]() {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -1316,12 +1363,18 @@ public:
             return;
         }
 
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (stop_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (stop_task_thread_.joinable()) {
+            std::thread stale = std::move(stop_task_thread_);
+            tlock.unlock();
             stop_task_cancel_.store(true);
             task_cv_.notify_all();
-            stop_task_thread_.join();
+            stale.join();
             stop_task_cancel_.store(false);
+            tlock.lock();
         }
         stop_task_thread_ = std::thread([this, channel, axis, stop_task_generation]() {
             auto& protocol = SkyWatcherProtocolWrapper::instance();
@@ -1400,7 +1453,7 @@ public:
         task_cv_.notify_all();
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        check_not_parked_locked("AbortSlew");
+        check_not_fully_parked_locked("AbortSlew");
         // AbortSlew is itself a motion command: bump the generation so any
         // stop-wait sleeping in an unlock window observes the supersession
         // and its dispatch aborts BEFORE sending new motor commands (the
@@ -1450,7 +1503,17 @@ private:
         }
     }
 
+    // A park in flight (parking_) gates the same members as a completed park
+    // so a slew/MoveAxis/sync cannot silently clobber it; AbortSlew and
+    // Unpark are allowed through and cancel the park.
     void check_not_parked_locked(const char* operation) const {
+        if (parked_ || parking_) {
+            throw AlpacaException(std::string(operation) + " is not allowed while " + (parked_ ? "parked" : "parking"),
+                                  AlpacaError::InvalidWhileParked);
+        }
+    }
+
+    void check_not_fully_parked_locked(const char* operation) const {
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
@@ -2595,6 +2658,10 @@ private:
 
     // Background task threads; task_mutex_ only guards handles + cv, never
     // held across protocol I/O.
+    // Serializes the async initiators (park, slew_to_coordinates_async) so
+    // their check -> reap -> spawn sequences cannot interleave. Never held
+    // by the task threads and never taken while mutex_ is held.
+    std::mutex initiator_mutex_;
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;
     std::thread slew_task_thread_;
