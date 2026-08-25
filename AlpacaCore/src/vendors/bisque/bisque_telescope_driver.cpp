@@ -22,7 +22,6 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <mutex>
 #include <numbers>
 #include <optional>
@@ -113,9 +112,6 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        // Cancel + join the background park task before any member it touches
-        // is destroyed. Must run WITHOUT mutex_ held (the task takes mutex_).
-        cancel_park_task();
         if (connected_) {
             try {
                 set_connected(false);
@@ -170,13 +166,6 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        if (!connected) {
-            // Cancel + join the background park task BEFORE taking mutex_: the
-            // task takes mutex_, so joining under the lock would deadlock, and
-            // leaving it running across the protocol disconnect would race the
-            // shared wrapper.
-            cancel_park_task();
-        }
         std::unique_lock<std::mutex> lock(mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
@@ -206,7 +195,6 @@ public:
             connected_ = true;
             target_set_ = false;
             parked_ = false;
-            parking_ = false;
             at_home_ = false;
             homing_ = false;
             slewing_cached_ = false;
@@ -251,7 +239,6 @@ public:
             connected_ = false;
             target_set_ = false;
             parked_ = false;
-            parking_ = false;
             at_home_ = false;
             homing_ = false;
             slewing_cached_ = false;
@@ -582,93 +569,33 @@ public:
         altaz_cache_valid_ = false;
     }
 
-    // Park is an asynchronous initiator (ITelescopeV4; ConformU 4.5 times it
-    // against the 1 s STANDARD target): TheSkyX's ParkAndDoNotDisconnect is
-    // issued in Asynchronous mode and this call returns at once. Slewing
-    // reports true until TheSkyX reports IsParked, at which point AtPark flips
-    // true in the same locked step (no window where a poller sees Slewing
-    // false with AtPark false). The completion poll runs in a background task
-    // thread. Issue #208.
     void park() override {
-        // Join any previous park task first. Must run without mutex_ held.
-        reap_park_task();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
+        check_connected();
+        auto& protocol = BisqueProtocolWrapper::instance();
+        protocol.park();
+        // Poll until parked.
+        auto start = std::chrono::steady_clock::now();
+        while (true) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed > 120) {
+                throw AlpacaException("Park timed out after 120 seconds");
+            }
+            try {
+                if (protocol.is_parked()) break;
+            } catch (...) {
+            }
+            // Release lock briefly so other threads can query state.
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            lock.lock();
+            // The mount may have been disconnected while the lock was released.
             check_connected();
-            if (parked_ || parking_) {
-                return;  // ASCOM: Park on a parked (or parking) mount is harmless.
-            }
-            BisqueProtocolWrapper::instance().park();
-            parking_ = true;
-            slewing_cached_ = true;
-            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-            manual_axis_slewing_[0] = false;
-            manual_axis_slewing_[1] = false;
-            at_home_ = false;
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
         }
-
-        // Join any task that raced in between the reap above and this lock,
-        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
-        // to observe the cancel and exit, so joining under the lock deadlocks.
-        std::unique_lock<std::mutex> tlock(task_mutex_);
-        while (park_task_thread_.joinable()) {
-            std::thread stale = std::move(park_task_thread_);
-            tlock.unlock();
-            park_task_cancel_.store(true);
-            task_cv_.notify_all();
-            stale.join();
-            park_task_cancel_.store(false);
-            tlock.lock();
-        }
-        park_task_thread_ = std::thread([this]() {
-            const auto timeout = std::chrono::seconds(120);
-            const auto start = std::chrono::steady_clock::now();
-            while (true) {
-                // Poll without mutex_ held so the HTTP getters stay responsive;
-                // the protocol wrapper serializes its own socket I/O.
-                if (!task_wait_for(std::chrono::milliseconds(500), park_task_cancel_)) {
-                    return;  // cancelled (disconnect / destruction): the canceller owns the state
-                }
-                bool is_parked = false;
-                bool poll_ok = false;
-                try {
-                    is_parked = BisqueProtocolWrapper::instance().is_parked();
-                    poll_ok = true;
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
-                    // Transient poll failure (or a racing disconnect): keep
-                    // polling while still connected, re-checked below.
-                }
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || !parking_ || park_task_cancel_.load()) {
-                    parking_ = false;
-                    return;
-                }
-                if (poll_ok && is_parked) {
-                    slewing_cached_ = false;
-                    slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                    equatorial_cache_valid_ = false;
-                    altaz_cache_valid_ = false;
-                    // AtPark and Slewing flip in the same locked step.
-                    parked_ = true;
-                    parking_ = false;
-                    return;
-                }
-                if (std::chrono::steady_clock::now() - start > timeout) {
-                    // Stop the hardware so the reported idle state matches reality.
-                    try {
-                        BisqueProtocolWrapper::instance().abort();
-                    } catch (...) {  // NOLINT(bugprone-empty-catch)
-                    }
-                    parking_ = false;
-                    slewing_cached_ = false;
-                    slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                    ALPACA_LOG_WARN("Bisque", "Park timed out after 120s waiting for TheSkyX IsParked");
-                    return;
-                }
-            }
-        });
+        parked_ = true;
+        equatorial_cache_valid_ = false;
+        altaz_cache_valid_ = false;
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -793,34 +720,15 @@ public:
     }
 
     void unpark() override {
-        bool was_parking = false;
-        bool unpark_failed = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            auto& protocol = BisqueProtocolWrapper::instance();
-            was_parking = parking_;
-            if (was_parking) {
-                // Unpark during a park wins the race: stop the park slew and
-                // drop the parking state; the task below is then joined.
-                protocol.abort();
-                parking_ = false;
-                slewing_cached_ = false;
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            }
-            protocol.unpark();
-            // Confirm unpark.
-            unpark_failed = protocol.is_parked();
-            if (!unpark_failed) {
-                parked_ = false;
-            }
-        }
-        if (was_parking) {
-            reap_park_task();  // without mutex_ held; join before any throw below
-        }
-        if (unpark_failed) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        auto& protocol = BisqueProtocolWrapper::instance();
+        protocol.unpark();
+        // Confirm unpark.
+        if (protocol.is_parked()) {
             throw AlpacaException("Failed to unpark mount");
         }
+        parked_ = false;
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -878,7 +786,6 @@ public:
         check_connected();
         auto& protocol = BisqueProtocolWrapper::instance();
         protocol.abort();
-        parking_ = false;  // an aborted park never reaches AtPark
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
@@ -947,11 +854,6 @@ private:
     }
 
     bool get_slewing_locked() const {
-        // A park in flight reports Slewing until the park task flips AtPark
-        // (same locked step) — never Slewing false with AtPark false.
-        if (parking_) {
-            return true;
-        }
         // Within the slew-force window, report as slewing without querying.
         if (slewing_cached_ && std::chrono::steady_clock::now() < slew_force_until_) {
             return true;
@@ -1020,35 +922,6 @@ private:
         }
     }
 
-    // Cancellable wait used by the park task. Returns false when cancelled.
-    bool task_wait_for(std::chrono::milliseconds d, std::atomic<bool>& cancel) const {
-        std::unique_lock<std::mutex> tlock(task_mutex_);
-        task_cv_.wait_for(tlock, d, [&] { return cancel.load(); });
-        return !cancel.load();
-    }
-
-    // Cancel and join the park task. Must be called WITHOUT mutex_ held (the
-    // task takes mutex_).
-    void cancel_park_task() {
-        park_task_cancel_.store(true);
-        task_cv_.notify_all();
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlock(task_mutex_);
-            prev = std::move(park_task_thread_);
-        }
-        if (prev.joinable()) {
-            prev.join();
-        }
-    }
-
-    // Join the previous park task (if any) and reset its cancel flag so a new
-    // one can start. Must be called WITHOUT mutex_ held.
-    void reap_park_task() {
-        cancel_park_task();
-        park_task_cancel_.store(false);
-    }
-
     int device_number_;
     ConnectionInfo connection_info_;
     mutable std::mutex mutex_;
@@ -1077,7 +950,6 @@ private:
     bool site_info_valid_ = false;
 
     mutable bool parked_ = false;
-    mutable bool parking_ = false;  // park task in flight (Slewing true, AtPark false)
     mutable bool at_home_ = false;
     mutable bool homing_ = false;
     mutable bool slewing_cached_ = false;
@@ -1089,13 +961,6 @@ private:
     int slew_settle_time_seconds_ = 0;
 
     GuideRate guide_rate_{};
-
-    // Background park task — task_mutex_ only guards the thread handle and
-    // the cv; it is never held across protocol I/O.
-    mutable std::mutex task_mutex_;
-    mutable std::condition_variable task_cv_;
-    std::thread park_task_thread_;
-    mutable std::atomic<bool> park_task_cancel_{false};
 };
 
 std::unique_ptr<TelescopeDriver> create_bisque_telescope(

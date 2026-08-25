@@ -105,7 +105,6 @@ if(TARGET alpacacore_bisque)
     # Covers the mutex-guarded get_connected() driver shape in the [stress]
     # pool (PR #115 round-2 ABBA regression coverage).
     list(APPEND TEST_SOURCES test_bisque_concurrency_stress.cpp)
-    list(APPEND TEST_SOURCES test_bisque_async_park.cpp)
 endif()
 if(TARGET alpacacore_touptek)
     list(APPEND TEST_SOURCES test_touptek_camera.cpp)
