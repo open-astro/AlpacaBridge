@@ -893,6 +893,21 @@ public:
     // which point AtPark flips true in the same locked step (no window where
     // a poller sees Slewing false with AtPark false). Issue #208.
     void park() override {
+        // Serialize against other initiators (SlewToCoordinatesAsync): the
+        // check-then-reap-then-spawn sequence must not interleave with
+        // another initiator's, or a park could be cancelled and restarted
+        // (or a slew could clobber a park) in the gap.
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            // Check BEFORE reaping: reap_slew_task() would cancel a park in
+            // flight (its task clears parking_), so a second Park would
+            // restart the slew instead of being the documented no-op.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            if (parked_ || parking_) {
+                return;  // calling Park twice (or while parking) is harmless
+            }
+        }
         double park_ra = 0.0;
         double park_dec = 0.0;
         // Cancel + join any previous slew task first. Must run without mutex_
@@ -1207,6 +1222,7 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
         {
             // Gate BEFORE reaping: reap_slew_task() would cancel a park in
             // flight (clearing parking_) and let this slew clobber it.
@@ -1833,6 +1849,10 @@ private:
 
     // Background task threads — see the helpers above. task_mutex_ only guards
     // thread handles and the cv; it is never held across protocol I/O.
+    // Serializes the async initiators (park, slew_to_coordinates_async) so
+    // their check -> reap -> spawn sequences cannot interleave. Never held
+    // by the task threads and never taken while mutex_ is held.
+    std::mutex initiator_mutex_;
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;
     std::thread slew_task_thread_;

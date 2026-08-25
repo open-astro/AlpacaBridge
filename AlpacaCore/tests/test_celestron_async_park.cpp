@@ -38,6 +38,7 @@ using Clock = std::chrono::steady_clock;
 
 struct FakeCelestronState {
     std::atomic<bool> goto_seen{false};
+    std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
@@ -62,6 +63,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
             case 'B':
                 st->goto_started.store(Clock::now().time_since_epoch().count());
                 st->goto_seen.store(true);
+                st->goto_count.fetch_add(1);
                 return "#";
             case 'L':
                 return st->goto_in_progress() ? "1#" : "0#";
@@ -77,6 +79,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                 if (op == 0x02 || op == 0x17) {  // MC_GOTO_FAST / MC_GOTO_SLOW
                     st->goto_started.store(Clock::now().time_since_epoch().count());
                     st->goto_seen.store(true);
+                    st->goto_count.fetch_add(1);
                     return "#";
                 }
                 if (op == 0x13) {  // MC_SLEW_DONE: 0x00 = still slewing, 0xFF = done
@@ -126,6 +129,13 @@ TEST_CASE("Celestron async - Park returns immediately, AtPark flips when the sle
     REQUIRE(driver->get_slewing());  // parking reports Slewing until AtPark
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the GOTO was dispatched
+    // Park while a park is in flight is a no-op: the running slew is neither
+    // cancelled nor restarted (still exactly one GOTO on the wire).
+    driver->park();
+    REQUIRE(driver->get_slewing());
+    REQUIRE_FALSE(driver->get_at_park());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(st->goto_count.load() == 1);
 
     REQUIRE(wait_until([&] { return driver->get_at_park(); }, 20000));
     REQUIRE_FALSE(driver->get_slewing());

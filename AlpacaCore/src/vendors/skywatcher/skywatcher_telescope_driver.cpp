@@ -819,6 +819,21 @@ public:
     // in the background and return inside the STANDARD response target; AtPark
     // turns true when the slew completes and tracking is stopped.
     void park() override {
+        // Serialize against other initiators (SlewToCoordinatesAsync): the
+        // check-then-reap-then-spawn sequence must not interleave with
+        // another initiator's, or a park could be cancelled and restarted
+        // (or a slew could clobber a park) in the gap.
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            // Check BEFORE reaping: reap_slew_task() would cancel a park in
+            // flight (its task clears parking_), so a second Park would
+            // restart the slew instead of being the documented no-op.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            if (parked_ || parking_) {
+                return;  // calling Park twice (or while parking) is harmless
+            }
+        }
         reap_slew_task();
         reap_pulse_task();
         double target_ra_axis = 0.0;
@@ -1114,6 +1129,14 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
+        {
+            // Gate BEFORE reaping: reap_slew_task() would cancel a park in
+            // flight (clearing parking_) and let this slew clobber it.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("SlewToCoordinatesAsync");
+        }
         // Cancel + join any previous slew or pulse task first (without mutex_):
         // a stale pulse timer firing mid-goto corrupts the slew.
         reap_slew_task();
@@ -1430,7 +1453,7 @@ public:
         task_cv_.notify_all();
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        check_not_parked_locked("AbortSlew");
+        check_not_fully_parked_locked("AbortSlew");
         // AbortSlew is itself a motion command: bump the generation so any
         // stop-wait sleeping in an unlock window observes the supersession
         // and its dispatch aborts BEFORE sending new motor commands (the
@@ -1480,7 +1503,17 @@ private:
         }
     }
 
+    // A park in flight (parking_) gates the same members as a completed park
+    // so a slew/MoveAxis/sync cannot silently clobber it; AbortSlew and
+    // Unpark are allowed through and cancel the park.
     void check_not_parked_locked(const char* operation) const {
+        if (parked_ || parking_) {
+            throw AlpacaException(std::string(operation) + " is not allowed while " + (parked_ ? "parked" : "parking"),
+                                  AlpacaError::InvalidWhileParked);
+        }
+    }
+
+    void check_not_fully_parked_locked(const char* operation) const {
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
@@ -2625,6 +2658,10 @@ private:
 
     // Background task threads; task_mutex_ only guards handles + cv, never
     // held across protocol I/O.
+    // Serializes the async initiators (park, slew_to_coordinates_async) so
+    // their check -> reap -> spawn sequences cannot interleave. Never held
+    // by the task threads and never taken while mutex_ is held.
+    std::mutex initiator_mutex_;
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;
     std::thread slew_task_thread_;
