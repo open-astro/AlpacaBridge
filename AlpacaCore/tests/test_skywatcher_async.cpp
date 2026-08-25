@@ -653,4 +653,26 @@ TEST_CASE("SkyWatcher async - Dec rate change does not orphan a live RA duty cyc
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - rate offset entry keeps the reported RA continuous", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_right_ascension_rate(0.0);
+    const double before = driver->get_right_ascension();
+
+    // Hardware and model disagree by 18 arcsec (count quantization / start
+    // latency, exaggerated): entering an offset must NOT re-anchor on
+    // hardware and jump the reported RA — ConformU samples RA before the
+    // rate write and 10 s after it, so a jump reads as a rate error.
+    mount.jump_axis_degrees(1, 0.005);
+    driver->set_right_ascension_rate(0.5);
+    const double after = driver->get_right_ascension();
+    REQUIRE(std::abs(after - before) < 3e-5);  // ~1.6 arcsec: model motion only
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-08-23
+## Updated 2026-08-25
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -137,7 +137,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested model**: Wave 100i, motor board firmware 3.58.68, on Linux arm64 (USB).
 - **AutoHome**: FindHome runs the SynScan-style AutoHome procedure using the mount's home index sensors, re-anchoring the position counters to the physical home mark regardless of the power-on position. Requires the home-index feature bit (Wave 100i reports it on both axes).
 - **Tracking**: Sidereal, Lunar, and Solar drive rates, plus RA/Dec tracking rate offsets (comet/satellite tracking) at the Sidereal drive rate. Declination rates below the motor controller's ~0.26 arcsec/s slow-mode floor are produced by duty-cycling. The linked ConformU reports predate the rate-offset feature; a re-run including ConformU's measured-rate offset tests is the merge gate for that feature and the reports will be refreshed with it.
-- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing violations on BOTH transports (USB serial and Wi-Fi UDP; Raspberry Pi CM4, mount AP) on the same final build, including the physically measured pulse-guide, sync-return, and slew-accuracy checks. When connecting over the mount's Wi-Fi AP from a single-radio SBC, disable any hotspot sharing that radio (dual-role AP+client causes link flapping and UDP loss).
+- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing violations on BOTH transports (USB serial and Wi-Fi UDP; Raspberry Pi CM4, mount AP) on the same final build, including the physically measured pulse-guide, sync-return, and slew-accuracy checks. The RA/Dec tracking-rate offsets were validated afterwards on the Wave 100i over USB (ConformU 4.5.0, 2026-08-25): 0 errors, 0 issues, all 32 measured offset-rate checks within tolerance; that run's only marks were two 0.10x s FAST readings on constant `Can*` getters caused by the dev-VM network path (ConformU now runs on the SBC over localhost, see `/conformu`), so the linked logs remain the earlier full-suite reports. When connecting over the mount's Wi-Fi AP from a single-radio SBC, disable any hotspot sharing that radio (dual-role AP+client causes link flapping and UDP loss).
 
 </details>
 

@@ -58,6 +58,7 @@ constexpr double kFastModeThresholdDegPerSec = 128.0 * kSiderealDegPerSec;
 constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
 // Longest a comms fault may serve last-known position/slewing state.
 constexpr auto kStaleCacheLimit = std::chrono::seconds(10);
+constexpr auto kOffsetModelHold = std::chrono::minutes(30);  // offset sessions serve the model this long
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
 constexpr auto kAxisStopTimeout = std::chrono::seconds(5);
 // Below this rate an in-place ":I" pulse adjustment is unreliable (and a
@@ -440,7 +441,7 @@ public:
             dec_rate_arcsec_per_sec_ = rate;
             const bool busy = axes_busy_locked();
             if (!busy) {
-                refresh_position_cache_locked(true);  // fresh model anchor
+                anchor_model_locked();  // continuous anchor: no position jump on a rate change
             }
             if (tracking_) {
                 apply_dec_rate_offset_locked(lock, /*defer_motion=*/busy);
@@ -565,7 +566,7 @@ public:
         }
         double previous = effective_ra_rate_locked();
         ra_rate_sec_per_sidereal_sec_ = rate;
-        refresh_position_cache_locked(true);  // fresh model anchor
+        anchor_model_locked();  // continuous anchor: no position jump on a rate change
         bool need_duty = false;
         if (tracking_) {
             apply_ra_tracking_rate_locked(lock, previous);
@@ -1578,6 +1579,30 @@ private:
 
     void invalidate_position_cache_locked() const { position_cache_valid_ = false; }
 
+    // Re-anchor the dead-reckoning model at "now" WITHOUT a hardware read.
+    // Rate setters need a fresh anchor time for the new rate, but a hardware
+    // re-anchor on a moving axis shifts the reported position by up to one
+    // encoder count (~0.31 arcsec) plus the axis start latency. ConformU
+    // samples RA before the rate write and 10 s after it: at the 0.05
+    // arcsec/s test rate that jump alone is a 25% "rate" error (measured on
+    // the Wave 100i). Advancing the cached angle by the commanded rate keeps
+    // the reported position continuous across the rate change; a cache that
+    // is invalid or stale for the current regime falls back to hardware.
+    void anchor_model_locked() const {
+        auto now = std::chrono::steady_clock::now();
+        auto age = now - last_position_update_;
+        bool fresh = position_cache_valid_ &&
+                     (age < kPositionCacheTtl || (rate_offsets_active_locked() && tracking_ && age < kOffsetModelHold));
+        if (!fresh) {
+            refresh_position_cache_locked(true);
+            return;
+        }
+        double dt = std::chrono::duration<double>(age).count();
+        cached_ra_axis_deg_ += cmd_axis_rate_deg_s_[0] * dt;
+        cached_dec_axis_deg_ += cmd_axis_rate_deg_s_[1] * dt;
+        last_position_update_ = now;
+    }
+
     // True while a goto/park/home/pulse/manual motion owns the axes: rate
     // setters must not issue motion then (they would hijack the axis and
     // make get_hardware_slewing_locked read "not slewing" mid-goto); the
@@ -1603,7 +1628,6 @@ private:
         // the hold is bounded: past kOffsetModelHold the model would pin at
         // the dt clamp and the reported position would silently freeze, so
         // fall through and take a fresh hardware anchor instead.
-        constexpr auto kOffsetModelHold = std::chrono::minutes(30);
         if (!force && position_cache_valid_ && rate_offsets_active_locked() && tracking_ &&
             (now - last_position_update_) < kOffsetModelHold) {
             return;

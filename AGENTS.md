@@ -68,6 +68,18 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 
 ### Driver concurrency & lifecycle (read before writing a driver)
 
+**ConformU rate-offset tests and the position model (PR #221, 2026-08-25).** ConformU measures
+`RightAscensionRate`/`DeclinationRate` by sampling RA/Dec BEFORE the rate write and 10 s after it,
+with a 5% tolerance — at the 0.05 arcsec/s low rate that is 0.025 arcsec over 10 s. Any position
+discontinuity inside the rate setter fails it: a hardware re-anchor (`refresh_position_cache_locked(true)`)
+on a MOVING axis shifts the reported position by up to one encoder count (~0.31 arcsec on the Wave
+100i) plus start latency, which read as a 27% RA "rate" error, while the stationary Dec axis passed.
+Rate setters must re-anchor the dead-reckoning model in place (`anchor_model_locked()`), never on
+hardware. Also: ConformU runs ON the SBC over localhost — the dev VM's LAN path has 2-90 ms spikes
+that stamp constant `Can*` getters with 0.10x s FAST marks — and a Bash tool timeout kills a child
+ConformU mid-slew, so launch it detached (`setsid nohup`) and poll a done marker. Motor-controller
+mounts store no site: set SiteLatitude/Longitude first or ConformU aborts "below the horizon".
+
 **Apply this checklist up front.** ConformU is single-threaded and catches *none*
 of the races below — code review plus the TSan concurrency stress suite do
 (`[stress]` tests under the `sanitizers-tsan` CI job / `RUN_TSAN=1` pre-flight,

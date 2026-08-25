@@ -8,6 +8,10 @@ You are the ConformU test session assistant for AlpacaBridge. Your job is to dri
 
 You DO NOT start or stop AlpacaBridge — that is the user's responsibility. You DO NOT connect the device — that is configured via the web UI. You only run ConformU and handle its output.
 
+**ConformU runs ON the test SBC, against `http://localhost:6800`.** Never run it from the dev machine across the LAN: the dev VM's network path shows 2-90 ms latency spikes to every LAN host (plain `ping` to the gateway shows the same), which stamps random `Can*` getters with 0.10x s FAST timing marks and fails the timing gate on an otherwise perfect run (PR #221, run 4). On the SBC, localhost round-trips are ~1 ms. The SBC is reached over SSH; the logs are copied back with `scp`.
+
+**Test rig identity (standard, do not re-ask):** hostname `openastro.lan` (future images may carry a 4-hex-digit MAC suffix, `openastro-XXXX.lan`, but the name always starts with `openastro`); SSH user `astro`, password `astro`; `sudo` requires the password (`echo astro | sudo -S <cmd>`). If key auth is not set up, use `sshpass -p astro ssh ...` or run `ssh-copy-id astro@openastro.lan` once. `astro.lan` is the OLD hostname and no longer resolves.
+
 **Is the target running the build under test?** ConformU results are only meaningful when the target device runs the build being validated. If the code under test was just built locally and the target SBC hasn't been updated, tell the user to run `/deploy-test` first — it builds the .deb, installs it on the SBC over SSH, restarts the service, and verifies the running version — then come back to `/conformu`.
 
 ## How to use arguments
@@ -36,13 +40,13 @@ Ask the following **one at a time**, waiting for each answer before moving on. I
    - If the device only supports one transport, omit the suffix — file is `Linux-arm64.txt`.
    - If the device supports multiple and this run only tests one, use the suffix — file is `Linux-arm64-<transport>.txt`. Existing reports already exist for the same device — those other transports stay untouched.
 
-5. **Alpaca host:port** — defaults to `http://localhost:11111`. Ask if they want a different host (e.g. testing against a remote SBC).
+5. **Test SBC host** — defaults to `openastro.lan` (see the rig identity above; if that does not resolve, `nmap -sn 192.168.1.0/24 | grep -i openastro` finds a suffixed name). ConformU itself runs on the SBC against `http://localhost:6800`; the pre-flight `curl` checks below run from the dev machine against `http://<host>:6800`. Only ask when the user names a different rig.
 
 6. **Device number** — defaults to `0`. Most single-device setups stay at 0.
 
 After all answers, summarize and confirm before continuing:
 
-> "Ready to run ConformU against `<vendor> <model>` (<type>) over <transport> at `http://<host>:<port>/api/v1/<type>/<n>`. Output will be saved to `AlpacaCore/conformu/<Vendor>/<Model>/Linux-arm64[-<transport>].txt`. Proceed?"
+> "Ready to run ConformU ON `<host>` against `http://localhost:6800/api/v1/<type>/<n>` for `<vendor> <model>` (<type>) over <transport>. Output will be saved to `AlpacaCore/conformu/<Vendor>/<Model>/Linux-arm64[-<transport>].txt`. Proceed?"
 
 ## SAFETY — NEVER run ConformU with a telescope (OTA) mounted (HARD RULE)
 
@@ -127,92 +131,75 @@ curl -sS --max-time 5 "http://<host>:<port>/management/v1/logfiles?ClientID=1&Cl
 
 Save the directory. Today's log file is named per the daily convention (check the Files list in the same response). Record `date -u +%H:%M:%S.%3N` as the **run-start baseline** — used in Step 5 to slice the log to just this test window.
 
-### 2f2. Telescope runs: target clock must be settled (HARD STOP while slewing)
+### 2f2. Telescope runs: site set and clock settled (HARD STOP)
 
-Telescope RA is `LST - HA` — LST comes from the target's system clock, so an NTP
-slew on the target distorts every RA-rate measurement while leaving Dec tests
-untouched (learned on PR #221: a freshly-rebooted Pi failed the +0.0033 s-RA/s
-RightAscensionRate test 31% low from ~1 ms/s of chrony slew; the Dec-only tests
-in the same run also showed phantom RA rates of +0.0004..+0.0017 s-RA/s).
-
-Before any Telescope run, check clock discipline on the TARGET:
+**Site.** Motor-controller mounts (Sky-Watcher) store no site; a freshly imaged SBC reports `SiteLatitude = SiteLongitude = 0`. ConformU then omits the offset-rate sub-tests ("expected condition at latitudes close to the equator") and finally aborts CheckMethods with "The highest elevation available ... is below the horizon" (PR #221, run 2). Check and, if zero, set the site before the run (the driver persists it across reconnects; the standard rig site is `39.739194, -104.990306, 1609 m`):
 
 ```bash
-ssh <user>@<host> 'chronyc tracking'
+for m in sitelatitude sitelongitude; do curl -sS "http://<host>:6800/api/v1/<type>/<n>/$m?ClientID=1&ClientTransactionID=1" | jq .Value; done
 ```
 
-Require: `Leap status: Normal`, `System time` offset under ~0.001 s, and no
-large in-progress correction. After a reboot, wait until these hold (typically
-1-5 minutes) before starting the run. Skip this check for non-telescope devices.
-
-### 2g. ConformU binary is available
-
-Search common locations in this order, stop at the first match:
-```bash
-command -v conformu
-ls /home/dev/Downloads/conformu/conformu
-ls /opt/conformu/conformu
-ls ~/conformu/conformu
-```
-
-If none found:
-
-> "ConformU binary not found. Download from https://github.com/ASCOMInitiative/ConformU/releases (linux-arm64) and extract to `~/conformu/` or `/home/dev/Downloads/conformu/`."
-
-### 2h. ConformU is the CURRENT release (check upstream before every run)
-
-Validation logs advertise the ConformU version they were produced with, so always test with the latest release. Get the installed version and the newest upstream tag:
+**Clock.** Telescope RA is `LST - HA` with LST from the SBC's system clock, so an unsettled clock distorts RA-rate measurements. The SBC image runs `systemd-timesyncd` (no chrony):
 
 ```bash
-<path-to-conformu>/conformu --version
-curl -sS --max-time 10 "https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest" | jq -r '.tag_name'
+ssh astro@<host> 'timedatectl | grep synchronized; echo astro | sudo -S timedatectl timesync-status | grep -E "Offset|Poll"'
 ```
 
-(If the API call fails — offline, or the 60/hr unauthenticated rate limit when `/conformu` runs repeatedly in a session — fall back to checking https://github.com/ASCOMInitiative/ConformU/tags, and if that's also unreachable, warn the user and proceed with the installed version. When `gh` is authenticated, prefer `gh api repos/ASCOMInitiative/ConformU/releases/latest --jq .tag_name` to avoid the unauthenticated limit entirely.)
+Require `synchronized: yes` and an offset in the low-millisecond range. Skip for non-telescope devices.
 
-Compare the two **numerically per dot-segment, never lexicographically** — a string compare misjudges `4.9.0` vs `4.10.0`. Strip any `v` prefix, then:
+(Note: the earlier PR #221 "clock slew" diagnosis was wrong — the RightAscensionRate +0.0033 s/s failure was the driver re-anchoring on hardware counts inside the rate setter, fixed in the driver. Keep this check anyway; it is cheap.)
+
+### 2g. ConformU is installed ON THE SBC and is the CURRENT release
+
+ConformU lives at `/home/astro/conformu/conformu` on the SBC. Validation logs advertise the ConformU version they were produced with, so always test with the latest release. Get the installed and newest upstream versions:
 
 ```bash
-# Prints the higher of the two versions
-printf '%s\n%s\n' "<installed>" "<latest>" | sort -V | tail -1
+ssh astro@<host> '~/conformu/conformu --version 2>/dev/null | tail -1 || echo MISSING'
+gh api repos/ASCOMInitiative/ConformU/releases/latest --jq .tag_name
 ```
 
-The installed version is current if and only if it equals the `sort -V` maximum:
+(If `gh` is unavailable, `curl -sS https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest | jq -r .tag_name`; if that fails too, warn and proceed with the installed version.)
 
-- **Installed == latest** → note the version and continue.
-- **Installed < latest** → offer to update before running:
+Compare **numerically per dot-segment, never lexicographically** (`4.9.0` vs `4.10.0`): strip any `v` prefix, then `printf '%s\n%s\n' "<installed>" "<latest>" | sort -V | tail -1` — installed is current only if it equals that maximum.
 
-  > "ConformU `<installed>` is outdated — `<latest>` is available. Update now? I'll download the linux-arm64 build and replace the current install."
-
-  On yes, download the `linux-arm64` asset from the latest release, extract it over the existing install location found in Step 2g, make the binary executable, and re-run `conformu --version` to confirm the new version before continuing. On no, proceed but record the older version accurately in the summary table and `SUPPORTED-DRIVERS.md` notes — never label a log with a version that wasn't used.
-
-## Step 3 — Run ConformU
-
-Create a temp working directory and invoke the conformance subcommand:
+If MISSING or outdated, install/update it on the SBC (no confirmation needed — this is part of the standard rig setup). The linux-arm64 asset is a `.tar.xz`:
 
 ```bash
-TMPDIR=$(mktemp -d /tmp/conformu-XXXXXX)
-<path-to-conformu>/conformu conformance \
-  "http://<host>:<port>/api/v1/<type>/<n>" \
-  -n "$TMPDIR/conformu.txt"
+URL=$(gh api repos/ASCOMInitiative/ConformU/releases/latest --jq '.assets[]|select(.name|test("linux-arm64"))|.browser_download_url' | head -1)
+ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz '$URL' && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
 ```
 
-Stream output to the user as it runs. ConformU can take minutes (especially for cameras and telescopes).
+(If the SBC has no internet, download on the dev machine and `scp -r` the extracted `conformu/` directory to `astro@<host>:~/`.) Re-check `--version` before continuing, and never label a log with a version that wasn't used.
 
-**Motion devices (Telescope, Dome, Rotator): STOP AT THE FIRST ISSUE — do not let a failing run grind to the end.** Run a watchdog alongside ConformU that polls the log every ~5 s and kills the run the moment an `ISSUE` or `ERROR` line appears:
+## Step 3 — Run ConformU (on the SBC, detached)
+
+A full telescope run takes ~22 minutes; Bash tool calls cap at 10 minutes and killing the calling shell kills a child ConformU mid-slew (PR #221, run 3 — the mount then needs re-homing). So launch it on the SBC with `setsid nohup`, fully detached, with the first-issue watchdog inside the same script, and poll for a `done` marker from a separate background call.
 
 ```bash
-while pgrep -x conformu >/dev/null; do
-  N=$(grep -c "ISSUE" "$TMPDIR/conformu.txt" 2>/dev/null | head -1)
-  if [ "${N:-0}" -gt 0 ] 2>/dev/null; then
-    pkill -x conformu
-    break
-  fi
-  sleep 5
-done
+ssh astro@<host> 'mkdir -p ~/cu && rm -f ~/cu/done ~/cu/conformu.txt ~/cu/stdout.log && cat > ~/cu/run.sh <<'"'"'EOF'"'"'
+#!/bin/bash
+D=/home/astro/cu
+/home/astro/conformu/conformu conformance "http://localhost:6800/api/v1/<type>/<n>" -n "$D/conformu.txt" > "$D/stdout.log" 2>&1 &
+CP=$!
+if [ "<type>" = telescope ] || [ "<type>" = dome ] || [ "<type>" = rotator ]; then
+  while kill -0 $CP 2>/dev/null; do
+    if grep -qE "^[0-9:.]+ .*(ISSUE|ERROR)" "$D/conformu.txt" 2>/dev/null; then kill $CP; echo KILLED >> "$D/stdout.log"; break; fi
+    sleep 5
+  done
+fi
+wait $CP; echo "exit=$?" >> "$D/stdout.log"; touch "$D/done"
+EOF
+chmod +x ~/cu/run.sh && setsid nohup ~/cu/run.sh >/dev/null 2>&1 < /dev/null & sleep 5; pgrep -x conformu >/dev/null && echo RUNNING'
 ```
 
-Why: a failed motion run keeps exercising the mechanics for 20+ minutes, later failures are usually cascade noise from the first one, and killing immediately preserves the exact server-log window around the root cause (grab the journal for the 2 minutes before the kill). After stopping: diagnose and fix the driver (Step 5), **send the mount back to home** (FindHome where supported, else the vendor's home/park), redeploy, and rerun from Step 3. Repeat until the suite completes clean.
+Then wait with a background Bash call (`run_in_background: true`, it may take several 10-minute calls) that polls `ssh astro@<host> 'test -f ~/cu/done'` every 30 s, and afterwards copy the log back:
+
+```bash
+TMPDIR=$(mktemp -d "$SCRATCHPAD/conformu-XXXXXX")
+scp astro@<host>:~/cu/conformu.txt astro@<host>:~/cu/stdout.log "$TMPDIR/"
+```
+
+**Motion devices (Telescope, Dome, Rotator): STOP AT THE FIRST ISSUE** — that is what the watchdog above does. Why: a failed motion run keeps exercising the mechanics for 20+ minutes, later failures are usually cascade noise from the first one, and killing immediately preserves the exact server-log window around the root cause. After a stop: diagnose and fix the driver (Step 5), **send the mount back to home** (connect, `PUT findhome`, poll `slewing`/`athome`, disconnect — ConformU must find it disconnected), zero any leftover `RightAscensionRate`/`DeclinationRate`, redeploy with `/deploy-test`, and rerun from Step 3. Repeat until the suite completes clean.
 
 For static devices (camera, filter wheel, focuser, switch, cover/calibrator, ObservingConditions, SafetyMonitor) let the run complete — the full issue list in one pass is more efficient to fix as a batch, and there is no mechanical wear argument. Stop-on-first-issue remains available if the user asks for it.
 
@@ -266,6 +253,8 @@ Do NOT save the failing ConformU log to `AlpacaCore/conformu/`. That directory i
    - For timing — list each `OUTSIDE … RESPONSE TIME TARGET` line with member name, actual time, and target.
 
 ### 5b. Pull the AlpacaBridge TRACE log for the test window
+
+Note: AB log lines are stamped in the SBC's LOCAL time zone (the rig image is Europe/London), ConformU lines in the machine running ConformU — with ConformU on the SBC both agree; when correlating with dev-machine timestamps convert first.
 
 The TRACE log captured during Step 3 is the most valuable diagnostic. Retrieve it and slice to the test window (baseline timestamp from Step 2f → now):
 
