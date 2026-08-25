@@ -761,12 +761,18 @@ public:
             homing_ = true;
         }
 
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (slew_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (slew_task_thread_.joinable()) {
+            std::thread stale = std::move(slew_task_thread_);
+            tlock.unlock();
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
-            slew_task_thread_.join();
+            stale.join();
             slew_task_cancel_.store(false);
+            tlock.lock();
         }
         slew_task_thread_ = std::thread([this]() {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -840,12 +846,18 @@ public:
             parking_ = true;
         }
 
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (slew_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (slew_task_thread_.joinable()) {
+            std::thread stale = std::move(slew_task_thread_);
+            tlock.unlock();
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
-            slew_task_thread_.join();
+            stale.join();
             slew_task_cancel_.store(false);
+            tlock.lock();
         }
         slew_task_thread_ = std::thread([this, target_ra_axis, target_dec_axis]() {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -945,12 +957,18 @@ public:
 
         // Stop-the-pulse timer thread — joinable member thread, never detached.
         reap_pulse_task();
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (pulse_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (pulse_task_thread_.joinable()) {
+            std::thread stale = std::move(pulse_task_thread_);
+            tlock.unlock();
             pulse_task_cancel_.store(true);
             task_cv_.notify_all();
-            pulse_task_thread_.join();
+            stale.join();
             pulse_task_cancel_.store(false);
+            tlock.lock();
         }
         const bool restore_tracking = ra_rate_adjust;
         const double dec_rate = dec_rate_deg_per_sec;
@@ -1118,12 +1136,18 @@ public:
             at_home_ = false;
         }
 
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (slew_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (slew_task_thread_.joinable()) {
+            std::thread stale = std::move(slew_task_thread_);
+            tlock.unlock();
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
-            slew_task_thread_.join();
+            stale.join();
             slew_task_cancel_.store(false);
+            tlock.lock();
         }
         slew_task_thread_ = std::thread([this, ra, dec]() {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -1316,12 +1340,18 @@ public:
             return;
         }
 
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (stop_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (stop_task_thread_.joinable()) {
+            std::thread stale = std::move(stop_task_thread_);
+            tlock.unlock();
             stop_task_cancel_.store(true);
             task_cv_.notify_all();
-            stop_task_thread_.join();
+            stale.join();
             stop_task_cancel_.store(false);
+            tlock.lock();
         }
         stop_task_thread_ = std::thread([this, channel, axis, stop_task_generation]() {
             auto& protocol = SkyWatcherProtocolWrapper::instance();

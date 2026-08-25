@@ -609,12 +609,18 @@ public:
             altaz_cache_valid_ = false;
         }
 
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (park_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (park_task_thread_.joinable()) {
+            std::thread stale = std::move(park_task_thread_);
+            tlock.unlock();
             park_task_cancel_.store(true);
             task_cv_.notify_all();
-            park_task_thread_.join();
+            stale.join();
             park_task_cancel_.store(false);
+            tlock.lock();
         }
         park_task_thread_ = std::thread([this]() {
             const auto timeout = std::chrono::seconds(120);

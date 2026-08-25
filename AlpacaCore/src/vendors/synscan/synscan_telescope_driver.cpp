@@ -924,12 +924,18 @@ public:
             parking_ = true;
         }
 
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (slew_task_thread_.joinable()) {
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (slew_task_thread_.joinable()) {
+            std::thread stale = std::move(slew_task_thread_);
+            tlock.unlock();
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
-            slew_task_thread_.join();
+            stale.join();
             slew_task_cancel_.store(false);
+            tlock.lock();
         }
         slew_task_thread_ = std::thread([this, park_ra, park_dec]() {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -1111,16 +1117,18 @@ public:
         // cancelled + joined on disconnect and in the destructor. Spawned
         // OUTSIDE mutex_ because its failure path takes mutex_.
         reap_pulse_task();
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (pulse_task_thread_.joinable()) {
-            // A racing caller spawned between our reap and this lock — cancel
-            // and join it INSIDE the same critical section as the assignment,
-            // so a joinable thread can never be overwritten (std::terminate)
-            // or joined from two threads (UB). [stress] telescope finding.
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (pulse_task_thread_.joinable()) {
+            std::thread stale = std::move(pulse_task_thread_);
+            tlock.unlock();
             pulse_task_cancel_.store(true);
             task_cv_.notify_all();
-            pulse_task_thread_.join();
+            stale.join();
             pulse_task_cancel_.store(false);
+            tlock.lock();
         }
         pulse_task_thread_ = std::thread([this, axis, duration, tracking_mode]() {
             if (!task_wait_for(std::chrono::milliseconds(duration), pulse_task_cancel_)) {
@@ -1232,14 +1240,18 @@ public:
 
         // Dispatch in a joinable member thread (never detached), cancelled +
         // joined on disconnect and in the destructor.
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        if (slew_task_thread_.joinable()) {
-            // Racing SlewAsync between reap and this lock — see the pulse
-            // spawn above; join under the same critical section.
+        // Join any task that raced in between the reap above and this lock,
+        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
+        // to observe the cancel and exit, so joining under the lock deadlocks.
+        std::unique_lock<std::mutex> tlock(task_mutex_);
+        while (slew_task_thread_.joinable()) {
+            std::thread stale = std::move(slew_task_thread_);
+            tlock.unlock();
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
-            slew_task_thread_.join();
+            stale.join();
             slew_task_cancel_.store(false);
+            tlock.lock();
         }
         slew_task_thread_ = std::thread([this, ra_raw, dec_raw, precise]() {
             std::lock_guard<std::mutex> lock(mutex_);
