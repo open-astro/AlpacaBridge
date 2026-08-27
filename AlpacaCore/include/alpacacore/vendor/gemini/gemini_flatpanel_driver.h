@@ -80,4 +80,33 @@ std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_v2(int device_num
  */
 std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_v2_by_index(int device_number, int panel_index = 0);
 
+/**
+ * @brief Create a Gemini Motorized Flat Panel V3 (INDI "Pro" revision, USB) CoverCalibrator driver.
+ *
+ * Same motorized-cover behavior as the v2 driver (shared driver class), but
+ * the Pro firmware identifies as "*HGeminiFlatPanelPro#", uses a different
+ * >S# status layout and acks open/close with a bare "*O"/"*C" prefix. Confirmed
+ * on hardware (firmware 107). Like Rev2, there is no wire-level abort: INDI's
+ * AbortCap() for Pro merely returns success, so HaltCover keeps the v2
+ * "stop reporting movement" behavior.
+ *
+ * @param device_number Alpaca device number
+ * @param serial_port Serial port path (e.g., "/dev/ttyUSB0")
+ * @param baud_rate Serial baud rate (default 9600)
+ * @return Unique pointer to CoverCalibrator driver
+ */
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_pro(int device_number, const std::string& serial_port,
+                                                                   int baud_rate = 9600);
+
+/**
+ * @brief Create a Gemini Motorized Flat Panel V3 (Pro) driver by auto-detecting the serial port.
+ *
+ * Shares port enumeration with the other Gemini flat panels.
+ *
+ * @param device_number Alpaca device number
+ * @param panel_index 0-based index into the list of detected panels
+ * @return Unique pointer to CoverCalibrator driver
+ */
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_pro_by_index(int device_number, int panel_index = 0);
+
 }  // namespace alpacacore::vendor::gemini

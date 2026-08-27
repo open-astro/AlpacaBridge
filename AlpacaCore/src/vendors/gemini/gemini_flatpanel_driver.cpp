@@ -19,6 +19,8 @@
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -387,15 +389,28 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "Gemini Astro Automatic FlatPanel v2"; }
+    // Identity strings are model-dependent: this class serves both the Rev2
+    // ("Astro Automatic FlatPanel v2") and Pro ("Motorized Flat Panel V3")
+    // hardware, which differ only in the protocol wrapper's >S#/ack parsing.
+    bool is_pro() const { return config_.model == FlatPanelModel::Pro; }
+
+    std::string get_name() const override {
+        return is_pro() ? "Gemini Motorized Flat Panel V3" : "Gemini Astro Automatic FlatPanel v2";
+    }
 
     DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
 
-    std::string get_unique_id() const override { return "GEMINI_FLATPANEL_V2_" + std::to_string(device_number_); }
+    std::string get_unique_id() const override {
+        return (is_pro() ? "GEMINI_FLATPANEL_PRO_" : "GEMINI_FLATPANEL_V2_") + std::to_string(device_number_);
+    }
 
-    std::string get_description() const override { return "Gemini Astro Automatic FlatPanel v2 Driver"; }
+    std::string get_description() const override {
+        return is_pro() ? "Gemini Motorized Flat Panel V3 (Pro) Driver" : "Gemini Astro Automatic FlatPanel v2 Driver";
+    }
 
-    std::string get_driver_info() const override { return "AlpacaCore Gemini Flat Panel v2 Driver"; }
+    std::string get_driver_info() const override {
+        return is_pro() ? "AlpacaCore Gemini Flat Panel Pro Driver" : "AlpacaCore Gemini Flat Panel v2 Driver";
+    }
 
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
@@ -465,12 +480,23 @@ public:
 
             // Seed calibrator state from a live read (cover state is never
             // cached -- see get_cover_state()'s doc comment).
+            invalidate_cover_status_cache();
             try {
-                auto status = protocol_.get_status_rev2();
+                auto status = protocol_.get_motorized_status();
                 const int bri = protocol_.get_brightness();
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                calibrator_engaged_ = status.light_on;
-                commanded_brightness_ = bri;
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex_);
+                    calibrator_engaged_ = status.light_on;
+                    commanded_brightness_ = bri;
+                }
+                // Seed the idle cover-status cache from this same read: ConformU
+                // reads DeviceState ~0.2 s and CoverState ~0.4 s after Connect(),
+                // inside the connect-adjacent window where even constant
+                // properties cost ~0.08 s client-side (see AGENTS.md), so a
+                // wire read there always misses the 0.1 s FAST target.
+                std::lock_guard<std::mutex> lock(cover_cache_mutex_);
+                cover_status_cache_ = status;
+                cover_status_read_at_ = std::chrono::steady_clock::now();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini", "Flat panel v2 state seed failed: " + std::string(e.what()));
             }
@@ -578,6 +604,15 @@ public:
      * state self-heals as soon as the physical move actually finishes (or
      * across a disconnect/reconnect) instead of sticking at Unknown until
      * the next OpenCover/CloseCover call.
+     *
+     * The idle-path >S# read is served from a short TTL cache
+     * (kCoverStatusCacheMs): the Pro firmware's status reply is 18 chars
+     * ("*S0M0L2C0D76C405O#") and a live round-trip measured 0.13 s on the
+     * Pi, over ConformU's 0.1 s FAST target for CoverState (and DeviceState,
+     * which reads it too). One second of staleness on an idle cover is
+     * invisible to clients (nothing moves it but our own commands, which
+     * bypass and then invalidate the cache); the cache is seeded at connect
+     * so ConformU's post-Connect property sweep never hits the wire.
      */
     CoverState get_cover_state() const override {
         ensure_connected();
@@ -585,7 +620,16 @@ public:
             return cover_halted_.load() ? CoverState::Unknown : CoverState::Moving;
         }
         try {
-            auto status = protocol_.get_status_rev2();
+            FlatPanelMotorizedStatus status;
+            {
+                std::lock_guard<std::mutex> lock(cover_cache_mutex_);
+                const auto now = std::chrono::steady_clock::now();
+                if (now - cover_status_read_at_ > std::chrono::milliseconds(kCoverStatusCacheMs)) {
+                    cover_status_cache_ = protocol_.get_motorized_status();
+                    cover_status_read_at_ = now;
+                }
+                status = cover_status_cache_;
+            }
             switch (status.cover_state) {
                 case FlatPanelCoverState::Closed:
                     return CoverState::Closed;
@@ -706,11 +750,16 @@ private:
         cover_in_flight_.store(true);
         try {
             cover_task_thread_ = std::thread([this, fn]() {
+                wait_for_calibrator_idle();  // see start_calibrator_task() fast path
                 try {
                     fn();
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("Gemini", "Flat panel v2 cover command failed: " + std::string(e.what()));
                 }
+                // Drop any pre-move cached >S# BEFORE clearing in-flight, so
+                // the first idle CoverState read after the move goes to the
+                // wire instead of returning the stale pre-move state.
+                invalidate_cover_status_cache();
                 cover_in_flight_.store(false);
             });
         } catch (...) {
@@ -778,8 +827,98 @@ private:
      * destroying the underlying std::thread -- leaving it here for the
      * catch block to join safely on the caller's thread.
      */
+    // Drop one calibrator claim (and, for the inline path, its in-flight
+    // flag) and wake anything waiting for the port.
+    void release_calibrator_claim(bool inline_done = false) {
+        {
+            std::lock_guard<std::mutex> lock(calibrator_idle_mutex_);
+            if (inline_done) {
+                calibrator_inline_active_.store(false);
+            }
+            calibrator_pending_count_.fetch_sub(1);
+        }
+        calibrator_idle_cv_.notify_all();
+    }
+
+    // Block a background calibrator command until an inline (fast-path)
+    // toggle has finished its wire transaction. The inline path always
+    // clears the flag (normal return or throw), so this is not bounded.
+    void wait_for_inline_calibrator() {
+        std::unique_lock<std::mutex> lock(calibrator_idle_mutex_);
+        calibrator_idle_cv_.wait(lock, [this] { return !calibrator_inline_active_.load(); });
+    }
+
+    // Let an in-progress calibrator command finish its short wire I/O before
+    // a cover move takes the port; bounded so a wedged light command can't
+    // hold a cover move hostage (it just falls through to the port mutex).
+    void wait_for_calibrator_idle() {
+        std::unique_lock<std::mutex> lock(calibrator_idle_mutex_);
+        calibrator_idle_cv_.wait_for(lock, kCalibratorIdleWait,
+                                     [this] { return calibrator_pending_count_.load() == 0; });
+    }
+
+    // Send the light on/off + brightness pair and commit the commanded state.
+    // Shared by the inline fast path and the background task.
+    void run_calibrator_command(bool on, int brightness) {
+        // One port transaction for the on/off + brightness pair: as two
+        // separate calls a cover move could take the port in between and
+        // hold the brightness back for the whole move (PR #226 review).
+        protocol_.set_light(on, on ? brightness : 0);
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        commanded_brightness_ = on ? brightness : 0;
+        calibrator_engaged_ = on;
+    }
+
     void start_calibrator_task(bool on, int brightness) {
-        std::lock_guard<std::mutex> lock(calibrator_task_mutex_);
+        std::unique_lock<std::mutex> lock(calibrator_task_mutex_);
+
+        // Fast path: with no cover move and no earlier calibrator command in
+        // flight, the serial link is free and the two light commands take
+        // ~30 ms on the Pro (~250 ms worst case on Lite/Rev2 with their
+        // pre-read settle) -- well inside the 1 s STANDARD target. Run them
+        // inline so the call returns with CalibratorState already Ready/Off,
+        // instead of NotReady until the client's next poll: NINA polls
+        // slowly enough that the background path made a 30 ms light toggle
+        // look like a multi-second one.
+        //
+        // cover_task_mutex_ is held only for the check-and-claim (lock order:
+        // calibrator_task_mutex_ -> cover_task_mutex_; nothing takes them the
+        // other way), NOT across the wire I/O: holding it for the whole
+        // ~250 ms made a concurrent HaltCover/OpenCover/CalibratorOn block
+        // behind an unrelated light toggle (PR #226 review). The claim is
+        // the pending count itself: start_cover_task()'s thread waits for it
+        // to drop before touching the port, so a cover move issued during
+        // the toggle cannot grab the port first and stall this inline call
+        // behind its 30 s wire wait, and the caller is released before the
+        // I/O starts.
+        bool claimed = false;
+        {
+            std::lock_guard<std::mutex> cover_lock(cover_task_mutex_);
+            if (!cover_in_flight_.load() && calibrator_pending_count_.load() == 0) {
+                calibrator_pending_count_.fetch_add(1);
+                calibrator_inline_active_.store(true);
+                claimed = true;
+            }
+        }
+        if (claimed) {
+            lock.unlock();  // both task locks released before the wire I/O
+            try {
+                run_calibrator_command(on, brightness);  // throws on wire failure
+            } catch (...) {
+                release_calibrator_claim(/*inline_done=*/true);
+                throw;
+            }
+            release_calibrator_claim(/*inline_done=*/true);
+            return;
+        }
+
+        // Background path. A command that lands here while an INLINE toggle
+        // is still on the wire has no thread to join (the fast path owns
+        // none), so it must wait for that toggle explicitly or the two
+        // set_light() transactions would race for the port and the later
+        // command could finish first (PR #226 review, round 3). The wait is
+        // done on the background thread, off the caller, like the join.
+
         calibrator_pending_count_.fetch_add(1);
         auto previous = std::make_shared<std::thread>(std::move(calibrator_task_thread_));
         try {
@@ -787,21 +926,13 @@ private:
                 if (previous->joinable()) {
                     previous->join();  // off the caller's thread -- see doc comment above
                 }
+                wait_for_inline_calibrator();  // preserves submission order behind a fast-path toggle
                 try {
-                    if (on) {
-                        protocol_.light_on();
-                        protocol_.set_brightness(brightness);
-                    } else {
-                        protocol_.light_off();
-                        protocol_.set_brightness(0);
-                    }
-                    std::lock_guard<std::mutex> lock(state_mutex_);
-                    commanded_brightness_ = on ? brightness : 0;
-                    calibrator_engaged_ = on;
+                    run_calibrator_command(on, brightness);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("Gemini", "Flat panel v2 calibrator command failed: " + std::string(e.what()));
                 }
-                calibrator_pending_count_.fetch_sub(1);
+                release_calibrator_claim();
             });
         } catch (...) {
             // std::thread ctor can throw (e.g. OS thread limit). previous is
@@ -813,7 +944,7 @@ private:
             if (previous->joinable()) {
                 previous->join();
             }
-            calibrator_pending_count_.fetch_sub(1);
+            release_calibrator_claim();
             throw;
         }
     }
@@ -856,6 +987,26 @@ private:
     // Count, not a bool: see start_calibrator_task()'s doc comment for why a
     // single flag misreports "not changing" while queued commands remain.
     std::atomic<int> calibrator_pending_count_{0};
+    // Pairs with calibrator_pending_count_ so a cover task can wait for an
+    // inline calibrator toggle to release the port (see wait_for_calibrator_idle()).
+    std::mutex calibrator_idle_mutex_;
+    std::condition_variable calibrator_idle_cv_;
+    // True while the fast path's set_light() is on the wire; background
+    // commands wait on it so submission order survives a fast->background
+    // transition (see start_calibrator_task()).
+    std::atomic<bool> calibrator_inline_active_{false};
+    static constexpr std::chrono::seconds kCalibratorIdleWait{2};
+
+    // Idle-cover >S# TTL cache (see get_cover_state()). Serialized on its own
+    // mutex so concurrent readers don't each hit the wire.
+    static constexpr int kCoverStatusCacheMs = 1000;
+    void invalidate_cover_status_cache() const {
+        std::lock_guard<std::mutex> lock(cover_cache_mutex_);
+        cover_status_read_at_ = std::chrono::steady_clock::time_point{};
+    }
+    mutable std::mutex cover_cache_mutex_;
+    mutable FlatPanelMotorizedStatus cover_status_cache_{};
+    mutable std::chrono::steady_clock::time_point cover_status_read_at_{};
 };
 
 std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_v2(int device_number, const std::string& serial_port,
@@ -873,6 +1024,24 @@ std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_v2_by_index(int d
     config.type = FlatPanelConnectionType::Serial;
     config.auto_detect_index = panel_index;
     config.model = FlatPanelModel::Rev2;
+    return std::make_unique<GeminiFlatPanelV2Driver>(device_number, std::move(config));
+}
+
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_pro(int device_number, const std::string& serial_port,
+                                                                   int baud_rate) {
+    FlatPanelConnectionConfig config;
+    config.type = FlatPanelConnectionType::Serial;
+    config.serial_port = serial_port;
+    config.baud_rate = baud_rate;
+    config.model = FlatPanelModel::Pro;
+    return std::make_unique<GeminiFlatPanelV2Driver>(device_number, std::move(config));
+}
+
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_pro_by_index(int device_number, int panel_index) {
+    FlatPanelConnectionConfig config;
+    config.type = FlatPanelConnectionType::Serial;
+    config.auto_detect_index = panel_index;
+    config.model = FlatPanelModel::Pro;
     return std::make_unique<GeminiFlatPanelV2Driver>(device_number, std::move(config));
 }
 

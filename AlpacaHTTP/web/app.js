@@ -350,6 +350,7 @@ const INDEX_FIELDS = [
     // enumerate_gemini_flatpanel_ports(), a scan shared by both models, so
     // devices of either model correctly compete for the same index namespace.
     { fieldId: 'gemini-flatpanel-v2-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
+    { fieldId: 'gemini-flatpanel-pro-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
     { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
     { fieldId: 'wandererastro-rotator-index', vendor: 'wandererastro', deviceType: 'rotator', configKey: 'rotatorIndex' },
     { fieldId: 'wandererastro-filterwheel-index', vendor: 'wandererastro', deviceType: 'filterwheel', configKey: 'wandererFilterwheelIndex' },
@@ -996,10 +997,22 @@ function startEditDevice(device) {
         setFormValue('weewx-poll-interval', config.pollIntervalSeconds);
         setFormValue('weewx-timeout', config.timeoutMs);
     } else if (vendor === 'gemini' && deviceType === 'covercalibrator') {
-        const model = config.flatPanelModel === 'v2' ? 'v2' : 'lite';
+        const model = (config.flatPanelModel === 'v2' || config.flatPanelModel === 'pro') ? config.flatPanelModel : 'lite';
         setFormValue('gemini-flatpanel-model', model);
         const connType = config.connectionType || 'auto';
-        if (model === 'v2') {
+        if (model === 'pro') {
+            setFormValue('gemini-flatpanel-pro-connection-type', connType);
+            if (connType === 'auto') {
+                setFormValue('gemini-flatpanel-pro-index', config.panelIndex);
+            } else if (connType === 'serial') {
+                setFormValue('gemini-flatpanel-pro-port-path', config.portPath);
+                setFormValue('gemini-flatpanel-pro-baud-rate', config.baudRate);
+            }
+            const geminiFlatPanelProConnTypeEl = document.getElementById('gemini-flatpanel-pro-connection-type');
+            if (geminiFlatPanelProConnTypeEl) {
+                geminiFlatPanelProConnTypeEl.dispatchEvent(new Event('change'));
+            }
+        } else if (model === 'v2') {
             setFormValue('gemini-flatpanel-v2-connection-type', connType);
             if (connType === 'auto') {
                 setFormValue('gemini-flatpanel-v2-index', config.panelIndex);
@@ -2252,14 +2265,19 @@ function updateGeminiFlatPanelModelFields() {
     const modelSelect = document.getElementById('gemini-flatpanel-model');
     const liteSection = document.getElementById('gemini-flatpanel-lite-fields');
     const v2Section = document.getElementById('gemini-flatpanel-v2-fields');
-    if (!modelSelect || !liteSection || !v2Section) {
+    const proSection = document.getElementById('gemini-flatpanel-pro-fields');
+    if (!modelSelect || !liteSection || !v2Section || !proSection) {
         return;
     }
     const isV2 = modelSelect.value === 'v2';
-    liteSection.style.display = isV2 ? 'none' : 'block';
+    const isPro = modelSelect.value === 'pro';
+    const isLite = !isV2 && !isPro;
+    liteSection.style.display = isLite ? 'block' : 'none';
     v2Section.style.display = isV2 ? 'block' : 'none';
-    setFieldGroupEnabled(liteSection, !isV2);
+    proSection.style.display = isPro ? 'block' : 'none';
+    setFieldGroupEnabled(liteSection, isLite);
     setFieldGroupEnabled(v2Section, isV2);
+    setFieldGroupEnabled(proSection, isPro);
 }
 
 // WandererAstro covers three device types from one vendor config block: the
@@ -2441,6 +2459,15 @@ if (geminiFlatPanelV2ConnectionType) {
         const type = this.value;
         document.getElementById('gemini-flatpanel-v2-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
         document.getElementById('gemini-flatpanel-v2-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
+const geminiFlatPanelProConnectionType = document.getElementById('gemini-flatpanel-pro-connection-type');
+if (geminiFlatPanelProConnectionType) {
+    geminiFlatPanelProConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('gemini-flatpanel-pro-auto-fields').style.display = type === 'auto' ? 'block' : 'none';
+        document.getElementById('gemini-flatpanel-pro-serial-fields').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -3490,9 +3517,24 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
     } else if (deviceData.vendor === 'gemini' && normalizeDeviceType(deviceData.deviceType) === 'covercalibrator') {
         const geminiFlatPanelModelEl = document.getElementById('gemini-flatpanel-model');
-        const isV2 = geminiFlatPanelModelEl ? geminiFlatPanelModelEl.value === 'v2' : false;
-        deviceData.flatPanelModel = isV2 ? 'v2' : 'lite';
-        if (isV2) {
+        const modelValue = geminiFlatPanelModelEl ? geminiFlatPanelModelEl.value : 'lite';
+        const isV2 = modelValue === 'v2';
+        const isPro = modelValue === 'pro';
+        deviceData.flatPanelModel = isPro ? 'pro' : (isV2 ? 'v2' : 'lite');
+        if (isPro) {
+            const geminiFlatPanelProConnType = document.getElementById('gemini-flatpanel-pro-connection-type');
+            deviceData.connectionType = geminiFlatPanelProConnType ? geminiFlatPanelProConnType.value : 'auto';
+            if (deviceData.connectionType === 'auto') {
+                const panelIndex = readOptionalNumber(formData, 'geminiFlatPanelProIndex');
+                deviceData.panelIndex = panelIndex !== null ? panelIndex : 0;
+            } else if (deviceData.connectionType === 'serial') {
+                deviceData.portPath = formData.get('geminiFlatPanelProPortPath') || '';
+                const baudRate = readOptionalNumber(formData, 'geminiFlatPanelProBaudRate');
+                if (baudRate !== null) {
+                    deviceData.baudRate = baudRate;
+                }
+            }
+        } else if (isV2) {
             const geminiFlatPanelV2ConnType = document.getElementById('gemini-flatpanel-v2-connection-type');
             deviceData.connectionType = geminiFlatPanelV2ConnType ? geminiFlatPanelV2ConnType.value : 'auto';
             if (deviceData.connectionType === 'auto') {
