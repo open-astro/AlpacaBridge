@@ -710,7 +710,17 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
 
-        refresh_position_cache_locked();
+        // Pier side only changes across a slew, flip, park or home, and every
+        // motion initiator invalidates the position cache, so a position a
+        // few seconds old is authoritative here. One :GEP# round trip costs
+        // ~100 ms of mount latency (HAE16 EQ ConformU 4.5.0, 2026-08-25:
+        // 0.113 s against the 0.1 s FAST target when the 1 s cache had just
+        // lapsed), so this read tolerates a longer staleness than RA/Dec.
+        const auto now = std::chrono::steady_clock::now();
+        if (!position_cache_valid_ || cached_status_.is_slewing ||
+            (now - last_position_update_) >= kSideOfPierPositionTtl) {
+            refresh_position_cache_locked();
+        }
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
             // ensure_site_info_cached_locked() sets site_info_valid_ on success;
@@ -982,7 +992,7 @@ public:
         if (slew_override_until_ > now) {
             return true;
         }
-        // HAE29C firmware quirk (hardware-verified 2026-07-14): GOTO stops
+        // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
         // compensating sidereal motion during its final ~1 s approach, so
         // slews settle a consistent ~11-16 arcsec east of the RA target
         // (ConformU tolerance is +/-10"). Re-issuing the GOTO does NOT fix it:
@@ -992,7 +1002,7 @@ public:
         // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
         // on this firmware and Dec pulse polarity flips with pier side.
         // Slewing stays true while a trim pulse runs.
-        if (slew_in_progress_ && hae29c_quirks_active() && slew_refine_count_ < kMaxSlewRefines) {
+        if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
             ++slew_refine_count_;
             try {
                 auto& protocol = iOptronProtocolWrapper::instance();
@@ -1601,6 +1611,7 @@ private:
     static constexpr std::chrono::seconds kSiteInfoCacheTtl{60};
     static constexpr std::chrono::milliseconds kStatusCacheTtl{1000};
     static constexpr std::chrono::milliseconds kPositionCacheTtl{1000};
+    static constexpr std::chrono::seconds kSideOfPierPositionTtl{5};
     static constexpr std::chrono::milliseconds kSlewPollInterval{250};
     static constexpr std::chrono::seconds kSlewTimeout{300};
     static constexpr std::chrono::seconds kFastCacheGrace{30};
@@ -1613,11 +1624,18 @@ private:
     static constexpr double kSiderealRateDegPerSec = 360.0 / kSiderealSeconds;
     static constexpr double kDefaultGuideRateFraction = 0.5;
 
-    // All three HAE29C firmware-quirk workarounds (wedged-park finalizer,
-    // zero-distance park finalizer, GOTO refinement) are gated on the exact
-    // model code so other iOptron mounts (HAE43, HEM27, ...) keep the
-    // original, hardware-validated behavior.
+    // The HAE29C park firmware-quirk workarounds (wedged-park finalizer,
+    // zero-distance park finalizer) are gated on the exact model code so
+    // other iOptron mounts (HAE43, HEM27, ...) keep the original,
+    // hardware-validated behavior.
     bool hae29c_quirks_active() const { return mount_info_.model_code == "0036"; }
+
+    // GOTO final-approach RA refinement. Hardware-verified on HAE29C EQ
+    // (0036, 2026-07-14) and HAE16 EQ (0012, ConformU 2026-08-25: same
+    // 11-16 arcsec east RA settle, Dec within 0.2 arcsec, park clean).
+    bool goto_refine_active() const {
+        return mount_info_.model_code == "0036" || mount_info_.model_code == "0012";
+    }
 
     void check_connected() const {
         if (!connected_) {
