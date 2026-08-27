@@ -346,3 +346,27 @@ TEST_CASE("Gemini Flat Panel Pro Driver - Idle CoverState is served from the TTL
     CHECK(driver->get_cover_state() == alpacacore::CoverState::Open);
     CHECK(panel.count(">S#") == after_move + 1);
 }
+
+TEST_CASE("Gemini Flat Panel Pro Driver - A CalibratorOff overlapping an inline CalibratorOn keeps submission order",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    panel.set_reply_delay(">B", std::chrono::milliseconds(300));  // slow brightness ack holds the toggle
+    auto driver = connect_fake_pro(panel);
+
+    std::thread on_thread([&] { driver->calibrator_on(200); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));  // the ON toggle is on the wire
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->calibrator_off();  // pending != 0 -> background path, must queue behind the inline ON
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(150));
+    CHECK(driver->get_calibrator_changing());
+    on_thread.join();
+
+    REQUIRE(wait_until([&] { return !driver->get_calibrator_changing(); }, std::chrono::milliseconds(3000)));
+    // The later command wins: panel off, state Off, and the wire order is
+    // ON's pair then OFF's pair.
+    CHECK(driver->get_calibrator_state() == alpacacore::CalibratorState::Off);
+    CHECK(driver->get_brightness() == 0);
+    CHECK_FALSE(panel.light_on());
+    CHECK(panel.index_of(">D#") > panel.index_of(">B200#"));
+    CHECK(panel.index_of(">B0#") == panel.index_of(">D#") + 1);
+}

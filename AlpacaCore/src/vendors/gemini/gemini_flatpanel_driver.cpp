@@ -827,13 +827,25 @@ private:
      * destroying the underlying std::thread -- leaving it here for the
      * catch block to join safely on the caller's thread.
      */
-    // Drop one calibrator claim and wake a cover task waiting for the port.
-    void release_calibrator_claim() {
+    // Drop one calibrator claim (and, for the inline path, its in-flight
+    // flag) and wake anything waiting for the port.
+    void release_calibrator_claim(bool inline_done = false) {
         {
             std::lock_guard<std::mutex> lock(calibrator_idle_mutex_);
+            if (inline_done) {
+                calibrator_inline_active_.store(false);
+            }
             calibrator_pending_count_.fetch_sub(1);
         }
         calibrator_idle_cv_.notify_all();
+    }
+
+    // Block a background calibrator command until an inline (fast-path)
+    // toggle has finished its wire transaction. The inline path always
+    // clears the flag (normal return or throw), so this is not bounded.
+    void wait_for_inline_calibrator() {
+        std::unique_lock<std::mutex> lock(calibrator_idle_mutex_);
+        calibrator_idle_cv_.wait(lock, [this] { return !calibrator_inline_active_.load(); });
     }
 
     // Let an in-progress calibrator command finish its short wire I/O before
@@ -884,6 +896,7 @@ private:
             std::lock_guard<std::mutex> cover_lock(cover_task_mutex_);
             if (!cover_in_flight_.load() && calibrator_pending_count_.load() == 0) {
                 calibrator_pending_count_.fetch_add(1);
+                calibrator_inline_active_.store(true);
                 claimed = true;
             }
         }
@@ -892,12 +905,19 @@ private:
             try {
                 run_calibrator_command(on, brightness);  // throws on wire failure
             } catch (...) {
-                release_calibrator_claim();
+                release_calibrator_claim(/*inline_done=*/true);
                 throw;
             }
-            release_calibrator_claim();
+            release_calibrator_claim(/*inline_done=*/true);
             return;
         }
+
+        // Background path. A command that lands here while an INLINE toggle
+        // is still on the wire has no thread to join (the fast path owns
+        // none), so it must wait for that toggle explicitly or the two
+        // set_light() transactions would race for the port and the later
+        // command could finish first (PR #226 review, round 3). The wait is
+        // done on the background thread, off the caller, like the join.
 
         calibrator_pending_count_.fetch_add(1);
         auto previous = std::make_shared<std::thread>(std::move(calibrator_task_thread_));
@@ -906,6 +926,7 @@ private:
                 if (previous->joinable()) {
                     previous->join();  // off the caller's thread -- see doc comment above
                 }
+                wait_for_inline_calibrator();  // preserves submission order behind a fast-path toggle
                 try {
                     run_calibrator_command(on, brightness);
                 } catch (const std::exception& e) {
@@ -970,6 +991,10 @@ private:
     // inline calibrator toggle to release the port (see wait_for_calibrator_idle()).
     std::mutex calibrator_idle_mutex_;
     std::condition_variable calibrator_idle_cv_;
+    // True while the fast path's set_light() is on the wire; background
+    // commands wait on it so submission order survives a fast->background
+    // transition (see start_calibrator_task()).
+    std::atomic<bool> calibrator_inline_active_{false};
     static constexpr std::chrono::seconds kCalibratorIdleWait{2};
 
     // Idle-cover >S# TTL cache (see get_cover_state()). Serialized on its own
