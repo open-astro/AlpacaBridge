@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -749,6 +750,7 @@ private:
         cover_in_flight_.store(true);
         try {
             cover_task_thread_ = std::thread([this, fn]() {
+                wait_for_calibrator_idle();  // see start_calibrator_task() fast path
                 try {
                     fn();
                 } catch (const std::exception& e) {
@@ -825,6 +827,24 @@ private:
      * destroying the underlying std::thread -- leaving it here for the
      * catch block to join safely on the caller's thread.
      */
+    // Drop one calibrator claim and wake a cover task waiting for the port.
+    void release_calibrator_claim() {
+        {
+            std::lock_guard<std::mutex> lock(calibrator_idle_mutex_);
+            calibrator_pending_count_.fetch_sub(1);
+        }
+        calibrator_idle_cv_.notify_all();
+    }
+
+    // Let an in-progress calibrator command finish its short wire I/O before
+    // a cover move takes the port; bounded so a wedged light command can't
+    // hold a cover move hostage (it just falls through to the port mutex).
+    void wait_for_calibrator_idle() {
+        std::unique_lock<std::mutex> lock(calibrator_idle_mutex_);
+        calibrator_idle_cv_.wait_for(lock, kCalibratorIdleWait,
+                                     [this] { return calibrator_pending_count_.load() == 0; });
+    }
+
     // Send the light on/off + brightness pair and commit the commanded state.
     // Shared by the inline fast path and the background task.
     void run_calibrator_command(bool on, int brightness) {
@@ -841,25 +861,45 @@ private:
     }
 
     void start_calibrator_task(bool on, int brightness) {
-        std::lock_guard<std::mutex> lock(calibrator_task_mutex_);
+        std::unique_lock<std::mutex> lock(calibrator_task_mutex_);
 
         // Fast path: with no cover move and no earlier calibrator command in
         // flight, the serial link is free and the two light commands take
-        // ~30 ms on the Pro (~200 ms worst case on Lite/Rev2 with their
+        // ~30 ms on the Pro (~250 ms worst case on Lite/Rev2 with their
         // pre-read settle) -- well inside the 1 s STANDARD target. Run them
         // inline so the call returns with CalibratorState already Ready/Off,
         // instead of NotReady until the client's next poll: NINA polls
         // slowly enough that the background path made a 30 ms light toggle
-        // look like a multi-second one. cover_task_mutex_ is held for the
-        // check AND the commands so a cover move can't start in between and
-        // stall us behind its 30 s wire wait (lock order: calibrator_task_
-        // mutex_ -> cover_task_mutex_; nothing takes them the other way).
+        // look like a multi-second one.
+        //
+        // cover_task_mutex_ is held only for the check-and-claim (lock order:
+        // calibrator_task_mutex_ -> cover_task_mutex_; nothing takes them the
+        // other way), NOT across the wire I/O: holding it for the whole
+        // ~250 ms made a concurrent HaltCover/OpenCover/CalibratorOn block
+        // behind an unrelated light toggle (PR #226 review). The claim is
+        // the pending count itself: start_cover_task()'s thread waits for it
+        // to drop before touching the port, so a cover move issued during
+        // the toggle cannot grab the port first and stall this inline call
+        // behind its 30 s wire wait, and the caller is released before the
+        // I/O starts.
+        bool claimed = false;
         {
             std::lock_guard<std::mutex> cover_lock(cover_task_mutex_);
             if (!cover_in_flight_.load() && calibrator_pending_count_.load() == 0) {
-                run_calibrator_command(on, brightness);  // throws on wire failure
-                return;
+                calibrator_pending_count_.fetch_add(1);
+                claimed = true;
             }
+        }
+        if (claimed) {
+            lock.unlock();  // both task locks released before the wire I/O
+            try {
+                run_calibrator_command(on, brightness);  // throws on wire failure
+            } catch (...) {
+                release_calibrator_claim();
+                throw;
+            }
+            release_calibrator_claim();
+            return;
         }
 
         calibrator_pending_count_.fetch_add(1);
@@ -874,7 +914,7 @@ private:
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("Gemini", "Flat panel v2 calibrator command failed: " + std::string(e.what()));
                 }
-                calibrator_pending_count_.fetch_sub(1);
+                release_calibrator_claim();
             });
         } catch (...) {
             // std::thread ctor can throw (e.g. OS thread limit). previous is
@@ -886,7 +926,7 @@ private:
             if (previous->joinable()) {
                 previous->join();
             }
-            calibrator_pending_count_.fetch_sub(1);
+            release_calibrator_claim();
             throw;
         }
     }
@@ -929,6 +969,11 @@ private:
     // Count, not a bool: see start_calibrator_task()'s doc comment for why a
     // single flag misreports "not changing" while queued commands remain.
     std::atomic<int> calibrator_pending_count_{0};
+    // Pairs with calibrator_pending_count_ so a cover task can wait for an
+    // inline calibrator toggle to release the port (see wait_for_calibrator_idle()).
+    std::mutex calibrator_idle_mutex_;
+    std::condition_variable calibrator_idle_cv_;
+    static constexpr std::chrono::seconds kCalibratorIdleWait{2};
 
     // Idle-cover >S# TTL cache (see get_cover_state()). Serialized on its own
     // mutex so concurrent readers don't each hit the wire.
