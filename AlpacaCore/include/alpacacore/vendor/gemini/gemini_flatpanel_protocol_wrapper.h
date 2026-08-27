@@ -205,6 +205,19 @@ public:
     /** @brief Set brightness (0-255). Command >B<value># */
     void set_brightness(int value);
 
+    /**
+     * @brief Turn the light on/off and set its brightness as ONE port
+     * transaction (>L# or >D#, then >B<value>#).
+     *
+     * light_on()/light_off() + set_brightness() as two calls each take and
+     * release the port mutex, so an open_cover()/close_cover() issued between
+     * them could grab the port and hold it for a whole cover move (up to
+     * 30 s) before the brightness was applied (PR #226 review). Holding the
+     * mutex across both commands keeps the pair atomic with respect to any
+     * other wire command.
+     */
+    void set_light(bool on, int value);
+
     // --- Motorized-cover commands (Rev2 and Pro only) ---
 
     /**

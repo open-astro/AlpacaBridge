@@ -848,13 +848,10 @@ private:
     // Send the light on/off + brightness pair and commit the commanded state.
     // Shared by the inline fast path and the background task.
     void run_calibrator_command(bool on, int brightness) {
-        if (on) {
-            protocol_.light_on();
-            protocol_.set_brightness(brightness);
-        } else {
-            protocol_.light_off();
-            protocol_.set_brightness(0);
-        }
+        // One port transaction for the on/off + brightness pair: as two
+        // separate calls a cover move could take the port in between and
+        // hold the brightness back for the whole move (PR #226 review).
+        protocol_.set_light(on, on ? brightness : 0);
         std::lock_guard<std::mutex> lock(state_mutex_);
         commanded_brightness_ = on ? brightness : 0;
         calibrator_engaged_ = on;

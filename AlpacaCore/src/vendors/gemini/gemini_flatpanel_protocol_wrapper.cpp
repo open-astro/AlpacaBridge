@@ -562,6 +562,15 @@ public:
         send_command_locked(cmd);
     }
 
+    void set_light(bool on, int value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
+        send_command_locked(on ? ">L#" : ">D#");
+        char cmd[kMaxCommandLen];
+        std::snprintf(cmd, sizeof(cmd), ">B%d#", value);
+        send_command_locked(cmd);
+    }
+
     FlatPanelMotorizedStatus get_motorized_status() {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
@@ -877,6 +886,8 @@ bool GeminiFlatPanelProtocolWrapper::get_light_on() { return impl_->get_light_on
 int GeminiFlatPanelProtocolWrapper::get_brightness() { return impl_->get_brightness(); }
 
 void GeminiFlatPanelProtocolWrapper::light_on() { impl_->light_on(); }
+
+void GeminiFlatPanelProtocolWrapper::set_light(bool on, int value) { impl_->set_light(on, value); }
 
 void GeminiFlatPanelProtocolWrapper::light_off() { impl_->light_off(); }
 

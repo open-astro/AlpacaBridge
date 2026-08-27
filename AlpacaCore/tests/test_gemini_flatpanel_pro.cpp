@@ -15,10 +15,13 @@
 #include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
 #include <optional>
+#include <thread>
 
 #include "catch2_compat.h"
+#include "fake_gemini_flatpanel.h"
 
 namespace {
 
@@ -198,4 +201,148 @@ TEST_CASE("Gemini Flat Panel Pro Driver - Unsupported methods", "[gemini][flatpa
     require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->close_cover(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_max_brightness() == 255);
+}
+
+// ---------------------------------------------------------------------------
+// Wire-level behaviour over a pty-backed fake Pro panel (see
+// fake_gemini_flatpanel.h). These cover the two paths the PR #226 review
+// asked for: the inline calibrator fast path vs the background path, and
+// the idle CoverState TTL cache.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using alpacacore::test::FakeGeminiFlatPanel;
+
+std::unique_ptr<alpacacore::CoverCalibratorDriver> connect_fake_pro(const FakeGeminiFlatPanel& panel) {
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    return driver;
+}
+
+template <typename Pred>
+bool wait_until(Pred pred, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return pred();
+}
+
+}  // namespace
+
+TEST_CASE("Gemini Flat Panel Pro Driver - CalibratorOn takes the inline fast path when the port is free",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_fake_pro(panel);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->calibrator_on(128);
+    const auto took = std::chrono::steady_clock::now() - t0;
+
+    // Returned with the state already applied (no NotReady window) and the
+    // on/off + brightness pair went out back-to-back as one transaction.
+    CHECK(took < std::chrono::milliseconds(500));
+    CHECK_FALSE(driver->get_calibrator_changing());
+    CHECK(driver->get_calibrator_state() == alpacacore::CalibratorState::Ready);
+    CHECK(driver->get_brightness() == 128);
+    CHECK(panel.light_on());
+    CHECK(panel.brightness() == 128);
+    const int l = panel.index_of(">L#");
+    const int b = panel.index_of(">B128#");
+    REQUIRE(l >= 0);
+    CHECK(b == l + 1);
+
+    driver->calibrator_off();
+    CHECK(driver->get_calibrator_state() == alpacacore::CalibratorState::Off);
+    CHECK_FALSE(panel.light_on());
+    CHECK(panel.index_of(">B0#") == panel.index_of(">D#") + 1);
+}
+
+TEST_CASE("Gemini Flat Panel Pro Driver - CalibratorOn goes to the background path while a cover move holds the port",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    panel.set_reply_delay(">O#", std::chrono::milliseconds(400));  // a "mechanical" open
+    auto driver = connect_fake_pro(panel);
+
+    driver->open_cover();
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Moving);
+    // Let the cover task actually put >O# on the wire (the fake records a
+    // command on receipt, before its delayed ack), so the port is genuinely
+    // held for the next 400 ms.
+    REQUIRE(wait_until([&] { return panel.count(">O#") == 1; }, std::chrono::milliseconds(1000)));
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->calibrator_on(64);
+    const auto took = std::chrono::steady_clock::now() - t0;
+
+    // Must not block behind the cover move; reports NotReady until its
+    // queued wire command has actually run.
+    CHECK(took < std::chrono::milliseconds(150));
+    CHECK(driver->get_calibrator_changing());
+    CHECK(driver->get_calibrator_state() == alpacacore::CalibratorState::NotReady);
+
+    REQUIRE(wait_until([&] { return !driver->get_calibrator_changing(); }, std::chrono::milliseconds(3000)));
+    CHECK(driver->get_calibrator_state() == alpacacore::CalibratorState::Ready);
+    CHECK(panel.brightness() == 64);
+    // The light commands were serialized behind the in-flight cover move.
+    CHECK(panel.index_of(">L#") > panel.index_of(">O#"));
+
+    REQUIRE(wait_until([&] { return !driver->get_cover_moving(); }, std::chrono::milliseconds(3000)));
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Open);
+}
+
+TEST_CASE("Gemini Flat Panel Pro Driver - A cover move issued mid-toggle waits for the inline toggle",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    panel.set_reply_delay(">B", std::chrono::milliseconds(300));  // slow brightness ack
+    auto driver = connect_fake_pro(panel);
+
+    std::thread toggler([&] { driver->calibrator_on(200); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));  // toggle is now on the wire
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->open_cover();  // async initiator: returns at once, task waits for the toggle
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(150));
+    toggler.join();
+
+    // The inline toggle completed without being stalled behind the cover
+    // move, and the cover command went out only after the brightness ack.
+    CHECK(driver->get_calibrator_state() == alpacacore::CalibratorState::Ready);
+    REQUIRE(wait_until([&] { return !driver->get_cover_moving(); }, std::chrono::milliseconds(3000)));
+    CHECK(panel.index_of(">O#") > panel.index_of(">B200#"));
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Open);
+}
+
+TEST_CASE("Gemini Flat Panel Pro Driver - Idle CoverState is served from the TTL cache and invalidated by a move",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_fake_pro(panel);
+
+    // Connect seeded the cache with one >S#; a burst of reads must not hit
+    // the wire again.
+    const int seeded = panel.count(">S#");
+    REQUIRE(seeded >= 1);
+    for (int i = 0; i < 5; ++i) {
+        CHECK(driver->get_cover_state() == alpacacore::CoverState::Closed);
+    }
+    CHECK(panel.count(">S#") == seeded);
+
+    // A completed move invalidates the cache: the next read is live and
+    // sees the new position.
+    driver->open_cover();
+    REQUIRE(wait_until([&] { return !driver->get_cover_moving(); }, std::chrono::milliseconds(3000)));
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Open);
+    const int after_move = panel.count(">S#");
+    CHECK(after_move == seeded + 1);
+
+    // Within the TTL: cached. After it lapses: one more live read.
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Open);
+    CHECK(panel.count(">S#") == after_move);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    CHECK(driver->get_cover_state() == alpacacore::CoverState::Open);
+    CHECK(panel.count(">S#") == after_move + 1);
 }
