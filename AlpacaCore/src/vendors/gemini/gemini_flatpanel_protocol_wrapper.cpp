@@ -97,7 +97,7 @@ bool parse_light_flag(const std::string& resp, bool& out) {
 // accepts) followed by three single-digit flags, 7 chars minimum before the
 // '#'. This is a DIFFERENT layout from the Lite's "*S<light><f2><f3>#" (see
 // parse_light_flag() above) -- do not reuse that parser here.
-bool parse_rev2_status(const std::string& resp, FlatPanelRev2Status& out) {
+bool parse_rev2_status(const std::string& resp, FlatPanelMotorizedStatus& out) {
     if (resp.size() < 7 || resp[0] != '*' || resp[1] != 'S') {
         return false;
     }
@@ -121,7 +121,46 @@ bool parse_rev2_status(const std::string& resp, FlatPanelRev2Status& out) {
     out.cover_state = static_cast<FlatPanelCoverState>(cover);
     return true;
 }
+
+// Pro >S# reply layout, per INDI's GeminiFlatpanelProAdapter::getStatus():
+// the motor/light/cover digits sit at fixed positions 2, 4 and 6 with a
+// letter tag after each one, followed by extra fields INDI ignores.
+// Confirmed on hardware (firmware 107): "*S0M0L2C0D76C405O#" -> motor 0
+// (stopped), light 0 (off), cover 2 (open); the trailing "0D76C405O" is
+// presumed dew-heater flag + closed/open position calibration, not parsed.
+// No 2-digit device-ID gate here, unlike parse_rev2_status().
+bool parse_pro_status(const std::string& resp, FlatPanelMotorizedStatus& out) {
+    if (resp.size() < 7 || resp[0] != '*' || resp[1] != 'S') {
+        return false;
+    }
+    if (!std::isdigit(static_cast<unsigned char>(resp[2])) || !std::isdigit(static_cast<unsigned char>(resp[4])) ||
+        !std::isdigit(static_cast<unsigned char>(resp[6]))) {
+        return false;
+    }
+    int motor = resp[2] - '0';
+    int light = resp[4] - '0';
+    int cover = resp[6] - '0';
+    if (motor > 1 || light > 1 || cover > 3) {
+        return false;
+    }
+    out.motor_running = (motor != 0);
+    out.light_on = (light != 0);
+    out.cover_state = static_cast<FlatPanelCoverState>(cover);
+    return true;
+}
 }  // namespace
+
+std::string_view expected_flatpanel_handshake_reply(FlatPanelModel model) {
+    switch (model) {
+        case FlatPanelModel::Lite:
+            return "*HGeminiFlatPanelLite#";
+        case FlatPanelModel::Rev2:
+            return "*HGeminiFlatPanel#";
+        case FlatPanelModel::Pro:
+            return "*HGeminiFlatPanelPro#";
+    }
+    return "*H";
+}
 
 bool is_flatpanel_handshake_reply(const std::string& reply) {
     return reply.size() >= 2 && reply[0] == '*' && reply[1] == 'H';
@@ -414,6 +453,16 @@ public:
                 std::string reply = send_command_locked(">H#");
                 if (is_flatpanel_handshake_reply(reply)) {
                     success = true;
+                    // Warn (don't fail) when the identity string doesn't match
+                    // the configured model: each model parses >S# differently,
+                    // so a mismatch usually means the wrong flatPanelModel was
+                    // picked in the web UI and later status reads will fail.
+                    const std::string_view expected = expected_flatpanel_handshake_reply(config_.model);
+                    if (reply != expected) {
+                        ALPACA_LOG_WARN("Gemini", "Flat panel handshake reply '" + reply + "' does not match the " +
+                                                      "configured model's expected '" + std::string(expected) +
+                                                      "' -- check the Flat Panel Model setting");
+                    }
                 } else {
                     ALPACA_LOG_WARN("Gemini", "Flat panel handshake attempt " + std::to_string(attempt + 1) +
                                                   " got a non-flat-panel reply: " + reply);
@@ -513,15 +562,36 @@ public:
         send_command_locked(cmd);
     }
 
-    FlatPanelRev2Status get_status_rev2() {
+    void set_light(bool on, int value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
+        send_command_locked(on ? ">L#" : ">D#");
+        char cmd[kMaxCommandLen];
+        std::snprintf(cmd, sizeof(cmd), ">B%d#", value);
+        send_command_locked(cmd);
+    }
+
+    FlatPanelMotorizedStatus get_motorized_status() {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
         std::string resp = send_command_locked(">S#");
-        FlatPanelRev2Status status;
-        if (!parse_rev2_status(resp, status)) {
-            throw AlpacaException("Failed to parse Rev2 status: " + resp, AlpacaError::DriverException);
+        FlatPanelMotorizedStatus status;
+        const bool ok =
+            (config_.model == FlatPanelModel::Pro) ? parse_pro_status(resp, status) : parse_rev2_status(resp, status);
+        if (!ok) {
+            throw AlpacaException("Failed to parse motorized flat panel status: " + resp, AlpacaError::DriverException);
         }
         return status;
+    }
+
+    // Rev2 firmware replies with the exact completion string; Pro firmware
+    // acks with variants ("*O", "*O#", "*OOpened#" per INDI), so only the
+    // "*<letter>" prefix is required there.
+    bool is_cover_reply_ok(const std::string& resp, const std::string& exact) const {
+        if (config_.model == FlatPanelModel::Pro) {
+            return resp.size() >= 2 && resp[0] == '*' && resp[1] == exact[1];
+        }
+        return resp == exact;
     }
 
     void open_cover() {
@@ -537,7 +607,7 @@ public:
             throw;
         }
         config_.serial_timeout_s = saved_timeout;
-        if (resp != "*OOpened#") {
+        if (!is_cover_reply_ok(resp, "*OOpened#")) {
             throw AlpacaException("Unexpected open cover reply: " + resp, AlpacaError::DriverException);
         }
     }
@@ -555,7 +625,7 @@ public:
             throw;
         }
         config_.serial_timeout_s = saved_timeout;
-        if (resp != "*CClosed#") {
+        if (!is_cover_reply_ok(resp, "*CClosed#")) {
             throw AlpacaException("Unexpected close cover reply: " + resp, AlpacaError::DriverException);
         }
     }
@@ -773,7 +843,16 @@ private:
     std::string send_command_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("Gemini", "Flat panel command: " + cmd);
         write_data(cmd);
-        std::this_thread::sleep_for(std::chrono::milliseconds(kCommandDelayMs));
+        // The Pro firmware answers >S# in ~27 ms wire-to-wire (measured on a
+        // Pi, 18-char reply), and its CoverState must land inside ConformU's
+        // 0.1 s FAST target; the fixed pre-read settle below pushed a live
+        // read to ~0.13 s. read_response() already blocks per byte (VTIME),
+        // so the Pro path reads immediately. Lite/Rev2 keep the settle they
+        // were ConformU-validated with -- no Lite/Rev2 unit was on hand to
+        // prove they tolerate its removal.
+        if (config_.model != FlatPanelModel::Pro) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kCommandDelayMs));
+        }
         return read_response();
     }
 
@@ -808,11 +887,15 @@ int GeminiFlatPanelProtocolWrapper::get_brightness() { return impl_->get_brightn
 
 void GeminiFlatPanelProtocolWrapper::light_on() { impl_->light_on(); }
 
+void GeminiFlatPanelProtocolWrapper::set_light(bool on, int value) { impl_->set_light(on, value); }
+
 void GeminiFlatPanelProtocolWrapper::light_off() { impl_->light_off(); }
 
 void GeminiFlatPanelProtocolWrapper::set_brightness(int value) { impl_->set_brightness(value); }
 
-FlatPanelRev2Status GeminiFlatPanelProtocolWrapper::get_status_rev2() { return impl_->get_status_rev2(); }
+FlatPanelMotorizedStatus GeminiFlatPanelProtocolWrapper::get_motorized_status() {
+    return impl_->get_motorized_status();
+}
 
 void GeminiFlatPanelProtocolWrapper::open_cover() { impl_->open_cover(); }
 

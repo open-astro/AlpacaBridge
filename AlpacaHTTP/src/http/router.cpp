@@ -8198,34 +8198,45 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #ifdef ALPACACORE_ENABLE_GEMINI
         std::string conn_type = config.value("connectionType", "auto");
         // "lite" (default, back-compat) = Astro Flat Panel Cover Lite (light-only);
-        // "v2" = Astro Automatic FlatPanel v2 (motorized cover).
+        // "v2" = Astro Automatic FlatPanel v2 (motorized cover);
+        // "pro" = Motorized Flat Panel V3 (INDI "Pro" firmware, motorized cover).
         std::string model = config.value("flatPanelModel", "lite");
         bool is_v2 = (model == "v2");
+        bool is_pro = (model == "pro");
+
+        auto make_by_index = [&](int panel_index) {
+            if (is_pro)
+                return alpacacore::vendor::gemini::create_gemini_flatpanel_pro_by_index(device_number, panel_index);
+            if (is_v2)
+                return alpacacore::vendor::gemini::create_gemini_flatpanel_v2_by_index(device_number, panel_index);
+            return alpacacore::vendor::gemini::create_gemini_flatpanel_by_index(device_number, panel_index);
+        };
+        auto make_serial = [&](const std::string& port_path, int baud_rate) {
+            if (is_pro)
+                return alpacacore::vendor::gemini::create_gemini_flatpanel_pro(device_number, port_path, baud_rate);
+            if (is_v2)
+                return alpacacore::vendor::gemini::create_gemini_flatpanel_v2(device_number, port_path, baud_rate);
+            return alpacacore::vendor::gemini::create_gemini_flatpanel(device_number, port_path, baud_rate);
+        };
 
         std::unique_ptr<alpacacore::CoverCalibratorDriver> panel;
         if (conn_type == "serial") {
             std::string port_path = config.value("portPath", "");
             if (port_path.empty()) {
                 // No port specified with serial mode — fall through to auto-detect
-                int panel_index = config.value("panelIndex", 0);
-                panel =
-                    is_v2 ? alpacacore::vendor::gemini::create_gemini_flatpanel_v2_by_index(device_number, panel_index)
-                          : alpacacore::vendor::gemini::create_gemini_flatpanel_by_index(device_number, panel_index);
+                panel = make_by_index(config.value("panelIndex", 0));
             } else {
-                int baud_rate = config.value("baudRate", 9600);
-                panel =
-                    is_v2 ? alpacacore::vendor::gemini::create_gemini_flatpanel_v2(device_number, port_path, baud_rate)
-                          : alpacacore::vendor::gemini::create_gemini_flatpanel(device_number, port_path, baud_rate);
+                panel = make_serial(port_path, config.value("baudRate", 9600));
             }
         } else {
             // "auto" or unset — auto-detect
-            int panel_index = config.value("panelIndex", 0);
-            panel = is_v2 ? alpacacore::vendor::gemini::create_gemini_flatpanel_v2_by_index(device_number, panel_index)
-                          : alpacacore::vendor::gemini::create_gemini_flatpanel_by_index(device_number, panel_index);
+            panel = make_by_index(config.value("panelIndex", 0));
         }
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(panel)))) {
-            util::log_info(is_v2 ? "Registered Gemini Flat Panel v2" : "Registered Gemini Flat Panel");
+            util::log_info(is_pro  ? "Registered Gemini Motorized Flat Panel V3"
+                           : is_v2 ? "Registered Gemini Flat Panel v2"
+                                   : "Registered Gemini Flat Panel");
             return true;
         }
 
@@ -8624,7 +8635,8 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("connectionType");
         copy_if_present("focuserIndex");
         copy_if_present("panelIndex");
-        copy_if_present("flatPanelModel");  // "lite" (Cover Lite) or "v2" (Automatic FlatPanel v2)
+        copy_if_present(
+            "flatPanelModel");  // "lite" (Cover Lite), "v2" (Automatic FlatPanel v2) or "pro" (Motorized Flat Panel V3)
         std::string connection_type = config.value("connectionType", "auto");
         if (connection_type == "serial") {
             copy_if_present("portPath");

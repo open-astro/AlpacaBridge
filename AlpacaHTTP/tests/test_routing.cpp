@@ -1486,6 +1486,24 @@ int main() {
         EXPECT(cfg.value("panelIndex", -1) == 3);
         remove_device(router, "gemini", "covercalibrator", 9619);
     }
+    {
+        // gemini / covercalibrator (Motorized Flat Panel V3, "pro" firmware) —
+        // third model on the same slot; guards flatPanelModel="pro" survives
+        // sanitize_device_config and routing accepts it.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "gemini"},
+                                           {"deviceType", "covercalibrator"},
+                                           {"deviceNumber", 9620},
+                                           {"flatPanelModel", "pro"},
+                                           {"connectionType", "auto"},
+                                           {"panelIndex", 1}},
+                                          "CoverCalibrator", 9620);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("flatPanelModel", "") == "pro");
+        EXPECT(cfg.value("connectionType", "") == "auto");
+        EXPECT(cfg.value("panelIndex", -1) == 1);
+        remove_device(router, "gemini", "covercalibrator", 9620);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_ASTROASIS

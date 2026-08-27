@@ -196,6 +196,7 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | Astro Flat Panel Cover Lite | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro%20Flat%20Panel%20Cover%20Lite/) |
 | Astro Automatic FlatPanel v2 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Astro%20Automatic%20FlatPanel%20v2/) |
+| Motorized Flat Panel V3 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Motorized%20Flat%20Panel%20V3/) |
 
 <details>
 <summary><strong>Gemini CoverCalibrator Driver Notes</strong></summary>
@@ -217,6 +218,18 @@ This document lists all hardware vendors and device types that are verified to w
 - **Calibrator/cover port contention**: `CalibratorOn`/`CalibratorOff` share the same physical serial link and port-level mutex as `OpenCover`/`CloseCover`. Calling `CalibratorOn` while a cover move is in flight can block behind the cover's up-to-30s wire wait; **fixed by running `CalibratorOn`/`CalibratorOff` on a background thread** (mirroring the cover task) so the ASCOM initiator still returns immediately, with `CalibratorChanging`/`CalibratorState` correctly reporting `NotReady` while the background command is in flight. Caught by ConformU: the first `CalibratorOn` call, issued right after a `HaltCover` on a cover that was still physically moving, blocked the HTTP thread for 6+ seconds before this fix.
 - **Tested model**: Gemini Astro Automatic FlatPanel v2 (firmware 408) on Linux arm64.
 - **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing issues.
+
+</details>
+
+<details>
+<summary><strong>Gemini Motorized Flat Panel V3 Driver Notes</strong></summary>
+
+- **Protocol**: the firmware INDI calls "Pro" (`GeminiFlatpanelProAdapter` in `indilib/indi`), confirmed against real hardware. Same `">X#"`/`">Xnnn#"` wire syntax and light commands as the other Gemini panels; identifies as `*HGeminiFlatPanelPro#`, reports status as `*S<motor>M<light>L<cover>C...#` (flags at fixed positions, extra fields ignored) and acknowledges `>O#`/`>C#` with the reached position (`*O405#`/`*C70#`) once travel completes (~10 s).
+- **Connection**: USB (CH340 adapter), 9600 baud 8N1. Selected via `flatPanelModel: "pro"` on the same `gemini`+`covercalibrator` router slot as the Lite and v2 models; shares port auto-detection with them.
+- **Cover**: `OpenCover`/`CloseCover` run on a background thread and report `Moving` until the hardware acknowledges; `HaltCover` has no hardware equivalent (as on v2) and stops the driver from reporting `Moving`. Extra manual-jog and set-position commands exist in the firmware but are outside the ASCOM CoverCalibrator interface and are not exposed.
+- **Calibrator**: the firmware takes ~125 ms per light command, so a toggle (`>L#`/`>D#` plus `>B<n>#`) completes in ~250 ms; `CalibratorOn`/`CalibratorOff` return with the state already applied unless a cover move is holding the serial link.
+- **Tested model**: Gemini Motorized Flat Panel V3 (firmware 107) on Linux arm64 (Raspberry Pi).
+- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing issues. Start ConformU with the cover closed: ConformU 4.5's test order for a cover that starts open runs `HaltCover` before it has classified the cover as asynchronous and reports a spurious issue.
 
 </details>
 
