@@ -1210,7 +1210,10 @@ datagrams before each send so replies cannot get off-by-one.
 
 ### iOptron
 
-Devices: Telescope (mount), Switch (iMate PowerBox).
+Devices: Telescope (mount), Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, via Player One SDK).
+
+- **iCAM cameras are rebadged Player One cameras** (2026-08-26): the iCAM178M enumerates as USB `a0a0:178b` with the descriptor string "Player One iCAM178M", and the Player One SDK lists it by name with no special handling. iOptron publishes no camera SDK. The `(ioptron, camera)` router branch therefore calls `create_playerone_camera()` under `#ifdef ALPACACORE_ENABLE_PLAYERONE` (not the iOptron flag) — there is no iOptron camera class. The web UI's `ioptron-camera-index` field uses `name="ioptronCameraIndex"` (FormData collision rule) and has its own `INDEX_FIELDS` entry, so auto-numbering is per `(ioptron, camera)`; the SDK index space is still shared with Player One-branded cameras, which the UI helper text says. Any future iCAM model should be checked with `lsusb` first: VID `a0a0` means the alias just works. Validated on iCAM178M (`a0a0:178b`, mono), iCAM462C (`a0a0:462a`, color RGGB) and iCAM464C (`a0a0:464a`, color, IMX464 2712x1538), ConformU 4.5.0 clean on all three.
+- **A sick USB link looks like a driver bug (bit us on the iCAM462C, 2026-08-26)**: the first ConformU run showed `CCDTemperature = -300`, `PulseGuide` failing with `POASetConfig(bool): operation failed` while `CanPulseGuide` was true, and `StartExposure` never leaving Exposing; the server log had `libusb: error [op_set_configuration] failed, error -1 errno 71` on the reopen and the camera later vanished from enumeration (`Camera index out of range`). Re-seating the camera on a direct USB 3 port produced a fully clean run with a valid temperature and working ST4 pulses. Do NOT "fix" the driver for these symptoms (guarding `has_guide_st4` / the -300 sentinel was drafted and reverted); check `journalctl` for errno 71 and `lsusb` for the device first.
 
 Protocol documentation: `AlpacaCore/external/iOptron/RS-232_Command_Language2014V310.md`. No external SDK required — uses RS-232 serial communication directly.
 

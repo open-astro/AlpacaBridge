@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-08-25
+## Updated 2026-08-26
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -37,6 +37,26 @@ This document lists all hardware vendors and device types that are verified to w
   - **Debian 13 (Trixie)**: Wi-Fi has been tested from Raspberry Pi to the mount. Due to the limited Wi-Fi power management on the Raspberry Pi, it is highly recommended to disable low power mode if you opt to connect via Wi-Fi to the mount. A USB connection to the mount is recommended when possible, as commands are much quicker and more reliable.
 
 ## Camera Drivers
+
+### iOptron
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| iCAM178M | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iCAM178M/) |
+| iCAM462C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iCAM462C/) |
+| iCAM464C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iCAM464C/) |
+
+<details>
+<summary><strong>iOptron Camera Driver Notes</strong></summary>
+
+- **Backend**: the iCAM cameras are rebadged Player One cameras (iCAM178M = USB `a0a0:178b`, iCAM462C = `a0a0:462a`, iCAM464C = `a0a0:464a`; the Player One SDK enumerates them by their iCAM names). It is served by the Player One camera driver (Player One Camera SDK v3.10.0) and needs the `ALPACACORE_ENABLE_PLAYERONE` build flag; iOptron publishes no camera SDK.
+- **Configuration**: select vendor iOptron, device type Camera, and the Player One SDK camera index. The index is shared with any Player One-branded cameras on the same system.
+- **Behavior**: identical to the Player One camera driver (see Player One Driver Notes below), including dew heater and fan Actions on cooled models.
+- **Validated**: ConformU 4.5.0 on iCAM178M (mono), iCAM462C (color, RGGB) and iCAM464C (color) hardware (Raspberry Pi, Linux arm64, 2026-08-26): 0 errors, 0 issues, all members within timing targets on all three.
+- **USB link health matters**: a marginal cable/port shows up as `libusb: error [op_set_configuration] failed, error -1 errno 71` in the server log, and the camera then answers with a -300 CCDTemperature, fails PulseGuide (`POASetConfig(bool): operation failed`) and never delivers a frame before dropping off the bus. Re-seat the camera on a direct USB 3 port with a known-good cable; the driver is not at fault. Cold ConformU processes on the Pi show ~0.1-0.16 s first-use marks on enum-typed members (CameraState, SensorType); these are ConformU-side JIT, not the driver, and a warm re-run in the same session is clean.
+- **Verified OS/Architecture**: Linux arm64 (Raspberry Pi).
+
+</details>
 
 ### Player One
 
@@ -104,14 +124,15 @@ This document lists all hardware vendors and device types that are verified to w
 | GPCMOS01200KPF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS01200KPF/) |
 | GPCMOS02000KPA | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPCMOS02000KPA/) |
 | ATR2600M (cooled, IMX571) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/ATR2600M/) |
+| GPM662M (mono, IMX662) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPM662M/) |
 
 <details>
 <summary><strong>ToupTek Driver Notes</strong></summary>
 
 - **SDK**: ToupTek toupcamsdk 2026-01-28 (build target)
 - **Connection**: USB (self-contained `libtoupcam.so`; no libusb/libudev link dependency)
-- **Tested models**: GPCMOS01200KPF and GPCMOS02000KPA (guide cameras) and ATR2600M (cooled APS-C mono, IMX571) — all ConformU-validated on Linux arm64. Other ToupTek models sharing the same SDK are expected to work but have not been individually verified.
-- **ConformU**: 4.3.0 — ATR2600M: 0 errors, 0 issues, 0 timing issues (SDK 59.30701.20260128).
+- **Tested models**: GPCMOS01200KPF and GPCMOS02000KPA (guide cameras), ATR2600M (cooled APS-C mono, IMX571) and GPM662M (uncooled mono, IMX662, HCG/LCG readout modes) — all ConformU-validated on Linux arm64. Other ToupTek models sharing the same SDK are expected to work but have not been individually verified.
+- **ConformU**: 4.3.0 — ATR2600M: 0 errors, 0 issues, 0 timing issues (SDK 59.30701.20260128). 4.5.0 — GPM662M (Raspberry Pi, 2026-08-26): 0 errors, 0 issues, all members within timing targets.
 - **Cooling (TEC)**: Capability-gated on `TOUPCAM_FLAG_TEC` / `TOUPCAM_FLAG_TEC_ONOFF`. Uncooled cameras report `CanSetCCDTemperature = false`. On cooled models (ATR2600M) `CoolerOn` / `SetCCDTemperature` / `CoolerPower` drive the TEC; verified reaching −10 °C on hardware.
 - **Readout modes (conversion gain + High Full Well)**: on sensors that support them, ASCOM `ReadoutModes` exposes the conversion-gain (`HCG` / `LCG`, plus `HDR` on HDR-capable models) and `High Full Well` hardware modes as a dropdown (e.g. NINA). On the IMX571 these trade read-noise vs full-well (HCG = low noise; LCG / High Full Well = larger full well, ~51 ke⁻ → ~100 ke⁻). Sensors without these keep a single `Normal` mode.
 - **Offset**: exposed as ASCOM `Offset` (black level, `TOUPCAM_OPTION_BLACKLEVEL`) on cameras reporting `TOUPCAM_FLAG_BLACKLEVEL`; `OffsetMax` scales with the output bit depth. Cameras without it report `PropertyNotImplemented`.

@@ -6977,6 +6977,29 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "ioptron" && device_type_str == "camera") {
+        // iOptron iCAM cameras (e.g. iCAM178M) are rebadged Player One
+        // cameras: USB VID a0a0, and the Player One SDK enumerates them by
+        // name ("iCAM178M"). Reuse the Player One camera driver directly;
+        // there is no iOptron camera SDK. Requires the Player One build flag.
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+        int camera_index = config.value("cameraIndex", 0);
+
+        auto camera = alpacacore::vendor::playerone::create_playerone_camera(device_number, camera_index);
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
+            util::log_info("Registered iOptron iCAM camera (Player One SDK)");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "iOptron iCAM cameras use the Player One SDK. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "ioptron" && device_type_str == "filterwheel") {
 #ifdef ALPACACORE_ENABLE_IOPTRON
         // iEFW-15 / iEFW-18 filter wheel — USB-serial only, fixed 115200 baud.
@@ -8424,6 +8447,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("gpioChip");
             copy_if_present("pwmFrequencyHz");
             copy_if_present("ports");
+        } else if (device_type == "camera") {
+            // iCAM (Player One rebadge): SDK enumeration index only.
+            copy_if_present("cameraIndex");
         } else if (device_type == "filterwheel") {
             // iEFW: USB-serial only, fixed baud — no baudRate/network fields.
             copy_if_present("connectionType");
