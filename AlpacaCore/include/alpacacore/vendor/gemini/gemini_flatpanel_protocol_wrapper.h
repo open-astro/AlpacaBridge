@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace alpacacore::vendor::gemini {
@@ -37,15 +38,30 @@ enum class FlatPanelConnectionType : std::uint8_t {
  *   - Lite: light-only, no motor. >S# replies "*S<d1><d2><d3>#" (see
  *     get_light_on()/parse_light_flag()).
  *   - Rev2: adds a motorized cover. >S# replies "*S<id2digits><motor><light><cover>#"
- *     (see get_status_rev2()). Sourced from INDI's open-source
+ *     (see get_motorized_status()). Sourced from INDI's open-source
  *     GeminiFlatpanelRev2Adapter (indilib/indi, drivers/auxiliary/
  *     gemini_flatpanel_adapters.cpp), unlike the Lite parsing which was
  *     reverse-engineered from traffic captures of the vendor's own app.
  *     ConformU 4.4.0 validated against a real Rev2 unit (firmware 408,
  *     Linux arm64): 0 errors, 0 issues, 0 timing issues (see AGENTS.md and
  *     AlpacaCore/conformu/Gemini/Astro Automatic FlatPanel v2/).
+ *   - Pro ("Motorized Flat Panel V3" on the vendor's store): motorized cover
+ *     with a different >S# layout, "*S<motor>M<light>L<cover>C..." -- the
+ *     flags sit at fixed positions 2/4/6 with letter tags between them and
+ *     extra trailing fields the driver ignores (see get_motorized_status()).
+ *     Per INDI's GeminiFlatpanelProAdapter; confirmed on hardware (firmware
+ *     107): ">S#" -> "*S0M0L2C0D76C405O#".
  */
-enum class FlatPanelModel : std::uint8_t { Lite, Rev2 };
+enum class FlatPanelModel : std::uint8_t { Lite, Rev2, Pro };
+
+/**
+ * @brief Expected >H# handshake reply for a given model, e.g.
+ * "*HGeminiFlatPanelPro#". Confirmed on hardware for Lite (firmware 206),
+ * Rev2 (firmware 408) and Pro (firmware 107); connect() only WARNS on a
+ * mismatch (the generic "*H" gate still decides accept/reject) so a
+ * misconfigured flatPanelModel is diagnosable from the log.
+ */
+std::string_view expected_flatpanel_handshake_reply(FlatPanelModel model);
 
 /**
  * @brief Connection configuration for a Gemini flat panel (Lite or Rev2).
@@ -68,9 +84,9 @@ struct FlatPanelConnectionConfig {
 enum class FlatPanelCoverState : std::uint8_t { Moving = 0, Closed = 1, Open = 2, TimedOut = 3 };
 
 /**
- * @brief Parsed >S# status for a Rev2 panel (light, motor, and cover state together).
+ * @brief Parsed >S# status for a motorized (Rev2/Pro) panel (light, motor, and cover state together).
  */
-struct FlatPanelRev2Status {
+struct FlatPanelMotorizedStatus {
     bool light_on = false;
     bool motor_running = false;
     FlatPanelCoverState cover_state = FlatPanelCoverState::Moving;
@@ -133,7 +149,7 @@ bool is_flatpanel_handshake_reply(const std::string& reply);
  * >J# -> "*J64#"). >S# is the one exception -- on the Lite its payload is
  * three single-digit flags ("*S111#"), not one combined number; see
  * parse_light_flag() in the .cpp for why that needs its own parser. The
- * Rev2 >S# reply has a different, longer layout — see get_status_rev2().
+ * Rev2 >S# reply has a different, longer layout — see get_motorized_status().
  *
  * The Rev2 (motorized cover) commands are sourced from INDI's open-source
  * GeminiFlatpanelRev2Adapter (indilib/indi, drivers/auxiliary/
@@ -189,27 +205,31 @@ public:
     /** @brief Set brightness (0-255). Command >B<value># */
     void set_brightness(int value);
 
-    // --- Rev2-only commands (motorized cover) ---
+    // --- Motorized-cover commands (Rev2 and Pro only) ---
 
     /**
-     * @brief Get combined light/motor/cover status (Rev2 only). Command >S#
+     * @brief Get combined light/motor/cover status (Rev2/Pro only). Command >S#
      *
      * Unlike get_light_on(), which reads only the Lite's 3-flag >S# reply,
      * this parses the Rev2 7-char layout ("*S<id2digits><motor><light><cover>#")
+     * or, when the configured model is Pro, the Pro layout (flags at
+     * positions 2/4/6 -- see parse_pro_status())
      * including the device-ID gate (19 or 99) INDI's adapter checks before
      * trusting the reply.
      */
-    FlatPanelRev2Status get_status_rev2();
+    FlatPanelMotorizedStatus get_motorized_status();
 
     /**
-     * @brief Open the motorized cover (Rev2 only). Command >O#, expects "*OOpened#".
+     * @brief Open the motorized cover (Rev2/Pro only). Command >O#, expects "*OOpened#"
+     * (Rev2, exact) or any "*O"-prefixed ack (Pro, per INDI: "*O", "*O#" or "*OOpened#").
      * Uses a long timeout -- cover travel is a mechanical motion, not an
      * instant ack, unlike the light/brightness commands.
      */
     void open_cover();
 
     /**
-     * @brief Close the motorized cover (Rev2 only). Command >C#, expects "*CClosed#".
+     * @brief Close the motorized cover (Rev2/Pro only). Command >C#, expects "*CClosed#"
+     * (Rev2, exact) or any "*C"-prefixed ack (Pro).
      */
     void close_cover();
 

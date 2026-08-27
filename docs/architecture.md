@@ -115,7 +115,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | SkyWatcher (direct MC) | Telescope (Wave 100i/150i, AZ-GTi class, motor controller protocol over USB or WiFi UDP) | Protocol wrapper | Production |
 | Celestron | Telescope | Protocol wrapper | Production |
 | OnStep | Telescope (generic DIY/retrofit mounts) | Protocol wrapper | Production |
-| Losmandy Gemini | Focuser, CoverCalibrator (Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2) | Protocol wrapper | Production |
+| Losmandy Gemini | Focuser, CoverCalibrator (Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3) | Protocol wrapper | Production |
 | WandererAstro | CoverCalibrator (WandererCover V4), Rotator (WandererRotator Mini V1/V2), FilterWheel (SFW50/SFW50S/SFW36S), Switch (WandererBox Pro V3) | Protocol wrapper | Production |
 | Astroasis | Focuser (Oasis Focuser) | Protocol wrapper | Production |
 | WeeWX | ObservingConditions | HTTP client | Production |
