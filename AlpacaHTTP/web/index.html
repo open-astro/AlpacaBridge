@@ -216,6 +216,16 @@
                     </table>
                   </div>
 
+                  <div id="ioptron-camera-config" style="display: none;">
+                    <h3>iOptron iCAM Camera Configuration</h3>
+                    <small style="color: #666;">iCAM cameras (e.g. iCAM178M) are Player One cameras under the hood and use the Player One camera SDK. The camera index is shared with any Player One cameras on this system.</small>
+                    <div class="form-group">
+                        <label for="ioptron-camera-index">Camera Index:</label>
+                        <input type="number" id="ioptron-camera-index" name="ioptronCameraIndex" value="0" min="0">
+                        <small>0-based index in the Player One SDK enumeration (includes Player One-branded cameras)</small>
+                    </div>
+                  </div>
+
                   <div id="ioptron-focuser-config" style="display: none;">
                     <h3>iOptron iEAF / iAFS2/3 Focuser Configuration</h3>
                     <small style="color: #666;">USB-serial connection at a fixed 115200 baud. Covers the iEAF and the iAFS2/3 (same protocol). Auto-detect scans for the focuser's Prolific USB-serial adapter and verifies it with the device handshake.</small>

@@ -12,7 +12,7 @@ You DO NOT start or stop AlpacaBridge — that is the user's responsibility. You
 
 **Test rig identity (standard, do not re-ask):** hostname `openastro.lan` (future images may carry a 4-hex-digit MAC suffix, `openastro-XXXX.lan`, but the name always starts with `openastro`); SSH user `astro`, password `astro`; `sudo` requires the password (`echo astro | sudo -S <cmd>`). If key auth is not set up, use `sshpass -p astro ssh ...` or run `ssh-copy-id astro@openastro.lan` once. `astro.lan` is the OLD hostname and no longer resolves.
 
-**Is the target running the build under test?** ConformU results are only meaningful when the target device runs the build being validated. If the code under test was just built locally and the target SBC hasn't been updated, tell the user to run `/deploy-test` first — it builds the .deb, installs it on the SBC over SSH, restarts the service, and verifies the running version — then come back to `/conformu`.
+**Is the target running the build under test?** ConformU results are only meaningful when the target device runs the build being validated. If the code under test was just built locally and the target SBC hasn't been updated, tell the user to run `/deploy-test` first — it builds the .deb, installs it on the SBC over SSH, restarts the service, and verifies the running version — then come back to `/conformu`. If the SBC is only reachable through a Raspberry Pi Connect browser shell (no SSH), use `/deploy-remote-test` instead; it ships the .deb via a temporary GitHub pre-release.
 
 ## How to use arguments
 

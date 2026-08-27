@@ -47,6 +47,14 @@ Gets the current working tree running on the test device so ConformU validates t
 - Copies it to the SBC over SSH, installs it, and restarts `alpacabridge.service`
 - Verifies the device is reachable and reports the deployed version via the management API before handing off to `/conformu`
 
+### `/deploy-remote-test` — same, for an SBC with no SSH path
+
+For a test SBC reachable only through a Raspberry Pi Connect browser shell (no LAN/SSH):
+
+- Builds the .deb and publishes it as a temporary GitHub pre-release (`test-<suffix>-<hash>` tag) on the project repo
+- Prints the paste-ready `curl` / `dpkg -i` / restart / md5 verification commands for the remote shell
+- Deletes the pre-release and its tag once testing is done; ConformU then runs on the SBC against `127.0.0.1:6800`
+
 ### `/conformu` — hardware validation
 
 Runs ConformU against a connected AlpacaBridge device and processes the results:

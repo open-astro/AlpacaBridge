@@ -344,6 +344,7 @@ const INDEX_FIELDS = [
     { fieldId: 'astroasis-focuser-index', vendor: 'astroasis', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'astroasis-hid-path' },
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'ioptron-ieaf-focuser-index', vendor: 'ioptron', deviceType: 'focuser', configKey: 'focuserIndex' },
+    { fieldId: 'ioptron-camera-index', vendor: 'ioptron', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'ioptron-filterwheel-index', vendor: 'ioptron', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
     // Same configKey as the Lite field above: panelIndex is an index into
@@ -795,6 +796,10 @@ function startEditDevice(device) {
         if (ieafConnectionTypeEl) {
             ieafConnectionTypeEl.dispatchEvent(new Event('change'));
         }
+        updateIoptronConfigFields();
+    } else if (vendor === 'ioptron' && deviceType === 'camera') {
+        // iCAM (Player One SDK): enumeration index only.
+        setFormValue('ioptron-camera-index', config.cameraIndex);
         updateIoptronConfigFields();
     } else if (vendor === 'ioptron') {
         const ioptronConnectionType = config.connectionType || 'auto';
@@ -2044,8 +2049,9 @@ function updateVendorOptions() {
     const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
     if (ioptronOption) {
         // iOptron provides the mount (telescope), the iMate PowerBox (switch),
-        // the iEAF / iAFS2/3 focusers and the iEFW filter wheel.
-        const ioptronAllowed = isTelescope || isSwitch || isFocuser || isFilterWheel;
+        // the iEAF / iAFS2/3 focusers, the iEFW filter wheel and the iCAM
+        // cameras (Player One SDK).
+        const ioptronAllowed = isTelescope || isSwitch || isFocuser || isFilterWheel || isCamera;
         ioptronOption.disabled = !ioptronAllowed;
         ioptronOption.hidden = !ioptronAllowed;
     }
@@ -2135,7 +2141,7 @@ function updateVendorOptions() {
     if (!isFocuser && vendorSelect.value === 'astroasis') {
         vendorSelect.value = '';
     }
-    if (!isTelescope && !isSwitch && !isFocuser && !isFilterWheel && vendorSelect.value === 'ioptron') {
+    if (!isTelescope && !isSwitch && !isFocuser && !isFilterWheel && !isCamera && vendorSelect.value === 'ioptron') {
         vendorSelect.value = '';
     }
     if (!isTelescope && vendorSelect.value === 'synscan') {
@@ -2319,7 +2325,8 @@ function updateIoptronConfigFields() {
     const switchSection = document.getElementById('ioptron-switch-config');
     const focuserSection = document.getElementById('ioptron-focuser-config');
     const filterwheelSection = document.getElementById('ioptron-filterwheel-config');
-    if (!telescopeSection || !switchSection || !focuserSection || !filterwheelSection) {
+    const cameraSection = document.getElementById('ioptron-camera-config');
+    if (!telescopeSection || !switchSection || !focuserSection || !filterwheelSection || !cameraSection) {
         return;
     }
     const deviceTypeSelect = document.getElementById('device-type');
@@ -2327,10 +2334,12 @@ function updateIoptronConfigFields() {
     const isSwitch = deviceType === 'switch';
     const isFocuser = deviceType === 'focuser';
     const isFilterWheel = deviceType === 'filterwheel';
-    telescopeSection.style.display = (isSwitch || isFocuser || isFilterWheel) ? 'none' : 'block';
+    const isCamera = deviceType === 'camera';
+    telescopeSection.style.display = (isSwitch || isFocuser || isFilterWheel || isCamera) ? 'none' : 'block';
     switchSection.style.display = isSwitch ? 'block' : 'none';
     focuserSection.style.display = isFocuser ? 'block' : 'none';
     filterwheelSection.style.display = isFilterWheel ? 'block' : 'none';
+    cameraSection.style.display = isCamera ? 'block' : 'none';
 }
 
 const ioptronConnectionType = document.getElementById('ioptron-connection-type');
@@ -3160,6 +3169,10 @@ document.getElementById('device-form').addEventListener('submit', async function
         } else {
             deviceData.focuserIndex = parseInt(formData.get('ioptronIeafFocuserIndex')) || 0;
         }
+    } else if (deviceData.vendor === 'ioptron' && normalizeDeviceType(deviceData.deviceType) === 'camera') {
+        // iCAM (Player One SDK): unique vendor-prefixed field name so the
+        // hidden ZWO cameraIndex block does not win the FormData collision.
+        deviceData.cameraIndex = parseInt(formData.get('ioptronCameraIndex')) || 0;
     } else if (deviceData.vendor === 'ioptron') {
         deviceData.connectionType = formData.get('ioptronConnectionType') || 'auto';
         if (deviceData.connectionType === 'serial') {
