@@ -1394,6 +1394,17 @@ int main() {
         remove_device(router, "playerone", "camera", 9611);
     }
     {
+        // ioptron / camera (iCAM178M) — rebadged Player One camera routed to
+        // the Player One driver; cameraIndex must survive the sanitizer.
+        const auto cfg = roundtrip_config(
+            router, {{"vendor", "ioptron"}, {"deviceType", "camera"}, {"deviceNumber", 9624}, {"cameraIndex", 2}},
+            "Camera", 9624);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "ioptron");
+        EXPECT(cfg.value("cameraIndex", -1) == 2);
+        remove_device(router, "ioptron", "camera", 9624);
+    }
+    {
         // playerone / filterwheel
         const auto cfg =
             roundtrip_config(router,
