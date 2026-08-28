@@ -720,8 +720,15 @@ public:
         // ~100 ms of mount latency (HAE16 EQ ConformU 4.5.0, 2026-08-25:
         // 0.113 s against the 0.1 s FAST target when the 1 s cache had just
         // lapsed), so this read tolerates a longer staleness than RA/Dec.
+        // slew_in_progress_ (set by every GOTO initiator, cleared once
+        // Slewing has observed completion) is the authoritative "a move may
+        // be changing pier side" signal here: cached_status_.is_slewing is
+        // only refreshed when someone polls Slewing/DeviceState, so a client
+        // that polls SideOfPier alone across a flip would otherwise ride the
+        // 5 s window on pre-flip data (PR #228 review). While a slew is in
+        // flight every read goes live; the cost only applies mid-move.
         const auto now = std::chrono::steady_clock::now();
-        if (!position_cache_valid_ || cached_status_.is_slewing ||
+        if (!position_cache_valid_ || slew_in_progress_ || cached_status_.is_slewing ||
             (now - last_position_update_) >= kSideOfPierPositionTtl) {
             refresh_position_cache_locked();
         }
