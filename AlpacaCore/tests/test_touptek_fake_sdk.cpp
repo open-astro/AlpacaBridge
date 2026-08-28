@@ -21,6 +21,10 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
+#include <chrono>
+#include <functional>
+#include <thread>
+
 #include "catch2_compat.h"
 #include "fake_touptek_sdk.h"
 
@@ -179,4 +183,56 @@ TEST_CASE("ToupTek focuser - position round-trips through the AAF Set/Get pair",
     driver->move(1234);
     CHECK(driver->get_position() == 1234);
     driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is silent during an exposure",
+          "[touptek][camera][unit][fakesdk]") {
+    // Regression guard for the ATR585M E_UNEXPECTED frame drops: thermal USB
+    // control transfers issued while Toupcam_WaitImageV4 is pending make the
+    // SDK abandon the frame. The poller must (1) have read the temperature
+    // before the client's first DeviceState poll, (2) issue NO thermal SDK
+    // call while exposure_active_, while the getters still answer from the
+    // cache, and (3) resume once the exposure ends.
+    auto fake = make_fake_with_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // (1) The first poller tick runs as soon as set_connected releases mutex_.
+    auto wait_until = [](const std::function<bool()>& pred, std::chrono::milliseconds limit) {
+        const auto deadline = std::chrono::steady_clock::now() + limit;
+        while (!pred() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return pred();
+    };
+    REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }, std::chrono::milliseconds(2000)));
+    CHECK(fake.call_count("get_tec_voltage_deciV") >= 1);  // default fake camera supports the cooler
+    CHECK(fake.call_count("get_tec_voltage_max_deciV") == 1);
+
+    // (2) Hold the frame so the exposure stays in flight across two poll intervals.
+    fake.hold_wait_image(true);
+    driver->start_exposure(0.05, true);
+    REQUIRE(wait_until([&] { return fake.call_count("wait_image") >= 1; }, std::chrono::milliseconds(2000)));
+    const int temp_calls = fake.call_count("get_temperature_deciC");
+    const int tec_calls = fake.call_count("get_tec_voltage_deciV");
+    std::this_thread::sleep_for(std::chrono::milliseconds(2300));
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    // Getters answer from the cache (no SDK traffic) while exposing.
+    CHECK_NOTHROW(driver->get_ccd_temperature());
+    CHECK_NOTHROW(driver->get_cooler_power());
+    CHECK(fake.call_count("get_temperature_deciC") == temp_calls);
+    CHECK(fake.call_count("get_tec_voltage_deciV") == tec_calls);
+    CHECK(fake.call_count("get_tec_voltage_max_deciV") == 1);
+
+    // (3) End the exposure; the poller resumes.
+    fake.release_wait_image();
+    REQUIRE(wait_until(
+        [&] { return !driver->get_connected() || driver->get_camera_state() == alpacacore::CameraState::Idle; },
+        std::chrono::milliseconds(3000)));
+    REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") > temp_calls; },
+                       std::chrono::milliseconds(3000)));
+
+    driver->set_connected(false);
+    CHECK(fake.ref_count("fake-cam-0") == 0);
 }
