@@ -142,11 +142,79 @@ void Server::wait() {
     }
 }
 
+namespace {
+
+// Create a bound, listening HTTP socket on `port`. Prefers a dual-stack IPv6
+// socket (IPV6_V6ONLY off) so both ::1 and 127.0.0.1 connect directly; falls
+// back to IPv4-only where IPv6 is unavailable.
+//
+// Why dual-stack: .NET clients (ConformU, NINA on Linux/macOS) connecting to
+// "127.0.0.1" or "localhost" try ::1 first and only then 127.0.0.1. With an
+// IPv4-only listener every request pays a refused IPv6 SYN before the real
+// connect, and on a Raspberry Pi that fallback showed up in ConformU as a
+// consistent ~100 ms on a handful of otherwise 1 ms members (captured with
+// tcpdump on the HAE16 EQ validation, 2026-08-25).
+util::SocketHandle create_listener(int port) {
+    util::SocketHandle fd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd != util::kInvalidSocket) {
+        int opt = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
+        int v6only = 0;
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&v6only), sizeof(v6only)) != 0) {
+            // Without a confirmed dual-stack socket, IPv4 clients could be
+            // locked out on a host whose default is v6-only; fall back to the
+            // IPv4 listener rather than guess.
+            util::log_warning("IPV6_V6ONLY could not be cleared (" +
+                              util::socket_error_message(util::socket_get_last_error()) +
+                              "); falling back to an IPv4-only HTTP listener");
+            util::socket_close(fd);
+            fd = util::kInvalidSocket;
+        }
+        struct sockaddr_in6 address6 {};
+        address6.sin6_family = AF_INET6;
+        address6.sin6_addr = in6addr_any;
+        address6.sin6_port = htons(static_cast<u_short>(port));
+        if (fd != util::kInvalidSocket) {
+            if (bind(fd, reinterpret_cast<struct sockaddr*>(&address6), sizeof(address6)) == 0 && listen(fd, 10) == 0) {
+                return fd;
+            }
+            util::socket_close(fd);
+            util::log_warning("Dual-stack HTTP listener unavailable, falling back to IPv4 only");
+        }
+    }
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == util::kInvalidSocket) {
+        return util::kInvalidSocket;
+    }
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
+    struct sockaddr_in address;
+    std::memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(static_cast<u_short>(port));
+    if (bind(fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) < 0 || listen(fd, 10) < 0) {
+        util::socket_close(fd);
+        return util::kInvalidSocket;
+    }
+    return fd;
+}
+
+}  // namespace
+
 void Server::run_server() {
     util::ensure_winsock();
-    util::SocketHandle server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    const int port = config_.http_port();
+    if (port < 0 || port > static_cast<int>(std::numeric_limits<u_short>::max())) {
+        util::log_error("Invalid HTTP port: " + std::to_string(port));
+        running_ = false;
+        return;
+    }
+
+    util::SocketHandle server_fd = create_listener(port);
     if (server_fd == util::kInvalidSocket) {
-        util::log_error("Failed to create socket");
+        util::log_error("Failed to bind HTTP listener to port " + std::to_string(port));
         running_ = false;
         return;
     }
@@ -154,44 +222,7 @@ void Server::run_server() {
     // Store server_fd so we can close it from stop()
     server_fd_.store(server_fd);
 
-    // Set socket options
-    int opt = 1;
-    const char* opt_ptr = reinterpret_cast<const char*>(&opt);
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, opt_ptr, sizeof(opt));
-
-    // Bind socket
-    struct sockaddr_in address;
-    std::memset(&address, 0, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    const int port = config_.http_port();
-    if (port < 0 || port > static_cast<int>(std::numeric_limits<u_short>::max())) {
-        util::log_error("Invalid HTTP port: " + std::to_string(port));
-        util::socket_close(server_fd);
-        server_fd_.store(util::kInvalidSocket);
-        running_ = false;
-        return;
-    }
-    address.sin_port = htons(static_cast<u_short>(port));
-
-    if (bind(server_fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) < 0) {
-        util::log_error("Failed to bind socket to port " + std::to_string(config_.http_port()));
-        util::socket_close(server_fd);
-        server_fd_.store(util::kInvalidSocket);
-        running_ = false;
-        return;
-    }
-
-    // Listen
-    if (listen(server_fd, 10) < 0) {
-        util::log_error("Failed to listen on socket");
-        util::socket_close(server_fd);
-        server_fd_.store(util::kInvalidSocket);
-        running_ = false;
-        return;
-    }
-
-    util::log_info("Server listening on port " + std::to_string(config_.http_port()));
+    util::log_info("Server listening on port " + std::to_string(port));
 
     // The listener fd can go bad underneath us without stop() being called (a
     // stray double-close elsewhere in the process can free and then re-close
@@ -221,18 +252,12 @@ void Server::run_server() {
             }
         }
         for (int attempt = 0; attempt < 10 && running_; ++attempt) {
-            util::SocketHandle fd = socket(AF_INET, SOCK_STREAM, 0);
+            util::SocketHandle fd = create_listener(port);
             if (fd != util::kInvalidSocket) {
-                int ropt = 1;
-                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&ropt), sizeof(ropt));
-                if (bind(fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) == 0 &&
-                    listen(fd, 10) == 0) {
-                    server_fd_.store(fd);
-                    server_fd = fd;
-                    util::log_error("HTTP listener recreated after descriptor loss");
-                    return true;
-                }
-                util::socket_close(fd);
+                server_fd_.store(fd);
+                server_fd = fd;
+                util::log_error("HTTP listener recreated after descriptor loss");
+                return true;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
@@ -288,7 +313,7 @@ void Server::run_server() {
         
         // Connection available - accept it
         if (FD_ISSET(server_fd, &read_fds)) {
-            struct sockaddr_in client_address;
+            struct sockaddr_storage client_address {};
             util::SocketLen client_len = sizeof(client_address);
 
             util::SocketHandle client_fd =
@@ -487,8 +512,18 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
             if (peer.ss_family == AF_INET) {
                 inet_ntop(AF_INET, &reinterpret_cast<struct sockaddr_in*>(&peer)->sin_addr, addr_buf, sizeof(addr_buf));
             } else if (peer.ss_family == AF_INET6) {
-                inet_ntop(AF_INET6, &reinterpret_cast<struct sockaddr_in6*>(&peer)->sin6_addr, addr_buf,
-                          sizeof(addr_buf));
+                // On the dual-stack listener an IPv4 client arrives as a
+                // v4-mapped IPv6 peer (::ffff:a.b.c.d); report the plain
+                // dotted form so the registry key and logs keep the format
+                // the IPv4-only listener produced.
+                const struct in6_addr* a6 = &reinterpret_cast<struct sockaddr_in6*>(&peer)->sin6_addr;
+                if (IN6_IS_ADDR_V4MAPPED(a6)) {
+                    struct in_addr a4 {};
+                    std::memcpy(&a4, &a6->s6_addr[12], sizeof(a4));
+                    inet_ntop(AF_INET, &a4, addr_buf, sizeof(addr_buf));
+                } else {
+                    inet_ntop(AF_INET6, a6, addr_buf, sizeof(addr_buf));
+                }
             }
         }
         request.set_remote_address(addr_buf);

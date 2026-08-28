@@ -241,6 +241,8 @@ public:
                 park_override_until_ = std::chrono::steady_clock::time_point{};
                 park_finalize_pending_ = false;
                 tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
+                slew_override_until_ = std::chrono::steady_clock::time_point{};
+                slew_in_progress_ = false;
                 utc_query_supported_ = true;
                 pulse_guiding_active_.store(false, std::memory_order_release);
                 pulse_guiding_end_ns_.store(0, std::memory_order_relaxed);
@@ -317,6 +319,8 @@ public:
             park_override_until_ = std::chrono::steady_clock::time_point{};
             park_finalize_pending_ = false;
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
+            slew_override_until_ = std::chrono::steady_clock::time_point{};
+            slew_in_progress_ = false;
             pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_ra_hours_ = 0.0;
             pulse_guiding_hold_until_ = std::chrono::steady_clock::time_point{};
@@ -710,7 +714,27 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
 
-        refresh_position_cache_locked();
+        // Pier side only changes across a slew, flip, park or home, and every
+        // motion initiator invalidates the position cache, so a position a
+        // few seconds old is authoritative here. One :GEP# round trip costs
+        // ~100 ms of mount latency (HAE16 EQ ConformU 4.5.0, 2026-08-25:
+        // 0.113 s against the 0.1 s FAST target when the 1 s cache had just
+        // lapsed), so this read tolerates a longer staleness than RA/Dec.
+        // slew_in_progress_ (set by every GOTO initiator, cleared once
+        // Slewing has observed completion) is the authoritative "a move may
+        // be changing pier side" signal here: cached_status_.is_slewing is
+        // only refreshed when someone polls Slewing/DeviceState, so a client
+        // that polls SideOfPier alone across a flip would otherwise ride the
+        // 5 s window on pre-flip data (PR #228 review). While a slew is in
+        // flight every read goes live. The flag is sticky until the next
+        // Slewing/DeviceState poll observes completion, so a client that
+        // polls SideOfPier alone keeps live reads after the move as well:
+        // never stale, just uncached until it asks whether the slew ended.
+        const auto now = std::chrono::steady_clock::now();
+        if (!position_cache_valid_ || slew_in_progress_ || cached_status_.is_slewing ||
+            (now - last_position_update_) >= kSideOfPierPositionTtl) {
+            refresh_position_cache_locked();
+        }
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
             // ensure_site_info_cached_locked() sets site_info_valid_ on success;
@@ -982,7 +1006,7 @@ public:
         if (slew_override_until_ > now) {
             return true;
         }
-        // HAE29C firmware quirk (hardware-verified 2026-07-14): GOTO stops
+        // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
         // compensating sidereal motion during its final ~1 s approach, so
         // slews settle a consistent ~11-16 arcsec east of the RA target
         // (ConformU tolerance is +/-10"). Re-issuing the GOTO does NOT fix it:
@@ -992,7 +1016,7 @@ public:
         // iterating up to kMaxSlewRefines. RA only: Dec settles within ~0.2"
         // on this firmware and Dec pulse polarity flips with pier side.
         // Slewing stays true while a trim pulse runs.
-        if (slew_in_progress_ && hae29c_quirks_active() && slew_refine_count_ < kMaxSlewRefines) {
+        if (slew_in_progress_ && goto_refine_active() && slew_refine_count_ < kMaxSlewRefines) {
             ++slew_refine_count_;
             try {
                 auto& protocol = iOptronProtocolWrapper::instance();
@@ -1401,21 +1425,25 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_ || slew_dispatch_cancel_.load()) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     return;
                 }
                 try {
                     dispatch_slew_command_locked(phys_ra, phys_dec, true, "SlewToCoordinatesAsync");
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     ALPACA_LOG_WARN("iOptron", std::string("Async slew failed: ") + e.what());
                 } catch (...) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     ALPACA_LOG_WARN("iOptron", "Async slew failed with unknown exception");
                 }
             });
         } catch (const std::exception& e) {
             std::lock_guard<std::mutex> lock(mutex_);
             slew_in_progress_ = false;
+            clear_slew_override_locked();
             throw AlpacaException(std::string("Failed to start async slew: ") + e.what(),
                                   AlpacaError::DriverException);
         }
@@ -1500,6 +1528,10 @@ public:
             }
             slew_in_progress_ = true;
             ensure_not_parked_locked("SlewToAltAzAsync");
+            // Same reason as prepare_slew_state_locked(): Slewing must read
+            // true from the moment this initiator returns, not from when the
+            // dispatch thread gets the mutex.
+            slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         }
 
         try {
@@ -1519,6 +1551,7 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_ || slew_dispatch_cancel_.load()) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     return;
                 }
                 try {
@@ -1530,15 +1563,18 @@ public:
                     dispatch_slew_command_locked(ra_hours, dec_degrees, true, "SlewToAltAzAsync");
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     ALPACA_LOG_WARN("iOptron", std::string("Async AltAz slew failed: ") + e.what());
                 } catch (...) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     ALPACA_LOG_WARN("iOptron", "Async AltAz slew failed with unknown exception");
                 }
             });
         } catch (const std::exception& e) {
             std::lock_guard<std::mutex> lock(mutex_);
             slew_in_progress_ = false;
+            clear_slew_override_locked();
             throw AlpacaException(std::string("Failed to start async Alt/Az slew: ") + e.what(),
                                   AlpacaError::DriverException);
         }
@@ -1601,6 +1637,7 @@ private:
     static constexpr std::chrono::seconds kSiteInfoCacheTtl{60};
     static constexpr std::chrono::milliseconds kStatusCacheTtl{1000};
     static constexpr std::chrono::milliseconds kPositionCacheTtl{1000};
+    static constexpr std::chrono::seconds kSideOfPierPositionTtl{5};
     static constexpr std::chrono::milliseconds kSlewPollInterval{250};
     static constexpr std::chrono::seconds kSlewTimeout{300};
     static constexpr std::chrono::seconds kFastCacheGrace{30};
@@ -1613,11 +1650,16 @@ private:
     static constexpr double kSiderealRateDegPerSec = 360.0 / kSiderealSeconds;
     static constexpr double kDefaultGuideRateFraction = 0.5;
 
-    // All three HAE29C firmware-quirk workarounds (wedged-park finalizer,
-    // zero-distance park finalizer, GOTO refinement) are gated on the exact
-    // model code so other iOptron mounts (HAE43, HEM27, ...) keep the
-    // original, hardware-validated behavior.
+    // The HAE29C park firmware-quirk workarounds (wedged-park finalizer,
+    // zero-distance park finalizer) are gated on the exact model code so
+    // other iOptron mounts (HAE43, HEM27, ...) keep the original,
+    // hardware-validated behavior.
     bool hae29c_quirks_active() const { return mount_info_.model_code == "0036"; }
+
+    // GOTO final-approach RA refinement. Hardware-verified on HAE29C EQ
+    // (0036, 2026-07-14) and HAE16 EQ (0012, ConformU 2026-08-25: same
+    // 11-16 arcsec east RA settle, Dec within 0.2 arcsec, park clean).
+    bool goto_refine_active() const { return mount_info_.model_code == "0036" || mount_info_.model_code == "0012"; }
 
     void check_connected() const {
         if (!connected_) {
@@ -1818,7 +1860,17 @@ private:
         slew_target_ra_hours_ = phys_ra;
         slew_target_dec_degrees_ = phys_dec;
         slew_refine_count_ = 0;
+        // Arm the post-dispatch Slewing override HERE, not only after the
+        // mount accepts the GOTO: the async initiators hand the wire commands
+        // to a thread, and a Slewing poll that wins the mutex before that
+        // thread has sent :MS1 would otherwise see a not-slewing mount, run
+        // the settle refinement against the pre-slew position and report the
+        // slew complete before it started (caught by the loopback fake-mount
+        // test). Every dispatch-failure path clears it again.
+        slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     }
+
+    void clear_slew_override_locked() { slew_override_until_ = std::chrono::steady_clock::time_point{}; }
 
     void dispatch_slew_command_locked(double ra, double dec, bool allow_soft_fail, const char* label) {
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -1850,6 +1902,7 @@ private:
         }
         if (!accepted) {
             slew_in_progress_ = false;
+            clear_slew_override_locked();
             if (allow_soft_fail) {
                 ALPACA_LOG_WARN("iOptron", "Slew rejected by mount - treating as no-op for async slew");
                 return;
