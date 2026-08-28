@@ -1411,21 +1411,25 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_ || slew_dispatch_cancel_.load()) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     return;
                 }
                 try {
                     dispatch_slew_command_locked(phys_ra, phys_dec, true, "SlewToCoordinatesAsync");
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     ALPACA_LOG_WARN("iOptron", std::string("Async slew failed: ") + e.what());
                 } catch (...) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     ALPACA_LOG_WARN("iOptron", "Async slew failed with unknown exception");
                 }
             });
         } catch (const std::exception& e) {
             std::lock_guard<std::mutex> lock(mutex_);
             slew_in_progress_ = false;
+            clear_slew_override_locked();
             throw AlpacaException(std::string("Failed to start async slew: ") + e.what(),
                                   AlpacaError::DriverException);
         }
@@ -1510,6 +1514,10 @@ public:
             }
             slew_in_progress_ = true;
             ensure_not_parked_locked("SlewToAltAzAsync");
+            // Same reason as prepare_slew_state_locked(): Slewing must read
+            // true from the moment this initiator returns, not from when the
+            // dispatch thread gets the mutex.
+            slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         }
 
         try {
@@ -1529,6 +1537,7 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_ || slew_dispatch_cancel_.load()) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     return;
                 }
                 try {
@@ -1540,15 +1549,18 @@ public:
                     dispatch_slew_command_locked(ra_hours, dec_degrees, true, "SlewToAltAzAsync");
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     ALPACA_LOG_WARN("iOptron", std::string("Async AltAz slew failed: ") + e.what());
                 } catch (...) {
                     slew_in_progress_ = false;
+                    clear_slew_override_locked();
                     ALPACA_LOG_WARN("iOptron", "Async AltAz slew failed with unknown exception");
                 }
             });
         } catch (const std::exception& e) {
             std::lock_guard<std::mutex> lock(mutex_);
             slew_in_progress_ = false;
+            clear_slew_override_locked();
             throw AlpacaException(std::string("Failed to start async Alt/Az slew: ") + e.what(),
                                   AlpacaError::DriverException);
         }
@@ -1834,7 +1846,17 @@ private:
         slew_target_ra_hours_ = phys_ra;
         slew_target_dec_degrees_ = phys_dec;
         slew_refine_count_ = 0;
+        // Arm the post-dispatch Slewing override HERE, not only after the
+        // mount accepts the GOTO: the async initiators hand the wire commands
+        // to a thread, and a Slewing poll that wins the mutex before that
+        // thread has sent :MS1 would otherwise see a not-slewing mount, run
+        // the settle refinement against the pre-slew position and report the
+        // slew complete before it started (caught by the loopback fake-mount
+        // test). Every dispatch-failure path clears it again.
+        slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     }
+
+    void clear_slew_override_locked() { slew_override_until_ = std::chrono::steady_clock::time_point{}; }
 
     void dispatch_slew_command_locked(double ra, double dec, bool allow_soft_fail, const char* label) {
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -1866,6 +1888,7 @@ private:
         }
         if (!accepted) {
             slew_in_progress_ = false;
+            clear_slew_override_locked();
             if (allow_soft_fail) {
                 ALPACA_LOG_WARN("iOptron", "Slew rejected by mount - treating as no-op for async slew");
                 return;

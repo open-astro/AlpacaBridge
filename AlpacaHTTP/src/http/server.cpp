@@ -160,16 +160,28 @@ util::SocketHandle create_listener(int port) {
         int opt = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
         int v6only = 0;
-        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&v6only), sizeof(v6only));
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&v6only), sizeof(v6only)) != 0) {
+            // Without a confirmed dual-stack socket, IPv4 clients could be
+            // locked out on a host whose default is v6-only; fall back to the
+            // IPv4 listener rather than guess.
+            util::log_warning("IPV6_V6ONLY could not be cleared (" +
+                              util::socket_error_message(util::socket_get_last_error()) +
+                              "); falling back to an IPv4-only HTTP listener");
+            util::socket_close(fd);
+            fd = util::kInvalidSocket;
+        }
         struct sockaddr_in6 address6 {};
         address6.sin6_family = AF_INET6;
         address6.sin6_addr = in6addr_any;
         address6.sin6_port = htons(static_cast<u_short>(port));
-        if (bind(fd, reinterpret_cast<struct sockaddr*>(&address6), sizeof(address6)) == 0 && listen(fd, 10) == 0) {
-            return fd;
+        if (fd != util::kInvalidSocket) {
+            if (bind(fd, reinterpret_cast<struct sockaddr*>(&address6), sizeof(address6)) == 0 &&
+                listen(fd, 10) == 0) {
+                return fd;
+            }
+            util::socket_close(fd);
+            util::log_warning("Dual-stack HTTP listener unavailable, falling back to IPv4 only");
         }
-        util::socket_close(fd);
-        util::log_warning("Dual-stack HTTP listener unavailable, falling back to IPv4 only");
     }
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
