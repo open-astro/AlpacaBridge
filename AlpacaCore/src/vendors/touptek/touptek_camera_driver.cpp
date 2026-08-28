@@ -98,6 +98,7 @@ public:
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
         stop_exposure_thread();
+        stop_thermal_poller();
         stop_pulse_guide_thread();
         if (connected_.load()) {
             try {
@@ -141,7 +142,11 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
+        // exposure_lifecycle_mutex_ also serialises the thermal poller's
+        // spawn (connect path, below) against its join (disconnect path), so
+        // the std::thread object is never assigned and joined concurrently.
+        // Taken in both directions, before mutex_ (documented lock order).
+        std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         if (!connected) {
             // Join the exposure thread BEFORE taking mutex_ and closing the handle:
             // the thread runs Toupcam_WaitImageV4 on a raw handle snapshot, so
@@ -152,8 +157,10 @@ public:
             // start_exposure cannot spawn a fresh thread in the join→close gap
             // (it would block on this mutex, then fail NotConnected after we
             // null the handle). Lock order: exposure_lifecycle_mutex_ -> mutex_.
-            lifecycle_lock.lock();
             stop_exposure_thread();
+            // The poller takes mutex_ on every tick, so join it out here too --
+            // before mutex_ is taken and the handle closed under it.
+            stop_thermal_poller();
         }
         std::lock_guard<std::mutex> lock(mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
@@ -311,6 +318,11 @@ public:
                 reset_exposure_state_locked();
             }
             connected_.store(true);
+            // Spawned with mutex_ still held (never joined here -- see the top
+            // of this function); its first tick blocks on mutex_ until
+            // set_connected returns, then primes the caches before the client's
+            // first DeviceState poll.
+            start_thermal_poller();
             return;
         }
 
@@ -426,11 +438,22 @@ public:
     }
     bool get_can_stop_exposure() const override { return true; }
 
+    // Toupcam_get_Temperature and the TEC get_Option reads are synchronous USB
+    // control transfers (~50-70 ms each on an SBC). DeviceState reads
+    // CCDTemperature, CoolerPower and HeatSinkTemperature in one call, so served
+    // live that is ~0.17 s against a 0.1 s fast-response target -- and ConformU
+    // times the FIRST DeviceState after connect, so an on-demand cache cannot
+    // help. A background poller (thermal_poll_loop) refreshes the readings every
+    // kThermalPollInterval; the getters serve the cached value while it is
+    // younger than kThermalCacheMaxAge and fall back to a live read otherwise.
     double get_ccd_temperature() const override {
         ensure_connected();
         auto& sdk = sdk_;
-        int deci_c = with_handle([&](HToupcam h) { return sdk.get_temperature_deciC(h); });
-        return static_cast<double>(deci_c) / 10.0;
+        return with_handle([&](HToupcam h) {
+            if (thermal_cache_fresh_locked()) return temperature_cache_c_;
+            read_temperature_locked(h, sdk);
+            return temperature_cache_c_;
+        });
     }
 
     bool get_cooler_on() const override {
@@ -456,11 +479,15 @@ public:
         auto& sdk = sdk_;
         try {
             // Both reads under one with_handle so they come from the same open.
+            // Served from the thermal poller's cache when fresh (see
+            // get_ccd_temperature); TEC_VOLTAGE_MAX is a per-model constant read
+            // once per connection.
             int v = 0;
             int vmax = 0;
             with_handle([&](HToupcam h) {
-                v = sdk.get_tec_voltage_deciV(h);
-                vmax = sdk.get_tec_voltage_max_deciV(h);
+                if (!thermal_cache_fresh_locked()) read_tec_voltage_locked(h, sdk);
+                v = tec_voltage_deciV_;
+                vmax = tec_voltage_max_deciV_;
             });
             if (vmax <= 0) return 0.0;
             double pct = (static_cast<double>(v) / static_cast<double>(vmax)) * 100.0;
@@ -909,6 +936,86 @@ public:
         });
     }
 
+    // --- Background thermal poller ---------------------------------------
+    // All cache fields are guarded by mutex_ (callers hold it via with_handle).
+
+    // During an exposure the last reading is served regardless of age: no
+    // thermal USB control transfer may be issued while Toupcam_WaitImageV4 is
+    // pending (the SDK answers E_UNEXPECTED / drops the frame, seen on the
+    // ATR585M at bin 3-4), and a 1-3 s old temperature is harmless.
+    bool thermal_cache_fresh_locked() const {
+        if (!thermal_cache_valid_) return false;
+        if (exposure_active_.load()) return true;
+        return std::chrono::steady_clock::now() - thermal_cache_time_ < kThermalCacheMaxAge;
+    }
+
+    void read_temperature_locked(HToupcam h, ToupTekSDK& sdk) const {
+        temperature_cache_c_ = static_cast<double>(sdk.get_temperature_deciC(h)) / 10.0;
+    }
+
+    void read_tec_voltage_locked(HToupcam h, ToupTekSDK& sdk) const {
+        tec_voltage_deciV_ = sdk.get_tec_voltage_deciV(h);
+        if (!tec_voltage_max_valid_) {
+            tec_voltage_max_deciV_ = sdk.get_tec_voltage_max_deciV(h);
+            tec_voltage_max_valid_ = true;
+        }
+    }
+
+    // Caller guarantees no poller thread is live (set_connected joins it first).
+    void start_thermal_poller() {
+        if (thermal_thread_.joinable()) return;  // defensive: never join under mutex_
+        {
+            std::lock_guard<std::mutex> tlock(thermal_mutex_);
+            thermal_stop_ = false;
+        }
+        thermal_thread_ = std::thread([this] { thermal_poll_loop(); });
+    }
+
+    void stop_thermal_poller() {
+        {
+            std::lock_guard<std::mutex> tlock(thermal_mutex_);
+            thermal_stop_ = true;
+        }
+        thermal_cv_.notify_all();
+        if (thermal_thread_.joinable()) thermal_thread_.join();
+    }
+
+    void thermal_poll_loop() {
+        auto& sdk = sdk_;
+        bool first = true;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> tlock(thermal_mutex_);
+                // First tick runs immediately (primes the cache); later ticks
+                // wait out the interval unless stopped.
+                if (!first) {
+                    thermal_cv_.wait_for(tlock, kThermalPollInterval, [this] { return thermal_stop_; });
+                }
+                first = false;
+                if (thermal_stop_) return;
+            }
+            // Never touch the SDK while a frame is integrating (see
+            // thermal_cache_fresh_locked); the cache just ages until it ends.
+            if (exposure_active_.load()) continue;
+            try {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!handle_ || !connected_.load()) return;
+                if (exposure_active_.load()) continue;
+                read_temperature_locked(handle_, sdk);
+                if (camera_info_valid_ && camera_info_.supports_cooler) {
+                    read_tec_voltage_locked(handle_, sdk);
+                }
+                thermal_cache_time_ = std::chrono::steady_clock::now();
+                thermal_cache_valid_ = true;
+            } catch (const std::exception& e) {
+                // Transient SDK failure (e.g. USB hiccup mid-exposure): keep the
+                // last good values; the getters fall back to a live read once
+                // the cache ages out.
+                ALPACA_LOG_DEBUG("ToupTek", "Thermal poll failed: " + std::string(e.what()));
+            }
+        }
+    }
+
     void stop_pulse_guide_thread() {
         {
             std::lock_guard<std::mutex> plock(pulse_guide_mutex_);
@@ -1301,6 +1408,22 @@ private:
     mutable std::chrono::steady_clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 
+    // Thermal cache fed by thermal_poll_loop (all guarded by mutex_).
+    static constexpr std::chrono::milliseconds kThermalPollInterval{1000};
+    static constexpr std::chrono::milliseconds kThermalCacheMaxAge{3000};
+    mutable double temperature_cache_c_{0.0};
+    mutable int tec_voltage_deciV_{0};
+    mutable int tec_voltage_max_deciV_{0};
+    mutable bool tec_voltage_max_valid_{false};
+    mutable std::chrono::steady_clock::time_point thermal_cache_time_{};
+    mutable bool thermal_cache_valid_{false};
+    // Poller lifecycle: member thread + stop flag/cv so disconnect and the
+    // destructor can wake and join it (never detached).
+    std::thread thermal_thread_;
+    std::mutex thermal_mutex_;
+    std::condition_variable thermal_cv_;
+    bool thermal_stop_{false};
+
     mutable std::atomic<bool> pulse_guiding_;
     // Joinable timer that clears pulse_guiding_ after the pulse duration. Kept as a
     // member (not detached) with a cancel flag + cv so the destructor can wake and
@@ -1447,6 +1570,8 @@ private:
 
     void reset_exposure_state_locked() {
         image_ready_ = false;
+        thermal_cache_valid_ = false;
+        tec_voltage_max_valid_ = false;
         image_cached_ = false;
         last_exposure_duration_ = 0.0;
         last_exposure_start_ = std::chrono::system_clock::time_point{};
