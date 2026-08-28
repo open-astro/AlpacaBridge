@@ -222,6 +222,14 @@ TEST_CASE("iOptron Telescope Driver - HAE16 EQ (0012) GOTO settle is closed by t
     CHECK(mount.count(":ZS") == 0);
     CHECK(std::abs(driver->get_right_ascension() - 12.0) * 15.0 * 3600.0 < 1.0);
 
+    // A disconnect right after a fresh GOTO must not leak the 5 s Slewing
+    // override into the next connection (PR #228 review).
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(driver->get_slewing());
+
     driver->set_connected(false);
 }
 

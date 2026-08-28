@@ -241,6 +241,8 @@ public:
                 park_override_until_ = std::chrono::steady_clock::time_point{};
                 park_finalize_pending_ = false;
                 tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
+                slew_override_until_ = std::chrono::steady_clock::time_point{};
+                slew_in_progress_ = false;
                 utc_query_supported_ = true;
                 pulse_guiding_active_.store(false, std::memory_order_release);
                 pulse_guiding_end_ns_.store(0, std::memory_order_relaxed);
@@ -317,6 +319,8 @@ public:
             park_override_until_ = std::chrono::steady_clock::time_point{};
             park_finalize_pending_ = false;
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
+            slew_override_until_ = std::chrono::steady_clock::time_point{};
+            slew_in_progress_ = false;
             pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_ra_hours_ = 0.0;
             pulse_guiding_hold_until_ = std::chrono::steady_clock::time_point{};

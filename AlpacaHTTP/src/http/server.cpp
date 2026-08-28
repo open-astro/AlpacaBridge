@@ -512,8 +512,18 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
             if (peer.ss_family == AF_INET) {
                 inet_ntop(AF_INET, &reinterpret_cast<struct sockaddr_in*>(&peer)->sin_addr, addr_buf, sizeof(addr_buf));
             } else if (peer.ss_family == AF_INET6) {
-                inet_ntop(AF_INET6, &reinterpret_cast<struct sockaddr_in6*>(&peer)->sin6_addr, addr_buf,
-                          sizeof(addr_buf));
+                // On the dual-stack listener an IPv4 client arrives as a
+                // v4-mapped IPv6 peer (::ffff:a.b.c.d); report the plain
+                // dotted form so the registry key and logs keep the format
+                // the IPv4-only listener produced.
+                const struct in6_addr* a6 = &reinterpret_cast<struct sockaddr_in6*>(&peer)->sin6_addr;
+                if (IN6_IS_ADDR_V4MAPPED(a6)) {
+                    struct in_addr a4 {};
+                    std::memcpy(&a4, &a6->s6_addr[12], sizeof(a4));
+                    inet_ntop(AF_INET, &a4, addr_buf, sizeof(addr_buf));
+                } else {
+                    inet_ntop(AF_INET6, a6, addr_buf, sizeof(addr_buf));
+                }
             }
         }
         request.set_remote_address(addr_buf);
