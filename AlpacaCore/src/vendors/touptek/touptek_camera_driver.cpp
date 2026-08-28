@@ -949,8 +949,12 @@ public:
         return std::chrono::steady_clock::now() - thermal_cache_time_ < kThermalCacheMaxAge;
     }
 
+    // Both live reads stamp the cache so a getter's fallback read (poller
+    // stalled or not yet primed) is reused by the next caller within
+    // kThermalCacheMaxAge instead of every call hitting the SDK.
     void read_temperature_locked(HToupcam h, ToupTekSDK& sdk) const {
         temperature_cache_c_ = static_cast<double>(sdk.get_temperature_deciC(h)) / 10.0;
+        stamp_thermal_cache_locked();
     }
 
     void read_tec_voltage_locked(HToupcam h, ToupTekSDK& sdk) const {
@@ -959,6 +963,12 @@ public:
             tec_voltage_max_deciV_ = sdk.get_tec_voltage_max_deciV(h);
             tec_voltage_max_valid_ = true;
         }
+        stamp_thermal_cache_locked();
+    }
+
+    void stamp_thermal_cache_locked() const {
+        thermal_cache_time_ = std::chrono::steady_clock::now();
+        thermal_cache_valid_ = true;
     }
 
     // Caller guarantees no poller thread is live (set_connected joins it first).
@@ -1005,8 +1015,6 @@ public:
                 if (camera_info_valid_ && camera_info_.supports_cooler) {
                     read_tec_voltage_locked(handle_, sdk);
                 }
-                thermal_cache_time_ = std::chrono::steady_clock::now();
-                thermal_cache_valid_ = true;
             } catch (const std::exception& e) {
                 // Transient SDK failure (e.g. USB hiccup mid-exposure): keep the
                 // last good values; the getters fall back to a live read once

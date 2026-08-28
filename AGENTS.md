@@ -538,6 +538,12 @@ independently broken the same way, before it was centralised:
   headers on purpose**: an out-of-line virtual would make the device class's vtable a
   "key function" emitted only in the core library, and the per-vendor static libraries
   (linked before it) would fail to resolve `vtable for XDriver`. Keep them inline.
+- **Value types must match the ASCOM member type**: ConformU coerces each DeviceState
+  value to the member's declared type and treats a failure as "property not included"
+  (INFO, not an issue, so it hides in a passing log). `PercentCompleted` is a `short`; the
+  camera base emitted it as a double (`0.0`) for a year and every camera log carried the
+  INFO line. Emit integers for integer members (`CameraState`, `PercentCompleted`,
+  `Position`, …) and doubles only for double members.
 - ConformU is lenient about DeviceState contents (it does not require a fixed property
   set or even a TimeStamp — the iOptron switch passed at ISwitchV3 with neither), but it
   does flag values inconsistent with the individual GETs. The getter-based pattern above

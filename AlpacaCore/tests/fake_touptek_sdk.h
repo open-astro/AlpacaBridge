@@ -15,9 +15,13 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <utility>
@@ -60,6 +64,22 @@ public:
 
     // --- scripting knobs ---------------------------------------------------
     std::set<std::string> throw_from;
+    // When true, wait_image blocks (an exposure stays in flight) until
+    // release_wait_image() or stop() is called, or the driver's timeout
+    // elapses. Lets a test observe the driver's mid-exposure behaviour.
+    void hold_wait_image(bool hold) {
+        std::lock_guard<std::mutex> lock(sync_->wait_mutex);
+        sync_->wait_hold = hold;
+        if (!hold) sync_->wait_cv.notify_all();
+    }
+    void release_wait_image() { hold_wait_image(false); }
+    // Thread-safe view of `calls` (the driver's background threads hit the
+    // fake concurrently with the test body).
+    int call_count(const char* fn) const {
+        std::lock_guard<std::mutex> lock(sync_->calls_mutex);
+        auto it = calls.find(fn);
+        return it == calls.end() ? 0 : it->second;
+    }
     std::vector<ToupCameraInfo> cameras;
     std::vector<ToupFocuserInfo> focusers;
     std::vector<ToupFilterWheelInfo> wheels;
@@ -130,6 +150,7 @@ public:
     void stop(HToupcam h) override {
         hit("stop");
         require_open(h);
+        release_wait_image();  // a stopped stream unblocks a pending wait
     }
     void put_trigger_mode(HToupcam h, int) override {
         hit("put_trigger_mode");
@@ -139,9 +160,14 @@ public:
         hit("trigger");
         require_open(h);
     }
-    bool wait_image(HToupcam h, unsigned, void*, int, int, unsigned& actual_width, unsigned& actual_height) override {
+    bool wait_image(HToupcam h, unsigned timeout_ms, void*, int, int, unsigned& actual_width,
+                    unsigned& actual_height) override {
         hit("wait_image");
         require_open(h);
+        {
+            std::unique_lock<std::mutex> lock(sync_->wait_mutex);
+            sync_->wait_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return !sync_->wait_hold; });
+        }
         actual_width = 0;
         actual_height = 0;
         return false;  // "timeout" — exposure tests belong to the poll-loop issue (#105)
@@ -463,8 +489,21 @@ public:
     }
 
 private:
+    // Sync primitives live behind a unique_ptr so the fake stays movable
+    // (tests build it in a helper and return it by value).
+    struct Sync {
+        std::mutex calls_mutex;
+        std::mutex wait_mutex;
+        std::condition_variable wait_cv;
+        bool wait_hold = false;
+    };
+    std::unique_ptr<Sync> sync_ = std::make_unique<Sync>();
+
     void hit(const char* fn) {
-        ++calls[fn];
+        {
+            std::lock_guard<std::mutex> lock(sync_->calls_mutex);
+            ++calls[fn];
+        }
         if (throw_from.count(fn) != 0) {
             throw AlpacaException(std::string("fake: injected failure in ") + fn, AlpacaError::DriverException);
         }

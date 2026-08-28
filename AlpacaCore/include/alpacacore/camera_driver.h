@@ -89,7 +89,10 @@ public:
         add("HeatSinkTemperature", [this] { return get_heat_sink_temperature(); });
         add("ImageReady", [this] { return get_image_ready(); });
         add("IsPulseGuiding", [this] { return get_is_pulse_guiding(); });
-        add("PercentCompleted", [this] { return get_percent_completed(); });
+        // ICameraV4.PercentCompleted is a short: emit an integer, matching the
+        // GET endpoint. As a double ("0.0") ConformU cannot coerce it and
+        // reports the property "not included in the DeviceState response".
+        add("PercentCompleted", [this] { return static_cast<std::int32_t>(get_percent_completed()); });
 
         state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
