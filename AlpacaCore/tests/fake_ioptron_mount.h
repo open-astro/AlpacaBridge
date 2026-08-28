@@ -38,7 +38,8 @@ public:
     /// @param model_code 4-digit :MountInfo reply, e.g. "0012" (HAE16 EQ), "0025" (HEM27)
     /// @param landing_ra_error_arcsec RA offset (east positive) the mount settles at after a GOTO
     FakeIoptronMount(std::string model_code, double landing_ra_error_arcsec)
-        : model_code_(std::move(model_code)), landing_error_arcsec_(landing_ra_error_arcsec),
+        : model_code_(std::move(model_code)),
+          landing_error_arcsec_(landing_ra_error_arcsec),
           server_([this](const std::string& chunk) { return respond(chunk); }) {}
 
     bool ok() const { return server_.ok(); }
@@ -100,12 +101,12 @@ private:
             // sign + 16 digits (site), then 6 status digits: GPS, system
             // status (1 = tracking, 2 = slewing), rate, speed, time source,
             // hemisphere.
-            return "+0000000000000000" "0" "1" "0" "0" "0" "1#";
+            return "+0000000000000000010001#";
         }
         if (cmd == ":GEP#") {
             const long long ra = ra_units_.load();
             const long long dec = dec_units_.load();
-            return signed_eight(dec) + nine(ra) + "0" "1#";
+            return signed_eight(dec) + nine(ra) + "01#";
         }
         if (cmd.rfind(":SRA", 0) == 0) {
             pending_ra_ = std::atoll(cmd.substr(4, 9).c_str());
@@ -126,8 +127,8 @@ private:
             ra_units_.store(pending_ra_);
             return "1";
         }
-        if (cmd.rfind(":Z", 0) == 0 || cmd.rfind(":S", 0) == 0 || cmd.rfind(":M", 0) == 0 ||
-            cmd.rfind(":R", 0) == 0 || cmd.rfind(":Q", 0) == 0) {
+        if (cmd.rfind(":Z", 0) == 0 || cmd.rfind(":S", 0) == 0 || cmd.rfind(":M", 0) == 0 || cmd.rfind(":R", 0) == 0 ||
+            cmd.rfind(":Q", 0) == 0) {
             return "1";  // set / motion / rate acks
         }
         return "0#";  // any other query: harmless, per-command parse failures are tolerated

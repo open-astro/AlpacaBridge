@@ -175,8 +175,7 @@ util::SocketHandle create_listener(int port) {
         address6.sin6_addr = in6addr_any;
         address6.sin6_port = htons(static_cast<u_short>(port));
         if (fd != util::kInvalidSocket) {
-            if (bind(fd, reinterpret_cast<struct sockaddr*>(&address6), sizeof(address6)) == 0 &&
-                listen(fd, 10) == 0) {
+            if (bind(fd, reinterpret_cast<struct sockaddr*>(&address6), sizeof(address6)) == 0 && listen(fd, 10) == 0) {
                 return fd;
             }
             util::socket_close(fd);
