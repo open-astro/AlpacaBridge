@@ -726,7 +726,10 @@ public:
         // only refreshed when someone polls Slewing/DeviceState, so a client
         // that polls SideOfPier alone across a flip would otherwise ride the
         // 5 s window on pre-flip data (PR #228 review). While a slew is in
-        // flight every read goes live; the cost only applies mid-move.
+        // flight every read goes live. The flag is sticky until the next
+        // Slewing/DeviceState poll observes completion, so a client that
+        // polls SideOfPier alone keeps live reads after the move as well:
+        // never stale, just uncached until it asks whether the slew ended.
         const auto now = std::chrono::steady_clock::now();
         if (!position_cache_valid_ || slew_in_progress_ || cached_status_.is_slewing ||
             (now - last_position_update_) >= kSideOfPierPositionTtl) {
