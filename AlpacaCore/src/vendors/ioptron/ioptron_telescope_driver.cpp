@@ -1633,9 +1633,7 @@ private:
     // GOTO final-approach RA refinement. Hardware-verified on HAE29C EQ
     // (0036, 2026-07-14) and HAE16 EQ (0012, ConformU 2026-08-25: same
     // 11-16 arcsec east RA settle, Dec within 0.2 arcsec, park clean).
-    bool goto_refine_active() const {
-        return mount_info_.model_code == "0036" || mount_info_.model_code == "0012";
-    }
+    bool goto_refine_active() const { return mount_info_.model_code == "0036" || mount_info_.model_code == "0012"; }
 
     void check_connected() const {
         if (!connected_) {

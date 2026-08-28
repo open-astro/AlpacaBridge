@@ -161,13 +161,11 @@ util::SocketHandle create_listener(int port) {
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
         int v6only = 0;
         setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&v6only), sizeof(v6only));
-        struct sockaddr_in6 address6;
-        std::memset(&address6, 0, sizeof(address6));
+        struct sockaddr_in6 address6 {};
         address6.sin6_family = AF_INET6;
         address6.sin6_addr = in6addr_any;
         address6.sin6_port = htons(static_cast<u_short>(port));
-        if (bind(fd, reinterpret_cast<struct sockaddr*>(&address6), sizeof(address6)) == 0 &&
-            listen(fd, 10) == 0) {
+        if (bind(fd, reinterpret_cast<struct sockaddr*>(&address6), sizeof(address6)) == 0 && listen(fd, 10) == 0) {
             return fd;
         }
         util::socket_close(fd);
@@ -185,8 +183,7 @@ util::SocketHandle create_listener(int port) {
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(static_cast<u_short>(port));
-    if (bind(fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) < 0 ||
-        listen(fd, 10) < 0) {
+    if (bind(fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) < 0 || listen(fd, 10) < 0) {
         util::socket_close(fd);
         return util::kInvalidSocket;
     }
@@ -305,7 +302,7 @@ void Server::run_server() {
         
         // Connection available - accept it
         if (FD_ISSET(server_fd, &read_fds)) {
-            struct sockaddr_storage client_address;
+            struct sockaddr_storage client_address {};
             util::SocketLen client_len = sizeof(client_address);
 
             util::SocketHandle client_fd =
