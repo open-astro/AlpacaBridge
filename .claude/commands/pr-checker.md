@@ -113,8 +113,9 @@ Checks to make before waiting on anything:
    comment against the commit's `committer.date`: a skewed clock would reject every fresh
    verdict. Exit codes: 0 with a verdict line = proceed to Step 3; 1 = not ready (including a
    transient API failure), go to Step 2; 3 = the comment has no readable sign-off, a hard stop.
-   (Exit 2, five API or timestamp failures in a row, can only occur in the Step 2 loop, since
-   a single pass counts to one.)
+   (Exit 2 from a single pass means a usage error, a non-numeric PR number or an unknown
+   option, or the PR object came back 401/403/404; the five-failures-in-a-row exit 2 can only
+   occur in the Step 2 loop, since a single pass counts to one.)
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
