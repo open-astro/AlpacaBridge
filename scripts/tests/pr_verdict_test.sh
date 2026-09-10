@@ -10,7 +10,8 @@ cat > "$STUB/gh" <<'STUBEOF'
 case "$*" in
   *"/comments"*) [ "$SCEN" = nocomment ] && { echo '[]'; exit 0; }
      printf '[{"user":{"login":"github-actions[bot]"},"updated_at":"%s","body":%s}]' "${UPD:-2026-09-10T10:00:00Z}" "$(printf '%s' "$BODY" | jq -Rs .)";;
-  *"/pulls/"*)   echo "abc123";;
+  *"/pulls/"*)   [ "$SCEN" = notfound ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+     echo "abc123";;
   *"/check-runs"*) case "$SCEN" in
      two_runs)        echo '{"check_runs":[{"name":"review","status":"completed","conclusion":"success","started_at":"2026-09-10T09:00:00Z"},{"name":"review","status":"completed","conclusion":"success","started_at":"2026-09-10T09:30:00Z"}]}';;
      cancelled_after) echo '{"check_runs":[{"name":"review","status":"completed","conclusion":"success","started_at":"2026-09-10T09:00:00Z"},{"name":"review","status":"completed","conclusion":"cancelled","started_at":"2026-09-10T09:45:00Z"}]}';;
@@ -79,6 +80,9 @@ if [ "$rc" = 0 ] && [[ "$out" == *"$A"* ]]; then pass=$((pass+1)); else fail=$((
 # an unrecognised option fails at once instead of falling through to the 30-minute poll
 out=$( TICK=0 BUDGET=1 bash "$SCRIPT" 282 --one-shot 2>&1 ); rc=$?
 if [ "$rc" = 2 ] && [[ "$out" == *"usage"* ]]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL unknown option: rc=$rc out='$out'"; fi
+# a PR that does not exist (HTTP 404) is a hard stop on the first tick, not five
+out=$( PATH="$STUB:$PATH" SCEN=notfound BODY=x TICK=0 BUDGET=120 FAILS_MAX=3 bash "$SCRIPT" 9999 2>&1 ); rc=$?
+if [ "$rc" = 2 ] && [[ "$out" == *"HTTP 404"* ]] && [[ "$out" != *"2 in a row"* ]]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL 404 fails fast: rc=$rc out='$out'"; fi
 # a non-numeric PR argument fails at once, not after 15 minutes of 404s
 out=$( bash "$SCRIPT" 28x --oneshot 2>&1 ); rc=$?
 if [ "$rc" = 2 ] && [[ "$out" == *"must be a number"* ]]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL non-numeric PR: rc=$rc out='$out'"; fi

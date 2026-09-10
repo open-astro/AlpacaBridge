@@ -8,7 +8,8 @@
 # Exit codes and stdout (first line "<updated_at> <verdict>", then the body):
 #   0  "✅ Approved" or "⚠️ Issues found" for the CURRENT head
 #   1  not ready (oneshot) or 30-minute timeout; the reason is on stderr
-#   2  the API or a timestamp failed FAILS_MAX ticks in a row; reason on stderr
+#   2  the API or a timestamp failed FAILS_MAX ticks in a row, the PR object
+#      came back 401/403/404 (fails at once), or the arguments are invalid
 #   3  the newest bot comment has no readable sign-off (hard stop)
 #
 # Verdict contract (see scripts/tests/pr_verdict_test.sh, which pins it):
@@ -61,6 +62,7 @@ case "$PR" in ''|*[!0-9]*) echo "pr_verdict.sh: PR must be a number, got '$PR'" 
 case "${2:-}" in '') ONESHOT=0;; --oneshot) ONESHOT=1;;
   *) echo "pr_verdict.sh: unknown option '${2}'; usage: pr_verdict.sh <PR-number> [--oneshot]" >&2; exit 2;; esac
 TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} )); FAILS_MAX=${FAILS_MAX:-5}
+ERRF=$(mktemp); trap 'rm -f "$ERRF"' EXIT
 fails=0; reject=""   # counts consecutive API and timestamp failures (either kind); a tick that reaches
                      # the gates, including "no comment yet", resets it, since the API is evidently fine
 
@@ -92,9 +94,17 @@ not_ready() {
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   [ "$ONESHOT" = 1 ] || sleep "$TICK"
   reject=""
+  if ! head_sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha 2>"$ERRF"); then
+    cat "$ERRF" >&2
+    # a missing PR or a dead token never recovers: stop now, not after FAILS_MAX ticks
+    if grep -qE 'HTTP (401|403|404)' "$ERRF"; then echo "POLL: PR $PR: $(tr -d '\n' <"$ERRF")" >&2; exit 2; fi
+    fails=$((fails + 1)); reject="API/jq failure ($fails in a row)"
+    echo "POLL: $reject for PR $PR (see above)" >&2
+    [ "$fails" -ge "$FAILS_MAX" ] && exit 2
+    not_ready; continue
+  fi
   if ! raw=$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100") \
      || ! c=$(printf '%s' "$raw" | jq -r -s "add | $VERDICT_JQ") \
-     || ! head_sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha) \
      || ! runs=$(gh api --paginate "repos/$REPO/commits/$head_sha/check-runs?per_page=100&filter=all") \
      || ! run_started=$(printf '%s' "$runs" | jq -r -s 'map(.check_runs[]) | [.[] | select(.name == "review" and .conclusion == "success") | .started_at] | max // empty') \
      || ! pending=$(printf '%s' "$runs" | jq -r -s 'map(.check_runs[]) | [.[] | select(.name == "review" and (.status == "queued" or .status == "in_progress"))] | length'); then
