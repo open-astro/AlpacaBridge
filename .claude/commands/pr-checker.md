@@ -83,15 +83,14 @@ Checks to make before waiting on anything:
    It is fine to update while a review is still in flight: the run on the old head is cancelled
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
-   Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (the
-   workflow posts a new comment per run, so `updated_at` equals `created_at` today, but it is
-   the field that stays correct if the comment is ever edited in place) is newer than the last
-   commit. Take the head from the PR object, not from `pulls/<N>/commits | .[-1]` (oldest-first,
-   30 per page, so `.[-1]` is the 30th commit on a long PR):
-   `gh api repos/open-astro/AlpacaBridge/pulls/<N> --jq .head.sha`, then
-   `gh api repos/open-astro/AlpacaBridge/commits/<sha> --jq .commit.committer.date`. Compare as
-   epoch seconds (`date -u -d <ts> +%s`): the two timestamps carry different offsets.
-   A verdict older than the head commit is stale and must not be trusted.
+   "Belongs to the current head" is decided by exactly the rule the Step 2 poll implements, so
+   run one iteration of that block with the `sleep` removed rather than re-deriving it: the head
+   from the PR object (`pulls/<N> --jq .head.sha`, never `pulls/<N>/commits | .[-1]`, which is
+   the 30th commit on a long PR), a successful `review` check-run on that commit with
+   `filter=all`, no `review` run still queued or in progress, and the comment's `updated_at`
+   at or after the newest such run's `started_at`, compared as epoch seconds. Never compare the
+   comment against the commit's `committer.date`: a skewed clock would reject every fresh
+   verdict. Exit 0 with a verdict line means proceed; exit 1 means poll; exit 3 is a hard stop.
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
@@ -141,24 +140,37 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
                                     elif ($line | test("^✅")) then "✅ Approved"
                                     else "⚠️ Issues found" end)\n\(.body)"'
   # Binding the verdict to THIS head: the proof is a successful `review`
-  # check-run on the head commit (per-commit query, "success" rather than
-  # "completed" because a run cancelled by concurrency or skipped for a
-  # missing label is "completed" too) AND a comment updated after the NEWEST
-  # such run started (`max`, not `last`: two successful runs on one head are
-  # routine after the relabel trick, and the API does not promise an order).
-  # A successful run can post nothing at all when the PR edits
-  # claude-review.yml (the action refuses to run and the assert step only
-  # warns); the started_at check is what stops the previous round's comment
-  # from being read as current. No committer.date check: it is implied by
-  # the pair above, and a commit made on a skewed clock (this repo ships
-  # scripts/sync-clock.sh for that class of problem) would reject every
-  # fresh verdict with a misleading message.
+  # check-run on the head commit AND a comment updated after the NEWEST such
+  # run started, with no `review` run still queued or in progress. Details:
+  # - Per-commit query with `filter=all` and --paginate: the endpoint's
+  #   default is `filter=latest`, ONE run per check name, so a later run on
+  #   the same head that was cancelled would hide the successful one and
+  #   reject a good verdict forever; `all` returns every attempt (probed:
+  #   PR #270's relabeled head shows its cancelled attempt, the live heads
+  #   their successful one). The check-run IS attached to the PR head under
+  #   pull_request_target (probed on #281 and #282, not assumed).
+  # - "success", not "completed": a run cancelled by concurrency or skipped
+  #   for a missing label is "completed" too and posts no comment.
+  # - `max` of started_at across attempts, since the API promises no order.
+  # - A queued/in_progress `review` run on the head (a relabel on an
+  #   unchanged head) rejects the tick: otherwise the previous round's
+  #   comment would be returned as current while the re-review is running.
+  # - A successful run can post nothing at all when the PR edits
+  #   claude-review.yml (the action refuses to run and the assert step only
+  #   warns); the started_at check is what stops the previous round's
+  #   comment from being read as current.
+  # No committer.date check: it is implied by the pair above, and a commit
+  # made on a skewed clock (this repo ships scripts/sync-clock.sh for that
+  # class of problem) would reject every fresh verdict with a misleading
+  # message.
   if ! raw=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100") \
      || ! c=$(printf '%s' "$raw" | jq -r -s "add | $VERDICT_JQ") \
      || ! head_sha=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha) \
-     || ! run_started=$(gh api "repos/open-astro/AlpacaBridge/commits/$head_sha/check-runs?per_page=100" \
-            --jq '[.check_runs[] | select(.name == "review" and .conclusion == "success") | .started_at] | max // empty'); then
-    fails=$((fails + 1)); echo "POLL: API/jq call failed for PR $PR ($fails in a row; see above)" >&2
+     || ! runs=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$head_sha/check-runs?per_page=100&filter=all") \
+     || ! run_started=$(printf '%s' "$runs" | jq -r -s 'map(.check_runs[]) | [.[] | select(.name == "review" and .conclusion == "success") | .started_at] | max // empty') \
+     || ! pending=$(printf '%s' "$runs" | jq -r -s 'map(.check_runs[]) | [.[] | select(.name == "review" and (.status == "queued" or .status == "in_progress"))] | length'); then
+    fails=$((fails + 1)); reject="API/jq failure ($fails in a row)"
+    echo "POLL: API/jq call failed for PR $PR ($fails in a row; see above)" >&2
     [ "$fails" -ge 3 ] && exit 2
     continue
   fi
@@ -178,7 +190,9 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     continue
   fi
   bad_ts=0
-  if [ -z "$run_started" ]; then
+  if [ "${pending:-0}" -gt 0 ]; then
+    reject="a review run is still queued/in progress on head $head_sha"
+  elif [ -z "$run_started" ]; then
     reject="no successful review check-run on head $head_sha yet"
   elif [ "$v_epoch" -lt "$r_epoch" ]; then
     reject="newest verdict (${c%% *}) predates the review run on head $head_sha (started $run_started)"
@@ -424,7 +438,10 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - The review workflow itself is broken (two consecutive timeouts after the relabel
   tricks) — report the run URL.
 - The poll exits 3 with `SIGN-OFF NOT IN LAST LINES`: none of the last five non-empty lines of
-  the bot's newest comment is a verdict, so its outcome cannot be read mechanically. Quote the comment's last lines and let
+  the bot's newest comment is a verdict, so its outcome cannot be read mechanically. This is
+  deliberately stricter than the workflow's own assert step (`grep -qE "Approved|Issues found"`
+  over the whole body in `claude-review.yml`), so a comment can pass CI and still stop here;
+  that is the safe direction. Quote the comment's last lines and let
   the user read the verdict.
 
 State the blocker in one or two sentences, finish every other PR in the list, and say exactly
