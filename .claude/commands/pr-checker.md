@@ -100,9 +100,10 @@ Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadli
 ```bash
 PR=<N>
 DEADLINE=$(( $(date +%s) + 1800 ))
-fails=0
+fails=0; bad_ts=0
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 180
+  reject=""   # per tick, so the timeout names THIS tick's gate, not an earlier one's
   # REST with --paginate captured FIRST, then `jq -s add`: the workflow posts a
   # NEW comment every run (gh pr comment --body-file; PR #281 has six), so a
   # long PR pushes the newest one past page 1. --paginate applies --jq PER
@@ -112,87 +113,86 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # variable before jq is what makes a gh failure visible: in a pipeline $?
   # is jq's, and a gh that dies mid-pagination has already emitted page 1
   # (the OLDEST comments), which jq would parse happily.
-  # Verdict = the sign-off among the LAST THREE non-empty lines of the body,
+  # Verdict = the sign-off among the LAST FIVE non-empty lines of the body,
   # each with `*`/`_` emphasis removed throughout (so "⚠️ **Issues found**"
   # reads as the verdict), then trimmed of whitespace, `#` heading, `>` quote
-  # and `-` bullet markers, matched by prefix (optional U+FE0F on ⚠, anything after
-  # the verdict such as "(2 blockers)" allowed): the review agent is only told
-  # to "end with a sign-off line", and a footer or `---` rule after it must
-  # not turn an ordinary review into a hard stop. A review may quote either
-  # string in its prose while discussing this file, so a global match is
-  # still not safe; the tail of the body is.
+  # and `-` bullet markers, matched by prefix (optional U+FE0F on ⚠, anything
+  # after the verdict such as "(2 blockers)" allowed): the review agent is
+  # only told to "end with a sign-off line", so a footer, a `---` rule and a
+  # couple of trailing notes must not turn an ordinary review into a hard
+  # stop. A review may quote either string in its prose while discussing this
+  # file, so a global match is still not safe; the tail of the body is.
   # The comment pre-filter strips the same markers from the whole body before
-  # testing, so "⚠️ **Issues found**" (emphasis inside the verdict) is not
-  # dropped and silently replaced by an OLDER comment; it reaches the tail
-  # matcher like any other review.
+  # testing, so an emphasised verdict is not dropped and silently replaced by
+  # an OLDER comment; it reaches the tail matcher like any other review.
   # Guards: no comment yet -> no output (select(. != null)); CRLF -> stripped
-  # with the whitespace; no verdict in the last three lines -> "SIGN-OFF NOT
-  # IN LAST LINES" (a hard stop, see below).
+  # with the whitespace; no verdict in the last five lines -> "SIGN-OFF NOT
+  # IN LAST LINES", which exits 3 (a hard stop, see below), never 0.
   # A transient gh/jq failure (502, secondary rate limit) skips this tick
   # with a message and retries; only three in a row exit 2. The poll is the
   # tail of a `preflight && push && poll` chain and must not die on one blip.
   VERDICT_JQ='[.[] | select((.user.login | test("^github-actions(\\[bot\\])?$"))
                             and (.body | gsub("[*#>_-]"; "") | test("✅ *Approved|⚠️? *Issues +found")))]
               | last | select(. != null)
-              | (.body | split("\n") | map(select(test("\\S"))) | .[-3:]
+              | (.body | split("\n") | map(select(test("\\S"))) | .[-5:]
                  | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("\\s+$"; ""))
                  | map(select(test("^(✅ *Approved|⚠️? *Issues +found)"))) | last) as $line
               | "\(.updated_at) \(if $line == null then "SIGN-OFF NOT IN LAST LINES"
                                     elif ($line | test("^✅")) then "✅ Approved"
                                     else "⚠️ Issues found" end)\n\(.body)"'
+  # Binding the verdict to THIS head: the proof is a successful `review`
+  # check-run on the head commit (per-commit query, "success" rather than
+  # "completed" because a run cancelled by concurrency or skipped for a
+  # missing label is "completed" too) AND a comment updated after the NEWEST
+  # such run started (`max`, not `last`: two successful runs on one head are
+  # routine after the relabel trick, and the API does not promise an order).
+  # A successful run can post nothing at all when the PR edits
+  # claude-review.yml (the action refuses to run and the assert step only
+  # warns); the started_at check is what stops the previous round's comment
+  # from being read as current. No committer.date check: it is implied by
+  # the pair above, and a commit made on a skewed clock (this repo ships
+  # scripts/sync-clock.sh for that class of problem) would reject every
+  # fresh verdict with a misleading message.
   if ! raw=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100") \
      || ! c=$(printf '%s' "$raw" | jq -r -s "add | $VERDICT_JQ") \
      || ! head_sha=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha) \
-     || ! head_at=$(gh api "repos/open-astro/AlpacaBridge/commits/$head_sha" --jq .commit.committer.date) \
      || ! run_started=$(gh api "repos/open-astro/AlpacaBridge/commits/$head_sha/check-runs?per_page=100" \
-            --jq '[.check_runs[] | select(.name == "review" and .conclusion == "success") | .started_at] | last // empty'); then
+            --jq '[.check_runs[] | select(.name == "review" and .conclusion == "success") | .started_at] | max // empty'); then
     fails=$((fails + 1)); echo "POLL: API/jq call failed for PR $PR ($fails in a row; see above)" >&2
     [ "$fails" -ge 3 ] && exit 2
     continue
   fi
   fails=0
-  # Head commit from the PR object, not `pulls/$PR/commits | .[-1]`: that list
-  # is oldest-first and 30 per page, so on a PR past 30 commits .[-1] is the
-  # 30th commit and a stale verdict would pass as fresh.
-  # Freshness, all as epoch seconds (updated_at is UTC "Z", committer.date
-  # keeps the committer's offset; a string compare mis-orders them), and
-  # every epoch checked for emptiness first: `[ "" -gt ... ]` returns 2 and
-  # would fall through to the accept branch.
-  # Binding the verdict to THIS head: committer.date is when the commit was
-  # made, not pushed, so a review of the previous head could finish later
-  # than it. The proof is a successful `review` check-run on this commit
-  # (per-commit query, "success" rather than "completed" because a run
-  # cancelled by concurrency or skipped for a missing label is "completed"
-  # too) AND a comment updated after that run STARTED: a successful run can
-  # post nothing at all when the PR edits claude-review.yml (the action
-  # refuses to run and the assert step only warns), and the started_at check
-  # is what stops the previous round's comment from being read as current.
-  reject=""
-  v_epoch=$(date -u -d "${c%% *}" +%s 2>/dev/null); h_epoch=$(date -u -d "$head_at" +%s 2>/dev/null)
-  r_epoch=$(date -u -d "$run_started" +%s 2>/dev/null)
   if [ -z "$c" ]; then
-    reject="no bot comment yet"
-  elif [ -z "$v_epoch" ] || [ -z "$h_epoch" ]; then
-    fails=$((fails + 1)); echo "POLL: unparseable timestamp (verdict '${c%% *}', head '$head_at')" >&2
-    [ "$fails" -ge 3 ] && exit 2
+    reject="no bot comment yet"; continue
+  fi
+  # Epochs (updated_at is UTC "Z"; started_at too, but never string-compare
+  # timestamps), each checked for emptiness first: `[ "" -ge ... ]` returns 2
+  # and would fall through. A persistently unparseable timestamp has its own
+  # counter so it cannot spin silently to the timeout.
+  v_epoch=$(date -u -d "${c%% *}" +%s 2>/dev/null)
+  r_epoch=$([ -n "$run_started" ] && date -u -d "$run_started" +%s 2>/dev/null)
+  if [ -z "$v_epoch" ] || { [ -n "$run_started" ] && [ -z "$r_epoch" ]; }; then
+    bad_ts=$((bad_ts + 1)); echo "POLL: unparseable timestamp (verdict '${c%% *}', run '$run_started'; $bad_ts in a row)" >&2
+    [ "$bad_ts" -ge 3 ] && exit 2
     continue
-  elif [ "$v_epoch" -le "$h_epoch" ]; then
-    reject="newest verdict (${c%% *}) predates head $head_sha ($head_at)"
-  elif [ -z "$run_started" ] || [ -z "$r_epoch" ]; then
-    reject="verdict is fresh but no successful review check-run on head $head_sha yet"
+  fi
+  bad_ts=0
+  if [ -z "$run_started" ]; then
+    reject="no successful review check-run on head $head_sha yet"
   elif [ "$v_epoch" -lt "$r_epoch" ]; then
-    reject="verdict (${c%% *}) predates the review run on head $head_sha (started $run_started)"
+    reject="newest verdict (${c%% *}) predates the review run on head $head_sha (started $run_started)"
   else
-    # First output line is "<updated_at> <verdict>"; the body follows. A
-    # "SIGN-OFF NOT IN LAST LINES" first line also exits 0: it is a hard
-    # stop for that PR (see Hard stops), never a verdict.
-    echo "$c"; exit 0
+    # First output line is "<updated_at> <verdict>"; the body follows.
+    echo "$c"
+    case "${c#* }" in "SIGN-OFF NOT IN LAST LINES"*) exit 3;; esac   # hard stop, distinct from a verdict
+    exit 0
   fi
 done
 # Name the gate that rejected the last poll: "no comment" routes to the
 # relabel / workflow checks, the others mean the review is still running,
 # was cancelled, or posted nothing, and must not be blamed on the workflow.
-echo "TIMEOUT after 30 minutes; last rejection: $reject" >&2; exit 1
+echo "TIMEOUT after 30 minutes; last rejection: ${reject:-none, every tick failed before the gates}" >&2; exit 1
 ```
 
 When several PRs are queued, poll them all in one background loop and act on whichever verdict
@@ -210,7 +210,7 @@ batch as the bot findings, not on its own.
 
 ## Step 3 — Act on the verdict
 
-Read the newest bot comment in full. The verdict is the sign-off among the **last three
+Read the newest bot comment in full. The verdict is the sign-off among the **last five
 non-empty lines** of the body (markers and emphasis stripped, prefix match), the same rule the
 Step 2 poll applies; never a string matched elsewhere in it, since reviews quote `✅ Approved`
 / `⚠️ Issues found` in prose when discussing this file.
@@ -392,13 +392,13 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 
 - **A pre-flight failure in code this branch does not touch** is not a stop. Re-run the failed
   test in isolation 5 times against the built binary (`AlpacaCore/build/tests/alpacacore_tests
-  "<test name>"`). If it passes in isolation and `git diff main...HEAD --name-only` shows no
+  "<test name>"`). If it passes in isolation and `git diff origin/main...HEAD --name-only` shows no
   file that could affect it, it is a flake: re-run `ci_preflight.sh` once, push on green, and
   record the flake (test name, failure text, pass rate) in the wrap-up for the user. Two
   consecutive flakes on the same test still push if the isolated runs pass. Only a failure in
   code this branch changes, or a test that fails in isolation every time, blocks the push.
 - **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/`.py`/workflow changes; check with
-  `git diff main...HEAD --name-only`) does NOT run `ci_preflight.sh` at all: there is nothing
+  `git diff origin/main...HEAD --name-only`) does NOT run `ci_preflight.sh` at all: there is nothing
   for the build and test gates to check, and CI runs them on the PR anyway. It still runs the
   repo-wide checks CI applies to every PR (the docs row in "Prove it before you push"
   item 5), because AGENTS.md and CHANGELOG edits are exactly what they catch. Commit, push, poll.
@@ -423,8 +423,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - Merge conflicts that cannot be resolved without choosing between two contributors' intents.
 - The review workflow itself is broken (two consecutive timeouts after the relabel
   tricks) — report the run URL.
-- The poll reports `SIGN-OFF NOT IN LAST LINES`: none of the last three non-empty lines of the
-  bot's newest comment is a verdict, so its outcome cannot be read mechanically. Quote the comment's last lines and let
+- The poll exits 3 with `SIGN-OFF NOT IN LAST LINES`: none of the last five non-empty lines of
+  the bot's newest comment is a verdict, so its outcome cannot be read mechanically. Quote the comment's last lines and let
   the user read the verdict.
 
 State the blocker in one or two sentences, finish every other PR in the list, and say exactly
