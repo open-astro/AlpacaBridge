@@ -12,7 +12,11 @@
 #   3  the newest bot comment has no readable sign-off (hard stop)
 #
 # Verdict contract (see scripts/tests/pr_verdict_test.sh, which pins it):
-#   Lines are normalised: emphasis (*_) removed throughout, leading #, >, -
+#   Fenced code blocks (``` or ~~~, to the closing fence or the end of the
+#   body) are dropped first: a review that quotes a verdict on its own line
+#   inside a fence, as any review of this script or the skill will, is not
+#   signing off. Inline code stays: a line that starts with a backtick never
+#   matches either rule. Remaining lines are normalised: emphasis (*_) removed throughout, leading #, >, -
 #   markers and a "Verdict:" label stripped, whitespace trimmed, and a line
 #   that becomes empty (a `---` rule) dropped so it does not consume the
 #   five-line tail. Matching is case-insensitive ("Issues Found" counts). The
@@ -57,7 +61,11 @@ fails=0; reject=""   # counts consecutive API and timestamp failures (either kin
 VERDICT_JQ='[.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$"))
                           and (.body | gsub("[*#>_-]"; "") | test("(✅️? *)?Approved|(⚠️? *)?Issues +found"; "i")))]
             | last | select(. != null)
-            | (.body | split("\n") | map(select(test("\\S")))
+            | (.body | split("\n")
+               | reduce .[] as $l ({fence: false, out: []};          # drop fenced code: a quoted verdict is not a sign-off
+                   if ($l | test("^\\s*(```|~~~)")) then .fence |= not
+                   elif .fence then . else .out += [$l] end) | .out
+               | map(select(test("\\S")))
                | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("^[\\s#>-]+"; "") | sub("\\s+$"; ""))
                | map(select(. != ""))) as $lines
             | ($lines | .[-5:]) as $tail
