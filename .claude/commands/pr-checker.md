@@ -57,6 +57,10 @@ Checks to make before waiting on anything:
    `pulls/<N>/files` endpoint is, 100 per page, and would miss the file on a large PR). A match
    (probed: true on PR #280, which switched the model; false on #282) means the user reads and
    merges that PR by hand; finish the rest of the queue.
+   **Same for a dependabot PR**: the job's `if` starts with `github.actor != 'dependabot[bot]'`,
+   so no comment ever comes. `gh pr view <N> --json author --jq .author.login` prints
+   `app/dependabot` (REST: `dependabot[bot]`; probed on #231/#232). Skip it with a line in the
+   wrap-up; the user merges dependabot PRs on CI alone.
 1. **`review` check skipped / no verdict comment and no `safe-to-review` label** -> add the label
    via REST (`gh pr edit --add-label` can choke on a GraphQL projects warning):
    ```bash
@@ -96,8 +100,11 @@ Checks to make before waiting on anything:
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
    "Belongs to the current head" is decided by exactly the rule the Step 2 poll implements, so
-   run that block once with `ONESHOT=1` (its documented switch: no sleep, and any "not ready"
-   path exits 1 with the reason instead of looping) rather than re-deriving it: the head
+   run that block once with its documented switch rather than re-deriving it: save the block
+   to a file with `PR=<N>` filled in and run `ONESHOT=1 bash poll.sh` (the block's own second
+   line is `ONESHOT=${ONESHOT:-0}`, so pasting it into a shell would NOT set the switch and
+   would foreground-sleep instead). Under the switch there is no sleep and any "not ready" path
+   exits 1 with the reason: the head
    from the PR object (`pulls/<N> --jq .head.sha`, never `pulls/<N>/commits | .[-1]`, which is
    the 30th commit on a long PR), a successful `review` check-run on that commit with
    `filter=all`, no `review` run still queued or in progress, and the comment's `updated_at`
@@ -135,33 +142,36 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # variable before jq is what makes a gh failure visible: in a pipeline $?
   # is jq's, and a gh that dies mid-pagination has already emitted page 1
   # (the OLDEST comments), which jq would parse happily.
-  # Verdict = the sign-off among the LAST FIVE non-empty lines of the body,
-  # each with `*`/`_` emphasis removed throughout (so "⚠️ **Issues found**"
-  # reads as the verdict), then trimmed of whitespace, `#` heading, `>` quote
-  # and `-` bullet markers and a leading "Verdict:" label, matched by prefix
-  # (optional U+FE0F on ⚠, anything
-  # after the verdict such as "(2 blockers)" allowed): the review agent is
-  # only told to "end with a sign-off line", so a footer, a `---` rule and a
-  # couple of trailing notes must not turn an ordinary review into a hard
-  # stop. A review may quote either string in its prose while discussing this
-  # file, so a global match is still not safe; the tail of the body is.
+  # Verdict = the sign-off, found in two passes over the non-empty lines of
+  # the body, each with `*`/`_` emphasis removed throughout (so "⚠️ **Issues
+  # found**" reads as the verdict), then trimmed of whitespace, `#` heading,
+  # `>` quote and `-` bullet markers and a leading "Verdict:" label. The
+  # emoji is OPTIONAL, like the workflow's own assert grep ("Approved|Issues
+  # found"): a bare "**Issues found**" passes CI and must not vanish here.
+  # Pass 1: the last five lines, prefix match (anything after the verdict,
+  # e.g. "(2 blockers)", allowed). Pass 2, if pass 1 finds nothing: any line
+  # that is EXACTLY a verdict (optional trailing . or !), so a sign-off
+  # followed by a long footer is still read, while prose that merely quotes
+  # a verdict mid-sentence never counts. The review agent is only told to
+  # "end with a sign-off line".
   # The comment pre-filter strips the same markers from the whole body before
   # testing, so an emphasised verdict is not dropped and silently replaced by
   # an OLDER comment; it reaches the tail matcher like any other review.
   # Guards: no comment yet -> no output (select(. != null)); CRLF -> stripped
-  # with the whitespace; no verdict in the last five lines -> "SIGN-OFF NOT
+  # with the whitespace; no sign-off found by either pass -> "SIGN-OFF NOT
   # IN LAST LINES", which exits 3 (a hard stop, see below), never 0.
   # A transient gh/jq failure (502, secondary rate limit) skips this tick
-  # with a message and retries; only three in a row exit 2. The poll is the
+  # with a message and retries; only five in a row (15 min) exit 2. The poll is the
   # tail of a `preflight && push && poll` chain and must not die on one blip.
   VERDICT_JQ='[.[] | select((.user.login | test("^github-actions(\\[bot\\])?$"))
-                            and (.body | gsub("[*#>_-]"; "") | test("✅ *Approved|⚠️? *Issues +found")))]
+                            and (.body | gsub("[*#>_-]"; "") | test("(✅ *)?Approved|(⚠️? *)?Issues +found")))]
               | last | select(. != null)
-              | (.body | split("\n") | map(select(test("\\S"))) | .[-5:]
-                 | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("\\s+$"; ""))
-                 | map(select(test("^(✅ *Approved|⚠️? *Issues +found)"))) | last) as $line
+              | (.body | split("\n") | map(select(test("\\S")))
+                 | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("\\s+$"; ""))) as $lines
+              | (($lines | .[-5:] | map(select(test("^((✅ *)?Approved|(⚠️? *)?Issues +found)"))) | last)
+                 // ($lines | map(select(test("^((✅ *)?Approved|(⚠️? *)?Issues +found)[.!]?$"))) | last)) as $line
               | "\(.updated_at) \(if $line == null then "SIGN-OFF NOT IN LAST LINES"
-                                    elif ($line | test("^✅")) then "✅ Approved"
+                                    elif ($line | test("^(✅ *)?Approved")) then "✅ Approved"
                                     else "⚠️ Issues found" end)\n\(.body)"'
   # Binding the verdict to THIS head: the proof is a successful `review`
   # check-run on the head commit AND a comment updated after the NEWEST such
@@ -195,7 +205,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
      || ! pending=$(printf '%s' "$runs" | jq -r -s 'map(.check_runs[]) | [.[] | select(.name == "review" and (.status == "queued" or .status == "in_progress"))] | length'); then
     fails=$((fails + 1)); reject="API/jq failure ($fails in a row)"
     echo "POLL: API/jq call failed for PR $PR ($fails in a row; see above)" >&2
-    [ "$fails" -ge 3 ] && exit 2
+    [ "$fails" -ge 5 ] && exit 2   # 5 ticks = 15 min of the 30-min budget; 502s and rate limits cluster
     not_ready; continue
   fi
   fails=0
@@ -211,7 +221,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   if [ -z "$v_epoch" ] || { [ -n "$run_started" ] && [ -z "$r_epoch" ]; }; then
     bad_ts=$((bad_ts + 1)); reject="unparseable timestamp (verdict '${c%% *}', run '$run_started'; $bad_ts in a row)"
     echo "POLL: $reject" >&2
-    [ "$bad_ts" -ge 3 ] && exit 2
+    [ "$bad_ts" -ge 5 ] && exit 2
     not_ready; continue
   fi
   bad_ts=0
@@ -229,9 +239,16 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   fi
   not_ready
 done
-# Name the gate that rejected the last poll: "no comment" routes to the
-# relabel / workflow checks, the others mean the review is still running,
-# was cancelled, or posted nothing, and must not be blamed on the workflow.
+# Name the gate that rejected the last poll, and act on it:
+#   "no bot comment yet"            -> Step 1.1/1.2 (label, or relabel to re-run)
+#   "no successful review check-run" -> the run failed its assert or was
+#                                       cancelled: relabel (Step 1.2) or
+#                                       `gh run rerun <id>`, then poll again
+#   "predates the review run"        -> same: the newest run posted nothing
+#   "still queued/in progress"       -> just poll again
+#   "API/jq failure" / "unparseable" -> transient; poll again once
+# Only two consecutive timeouts on the SAME rejection, after the action
+# above was taken, mean the workflow itself is broken (Hard stops).
 echo "TIMEOUT after 30 minutes; last rejection: ${reject:-none, every tick failed before the gates}" >&2; exit 1
 ```
 
@@ -444,9 +461,12 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   record the flake (test name, failure text, pass rate) in the wrap-up for the user. Two
   consecutive flakes on the same test still push if the isolated runs pass. Only a failure in
   code this branch changes, or a test that fails in isolation every time, blocks the push.
-- **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/`.py`/workflow changes; check with
-  `git diff origin/main...HEAD --name-only`) does NOT run `ci_preflight.sh` at all: there is nothing
-  for the build and test gates to check, and CI runs them on the PR anyway. It still runs the
+- **A docs/skill-only branch** does NOT run `ci_preflight.sh` at all: there is nothing for the
+  build and test gates to check, and CI runs them on the PR anyway. Docs-only is decided by
+  what the branch touches, not by listing code extensions (a `CMakeLists.txt`, `VERSION` or
+  `debian/` change is code): every path in `git diff origin/main...HEAD --name-only` must match
+  `\.md$`, `^docs/`, `^\.claude/`, or a ConformU report under `AlpacaCore/conformu/` or
+  `AlpacaHTTP/conformu/`. Anything else runs the pre-flight. It still runs the
   repo-wide checks CI applies to every PR (the docs row in "Prove it before you push"
   item 5), because AGENTS.md and CHANGELOG edits are exactly what they catch. Commit, push, poll.
 - **A bot round with new findings** is the normal case, not a reason to report back. Fix,
