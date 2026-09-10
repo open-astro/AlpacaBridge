@@ -13,8 +13,10 @@
 #
 # Verdict contract (see scripts/tests/pr_verdict_test.sh, which pins it):
 #   Lines are normalised: emphasis (*_) removed throughout, leading #, >, -
-#   markers and a "Verdict:" label stripped, whitespace trimmed. The emoji is
-#   optional, like the workflow's own assert grep; VS16 is optional too.
+#   markers and a "Verdict:" label stripped, whitespace trimmed, and a line
+#   that becomes empty (a `---` rule) dropped so it does not consume the
+#   five-line tail. Matching is case-insensitive ("Issues Found" counts). The
+#   emoji is optional, like the workflow's own assert grep; VS16 is optional.
 #   1. Any line among the LAST FIVE non-empty lines that STARTS WITH
 #      "Issues found"  -> Issues found   (prefix: "(2 blockers)" allowed)
 #   2. else any such line that STARTS WITH "Approved" -> Approved
@@ -45,22 +47,26 @@ REPO=${REPO:-open-astro/AlpacaBridge}
 PR=${1:?usage: pr_verdict.sh <PR-number> [--oneshot]}
 ONESHOT=0; [ "${2:-}" = "--oneshot" ] && ONESHOT=1
 TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} )); FAILS_MAX=${FAILS_MAX:-5}
-fails=0; bad_ts=0; reject=""
+fails=0; reject=""   # one counter for API and timestamp failures, so alternating kinds still reach exit 2
 
 # shellcheck disable=SC2016  # jq program: $lines/$tail/$verdict are jq variables
 VERDICT_JQ='[.[] | select((.user.login | test("^github-actions(\\[bot\\])?$"))
-                          and (.body | gsub("[*#>_-]"; "") | test("(✅️? *)?Approved|(⚠️? *)?Issues +found")))]
+                          and (.body | gsub("[*#>_-]"; "") | test("(✅️? *)?Approved|(⚠️? *)?Issues +found"; "i")))]
             | last | select(. != null)
             | (.body | split("\n") | map(select(test("\\S")))
-               | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("^[\\s#>-]+"; "") | sub("\\s+$"; ""))) as $lines
+               | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("^[\\s#>-]+"; "") | sub("\\s+$"; ""))
+               | map(select(. != ""))) as $lines
             | ($lines | .[-5:]) as $tail
-            | (if   ($tail  | any(test("^(⚠️? *)?Issues +found")))        then "⚠️ Issues found"
-               elif ($tail  | any(test("^(✅️? *)?Approved\\b")))          then "✅ Approved"
-               elif ($lines | any(test("^(⚠️? *)?Issues +found[.!]?$")))  then "⚠️ Issues found"
+            | (if   ($tail  | any(test("^(⚠️? *)?Issues +found"; "i")))        then "⚠️ Issues found"
+               elif ($tail  | any(test("^(✅️? *)?Approved\\b"; "i")))          then "✅ Approved"
+               elif ($lines | any(test("^(⚠️? *)?Issues +found[.!]?$"; "i")))  then "⚠️ Issues found"
                else "SIGN-OFF NOT IN LAST LINES" end) as $verdict
             | "\(.updated_at) \($verdict)\n\(.body)"'
 
-not_ready() { if [ "$ONESHOT" = 1 ]; then echo "NOT READY: $reject" >&2; exit 1; fi; }
+not_ready() {
+  if [ "$ONESHOT" = 1 ]; then echo "NOT READY: $reject" >&2; exit 1; fi
+  echo "$(date -u +%H:%M:%SZ) not ready: $reject" >&2   # per-tick trail, so a timeout is diagnosable from the log
+}
 
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   [ "$ONESHOT" = 1 ] || sleep "$TICK"
@@ -81,12 +87,12 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   v_epoch=$(date -u -d "${c%% *}" +%s 2>/dev/null)
   r_epoch=""; [ -n "$run_started" ] && r_epoch=$(date -u -d "$run_started" +%s 2>/dev/null)
   if [ -z "$v_epoch" ] || { [ -n "$run_started" ] && [ -z "$r_epoch" ]; }; then
-    bad_ts=$((bad_ts + 1)); reject="unparseable timestamp (verdict '${c%% *}', run '$run_started'; $bad_ts in a row)"
+    fails=$((fails + 1)); reject="unparseable timestamp (verdict '${c%% *}', run '$run_started'; $fails failures in a row)"
     echo "POLL: $reject" >&2
-    [ "$bad_ts" -ge "$FAILS_MAX" ] && exit 2
+    [ "$fails" -ge "$FAILS_MAX" ] && exit 2
     not_ready; continue
   fi
-  bad_ts=0
+  fails=0
   if [ "${pending:-0}" -gt 0 ]; then
     reject="a review run is still queued/in progress on head $head_sha"
   elif [ -z "$run_started" ]; then

@@ -528,7 +528,7 @@ jobs:
 
   shellcheck:
     name: ShellCheck
-    runs-on: ubuntu-24.04-arm   # static text analysis; arch-independent
+    runs-on: ubuntu-24.04-arm   # static text analysis plus the pr_verdict.sh contract test (stub gh, no network, no secrets); arch-independent
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

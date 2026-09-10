@@ -41,6 +41,9 @@ check "issues buried under footer"    ok 2026-09-10T10:00:00Z "r\n$I\n---\nf1\nf
 check "mixed tail is a rejection"     ok 2026-09-10T10:00:00Z "r\n$I\nApproved once the null check is added." 0 "$I"
 check "quoted approval in prose"      ok 2026-09-10T10:00:00Z "the $A section says\nend\n1\n2\n3\n4\n5"       3 "SIGN-OFF NOT IN LAST LINES"
 check "approval buried under footer"  ok 2026-09-10T10:00:00Z "r\n$A\n---\nf1\nf2\nf3\nf4\nf5"               3 "SIGN-OFF NOT IN LAST LINES"
+check "capitalised sign-off"          ok 2026-09-10T10:00:00Z "review\n⚠️ Issues Found"                    0 "$I"
+check "caps issues over bullet approved" ok 2026-09-10T10:00:00Z "r\n- Approved the earlier fix, but the new one regresses X.\n⚠️ ISSUES FOUND" 0 "$I"
+check "rule and four footer lines"    ok 2026-09-10T10:00:00Z "r\n$A\n---\nf1\nf2\nf3\nf4"              0 "$A"
 check "CRLF body"                     ok 2026-09-10T10:00:00Z "r\r\n$A\r\n"                                   0 "$A"
 check "no comment yet"                nocomment 2026-09-10T10:00:00Z "x"                                    1 "NOT READY: no bot comment yet"
 check "verdict predates run"          ok 2026-09-10T08:00:00Z "r\n$A"                                       1 "predates the review run"
@@ -54,4 +57,7 @@ out=$( PATH="$STUB:$PATH" SCEN=ok BODY=x bash "$STUB/broken.sh" 282 --oneshot 2>
 if [ "$rc" = 1 ] && [[ "$out" == *"gh-none"* || "$out" == *"API/jq failure"* ]]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL gh failure oneshot: rc=$rc out='$out'"; fi
 out=$( PATH="$STUB:$PATH" SCEN=ok BODY=x TICK=0 BUDGET=5 FAILS_MAX=3 bash "$STUB/broken.sh" 282 2>&1 ); rc=$?; out=${out##*$'\n'}
 if [ "$rc" = 2 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL gh failure loop: rc=$rc out='$out'"; fi
+# a persistently unparseable timestamp reaches exit 2 through the shared counter
+out=$( PATH="$STUB:$PATH" SCEN=ok UPD="not-a-date" BODY="r\n$A" TICK=0 BUDGET=5 FAILS_MAX=3 bash "$SCRIPT" 282 2>&1 ); rc=$?
+if [ "$rc" = 2 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL unparseable timestamp loop: rc=$rc out='${out##*$'\n'}'"; fi
 echo "pr_verdict_test: $pass passed, $fail failed"; [ "$fail" -eq 0 ]
