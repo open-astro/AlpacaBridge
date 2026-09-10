@@ -86,7 +86,11 @@ Checks to make before waiting on anything:
    Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (the
    workflow posts a new comment per run, so `updated_at` equals `created_at` today, but it is
    the field that stays correct if the comment is ever edited in place) is newer than the last
-   commit (`gh api repos/open-astro/AlpacaBridge/pulls/<N>/commits --jq '.[-1].commit.committer.date'`).
+   commit. Take the head from the PR object, not from `pulls/<N>/commits | .[-1]` (oldest-first,
+   30 per page, so `.[-1]` is the 30th commit on a long PR):
+   `gh api repos/open-astro/AlpacaBridge/pulls/<N> --jq .head.sha`, then
+   `gh api repos/open-astro/AlpacaBridge/commits/<sha> --jq .commit.committer.date`. Compare as
+   epoch seconds (`date -u -d <ts> +%s`): the two timestamps carry different offsets.
    A verdict older than the head commit is stale and must not be trusted.
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
@@ -98,37 +102,45 @@ PR=<N>
 DEADLINE=$(( $(date +%s) + 1800 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 180
-  # REST with --paginate, not `gh pr view --json comments`: the workflow posts
-  # a NEW comment every run (gh pr comment --body-file; PR #281 has six), so
-  # a long PR pushes the newest one past page 1 and `last` on an unpaginated
-  # call returns a stale verdict forever. REST also exposes updated_at, the
-  # freshness field compared below.
+  # REST with --paginate piped to `jq -s add`, not `gh pr view --json comments`:
+  # the workflow posts a NEW comment every run (gh pr comment --body-file; PR
+  # #281 has six), so a long PR pushes the newest one past page 1. --paginate
+  # applies --jq PER PAGE, and this gh (2.46) has no --slurp, so the pages are
+  # emitted raw and merged locally (probe: per_page=2 on #281 gives 6 merged
+  # comments and the same newest id as a single 100-per-page call).
   # Verdict = the final non-empty line of the body, trimmed of whitespace and
-  # `*` emphasis (verified on every bot comment on PRs #279-#282; the review
-  # agent is only told to "end with a sign-off line", so "✅ Approved  " with a
-  # Markdown hard break or "**✅ Approved**" must still count). A review may
-  # quote either string in its prose while discussing this file, so neither
-  # the first nor the last global match is safe; the sign-off line is.
+  # `*` emphasis, matched loosely (optional U+FE0F on ⚠, optional trailing
+  # . or !): the review agent is only told to "end with a sign-off line". A
+  # review may quote either string in its prose while discussing this file,
+  # so neither the first nor the last global match is safe; the sign-off is.
   # Guards: no comment yet -> no output (select(. != null)); CRLF -> stripped
-  # with the rest of the whitespace; a last line that is not a verdict ->
-  # "SIGN-OFF NOT LAST LINE: ..." (a hard stop, see below). stderr is NOT
-  # suppressed: a rate limit or a jq typo must show up here, not as a
-  # 30-minute timeout blamed on the review workflow.
-  c=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments" --jq '[.[]
-        | select((.user.login | test("^github-actions(\\[bot\\])?$"))
-                 and (.body | test("✅ Approved|⚠️ Issues found")))]
-        | last | select(. != null)
-        | (.body | split("\n") | map(select(test("\\S"))) | last
-           | sub("^[\\s*]+"; "") | sub("[\\s*]+$"; "")) as $line
-        | "\(.updated_at) \(if ($line | test("^(✅ Approved|⚠️ Issues found)$")) then $line
-                              else "SIGN-OFF NOT LAST LINE: " + $line end)\n\(.body)"' || true)
-  head_at=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR/commits" --jq '.[-1].commit.committer.date')
-  # Only a verdict UPDATED after the head commit counts: anything older is a
-  # stale verdict on a previous head (or the contributor pushed mid-round).
-  # First output line is "<updated_at> <verdict>"; the body follows. A
-  # "SIGN-OFF NOT LAST LINE" first line also exits 0: it is a hard stop for
-  # that PR (see Hard stops), never a verdict.
-  if [[ "${c%% *}" > "$head_at" ]]; then echo "$c"; exit 0; fi
+  # with the whitespace; a last line that is not a verdict -> "SIGN-OFF NOT
+  # LAST LINE: ..." (a hard stop, see below). A failed gh call exits 2 with
+  # its own message: it must never surface as a 30-minute timeout blamed on
+  # the review workflow.
+  VERDICT_JQ='[.[] | select((.user.login | test("^github-actions(\\[bot\\])?$"))
+                            and (.body | test("✅ Approved|⚠️ Issues found")))]
+              | last | select(. != null)
+              | (.body | split("\n") | map(select(test("\\S"))) | last
+                 | sub("^[\\s*]+"; "") | sub("[\\s*]+$"; "")) as $line
+              | "\(.updated_at) \(if ($line | test("^(✅ *Approved|⚠️? *Issues +found)[.!]?$"))
+                                    then $line else "SIGN-OFF NOT LAST LINE: " + $line end)\n\(.body)"'
+  c=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" \
+        | jq -r -s "add | $VERDICT_JQ") \
+     || { echo "POLL: gh api failed for PR $PR comments (rate limit, network, or jq error above)" >&2; exit 2; }
+  # Head commit from the PR object, not `pulls/$PR/commits | .[-1]`: that list
+  # is oldest-first and 30 per page, so on a PR past 30 commits .[-1] is the
+  # 30th commit and a stale verdict would pass as fresh.
+  head_sha=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha) || exit 2
+  head_at=$(gh api "repos/open-astro/AlpacaBridge/commits/$head_sha" --jq .commit.committer.date) || exit 2
+  # Compare as epoch seconds: updated_at is UTC "Z" but committer.date keeps
+  # the committer's offset, and a string compare would mis-order them.
+  if [ -n "$c" ] && [ "$(date -u -d "${c%% *}" +%s)" -gt "$(date -u -d "$head_at" +%s)" ]; then
+    # First output line is "<updated_at> <verdict>"; the body follows. A
+    # "SIGN-OFF NOT LAST LINE" first line also exits 0: it is a hard stop for
+    # that PR (see Hard stops), never a verdict.
+    echo "$c"; exit 0
+  fi
 done
 echo "TIMEOUT: no review-bot comment within 30 minutes" >&2; exit 1
 ```
