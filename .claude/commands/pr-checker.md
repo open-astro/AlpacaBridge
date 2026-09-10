@@ -109,6 +109,11 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # Only a verdict UPDATED after the head commit counts: anything older is a
   # stale verdict on a previous head (or the contributor pushed mid-round).
   if [[ "$(echo "$c" | head -1)" > "$head_at" ]]; then echo "$c"; exit 0; fi
+  # The verdict is the LAST "✅ Approved" / "⚠️ Issues found" in the body. A
+  # review can quote either string earlier (PR #282's review cited this
+  # file's "✅ Approved" section and then ended in "⚠️ Issues found"), so
+  # never take the first match:
+  #   .body | [match("✅ Approved|⚠️ Issues found"; "g")] | last | .string
 done
 echo "TIMEOUT: no review-bot comment within 30 minutes" >&2; exit 1
 ```
@@ -128,7 +133,8 @@ batch as the bot findings, not on its own.
 
 ## Step 3 — Act on the verdict
 
-Read the newest bot comment in full.
+Read the newest bot comment in full. The verdict is the **last** `✅ Approved` or `⚠️ Issues
+found` in the body, never the first: reviews quote those strings when discussing this file.
 
 ### `⚠️ Issues found`
 
@@ -157,20 +163,32 @@ For **every** finding, in this order:
 2. **Fix, then re-run the same probe.** Red, then green, with the same input. A fix that was
    never red is not proven.
 3. **Ship the probe with the fix** whenever it can live in the repo: a Catch2 case for driver
-   code, a self-test or assertion for a script (the floor and parity guards in
-   `check_docs_drift.py` are examples), a synthetic-repo check in the commit message when the
-   probe cannot be committed (`git init` in a temp dir, one rename, run the script).
-4. **Prefer removing a mechanism over adding a guard.** When a finding exposes brittle
-   structure, fix the structure inside the PR's own files (strip the fences instead of stacking
-   a count floor and a parity check on top of a fragile regex). Never widen to files the PR
-   does not touch.
-5. **Run the exact CI gate for what changed**, not the whole pre-flight and not nothing:
-   `git-clang-format --commit "$(git merge-base origin/main HEAD)" --diff` for C/C++,
-   the script itself against the real repo for `scripts/*.py`, `shellcheck` for shell,
-   `zizmor` for workflows, a targeted `alpacacore_tests "[tag]"` run for driver code. The full
-   `ci_preflight.sh` is for branches that change runtime C++ across vendors.
-6. **One commit per finding, one push per round.** Commits stay atomic so a wrong one can be
-   reverted alone; the push stays batched because every push costs a full review.
+   code (the SynScan `Name` test over the fake handset, PR #281), a self-check inside a script,
+   or a synthetic-repo check described in the commit message when the probe cannot be committed
+   (`git init` in a temp dir, one rename, run the script).
+4. **Fix the structure before adding guards.** When a finding exposes brittle structure, fix
+   the cause first, inside the PR's own files (in `check_docs_drift.py` the cause was matching
+   spans across a fenced block; stripping fences fixed it). Keep a guard only when it catches
+   something distinct from the structural fix, and say so in its comment (the parity check and
+   count floor there guard against a stray backtick and a broken matcher, which fence-stripping
+   does not cover). Never widen to files the PR does not touch.
+5. **Run the exact CI gate for what changed**, not the whole pre-flight and not nothing. Use
+   the same invocation and pass criterion as `scripts/ci_preflight.sh`, which mirrors
+   `.github/workflows/ci.yml`:
+   - C/C++: `git-clang-format --commit "$(git merge-base origin/main HEAD)" --diff --extensions c,cc,cpp,cxx,h,hh,hpp,hxx`
+     is green only when it prints exactly `clang-format did not modify any files` or
+     `no modified files to format` (the exit code is not the signal). Never omit
+     `--extensions`: the default list includes `js`, and `AlpacaHTTP/web/app.js` is tracked.
+   - `scripts/*.py`: run the script itself against the real repo, plus its own probe.
+   - shell: `shellcheck <file>`. Workflows: the pinned zizmor the pre-flight fetches
+     (`~/.cache/alpacabridge-preflight/zizmor-<ZIZMOR_VER from ci_preflight.sh>`), not a bare
+     `zizmor` from PATH.
+   - driver code: `AlpacaCore/build/tests/alpacacore_tests "[vendor][device]"` after a rebuild.
+   The full `ci_preflight.sh` is for branches that change runtime C++ across vendors.
+6. **One commit per finding, one push per round** (this `⚠️ Issues found` path only). Commits
+   stay atomic so a wrong one can be reverted alone; the push stays batched because every push
+   costs a full review. A cleanup round after an approval is different: its notes are small and
+   related, so they go in ONE commit as the `✅ Approved` section says.
 
 Mechanics for a **fork PR** (the usual case for contributor branches):
 
@@ -327,7 +345,9 @@ commits that landed mid-run, one line each.
 **Retrospective, one line per PR:** which bot findings were about code pushed earlier in the
 same loop (a fix that introduced the next finding), and what probe would have caught each
 before the push. If the answer repeats across PRs, the fix belongs in this skill's "Prove it
-before you push" list or in `AGENTS.md`, in the same session. Then a single line naming anything the next session
-should know (e.g. an `update-branch` still running on a
+before you push" list or in `AGENTS.md`, in the same session.
+
+**Hand-off:** a single line naming anything the next session should know (e.g. an
+`update-branch` still running on a
 PR outside the list). Update memory only if the loop mechanics themselves changed (new bot login,
 new label, new stall trick); the per-PR outcome does not belong in memory.
