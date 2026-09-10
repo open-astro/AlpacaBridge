@@ -1637,9 +1637,13 @@ against its checklist, 2026-09-06:
   built for WandererAstro, explicitly designed to generalize "across wrappers"). Fixed:
   both scan loops skip a port another connected device holds open, `probe_skywatcher_port`
   re-checks after `open()` for the TOCTOU window, and `connect_serial()` claims the port
-  in the registry BEFORE opening it and releases it in `disconnect_locked()`. This is a
-  project-wide gap outside WandererAstro (synscan, ioptron, gemini, celestron, onstep none
-  use the registry either) — only `skywatcher` was closed here, in scope for this issue.
+  in the registry BEFORE opening it and releases it in `disconnect_locked()`. The gap is
+  wider than this vendor: only WandererAstro (all four wrappers) and Gemini's PDH wrapper
+  (`gemini_pdh_protocol_wrapper.cpp`) use the registry; synscan, ioptron, celestron, onstep
+  and Gemini's focuser/flat-panel wrappers do not — only `skywatcher` was closed here, in
+  scope for this issue. The claim/release in `connect_serial()` is covered by a pty-backed
+  test in `test_skywatcher_serial.cpp`; the post-`open()` re-check in `probe_skywatcher_port`
+  narrows the TOCTOU window but cannot close it (in-process best-effort set, not a file lock).
 - [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open; see the
   hemisphere fixes and pending bench test elsewhere in this section.
 - [ ] `SyncToCoordinates` single-point offset sync model — not exercised this session
