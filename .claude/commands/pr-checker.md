@@ -51,11 +51,12 @@ Checks to make before waiting on anything:
    with NO comment; the poll's "comment after the run started" rule then rejects forever and
    two timeouts later the loop would misreport the workflow as broken. Detect it up front:
    ```bash
-   gh api "repos/open-astro/AlpacaBridge/pulls/<N>/files?per_page=100" \
-     --jq '[.[].filename | select(. == ".github/workflows/claude-review.yml")] | length'
+   gh pr diff <N> --name-only | grep -qx '.github/workflows/claude-review.yml'
    ```
-   Non-zero (probed: 1 on PR #280, which switched the model; 0 on #282) means the user reads
-   and merges that PR by hand; finish the rest of the queue.
+   This is the workflow's own assert-step test, and `gh pr diff` is not paginated (the
+   `pulls/<N>/files` endpoint is, 100 per page, and would miss the file on a large PR). A match
+   (probed: true on PR #280, which switched the model; false on #282) means the user reads and
+   merges that PR by hand; finish the rest of the queue.
 1. **`review` check skipped / no verdict comment and no `safe-to-review` label** -> add the label
    via REST (`gh pr edit --add-label` can choke on a GraphQL projects warning):
    ```bash
@@ -102,9 +103,10 @@ Checks to make before waiting on anything:
    `filter=all`, no `review` run still queued or in progress, and the comment's `updated_at`
    at or after the newest such run's `started_at`, compared as epoch seconds. Never compare the
    comment against the commit's `committer.date`: a skewed clock would reject every fresh
-   verdict. Exit codes: 0 with a verdict line = proceed to Step 3; 1 = not ready, go to Step 2;
-   2 = the API or a timestamp failed three times in a row, a hard stop (report, move to the
-   next PR); 3 = the comment has no readable sign-off, a hard stop.
+   verdict. Exit codes: 0 with a verdict line = proceed to Step 3; 1 = not ready (including a
+   transient API failure), go to Step 2; 3 = the comment has no readable sign-off, a hard stop.
+   (Exit 2, three API or timestamp failures in a row, can only occur in the Step 2 loop, since
+   a single pass counts to one.)
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
@@ -116,9 +118,10 @@ ONESHOT=${ONESHOT:-0}   # 1 = one pass, no sleep: exit 1 with the reason instead
 DEADLINE=$(( $(date +%s) + 1800 ))
 fails=0; bad_ts=0
 # Every "not ready" path goes through here: in ONESHOT mode that is the
-# answer ("go poll"), otherwise it is the next 3-minute tick. Never remove the
-# sleep by hand: without this switch a reject falls straight back into the
-# loop and hammers the API ~4 calls per iteration for 30 minutes.
+# answer ("go poll", exit 1 with the reason), otherwise it just continues to
+# the next tick, whose first statement is the 3-minute sleep. Use the switch
+# for a single probe rather than deleting the sleep: a sleepless loop would
+# re-poll ~4 API calls per pass for 30 minutes.
 not_ready() { if [ "$ONESHOT" = 1 ]; then echo "NOT READY: $reject" >&2; exit 1; fi; }
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   [ "$ONESHOT" = 1 ] || sleep 180
@@ -135,7 +138,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # Verdict = the sign-off among the LAST FIVE non-empty lines of the body,
   # each with `*`/`_` emphasis removed throughout (so "⚠️ **Issues found**"
   # reads as the verdict), then trimmed of whitespace, `#` heading, `>` quote
-  # and `-` bullet markers, matched by prefix (optional U+FE0F on ⚠, anything
+  # and `-` bullet markers and a leading "Verdict:" label, matched by prefix
+  # (optional U+FE0F on ⚠, anything
   # after the verdict such as "(2 blockers)" allowed): the review agent is
   # only told to "end with a sign-off line", so a footer, a `---` rule and a
   # couple of trailing notes must not turn an ordinary review into a hard
@@ -154,7 +158,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
                             and (.body | gsub("[*#>_-]"; "") | test("✅ *Approved|⚠️? *Issues +found")))]
               | last | select(. != null)
               | (.body | split("\n") | map(select(test("\\S"))) | .[-5:]
-                 | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("\\s+$"; ""))
+                 | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("\\s+$"; ""))
                  | map(select(test("^(✅ *Approved|⚠️? *Issues +found)"))) | last) as $line
               | "\(.updated_at) \(if $line == null then "SIGN-OFF NOT IN LAST LINES"
                                     elif ($line | test("^✅")) then "✅ Approved"
@@ -265,6 +269,12 @@ If their head already moved past the reviewed SHA, read their diff first; if it 
 finding, adopt it (reset your local branch to their head) and just poll again.
 
 ### Prove it before you push (test-first, per finding)
+
+Run `git fetch --prune origin` before anything below: every `origin/main` in this section and
+in "Keep looping" is only as fresh as the last fetch, and a loop that merges PRs back to back
+makes it stale within the run. A stale `origin/main` moves the merge base backwards, and
+`git-clang-format` then reports lines merged from main that the PR never touched, a false
+hard block.
 
 The bot is the second pair of eyes, not the test suite. PR #281 (2026-09-10) took six rounds
 because two of my "fixes" were pushed unproven: a regex that silently dropped 66 of 83 matches,
