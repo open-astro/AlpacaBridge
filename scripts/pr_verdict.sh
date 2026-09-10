@@ -82,8 +82,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     [ "$fails" -ge "$FAILS_MAX" ] && exit 2
     not_ready; continue
   fi
-  fails=0
-  if [ -z "$c" ]; then reject="no bot comment yet"; not_ready; continue; fi
+  # (the failure counter is reset only after the timestamps parse, below)
+  if [ -z "$c" ]; then fails=0; reject="no bot comment yet"; not_ready; continue; fi
   v_epoch=$(date -u -d "${c%% *}" +%s 2>/dev/null)
   r_epoch=""; [ -n "$run_started" ] && r_epoch=$(date -u -d "$run_started" +%s 2>/dev/null)
   if [ -z "$v_epoch" ] || { [ -n "$run_started" ] && [ -z "$r_epoch" ]; }; then
