@@ -101,19 +101,19 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # (use_sticky_comment: true), which may be EDITED in place on later rounds,
   # and only REST exposes updated_at. createdAt alone would call every round
   # after the first "stale".
+  # Verdict = the final non-empty line of the body (verified on every bot
+  # comment on PRs #279-#282). A review may quote "✅ Approved" or "⚠️ Issues
+  # found" in its prose while discussing this file, so neither the first nor
+  # the last global match is safe; the sign-off line is.
   c=$(gh api "repos/open-astro/AlpacaBridge/issues/$PR/comments" --jq '[.[]
         | select((.user.login | test("^github-actions(\\[bot\\])?$"))
                  and (.body | test("✅ Approved|⚠️ Issues found")))]
-        | last | "\(.updated_at)\n\(.body)"')
+        | last | "\(.updated_at) \(.body | split("\n") | map(select(test("\\S"))) | last)\n\(.body)"')
   head_at=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR/commits" --jq '.[-1].commit.committer.date')
   # Only a verdict UPDATED after the head commit counts: anything older is a
   # stale verdict on a previous head (or the contributor pushed mid-round).
-  if [[ "$(echo "$c" | head -1)" > "$head_at" ]]; then echo "$c"; exit 0; fi
-  # The verdict is the LAST "✅ Approved" / "⚠️ Issues found" in the body. A
-  # review can quote either string earlier (PR #282's review cited this
-  # file's "✅ Approved" section and then ended in "⚠️ Issues found"), so
-  # never take the first match:
-  #   .body | [match("✅ Approved|⚠️ Issues found"; "g")] | last | .string
+  # First output line is "<updated_at> <verdict>"; the body follows.
+  if [[ "${c%% *}" > "$head_at" ]]; then echo "$c"; exit 0; fi
 done
 echo "TIMEOUT: no review-bot comment within 30 minutes" >&2; exit 1
 ```
@@ -133,12 +133,14 @@ batch as the bot findings, not on its own.
 
 ## Step 3 — Act on the verdict
 
-Read the newest bot comment in full. The verdict is the **last** `✅ Approved` or `⚠️ Issues
-found` in the body, never the first: reviews quote those strings when discussing this file.
+Read the newest bot comment in full. The verdict is the **final non-empty line** of the body,
+never a string matched elsewhere in it: reviews quote `✅ Approved` / `⚠️ Issues found` in prose
+when discussing this file.
 
 ### `⚠️ Issues found`
 
-Fix **every** finding the bot raises on this PR, in this PR, in **one batched commit**. Each push
+Fix **every** finding the bot raises on this PR, in this PR, one commit per finding, in **one
+batched push**. Each push
 restarts a full fresh review (PR #99 took 46 rounds when pushes trickled). Do not defer findings to
 follow-up issues and do not decline them as low priority unless the user says so; the standing
 rule is "work it in the same PR till there are no more issues."
@@ -179,11 +181,20 @@ For **every** finding, in this order:
      is green only when it prints exactly `clang-format did not modify any files` or
      `no modified files to format` (the exit code is not the signal). Never omit
      `--extensions`: the default list includes `js`, and `AlpacaHTTP/web/app.js` is tracked.
+     Base on `origin/main` deliberately: the pre-flight defaults to the local `main`
+     (`PREFLIGHT_BASE`), which is stale in a long session; `PREFLIGHT_BASE=origin/main` makes
+     the two agree.
    - `scripts/*.py`: run the script itself against the real repo, plus its own probe.
-   - shell: `shellcheck <file>`. Workflows: the pinned zizmor the pre-flight fetches
-     (`~/.cache/alpacabridge-preflight/zizmor-<ZIZMOR_VER from ci_preflight.sh>`), not a bare
-     `zizmor` from PATH.
-   - driver code: `AlpacaCore/build/tests/alpacacore_tests "[vendor][device]"` after a rebuild.
+   - shell: `shellcheck <file>`. Workflows: `zizmor --offline .github/workflows/`, resolving
+     the binary the way `ensure_zizmor()` in `ci_preflight.sh` does: `command -v zizmor` if
+     present, else the pinned copy at
+     `${XDG_CACHE_HOME:-$HOME/.cache}/alpacabridge-preflight/zizmor-<ZIZMOR_VER>` (the
+     pre-flight downloads it on first use).
+   - driver code: rebuild with the vendor compiled in, then run the tagged suite:
+     `cmake -S AlpacaCore -B AlpacaCore/build -DALPACACORE_ENABLE_ALL_VENDORS=ON && cmake --build AlpacaCore/build --target alpacacore_tests`
+     then `AlpacaCore/build/tests/alpacacore_tests "[vendor][device]"`. Vendors OFF (the
+     `run_all_tests.sh` first pass) compiles no driver, so the tag filter would match nothing
+     and pass vacuously.
    The full `ci_preflight.sh` is for branches that change runtime C++ across vendors.
 6. **One commit per finding, one push per round** (this `⚠️ Issues found` path only). Commits
    stay atomic so a wrong one can be reverted alone; the push stays batched because every push
