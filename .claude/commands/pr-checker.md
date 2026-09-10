@@ -142,6 +142,36 @@ their own fix for the same finding within minutes (PR #258 did this twice in one
 If their head already moved past the reviewed SHA, read their diff first; if it addresses the
 finding, adopt it (reset your local branch to their head) and just poll again.
 
+### Prove it before you push (test-first, per finding)
+
+The bot is the second pair of eyes, not the test suite. PR #281 (2026-09-10) took six rounds
+because two of my "fixes" were pushed unproven: a regex that silently dropped 66 of 83 matches,
+and a `--find-renames` flag that changed nothing. Both would have failed a 30-second probe.
+For **every** finding, in this order:
+
+1. **Reproduce the claim.** Re-read the bot's exact statement and make it observable before
+   changing anything: run the failing input through the current code, count the matches, run
+   the script against the real file, or write the unit test and watch it fail. If it cannot be
+   reproduced, that is the finding to answer (hard stop or a wrong-claim note in the commit
+   message), not a reason to change code on faith.
+2. **Fix, then re-run the same probe.** Red, then green, with the same input. A fix that was
+   never red is not proven.
+3. **Ship the probe with the fix** whenever it can live in the repo: a Catch2 case for driver
+   code, a self-test or assertion for a script (the floor and parity guards in
+   `check_docs_drift.py` are examples), a synthetic-repo check in the commit message when the
+   probe cannot be committed (`git init` in a temp dir, one rename, run the script).
+4. **Prefer removing a mechanism over adding a guard.** When a finding exposes brittle
+   structure, fix the structure inside the PR's own files (strip the fences instead of stacking
+   a count floor and a parity check on top of a fragile regex). Never widen to files the PR
+   does not touch.
+5. **Run the exact CI gate for what changed**, not the whole pre-flight and not nothing:
+   `git-clang-format --commit "$(git merge-base origin/main HEAD)" --diff` for C/C++,
+   the script itself against the real repo for `scripts/*.py`, `shellcheck` for shell,
+   `zizmor` for workflows, a targeted `alpacacore_tests "[tag]"` run for driver code. The full
+   `ci_preflight.sh` is for branches that change runtime C++ across vendors.
+6. **One commit per finding, one push per round.** Commits stay atomic so a wrong one can be
+   reverted alone; the push stays batched because every push costs a full review.
+
 Mechanics for a **fork PR** (the usual case for contributor branches):
 
 ```bash
@@ -292,7 +322,12 @@ Confirm `git branch -r` on origin shows no merged head branches left behind.
 
 One table: PR, title, rounds, final verdict, merge SHA (or "left open: reason"). Under it: any
 judgment notes left unpushed, any notes from the post-cleanup approval, and any contributor
-commits that landed mid-run, one line each. Then a single line naming anything the next session
+commits that landed mid-run, one line each.
+
+**Retrospective, one line per PR:** which bot findings were about code pushed earlier in the
+same loop (a fix that introduced the next finding), and what probe would have caught each
+before the push. If the answer repeats across PRs, the fix belongs in this skill's "Prove it
+before you push" list or in `AGENTS.md`, in the same session. Then a single line naming anything the next session
 should know (e.g. an `update-branch` still running on a
 PR outside the list). Update memory only if the loop mechanics themselves changed (new bot login,
 new label, new stall trick); the per-PR outcome does not belong in memory.
