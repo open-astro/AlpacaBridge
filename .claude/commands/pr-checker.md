@@ -45,6 +45,17 @@ author as `github-actions` while the REST API reports `github-actions[bot]`, so 
 
 Checks to make before waiting on anything:
 
+0. **The PR edits `.github/workflows/claude-review.yml`** -> hard stop for that PR, before any
+   waiting. The review action refuses to run on a PR that changes its own workflow, the post
+   step only warns, and the assert step exempts it, so the `review` check-run ends `success`
+   with NO comment; the poll's "comment after the run started" rule then rejects forever and
+   two timeouts later the loop would misreport the workflow as broken. Detect it up front:
+   ```bash
+   gh api "repos/open-astro/AlpacaBridge/pulls/<N>/files?per_page=100" \
+     --jq '[.[].filename | select(. == ".github/workflows/claude-review.yml")] | length'
+   ```
+   Non-zero (probed: 1 on PR #280, which switched the model; 0 on #282) means the user reads
+   and merges that PR by hand; finish the rest of the queue.
 1. **`review` check skipped / no verdict comment and no `safe-to-review` label** -> add the label
    via REST (`gh pr edit --add-label` can choke on a GraphQL projects warning):
    ```bash
@@ -84,13 +95,16 @@ Checks to make before waiting on anything:
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
    "Belongs to the current head" is decided by exactly the rule the Step 2 poll implements, so
-   run one iteration of that block with the `sleep` removed rather than re-deriving it: the head
+   run that block once with `ONESHOT=1` (its documented switch: no sleep, and any "not ready"
+   path exits 1 with the reason instead of looping) rather than re-deriving it: the head
    from the PR object (`pulls/<N> --jq .head.sha`, never `pulls/<N>/commits | .[-1]`, which is
    the 30th commit on a long PR), a successful `review` check-run on that commit with
    `filter=all`, no `review` run still queued or in progress, and the comment's `updated_at`
    at or after the newest such run's `started_at`, compared as epoch seconds. Never compare the
    comment against the commit's `committer.date`: a skewed clock would reject every fresh
-   verdict. Exit 0 with a verdict line means proceed; exit 1 means poll; exit 3 is a hard stop.
+   verdict. Exit codes: 0 with a verdict line = proceed to Step 3; 1 = not ready, go to Step 2;
+   2 = the API or a timestamp failed three times in a row, a hard stop (report, move to the
+   next PR); 3 = the comment has no readable sign-off, a hard stop.
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
@@ -98,10 +112,16 @@ Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadli
 
 ```bash
 PR=<N>
+ONESHOT=${ONESHOT:-0}   # 1 = one pass, no sleep: exit 1 with the reason instead of looping (Step 1.4)
 DEADLINE=$(( $(date +%s) + 1800 ))
 fails=0; bad_ts=0
+# Every "not ready" path goes through here: in ONESHOT mode that is the
+# answer ("go poll"), otherwise it is the next 3-minute tick. Never remove the
+# sleep by hand: without this switch a reject falls straight back into the
+# loop and hammers the API ~4 calls per iteration for 30 minutes.
+not_ready() { if [ "$ONESHOT" = 1 ]; then echo "NOT READY: $reject" >&2; exit 1; fi; }
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  sleep 180
+  [ "$ONESHOT" = 1 ] || sleep 180
   reject=""   # per tick, so the timeout names THIS tick's gate, not an earlier one's
   # REST with --paginate captured FIRST, then `jq -s add`: the workflow posts a
   # NEW comment every run (gh pr comment --body-file; PR #281 has six), so a
@@ -172,11 +192,11 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     fails=$((fails + 1)); reject="API/jq failure ($fails in a row)"
     echo "POLL: API/jq call failed for PR $PR ($fails in a row; see above)" >&2
     [ "$fails" -ge 3 ] && exit 2
-    continue
+    not_ready; continue
   fi
   fails=0
   if [ -z "$c" ]; then
-    reject="no bot comment yet"; continue
+    reject="no bot comment yet"; not_ready; continue
   fi
   # Epochs (updated_at is UTC "Z"; started_at too, but never string-compare
   # timestamps), each checked for emptiness first: `[ "" -ge ... ]` returns 2
@@ -185,9 +205,10 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   v_epoch=$(date -u -d "${c%% *}" +%s 2>/dev/null)
   r_epoch=$([ -n "$run_started" ] && date -u -d "$run_started" +%s 2>/dev/null)
   if [ -z "$v_epoch" ] || { [ -n "$run_started" ] && [ -z "$r_epoch" ]; }; then
-    bad_ts=$((bad_ts + 1)); echo "POLL: unparseable timestamp (verdict '${c%% *}', run '$run_started'; $bad_ts in a row)" >&2
+    bad_ts=$((bad_ts + 1)); reject="unparseable timestamp (verdict '${c%% *}', run '$run_started'; $bad_ts in a row)"
+    echo "POLL: $reject" >&2
     [ "$bad_ts" -ge 3 ] && exit 2
-    continue
+    not_ready; continue
   fi
   bad_ts=0
   if [ "${pending:-0}" -gt 0 ]; then
@@ -202,6 +223,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     case "${c#* }" in "SIGN-OFF NOT IN LAST LINES"*) exit 3;; esac   # hard stop, distinct from a verdict
     exit 0
   fi
+  not_ready
 done
 # Name the gate that rejected the last poll: "no comment" routes to the
 # relabel / workflow checks, the others mean the review is still running,
@@ -289,10 +311,11 @@ For **every** finding, in this order:
      pre-flight downloads it on first use).
    - driver code: rebuild with the vendor compiled in, then run the tagged suite:
      `cmake -S AlpacaCore -B AlpacaCore/build -DALPACACORE_ENABLE_ALL_VENDORS=ON && cmake --build AlpacaCore/build --target alpacacore_tests`
-     then `AlpacaCore/build/tests/alpacacore_tests "[vendor][device]"`. Vendors OFF (the
-     `run_all_tests.sh` first pass) compiles no driver, so the tag filter matches nothing and
-     Catch2 exits non-zero for "no tests ran" (probed: rc 2), a failure that says nothing about
-     the driver.
+     then `AlpacaCore/build/tests/alpacacore_tests "[vendor][device]"`. `run_all_tests.sh`
+     defaults vendors ON, but `ci_preflight.sh` gate 3 runs it as
+     `ALPACACORE_ENABLE_ALL_VENDORS=OFF ./run_all_tests.sh`, and a build from that pass compiles
+     no driver: the tag filter matches nothing and Catch2 exits non-zero for "no tests ran"
+     (probed: rc 2), a failure that says nothing about the driver.
    The full `ci_preflight.sh` is for branches that change runtime C++ across vendors.
 6. **One commit per finding, one push per round** (this `⚠️ Issues found` path only). Commits
    stay atomic so a wrong one can be reverted alone; the push stays batched because every push
@@ -437,6 +460,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - Merge conflicts that cannot be resolved without choosing between two contributors' intents.
 - The review workflow itself is broken (two consecutive timeouts after the relabel
   tricks) — report the run URL.
+- The poll exits 2: three consecutive API/jq failures or three unparseable timestamps. Report
+  the last `POLL:` line and move to the next PR; the user decides whether it is GitHub or us.
 - The poll exits 3 with `SIGN-OFF NOT IN LAST LINES`: none of the last five non-empty lines of
   the bot's newest comment is a verdict, so its outcome cannot be read mechanically. This is
   deliberately stricter than the workflow's own assert step (`grep -qE "Approved|Issues found"`
