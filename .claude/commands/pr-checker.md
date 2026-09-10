@@ -51,12 +51,15 @@ Checks to make before waiting on anything:
    with NO comment; the poll's "comment after the run started" rule then rejects forever and
    two timeouts later the loop would misreport the workflow as broken. Detect it up front:
    ```bash
-   gh pr diff <N> --name-only | grep -qx '.github/workflows/claude-review.yml'
+   files=$(gh pr diff <N> --name-only) || { echo "cannot list PR <N> files; treat as unknown" >&2; exit 2; }
+   grep -qx '.github/workflows/claude-review.yml' <<<"$files"
    ```
    This is the workflow's own assert-step test, and `gh pr diff` is not paginated (the
-   `pulls/<N>/files` endpoint is, 100 per page, and would miss the file on a large PR). A match
-   (probed: true on PR #280, which switched the model; false on #282) means the user reads and
-   merges that PR by hand; finish the rest of the queue.
+   `pulls/<N>/files` endpoint is, 100 per page, and would miss the file on a large PR). The
+   listing is captured first: in a bare pipeline `$?` would be grep's, and a failed `gh` would
+   read as "does not touch the workflow", skipping the stop. A match (probed: true on PR #280,
+   which switched the model; false on #282) means the user reads and merges that PR by hand;
+   an unknown (exit 2) is a hard stop too. Finish the rest of the queue.
    **Same for a dependabot PR**: the job's `if` starts with `github.actor != 'dependabot[bot]'`,
    so no comment ever comes. `gh pr view <N> --json author --jq .author.login` prints
    `app/dependabot` (REST: `dependabot[bot]`; probed on #231/#232). Skip it with a line in the
@@ -112,7 +115,7 @@ Checks to make before waiting on anything:
    comment against the commit's `committer.date`: a skewed clock would reject every fresh
    verdict. Exit codes: 0 with a verdict line = proceed to Step 3; 1 = not ready (including a
    transient API failure), go to Step 2; 3 = the comment has no readable sign-off, a hard stop.
-   (Exit 2, three API or timestamp failures in a row, can only occur in the Step 2 loop, since
+   (Exit 2, five API or timestamp failures in a row, can only occur in the Step 2 loop, since
    a single pass counts to one.)
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
@@ -122,6 +125,8 @@ Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadli
 ```bash
 PR=<N>
 ONESHOT=${ONESHOT:-0}   # 1 = one pass, no sleep: exit 1 with the reason instead of looping (Step 1.4)
+# Assumes GNU coreutils (`date -u -d`): on BSD/macOS date every tick would count as an
+# unparseable timestamp and the poll would exit 2 blaming GitHub. This repo targets Linux.
 DEADLINE=$(( $(date +%s) + 1800 ))
 fails=0; bad_ts=0
 # Every "not ready" path goes through here: in ONESHOT mode that is the
@@ -148,12 +153,18 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # `>` quote and `-` bullet markers and a leading "Verdict:" label. The
   # emoji is OPTIONAL, like the workflow's own assert grep ("Approved|Issues
   # found"): a bare "**Issues found**" passes CI and must not vanish here.
-  # Pass 1: the last five lines, prefix match (anything after the verdict,
-  # e.g. "(2 blockers)", allowed). Pass 2, if pass 1 finds nothing: any line
-  # that is EXACTLY a verdict (optional trailing . or !), so a sign-off
-  # followed by a long footer is still read, while prose that merely quotes
-  # a verdict mid-sentence never counts. The review agent is only told to
-  # "end with a sign-off line".
+  # The two verdicts are NOT matched symmetrically, because their costs are
+  # not symmetric: a missed "Issues found" costs a round, a false "Approved"
+  # merges the PR (and the text is agent prose summarising fork-controlled
+  # content). So: "Issues found" is a prefix match in the last five lines
+  # (anything after it, e.g. "(2 blockers)", allowed), falling back to any
+  # line that is EXACTLY "Issues found" further up (a sign-off buried under
+  # a long footer). "Approved" counts ONLY as an exact line (optional
+  # trailing . or !) inside the last five, never by prefix and never from
+  # further up, and a tail containing both resolves to "Issues found":
+  # "⚠️ Issues found" followed by "Approved once the null check is added."
+  # is a rejection, not an approval. VS16 (U+FE0F) is optional on both
+  # emoji. The review agent is only told to "end with a sign-off line".
   # The comment pre-filter strips the same markers from the whole body before
   # testing, so an emphasised verdict is not dropped and silently replaced by
   # an OLDER comment; it reaches the tail matcher like any other review.
@@ -164,15 +175,16 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # with a message and retries; only five in a row (15 min) exit 2. The poll is the
   # tail of a `preflight && push && poll` chain and must not die on one blip.
   VERDICT_JQ='[.[] | select((.user.login | test("^github-actions(\\[bot\\])?$"))
-                            and (.body | gsub("[*#>_-]"; "") | test("(✅ *)?Approved|(⚠️? *)?Issues +found")))]
+                            and (.body | gsub("[*#>_-]"; "") | test("(✅️? *)?Approved|(⚠️? *)?Issues +found")))]
               | last | select(. != null)
               | (.body | split("\n") | map(select(test("\\S")))
                  | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("\\s+$"; ""))) as $lines
-              | (($lines | .[-5:] | map(select(test("^((✅ *)?Approved|(⚠️? *)?Issues +found)"))) | last)
-                 // ($lines | map(select(test("^((✅ *)?Approved|(⚠️? *)?Issues +found)[.!]?$"))) | last)) as $line
-              | "\(.updated_at) \(if $line == null then "SIGN-OFF NOT IN LAST LINES"
-                                    elif ($line | test("^(✅ *)?Approved")) then "✅ Approved"
-                                    else "⚠️ Issues found" end)\n\(.body)"'
+              | ($lines | .[-5:]) as $tail
+              | (if   ($tail  | any(test("^(⚠️? *)?Issues +found")))          then "⚠️ Issues found"
+                 elif ($tail  | any(test("^(✅️? *)?Approved[.!]?$")))         then "✅ Approved"
+                 elif ($lines | any(test("^(⚠️? *)?Issues +found[.!]?$")))    then "⚠️ Issues found"
+                 else "SIGN-OFF NOT IN LAST LINES" end) as $verdict
+              | "\(.updated_at) \($verdict)\n\(.body)"'
   # Binding the verdict to THIS head: the proof is a successful `review`
   # check-run on the head commit AND a comment updated after the NEWEST such
   # run started, with no `review` run still queued or in progress. Details:
@@ -465,8 +477,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   build and test gates to check, and CI runs them on the PR anyway. Docs-only is decided by
   what the branch touches, not by listing code extensions (a `CMakeLists.txt`, `VERSION` or
   `debian/` change is code): every path in `git diff origin/main...HEAD --name-only` must match
-  `\.md$`, `^docs/`, `^\.claude/`, or a ConformU report under `AlpacaCore/conformu/` or
-  `AlpacaHTTP/conformu/`. Anything else runs the pre-flight. It still runs the
+  `\.md$`, `^docs/`, `^\.claude/.*\.md$` (a hook script under `.claude/` is code), or a ConformU
+  report under `AlpacaCore/conformu/` or `AlpacaHTTP/conformu/`. Anything else runs the pre-flight. It still runs the
   repo-wide checks CI applies to every PR (the docs row in "Prove it before you push"
   item 5), because AGENTS.md and CHANGELOG edits are exactly what they catch. Commit, push, poll.
 - **A bot round with new findings** is the normal case, not a reason to report back. Fix,
@@ -490,7 +502,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - Merge conflicts that cannot be resolved without choosing between two contributors' intents.
 - The review workflow itself is broken (two consecutive timeouts after the relabel
   tricks) — report the run URL.
-- The poll exits 2: three consecutive API/jq failures or three unparseable timestamps. Report
+- The poll exits 2: five consecutive API/jq failures or five unparseable timestamps (15 of the
+  30 minutes). Report
   the last `POLL:` line and move to the next PR; the user decides whether it is GitHub or us.
 - The poll exits 3 with `SIGN-OFF NOT IN LAST LINES`: none of the last five non-empty lines of
   the bot's newest comment is a verdict, so its outcome cannot be read mechanically. This is
