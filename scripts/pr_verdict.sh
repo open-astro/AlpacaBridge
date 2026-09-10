@@ -21,12 +21,15 @@
 #   that becomes empty (a `---` rule) dropped so it does not consume the
 #   five-line tail. Matching is case-insensitive ("Issues Found" counts). The
 #   emoji is optional, like the workflow's own assert grep; VS16 is optional.
-#   1. Any line ANYWHERE that STARTS WITH "Issues found" -> Issues found
-#      (prefix: "(2 blockers)" allowed; anywhere, so a sign-off buried under
-#      a long footer still rejects, and it beats any "Approved" in the tail
-#      because a false approval merges while a false rejection costs a round)
-#   2. else any line among the LAST FIVE that STARTS WITH "Approved"
-#      -> Approved ("Approved -- no significant issues" is an approval)
+#   1. Any line ANYWHERE (bullet marker also stripped) that STARTS WITH
+#      "Issues found" -> Issues found. Trailing text is allowed ("Issues found
+#      (2 blockers)"). Anywhere, so a sign-off buried under a long footer
+#      still rejects, and it beats any "Approved" in the tail because a false
+#      approval merges while a false rejection costs a round.
+#   2. else any line among the LAST FIVE that STARTS WITH "Approved" with the
+#      bullet marker KEPT -> Approved ("Approved -- no significant issues" is
+#      an approval; "- Approved the earlier fix, but ..." is a list item, so
+#      a comment whose only "Approved" is such a bullet falls to rule 3).
 #   3. else -> SIGN-OFF NOT IN LAST LINES (exit 3)
 #   Prose that quotes a verdict mid-sentence never starts a line after
 #   normalisation, so it never counts. A line like "Issues found last round
@@ -66,9 +69,10 @@ VERDICT_JQ='[.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\
                    if ($l | test("^\\s*(```|~~~)")) then .fence |= not
                    elif .fence then . else .out += [$l] end) | .out
                | map(select(test("\\S")))
-               | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("^[\\s#>-]+"; "") | sub("\\s+$"; ""))
-               | map(select(. != ""))) as $lines
-            | ($lines | .[-5:]) as $tail
+               | map(gsub("[*_]"; "") | sub("^[\\s#>]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("^[\\s#>]+"; "") | sub("\\s+$"; ""))
+               | map(select(test("^[\\s-]*$") | not))) as $signoffs   # bullet marker kept ("- Approved the fix, but" is prose); a --- rule is dropped
+            | ($signoffs | map(sub("^[\\s-]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("^[\\s#>-]+"; "")) | map(select(. != ""))) as $lines
+            | ($signoffs | .[-5:]) as $tail
             | (if   ($lines | any(test("^(⚠️? *)?Issues +found"; "i")))    then "⚠️ Issues found"
                elif ($tail  | any(test("^(✅️? *)?Approved\\b"; "i")))      then "✅ Approved"
                else "SIGN-OFF NOT IN LAST LINES" end) as $verdict
