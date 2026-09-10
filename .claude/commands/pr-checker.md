@@ -100,6 +100,7 @@ Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadli
 ```bash
 PR=<N>
 DEADLINE=$(( $(date +%s) + 1800 ))
+fails=0
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 180
   # REST with --paginate captured FIRST, then `jq -s add`: the workflow posts a
@@ -112,69 +113,85 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # is jq's, and a gh that dies mid-pagination has already emitted page 1
   # (the OLDEST comments), which jq would parse happily.
   # Verdict = the sign-off among the LAST THREE non-empty lines of the body,
-  # each trimmed of whitespace, `*` emphasis, `#` heading, `>` quote and `-`
-  # bullet markers, matched by prefix (optional U+FE0F on ⚠, anything after the
-  # verdict such as "(2 blockers)" allowed): the review agent is only told to
-  # "end with a sign-off line", and a footer or `---` rule after it must not
-  # turn an ordinary review into a hard stop. A review may quote either
+  # each with `*`/`_` emphasis removed throughout (so "⚠️ **Issues found**"
+  # reads as the verdict), then trimmed of whitespace, `#` heading, `>` quote
+  # and `-` bullet markers, matched by prefix (optional U+FE0F on ⚠, anything after
+  # the verdict such as "(2 blockers)" allowed): the review agent is only told
+  # to "end with a sign-off line", and a footer or `---` rule after it must
+  # not turn an ordinary review into a hard stop. A review may quote either
   # string in its prose while discussing this file, so a global match is
   # still not safe; the tail of the body is.
+  # The comment pre-filter strips the same markers from the whole body before
+  # testing, so "⚠️ **Issues found**" (emphasis inside the verdict) is not
+  # dropped and silently replaced by an OLDER comment; it reaches the tail
+  # matcher like any other review.
   # Guards: no comment yet -> no output (select(. != null)); CRLF -> stripped
   # with the whitespace; no verdict in the last three lines -> "SIGN-OFF NOT
-  # IN LAST LINES: ..." (a hard stop, see below). A failed gh call exits 2
-  # with its own message: it must never surface as a 30-minute timeout
-  # blamed on the review workflow.
+  # IN LAST LINES" (a hard stop, see below).
+  # A transient gh/jq failure (502, secondary rate limit) skips this tick
+  # with a message and retries; only three in a row exit 2. The poll is the
+  # tail of a `preflight && push && poll` chain and must not die on one blip.
   VERDICT_JQ='[.[] | select((.user.login | test("^github-actions(\\[bot\\])?$"))
-                            and (.body | test("✅ *Approved|⚠️? *Issues +found")))]
+                            and (.body | gsub("[*#>_-]"; "") | test("✅ *Approved|⚠️? *Issues +found")))]
               | last | select(. != null)
               | (.body | split("\n") | map(select(test("\\S"))) | .[-3:]
-                 | map(sub("^[\\s*#>-]+"; "") | sub("[\\s*]+$"; ""))
+                 | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("\\s+$"; ""))
                  | map(select(test("^(✅ *Approved|⚠️? *Issues +found)"))) | last) as $line
               | "\(.updated_at) \(if $line == null then "SIGN-OFF NOT IN LAST LINES"
                                     elif ($line | test("^✅")) then "✅ Approved"
                                     else "⚠️ Issues found" end)\n\(.body)"'
-  raw=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100") \
-     || { echo "POLL: gh api failed for PR $PR comments (rate limit, network; see above)" >&2; exit 2; }
-  c=$(printf '%s' "$raw" | jq -r -s "add | $VERDICT_JQ") \
-     || { echo "POLL: jq failed on PR $PR comments (see above)" >&2; exit 2; }
+  if ! raw=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100") \
+     || ! c=$(printf '%s' "$raw" | jq -r -s "add | $VERDICT_JQ") \
+     || ! head_sha=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha) \
+     || ! head_at=$(gh api "repos/open-astro/AlpacaBridge/commits/$head_sha" --jq .commit.committer.date) \
+     || ! run_started=$(gh api "repos/open-astro/AlpacaBridge/commits/$head_sha/check-runs?per_page=100" \
+            --jq '[.check_runs[] | select(.name == "review" and .conclusion == "success") | .started_at] | last // empty'); then
+    fails=$((fails + 1)); echo "POLL: API/jq call failed for PR $PR ($fails in a row; see above)" >&2
+    [ "$fails" -ge 3 ] && exit 2
+    continue
+  fi
+  fails=0
   # Head commit from the PR object, not `pulls/$PR/commits | .[-1]`: that list
   # is oldest-first and 30 per page, so on a PR past 30 commits .[-1] is the
   # 30th commit and a stale verdict would pass as fresh.
-  head_sha=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha) || exit 2
-  head_at=$(gh api "repos/open-astro/AlpacaBridge/commits/$head_sha" --jq .commit.committer.date) || exit 2
-  # Compare as epoch seconds: updated_at is UTC "Z" but committer.date keeps
-  # the committer's offset, and a string compare would mis-order them. Then
-  # bind the verdict to the SHA: committer.date is when the commit was made,
-  # not pushed, so a review of the PREVIOUS head finishing after the local
-  # commit time would otherwise look fresh. The proof the comment is about
-  # this head is a `review` check-run on exactly this commit with conclusion
-  # "success": queried per commit (not `gh run list`, which is repo-wide and
-  # drops off after --limit when several PRs are in flight), and "success"
-  # rather than "completed" because a run cancelled by concurrency or skipped
-  # for a missing safe-to-review label is also "completed" and posts no
-  # comment. (Probed: the head's check-run reads completed/success; PR #270's
-  # superseded head reads completed/cancelled; run headSha does equal the PR
-  # head under pull_request_target on this repo.)
+  # Freshness, all as epoch seconds (updated_at is UTC "Z", committer.date
+  # keeps the committer's offset; a string compare mis-orders them), and
+  # every epoch checked for emptiness first: `[ "" -gt ... ]` returns 2 and
+  # would fall through to the accept branch.
+  # Binding the verdict to THIS head: committer.date is when the commit was
+  # made, not pushed, so a review of the previous head could finish later
+  # than it. The proof is a successful `review` check-run on this commit
+  # (per-commit query, "success" rather than "completed" because a run
+  # cancelled by concurrency or skipped for a missing label is "completed"
+  # too) AND a comment updated after that run STARTED: a successful run can
+  # post nothing at all when the PR edits claude-review.yml (the action
+  # refuses to run and the assert step only warns), and the started_at check
+  # is what stops the previous round's comment from being read as current.
   reject=""
+  v_epoch=$(date -u -d "${c%% *}" +%s 2>/dev/null); h_epoch=$(date -u -d "$head_at" +%s 2>/dev/null)
+  r_epoch=$(date -u -d "$run_started" +%s 2>/dev/null)
   if [ -z "$c" ]; then
     reject="no bot comment yet"
-  elif [ "$(date -u -d "${c%% *}" +%s)" -le "$(date -u -d "$head_at" +%s)" ]; then
+  elif [ -z "$v_epoch" ] || [ -z "$h_epoch" ]; then
+    fails=$((fails + 1)); echo "POLL: unparseable timestamp (verdict '${c%% *}', head '$head_at')" >&2
+    [ "$fails" -ge 3 ] && exit 2
+    continue
+  elif [ "$v_epoch" -le "$h_epoch" ]; then
     reject="newest verdict (${c%% *}) predates head $head_sha ($head_at)"
-  else
-    reviewed=$(gh api "repos/open-astro/AlpacaBridge/commits/$head_sha/check-runs?per_page=100" \
-                 --jq '[.check_runs[] | select(.name == "review" and .conclusion == "success")] | length') || exit 2
-    if [ "${reviewed:-0}" -gt 0 ]; then
-      # First output line is "<updated_at> <verdict>"; the body follows. A
-      # "SIGN-OFF NOT IN LAST LINES" first line also exits 0: it is a hard
-      # stop for that PR (see Hard stops), never a verdict.
-      echo "$c"; exit 0
-    fi
+  elif [ -z "$run_started" ] || [ -z "$r_epoch" ]; then
     reject="verdict is fresh but no successful review check-run on head $head_sha yet"
+  elif [ "$v_epoch" -lt "$r_epoch" ]; then
+    reject="verdict (${c%% *}) predates the review run on head $head_sha (started $run_started)"
+  else
+    # First output line is "<updated_at> <verdict>"; the body follows. A
+    # "SIGN-OFF NOT IN LAST LINES" first line also exits 0: it is a hard
+    # stop for that PR (see Hard stops), never a verdict.
+    echo "$c"; exit 0
   fi
 done
 # Name the gate that rejected the last poll: "no comment" routes to the
-# relabel / workflow checks, the other two mean the review is still running
-# or was cancelled, and must not be blamed on the workflow.
+# relabel / workflow checks, the others mean the review is still running,
+# was cancelled, or posted nothing, and must not be blamed on the workflow.
 echo "TIMEOUT after 30 minutes; last rejection: $reject" >&2; exit 1
 ```
 
@@ -249,7 +266,8 @@ For **every** finding, in this order:
    - docs / skill / CHANGELOG (and every branch, since CI runs these on every PR regardless of
      what changed): `python3 scripts/check_docs_drift.py`, `python3 .github/scripts/check-unicode.py`,
      `python3 scripts/check_stress_registration.py`, and on a PR also
-     `python3 scripts/check_conformu_reports.py origin/main`; each prints `OK` and exits 0.
+     `python3 scripts/check_conformu_reports.py origin/main`. The exit code is the signal
+     (each prints its own wording, `Docs drift check OK.`, `Unicode scan OK -- ...`, and so on).
    - shell: `shellcheck <file>`. Workflows: `zizmor --offline .github/workflows/`, resolving
      the binary the way `ensure_zizmor()` in `ci_preflight.sh` does: `command -v zizmor` if
      present, else the pinned copy at
