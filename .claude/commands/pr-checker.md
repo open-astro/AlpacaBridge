@@ -83,8 +83,9 @@ Checks to make before waiting on anything:
    It is fine to update while a review is still in flight: the run on the old head is cancelled
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
-   Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (not
-   `createdAt`; the workflow's sticky comment may be edited in place) is newer than the last
+   Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (the
+   workflow posts a new comment per run, so `updated_at` equals `created_at` today, but it is
+   the field that stays correct if the comment is ever edited in place) is newer than the last
    commit (`gh api repos/open-astro/AlpacaBridge/pulls/<N>/commits --jq '.[-1].commit.committer.date'`).
    A verdict older than the head commit is stale and must not be trusted.
 
@@ -97,31 +98,36 @@ PR=<N>
 DEADLINE=$(( $(date +%s) + 1800 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 180
-  # REST, not `gh pr view --json comments`: the workflow uses a sticky comment
-  # (use_sticky_comment: true), which may be EDITED in place on later rounds,
-  # and only REST exposes updated_at. createdAt alone would call every round
-  # after the first "stale".
-  # Verdict = the final non-empty line of the body (verified on every bot
-  # comment on PRs #279-#282). A review may quote "✅ Approved" or "⚠️ Issues
-  # found" in its prose while discussing this file, so neither the first nor
-  # the last global match is safe; the sign-off line is. Guards: no comment
-  # yet -> no output (select(. != null)); CRLF body -> \r stripped; a last
-  # line that is not a verdict -> "SIGN-OFF NOT LAST LINE: ..." so it can
-  # never be mistaken for one. Probed: empty array, CRLF fixture, footer
-  # after the sign-off, and the live comments.
-  c=$(gh api "repos/open-astro/AlpacaBridge/issues/$PR/comments" --jq '[.[]
+  # REST with --paginate, not `gh pr view --json comments`: the workflow posts
+  # a NEW comment every run (gh pr comment --body-file; PR #281 has six), so
+  # a long PR pushes the newest one past page 1 and `last` on an unpaginated
+  # call returns a stale verdict forever. REST also exposes updated_at, the
+  # freshness field compared below.
+  # Verdict = the final non-empty line of the body, trimmed of whitespace and
+  # `*` emphasis (verified on every bot comment on PRs #279-#282; the review
+  # agent is only told to "end with a sign-off line", so "✅ Approved  " with a
+  # Markdown hard break or "**✅ Approved**" must still count). A review may
+  # quote either string in its prose while discussing this file, so neither
+  # the first nor the last global match is safe; the sign-off line is.
+  # Guards: no comment yet -> no output (select(. != null)); CRLF -> stripped
+  # with the rest of the whitespace; a last line that is not a verdict ->
+  # "SIGN-OFF NOT LAST LINE: ..." (a hard stop, see below). stderr is NOT
+  # suppressed: a rate limit or a jq typo must show up here, not as a
+  # 30-minute timeout blamed on the review workflow.
+  c=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments" --jq '[.[]
         | select((.user.login | test("^github-actions(\\[bot\\])?$"))
                  and (.body | test("✅ Approved|⚠️ Issues found")))]
         | last | select(. != null)
-        | (.body | split("\n") | map(select(test("\\S"))) | last | sub("\r$"; "")) as $line
+        | (.body | split("\n") | map(select(test("\\S"))) | last
+           | sub("^[\\s*]+"; "") | sub("[\\s*]+$"; "")) as $line
         | "\(.updated_at) \(if ($line | test("^(✅ Approved|⚠️ Issues found)$")) then $line
-                              else "SIGN-OFF NOT LAST LINE: " + $line end)\n\(.body)"' 2>/dev/null || true)
+                              else "SIGN-OFF NOT LAST LINE: " + $line end)\n\(.body)"' || true)
   head_at=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR/commits" --jq '.[-1].commit.committer.date')
   # Only a verdict UPDATED after the head commit counts: anything older is a
   # stale verdict on a previous head (or the contributor pushed mid-round).
   # First output line is "<updated_at> <verdict>"; the body follows. A
-  # "SIGN-OFF NOT LAST LINE" first line also exits 0: treat it as a hard stop
-  # for that PR, never as a verdict.
+  # "SIGN-OFF NOT LAST LINE" first line also exits 0: it is a hard stop for
+  # that PR (see Hard stops), never a verdict.
   if [[ "${c%% *}" > "$head_at" ]]; then echo "$c"; exit 0; fi
 done
 echo "TIMEOUT: no review-bot comment within 30 minutes" >&2; exit 1
@@ -346,6 +352,9 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - Merge conflicts that cannot be resolved without choosing between two contributors' intents.
 - The review workflow itself is broken (two consecutive timeouts after the relabel
   tricks) — report the run URL.
+- The poll reports `SIGN-OFF NOT LAST LINE`: the bot's newest comment does not end in a
+  verdict, so its outcome cannot be read mechanically. Quote the comment's last lines and let
+  the user read the verdict.
 
 State the blocker in one or two sentences, finish every other PR in the list, and say exactly
 which PR was left and why.
