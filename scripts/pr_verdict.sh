@@ -12,10 +12,12 @@
 #   3  the newest bot comment has no readable sign-off (hard stop)
 #
 # Verdict contract (see scripts/tests/pr_verdict_test.sh, which pins it):
-#   Fenced code blocks (``` or ~~~, to the closing fence or the end of the
-#   body) are dropped first: a review that quotes a verdict on its own line
-#   inside a fence, as any review of this script or the skill will, is not
-#   signing off. Inline code stays: a line that starts with a backtick never
+#   Fenced code blocks (``` or ~~~, to the closing fence) are dropped first:
+#   a review that quotes a verdict on its own line inside a fence, as any
+#   review of this script or the skill will, is not signing off. Parity
+#   guard: when the fence markers do not balance (a quoted fence, a truncated
+#   body) nothing is dropped, so the sign-off stays visible and a quoted
+#   rejection costs a round rather than a false hard stop. Inline code stays: a line that starts with a backtick never
 #   matches either rule. Remaining lines are normalised: emphasis (*_)
 #   removed throughout, leading #, > markers and a "Verdict:" label stripped,
 #   whitespace trimmed, and a line that is empty or only a --- rule dropped so
@@ -66,9 +68,11 @@ VERDICT_JQ='[.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\
                           and (.body | gsub("[*#>_-]"; "") | test("(✅️? *)?Approved|(⚠️? *)?Issues +found"; "i")))]
             | last | select(. != null)
             | (.body | split("\n")
+               | . as $raw
                | reduce .[] as $l ({fence: false, out: []};          # drop fenced code: a quoted verdict is not a sign-off
                    if ($l | test("^\\s*(```|~~~)")) then .fence |= not
-                   elif .fence then . else .out += [$l] end) | .out
+                   elif .fence then . else .out += [$l] end)
+               | if .fence then $raw else .out end                  # parity guard: an odd fence count would hide the sign-off, so fall back to every line
                | map(select(test("\\S")))
                | map(gsub("[*_]"; "") | sub("^[\\s#>]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("^[\\s#>]+"; "") | sub("\\s+$"; ""))
                | map(select(test("^[\\s-]*$") | not))) as $signoffs   # bullet marker kept ("- Approved the fix, but" is prose); a --- rule is dropped
