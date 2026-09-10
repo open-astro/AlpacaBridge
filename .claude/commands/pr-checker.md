@@ -112,8 +112,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # is jq's, and a gh that dies mid-pagination has already emitted page 1
   # (the OLDEST comments), which jq would parse happily.
   # Verdict = the sign-off among the LAST THREE non-empty lines of the body,
-  # each trimmed of whitespace, `*` emphasis, `#` heading and `>` quote
-  # markers, matched by prefix (optional U+FE0F on ⚠, anything after the
+  # each trimmed of whitespace, `*` emphasis, `#` heading, `>` quote and `-`
+  # bullet markers, matched by prefix (optional U+FE0F on ⚠, anything after the
   # verdict such as "(2 blockers)" allowed): the review agent is only told to
   # "end with a sign-off line", and a footer or `---` rule after it must not
   # turn an ordinary review into a hard stop. A review may quote either
@@ -128,7 +128,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
                             and (.body | test("✅ *Approved|⚠️? *Issues +found")))]
               | last | select(. != null)
               | (.body | split("\n") | map(select(test("\\S"))) | .[-3:]
-                 | map(sub("^[\\s*#>]+"; "") | sub("[\\s*]+$"; ""))
+                 | map(sub("^[\\s*#>-]+"; "") | sub("[\\s*]+$"; ""))
                  | map(select(test("^(✅ *Approved|⚠️? *Issues +found)"))) | last) as $line
               | "\(.updated_at) \(if $line == null then "SIGN-OFF NOT IN LAST LINES"
                                     elif ($line | test("^✅")) then "✅ Approved"
@@ -146,20 +146,36 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # the committer's offset, and a string compare would mis-order them. Then
   # bind the verdict to the SHA: committer.date is when the commit was made,
   # not pushed, so a review of the PREVIOUS head finishing after the local
-  # commit time would otherwise look fresh. A completed claude-review run
-  # on exactly this head is the proof the comment is about it.
-  if [ -n "$c" ] && [ "$(date -u -d "${c%% *}" +%s)" -gt "$(date -u -d "$head_at" +%s)" ]; then
-    reviewed=$(gh run list --workflow=claude-review.yml --limit 20 --json headSha,status \
-                 --jq "[.[] | select(.headSha == \"$head_sha\" and .status == \"completed\")] | length")
+  # commit time would otherwise look fresh. The proof the comment is about
+  # this head is a `review` check-run on exactly this commit with conclusion
+  # "success": queried per commit (not `gh run list`, which is repo-wide and
+  # drops off after --limit when several PRs are in flight), and "success"
+  # rather than "completed" because a run cancelled by concurrency or skipped
+  # for a missing safe-to-review label is also "completed" and posts no
+  # comment. (Probed: the head's check-run reads completed/success; PR #270's
+  # superseded head reads completed/cancelled; run headSha does equal the PR
+  # head under pull_request_target on this repo.)
+  reject=""
+  if [ -z "$c" ]; then
+    reject="no bot comment yet"
+  elif [ "$(date -u -d "${c%% *}" +%s)" -le "$(date -u -d "$head_at" +%s)" ]; then
+    reject="newest verdict (${c%% *}) predates head $head_sha ($head_at)"
+  else
+    reviewed=$(gh api "repos/open-astro/AlpacaBridge/commits/$head_sha/check-runs?per_page=100" \
+                 --jq '[.check_runs[] | select(.name == "review" and .conclusion == "success")] | length') || exit 2
     if [ "${reviewed:-0}" -gt 0 ]; then
       # First output line is "<updated_at> <verdict>"; the body follows. A
       # "SIGN-OFF NOT IN LAST LINES" first line also exits 0: it is a hard
       # stop for that PR (see Hard stops), never a verdict.
       echo "$c"; exit 0
     fi
+    reject="verdict is fresh but no successful review check-run on head $head_sha yet"
   fi
 done
-echo "TIMEOUT: no review-bot comment within 30 minutes" >&2; exit 1
+# Name the gate that rejected the last poll: "no comment" routes to the
+# relabel / workflow checks, the other two mean the review is still running
+# or was cancelled, and must not be blamed on the workflow.
+echo "TIMEOUT after 30 minutes; last rejection: $reject" >&2; exit 1
 ```
 
 When several PRs are queued, poll them all in one background loop and act on whichever verdict
@@ -177,9 +193,10 @@ batch as the bot findings, not on its own.
 
 ## Step 3 — Act on the verdict
 
-Read the newest bot comment in full. The verdict is the **final non-empty line** of the body,
-never a string matched elsewhere in it: reviews quote `✅ Approved` / `⚠️ Issues found` in prose
-when discussing this file.
+Read the newest bot comment in full. The verdict is the sign-off among the **last three
+non-empty lines** of the body (markers and emphasis stripped, prefix match), the same rule the
+Step 2 poll applies; never a string matched elsewhere in it, since reviews quote `✅ Approved`
+/ `⚠️ Issues found` in prose when discussing this file.
 
 ### `⚠️ Issues found`
 
@@ -231,7 +248,8 @@ For **every** finding, in this order:
    - `scripts/*.py`: run the script itself against the real repo, plus its own probe.
    - docs / skill / CHANGELOG (and every branch, since CI runs these on every PR regardless of
      what changed): `python3 scripts/check_docs_drift.py`, `python3 .github/scripts/check-unicode.py`,
-     `python3 scripts/check_stress_registration.py`; each prints `OK` and exits 0.
+     `python3 scripts/check_stress_registration.py`, and on a PR also
+     `python3 scripts/check_conformu_reports.py origin/main`; each prints `OK` and exits 0.
    - shell: `shellcheck <file>`. Workflows: `zizmor --offline .github/workflows/`, resolving
      the binary the way `ensure_zizmor()` in `ci_preflight.sh` does: `command -v zizmor` if
      present, else the pinned copy at
@@ -364,7 +382,7 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/`.py`/workflow changes; check with
   `git diff main...HEAD --name-only`) does NOT run `ci_preflight.sh` at all: there is nothing
   for the build and test gates to check, and CI runs them on the PR anyway. It still runs the
-  three repo-wide checks CI applies to every PR (the docs row in "Prove it before you push"
+  repo-wide checks CI applies to every PR (the docs row in "Prove it before you push"
   item 5), because AGENTS.md and CHANGELOG edits are exactly what they catch. Commit, push, poll.
 - **A bot round with new findings** is the normal case, not a reason to report back. Fix,
   pre-flight, push, poll, repeat. Report only in the wrap-up, or when a hard stop is hit.
