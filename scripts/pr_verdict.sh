@@ -17,17 +17,16 @@
 #   that becomes empty (a `---` rule) dropped so it does not consume the
 #   five-line tail. Matching is case-insensitive ("Issues Found" counts). The
 #   emoji is optional, like the workflow's own assert grep; VS16 is optional.
-#   1. Any line among the LAST FIVE non-empty lines that STARTS WITH
-#      "Issues found"  -> Issues found   (prefix: "(2 blockers)" allowed)
-#   2. else any such line that STARTS WITH "Approved" -> Approved
-#      ("Approved -- no significant issues" is an approval; a tail that
-#      also says "Issues found" is NOT, because a false approval merges)
-#   3. else any line ANYWHERE that is EXACTLY "Issues found" -> Issues found
-#      (a sign-off buried under a long footer)
-#   4. else -> SIGN-OFF NOT IN LAST LINES (exit 3)
+#   1. Any line ANYWHERE that STARTS WITH "Issues found" -> Issues found
+#      (prefix: "(2 blockers)" allowed; anywhere, so a sign-off buried under
+#      a long footer still rejects, and it beats any "Approved" in the tail
+#      because a false approval merges while a false rejection costs a round)
+#   2. else any line among the LAST FIVE that STARTS WITH "Approved"
+#      -> Approved ("Approved -- no significant issues" is an approval)
+#   3. else -> SIGN-OFF NOT IN LAST LINES (exit 3)
 #   Prose that quotes a verdict mid-sentence never starts a line after
-#   normalisation, so it never counts. A tail line like "Issues found last
-#   round are all addressed." costs one review round; that is the accepted
+#   normalisation, so it never counts. A line like "Issues found last round
+#   are all addressed." costs one review round; that is the accepted
 #   direction.
 #
 # Head binding: the comment must be updated after the newest SUCCESSFUL
@@ -39,27 +38,31 @@
 # workflow itself gets a successful run with no comment (handled upstream by
 # the skill's Step 1.0). Verified on same-repo and fork PR heads.
 #
+# The accepted comment author is the workflow's own assert-step pattern,
+# ^(claude|github-actions)(\[bot\])?$, so a token change there cannot make
+# CI pass while this poll rejects forever.
 # Requires GNU coreutils (date -u -d), gh, jq. Comments are fetched with
 # --paginate and merged locally (gh 2.46 has no --slurp); gh output is
 # captured before jq so a mid-pagination failure is visible.
 set -u
 REPO=${REPO:-open-astro/AlpacaBridge}
 PR=${1:?usage: pr_verdict.sh <PR-number> [--oneshot]}
+case "$PR" in ''|*[!0-9]*) echo "pr_verdict.sh: PR must be a number, got '$PR'" >&2; exit 2;; esac
 ONESHOT=0; [ "${2:-}" = "--oneshot" ] && ONESHOT=1
 TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} )); FAILS_MAX=${FAILS_MAX:-5}
-fails=0; reject=""   # one counter for API and timestamp failures, so alternating kinds still reach exit 2
+fails=0; reject=""   # counts consecutive API and timestamp failures (either kind); a tick that reaches
+                     # the gates, including "no comment yet", resets it, since the API is evidently fine
 
 # shellcheck disable=SC2016  # jq program: $lines/$tail/$verdict are jq variables
-VERDICT_JQ='[.[] | select((.user.login | test("^github-actions(\\[bot\\])?$"))
+VERDICT_JQ='[.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$"))
                           and (.body | gsub("[*#>_-]"; "") | test("(✅️? *)?Approved|(⚠️? *)?Issues +found"; "i")))]
             | last | select(. != null)
             | (.body | split("\n") | map(select(test("\\S")))
                | map(gsub("[*_]"; "") | sub("^[\\s#>-]+"; "") | sub("^(?i)verdict:\\s*"; "") | sub("^[\\s#>-]+"; "") | sub("\\s+$"; ""))
                | map(select(. != ""))) as $lines
             | ($lines | .[-5:]) as $tail
-            | (if   ($tail  | any(test("^(⚠️? *)?Issues +found"; "i")))        then "⚠️ Issues found"
-               elif ($tail  | any(test("^(✅️? *)?Approved\\b"; "i")))          then "✅ Approved"
-               elif ($lines | any(test("^(⚠️? *)?Issues +found[.!]?$"; "i")))  then "⚠️ Issues found"
+            | (if   ($lines | any(test("^(⚠️? *)?Issues +found"; "i")))    then "⚠️ Issues found"
+               elif ($tail  | any(test("^(✅️? *)?Approved\\b"; "i")))      then "✅ Approved"
                else "SIGN-OFF NOT IN LAST LINES" end) as $verdict
             | "\(.updated_at) \($verdict)\n\(.body)"'
 
