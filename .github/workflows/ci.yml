@@ -557,6 +557,9 @@ jobs:
           done
           echo "Linting: ${scripts[*]}"
           shellcheck "${scripts[@]}"
+      - name: Run the pr_verdict.sh contract test (stub gh, no network)
+        run: scripts/tests/pr_verdict_test.sh
+
 
   javascript:
     name: JavaScript syntax
