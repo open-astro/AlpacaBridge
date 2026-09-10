@@ -200,11 +200,14 @@ public:
         return device_number_;
     }
 
+    // The "(Synscan Hand Controller)" suffix disambiguates from the skywatcher direct
+    // driver's get_name(), which resolves to the identical model string for a
+    // mount reachable over both connections (see the sibling comment there).
     std::string get_name() const override {
         if (mount_model_id_ >= 0) {
-            return "Sky-Watcher " + synscan_model_id_to_name(mount_model_id_);
+            return "Sky-Watcher " + synscan_model_id_to_name(mount_model_id_) + " (Synscan Hand Controller)";
         }
-        return "Sky-Watcher SynScan Mount";
+        return "Sky-Watcher SynScan Mount (Synscan Hand Controller)";
     }
 
     DeviceType get_device_type() const override {

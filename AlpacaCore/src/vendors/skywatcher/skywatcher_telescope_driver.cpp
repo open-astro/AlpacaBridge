@@ -189,13 +189,18 @@ public:
 
     // Model comes from the ":e" mount-code byte captured at connect. Falls back
     // to the generic name while disconnected. Served from the narrow firmware
-    // mutex so it stays inside ConformU's 0.1 s FAST target.
+    // mutex so it stays inside ConformU's 0.1 s FAST target. The "(Direct USB / EQDIR)"
+    // suffix disambiguates from the synscan driver's get_name(), which
+    // resolves to the identical model string for a mount reachable over both
+    // its hand controller and its own USB/EQDIR port (hardware-confirmed
+    // 2026-09-10: both connections reported plain "Sky-Watcher EQM-35 Pro"
+    // for the same physical mount, indistinguishable in a client's chooser).
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         if (model_cache_.empty()) {
-            return "Sky-Watcher Mount";
+            return "Sky-Watcher Mount (Direct USB / EQDIR)";
         }
-        return "Sky-Watcher " + model_cache_;
+        return "Sky-Watcher " + model_cache_ + " (Direct USB / EQDIR)";
     }
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
