@@ -63,13 +63,14 @@ check "success then cancelled run"    cancelled_after 2026-09-10T10:00:00Z "r\n$
 check "re-review pending"             pending 2026-09-10T10:00:00Z "r\n$A"                                  1 "queued/in progress"
 check "no successful run"             none 2026-09-10T10:00:00Z "r\n$A"                                     1 "no successful review check-run"
 # gh failing: oneshot exits 1 on the first failure; the loop exits 2 after FAILS_MAX
+# (BUDGET is generous on purpose: these exit via the counter, and a 5 s deadline lost races on a busy runner)
 sed 's/gh api/gh-none api/g' "$SCRIPT" > "$STUB/broken.sh"
 out=$( PATH="$STUB:$PATH" SCEN=ok BODY=x bash "$STUB/broken.sh" 282 --oneshot 2>&1 ); rc=$?; out=${out%%$'\n'*}
 if [ "$rc" = 1 ] && [[ "$out" == *"gh-none"* || "$out" == *"API/jq failure"* ]]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL gh failure oneshot: rc=$rc out='$out'"; fi
-out=$( PATH="$STUB:$PATH" SCEN=ok BODY=x TICK=0 BUDGET=5 FAILS_MAX=3 bash "$STUB/broken.sh" 282 2>&1 ); rc=$?; out=${out##*$'\n'}
+out=$( PATH="$STUB:$PATH" SCEN=ok BODY=x TICK=0 BUDGET=120 FAILS_MAX=3 bash "$STUB/broken.sh" 282 2>&1 ); rc=$?; out=${out##*$'\n'}
 if [ "$rc" = 2 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL gh failure loop: rc=$rc out='$out'"; fi
 # a persistently unparseable timestamp reaches exit 2 through the shared counter
-out=$( PATH="$STUB:$PATH" SCEN=ok UPD="not-a-date" BODY="r\n$A" TICK=0 BUDGET=5 FAILS_MAX=3 bash "$SCRIPT" 282 2>&1 ); rc=$?
+out=$( PATH="$STUB:$PATH" SCEN=ok UPD="not-a-date" BODY="r\n$A" TICK=0 BUDGET=120 FAILS_MAX=3 bash "$SCRIPT" 282 2>&1 ); rc=$?
 if [ "$rc" = 2 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL unparseable timestamp loop: rc=$rc out='${out##*$'\n'}'"; fi
 # the workflow's own author pattern: a comment from claude[bot] is accepted
 sed 's/github-actions\[bot\]/claude[bot]/' "$STUB/gh" > "$STUB/gh2" && chmod +x "$STUB/gh2" && mkdir -p "$STUB/alt" && mv "$STUB/gh2" "$STUB/alt/gh"
