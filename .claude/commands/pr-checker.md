@@ -102,46 +102,61 @@ PR=<N>
 DEADLINE=$(( $(date +%s) + 1800 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 180
-  # REST with --paginate piped to `jq -s add`, not `gh pr view --json comments`:
-  # the workflow posts a NEW comment every run (gh pr comment --body-file; PR
-  # #281 has six), so a long PR pushes the newest one past page 1. --paginate
-  # applies --jq PER PAGE, and this gh (2.46) has no --slurp, so the pages are
-  # emitted raw and merged locally (probe: per_page=2 on #281 gives 6 merged
-  # comments and the same newest id as a single 100-per-page call).
-  # Verdict = the final non-empty line of the body, trimmed of whitespace and
-  # `*` emphasis, matched loosely (optional U+FE0F on ⚠, optional trailing
-  # . or !): the review agent is only told to "end with a sign-off line". A
-  # review may quote either string in its prose while discussing this file,
-  # so neither the first nor the last global match is safe; the sign-off is.
-  # The comment pre-filter uses the same loose pattern as the sign-off match,
-  # so a bold "⚠ Issues found" without U+FE0F is not dropped before it.
+  # REST with --paginate captured FIRST, then `jq -s add`: the workflow posts a
+  # NEW comment every run (gh pr comment --body-file; PR #281 has six), so a
+  # long PR pushes the newest one past page 1. --paginate applies --jq PER
+  # PAGE and this gh (2.46) has no --slurp, so pages are emitted raw and
+  # merged locally (probe: per_page=2 on #281 gives 6 merged comments and the
+  # same newest id as one 100-per-page call). Capturing gh's output into a
+  # variable before jq is what makes a gh failure visible: in a pipeline $?
+  # is jq's, and a gh that dies mid-pagination has already emitted page 1
+  # (the OLDEST comments), which jq would parse happily.
+  # Verdict = the sign-off among the LAST THREE non-empty lines of the body,
+  # each trimmed of whitespace, `*` emphasis, `#` heading and `>` quote
+  # markers, matched by prefix (optional U+FE0F on ⚠, anything after the
+  # verdict such as "(2 blockers)" allowed): the review agent is only told to
+  # "end with a sign-off line", and a footer or `---` rule after it must not
+  # turn an ordinary review into a hard stop. A review may quote either
+  # string in its prose while discussing this file, so a global match is
+  # still not safe; the tail of the body is.
   # Guards: no comment yet -> no output (select(. != null)); CRLF -> stripped
-  # with the whitespace; a last line that is not a verdict -> "SIGN-OFF NOT
-  # LAST LINE: ..." (a hard stop, see below). A failed gh call exits 2 with
-  # its own message: it must never surface as a 30-minute timeout blamed on
-  # the review workflow.
+  # with the whitespace; no verdict in the last three lines -> "SIGN-OFF NOT
+  # IN LAST LINES: ..." (a hard stop, see below). A failed gh call exits 2
+  # with its own message: it must never surface as a 30-minute timeout
+  # blamed on the review workflow.
   VERDICT_JQ='[.[] | select((.user.login | test("^github-actions(\\[bot\\])?$"))
                             and (.body | test("✅ *Approved|⚠️? *Issues +found")))]
               | last | select(. != null)
-              | (.body | split("\n") | map(select(test("\\S"))) | last
-                 | sub("^[\\s*]+"; "") | sub("[\\s*]+$"; "")) as $line
-              | "\(.updated_at) \(if ($line | test("^(✅ *Approved|⚠️? *Issues +found)[.!]?$"))
-                                    then $line else "SIGN-OFF NOT LAST LINE: " + $line end)\n\(.body)"'
-  c=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" \
-        | jq -r -s "add | $VERDICT_JQ") \
-     || { echo "POLL: gh api failed for PR $PR comments (rate limit, network, or jq error above)" >&2; exit 2; }
+              | (.body | split("\n") | map(select(test("\\S"))) | .[-3:]
+                 | map(sub("^[\\s*#>]+"; "") | sub("[\\s*]+$"; ""))
+                 | map(select(test("^(✅ *Approved|⚠️? *Issues +found)"))) | last) as $line
+              | "\(.updated_at) \(if $line == null then "SIGN-OFF NOT IN LAST LINES"
+                                    elif ($line | test("^✅")) then "✅ Approved"
+                                    else "⚠️ Issues found" end)\n\(.body)"'
+  raw=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100") \
+     || { echo "POLL: gh api failed for PR $PR comments (rate limit, network; see above)" >&2; exit 2; }
+  c=$(printf '%s' "$raw" | jq -r -s "add | $VERDICT_JQ") \
+     || { echo "POLL: jq failed on PR $PR comments (see above)" >&2; exit 2; }
   # Head commit from the PR object, not `pulls/$PR/commits | .[-1]`: that list
   # is oldest-first and 30 per page, so on a PR past 30 commits .[-1] is the
   # 30th commit and a stale verdict would pass as fresh.
   head_sha=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha) || exit 2
   head_at=$(gh api "repos/open-astro/AlpacaBridge/commits/$head_sha" --jq .commit.committer.date) || exit 2
   # Compare as epoch seconds: updated_at is UTC "Z" but committer.date keeps
-  # the committer's offset, and a string compare would mis-order them.
+  # the committer's offset, and a string compare would mis-order them. Then
+  # bind the verdict to the SHA: committer.date is when the commit was made,
+  # not pushed, so a review of the PREVIOUS head finishing after the local
+  # commit time would otherwise look fresh. A completed claude-review run
+  # on exactly this head is the proof the comment is about it.
   if [ -n "$c" ] && [ "$(date -u -d "${c%% *}" +%s)" -gt "$(date -u -d "$head_at" +%s)" ]; then
-    # First output line is "<updated_at> <verdict>"; the body follows. A
-    # "SIGN-OFF NOT LAST LINE" first line also exits 0: it is a hard stop for
-    # that PR (see Hard stops), never a verdict.
-    echo "$c"; exit 0
+    reviewed=$(gh run list --workflow=claude-review.yml --limit 20 --json headSha,status \
+                 --jq "[.[] | select(.headSha == \"$head_sha\" and .status == \"completed\")] | length")
+    if [ "${reviewed:-0}" -gt 0 ]; then
+      # First output line is "<updated_at> <verdict>"; the body follows. A
+      # "SIGN-OFF NOT IN LAST LINES" first line also exits 0: it is a hard
+      # stop for that PR (see Hard stops), never a verdict.
+      echo "$c"; exit 0
+    fi
   fi
 done
 echo "TIMEOUT: no review-bot comment within 30 minutes" >&2; exit 1
@@ -214,6 +229,9 @@ For **every** finding, in this order:
      (`PREFLIGHT_BASE`), which is stale in a long session; `PREFLIGHT_BASE=origin/main` makes
      the two agree.
    - `scripts/*.py`: run the script itself against the real repo, plus its own probe.
+   - docs / skill / CHANGELOG (and every branch, since CI runs these on every PR regardless of
+     what changed): `python3 scripts/check_docs_drift.py`, `python3 .github/scripts/check-unicode.py`,
+     `python3 scripts/check_stress_registration.py`; each prints `OK` and exits 0.
    - shell: `shellcheck <file>`. Workflows: `zizmor --offline .github/workflows/`, resolving
      the binary the way `ensure_zizmor()` in `ci_preflight.sh` does: `command -v zizmor` if
      present, else the pinned copy at
@@ -222,8 +240,9 @@ For **every** finding, in this order:
    - driver code: rebuild with the vendor compiled in, then run the tagged suite:
      `cmake -S AlpacaCore -B AlpacaCore/build -DALPACACORE_ENABLE_ALL_VENDORS=ON && cmake --build AlpacaCore/build --target alpacacore_tests`
      then `AlpacaCore/build/tests/alpacacore_tests "[vendor][device]"`. Vendors OFF (the
-     `run_all_tests.sh` first pass) compiles no driver, so the tag filter would match nothing
-     and pass vacuously.
+     `run_all_tests.sh` first pass) compiles no driver, so the tag filter matches nothing and
+     Catch2 exits non-zero for "no tests ran" (probed: rc 2), a failure that says nothing about
+     the driver.
    The full `ci_preflight.sh` is for branches that change runtime C++ across vendors.
 6. **One commit per finding, one push per round** (this `⚠️ Issues found` path only). Commits
    stay atomic so a wrong one can be reverted alone; the push stays batched because every push
@@ -342,9 +361,11 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   record the flake (test name, failure text, pass rate) in the wrap-up for the user. Two
   consecutive flakes on the same test still push if the isolated runs pass. Only a failure in
   code this branch changes, or a test that fails in isolation every time, blocks the push.
-- **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/workflow changes; check with
+- **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/`.py`/workflow changes; check with
   `git diff main...HEAD --name-only`) does NOT run `ci_preflight.sh` at all: there is nothing
-  for the build and test gates to check, and CI runs them on the PR anyway. Commit, push, poll.
+  for the build and test gates to check, and CI runs them on the PR anyway. It still runs the
+  three repo-wide checks CI applies to every PR (the docs row in "Prove it before you push"
+  item 5), because AGENTS.md and CHANGELOG edits are exactly what they catch. Commit, push, poll.
 - **A bot round with new findings** is the normal case, not a reason to report back. Fix,
   pre-flight, push, poll, repeat. Report only in the wrap-up, or when a hard stop is hit.
 - **Waiting is never a stopping point.** Every wait (pre-flight, verdict poll, CI checks,
@@ -366,8 +387,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - Merge conflicts that cannot be resolved without choosing between two contributors' intents.
 - The review workflow itself is broken (two consecutive timeouts after the relabel
   tricks) — report the run URL.
-- The poll reports `SIGN-OFF NOT LAST LINE`: the bot's newest comment does not end in a
-  verdict, so its outcome cannot be read mechanically. Quote the comment's last lines and let
+- The poll reports `SIGN-OFF NOT IN LAST LINES`: none of the last three non-empty lines of the
+  bot's newest comment is a verdict, so its outcome cannot be read mechanically. Quote the comment's last lines and let
   the user read the verdict.
 
 State the blocker in one or two sentences, finish every other PR in the list, and say exactly
