@@ -104,15 +104,24 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # Verdict = the final non-empty line of the body (verified on every bot
   # comment on PRs #279-#282). A review may quote "✅ Approved" or "⚠️ Issues
   # found" in its prose while discussing this file, so neither the first nor
-  # the last global match is safe; the sign-off line is.
+  # the last global match is safe; the sign-off line is. Guards: no comment
+  # yet -> no output (select(. != null)); CRLF body -> \r stripped; a last
+  # line that is not a verdict -> "SIGN-OFF NOT LAST LINE: ..." so it can
+  # never be mistaken for one. Probed: empty array, CRLF fixture, footer
+  # after the sign-off, and the live comments.
   c=$(gh api "repos/open-astro/AlpacaBridge/issues/$PR/comments" --jq '[.[]
         | select((.user.login | test("^github-actions(\\[bot\\])?$"))
                  and (.body | test("✅ Approved|⚠️ Issues found")))]
-        | last | "\(.updated_at) \(.body | split("\n") | map(select(test("\\S"))) | last)\n\(.body)"')
+        | last | select(. != null)
+        | (.body | split("\n") | map(select(test("\\S"))) | last | sub("\r$"; "")) as $line
+        | "\(.updated_at) \(if ($line | test("^(✅ Approved|⚠️ Issues found)$")) then $line
+                              else "SIGN-OFF NOT LAST LINE: " + $line end)\n\(.body)"' 2>/dev/null || true)
   head_at=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR/commits" --jq '.[-1].commit.committer.date')
   # Only a verdict UPDATED after the head commit counts: anything older is a
   # stale verdict on a previous head (or the contributor pushed mid-round).
-  # First output line is "<updated_at> <verdict>"; the body follows.
+  # First output line is "<updated_at> <verdict>"; the body follows. A
+  # "SIGN-OFF NOT LAST LINE" first line also exits 0: treat it as a hard stop
+  # for that PR, never as a verdict.
   if [[ "${c%% *}" > "$head_at" ]]; then echo "$c"; exit 0; fi
 done
 echo "TIMEOUT: no review-bot comment within 30 minutes" >&2; exit 1
