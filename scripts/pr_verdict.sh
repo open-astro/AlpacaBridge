@@ -16,11 +16,12 @@
 #   body) are dropped first: a review that quotes a verdict on its own line
 #   inside a fence, as any review of this script or the skill will, is not
 #   signing off. Inline code stays: a line that starts with a backtick never
-#   matches either rule. Remaining lines are normalised: emphasis (*_) removed throughout, leading #, >, -
-#   markers and a "Verdict:" label stripped, whitespace trimmed, and a line
-#   that becomes empty (a `---` rule) dropped so it does not consume the
-#   five-line tail. Matching is case-insensitive ("Issues Found" counts). The
-#   emoji is optional, like the workflow's own assert grep; VS16 is optional.
+#   matches either rule. Remaining lines are normalised: emphasis (*_)
+#   removed throughout, leading #, > markers and a "Verdict:" label stripped,
+#   whitespace trimmed, and a line that is empty or only a --- rule dropped so
+#   it does not consume the five-line tail. Matching is case-insensitive
+#   ("Issues Found" counts). The emoji is optional, like the workflow's own
+#   assert grep; VS16 is optional.
 #   1. Any line ANYWHERE (bullet marker also stripped) that STARTS WITH
 #      "Issues found" -> Issues found. Trailing text is allowed ("Issues found
 #      (2 blockers)"). Anywhere, so a sign-off buried under a long footer
@@ -32,8 +33,8 @@
 #      a comment whose only "Approved" is such a bullet falls to rule 3).
 #   3. else -> SIGN-OFF NOT IN LAST LINES (exit 3)
 #   Prose that quotes a verdict mid-sentence never starts a line after
-#   normalisation, so it never counts. A line like "Issues found last round
-#   are all addressed." costs one review round; that is the accepted
+#   normalisation, so it never counts. A prose line like "Issues found last
+#   round are all addressed." costs one review round; that is the accepted
 #   direction.
 #
 # Head binding: the comment must be updated after the newest SUCCESSFUL
@@ -97,7 +98,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     [ "$fails" -ge "$FAILS_MAX" ] && exit 2
     not_ready; continue
   fi
-  # (the failure counter is reset only after the timestamps parse, below)
+  # a tick that reaches the gates resets the failure counter: here for "no comment", below once the timestamps parse
   if [ -z "$c" ]; then fails=0; reject="no bot comment yet"; not_ready; continue; fi
   v_epoch=$(date -u -d "${c%% *}" +%s 2>/dev/null)
   r_epoch=""; [ -n "$run_started" ] && r_epoch=$(date -u -d "$run_started" +%s 2>/dev/null)

@@ -128,10 +128,13 @@ scripts/pr_verdict.sh <N> --oneshot  # one pass, no sleep (Step 1.4)
 The script is the whole contract; do not re-implement it inline. It is pinned by
 `scripts/tests/pr_verdict_test.sh` (stub `gh`, no network, run by CI's shellcheck job), and its
 header documents the verdict rule and the head binding. In short: comments are fetched
-paginated over REST and merged locally; the verdict is read from the tail of the newest bot
-comment (emphasis and labels stripped, emoji optional like the workflow's own assert grep;
-"Issues found" by prefix in the last five lines, "Approved" only when the tail has no "Issues
-found"); the comment must be updated after the newest successful `review` check-run on the PR
+paginated over REST and merged locally; fenced code blocks are dropped from the newest bot
+comment, the rest is normalised (emphasis and labels stripped, emoji optional like the
+workflow's own assert grep); a line starting with "Issues found" **anywhere** in the body
+rejects, else a line starting with "Approved" in the last five lines approves (a bullet
+`- Approved the fix, but ...` is prose, not a sign-off), else exit 3. When a PR keeps coming
+back rejected, search the whole comment for "Issues found", not just its tail; a quote
+inside a fence is ignored, one in prose on its own line is not. The comment must be updated after the newest successful `review` check-run on the PR
 head commit started (`filter=all`, so a later cancelled attempt cannot hide the good one), with
 no `review` run still queued or in progress. Exit codes:
 
