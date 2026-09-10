@@ -76,6 +76,9 @@ if [ "$rc" = 2 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL unpar
 sed 's/github-actions\[bot\]/claude[bot]/' "$STUB/gh" > "$STUB/gh2" && chmod +x "$STUB/gh2" && mkdir -p "$STUB/alt" && mv "$STUB/gh2" "$STUB/alt/gh"
 out=$( PATH="$STUB/alt:$PATH" SCEN=ok UPD=2026-09-10T10:00:00Z BODY="r"$'\n'"$A" bash "$SCRIPT" 282 --oneshot 2>&1 ); rc=$?; out=${out%%$'\n'*}
 if [ "$rc" = 0 ] && [[ "$out" == *"$A"* ]]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL claude[bot] author: rc=$rc out='$out'"; fi
+# an unrecognised option fails at once instead of falling through to the 30-minute poll
+out=$( TICK=0 BUDGET=1 bash "$SCRIPT" 282 --one-shot 2>&1 ); rc=$?
+if [ "$rc" = 2 ] && [[ "$out" == *"usage"* ]]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL unknown option: rc=$rc out='$out'"; fi
 # a non-numeric PR argument fails at once, not after 15 minutes of 404s
 out=$( bash "$SCRIPT" 28x --oneshot 2>&1 ); rc=$?
 if [ "$rc" = 2 ] && [[ "$out" == *"must be a number"* ]]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL non-numeric PR: rc=$rc out='$out'"; fi

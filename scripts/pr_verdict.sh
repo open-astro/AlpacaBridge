@@ -58,7 +58,8 @@ set -u
 REPO=${REPO:-open-astro/AlpacaBridge}
 PR=${1:?usage: pr_verdict.sh <PR-number> [--oneshot]}
 case "$PR" in ''|*[!0-9]*) echo "pr_verdict.sh: PR must be a number, got '$PR'" >&2; exit 2;; esac
-ONESHOT=0; [ "${2:-}" = "--oneshot" ] && ONESHOT=1
+case "${2:-}" in '') ONESHOT=0;; --oneshot) ONESHOT=1;;
+  *) echo "pr_verdict.sh: unknown option '${2}'; usage: pr_verdict.sh <PR-number> [--oneshot]" >&2; exit 2;; esac
 TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} )); FAILS_MAX=${FAILS_MAX:-5}
 fails=0; reject=""   # counts consecutive API and timestamp failures (either kind); a tick that reaches
                      # the gates, including "no comment yet", resets it, since the API is evidently fine
