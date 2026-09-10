@@ -113,13 +113,15 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # . or !): the review agent is only told to "end with a sign-off line". A
   # review may quote either string in its prose while discussing this file,
   # so neither the first nor the last global match is safe; the sign-off is.
+  # The comment pre-filter uses the same loose pattern as the sign-off match,
+  # so a bold "⚠ Issues found" without U+FE0F is not dropped before it.
   # Guards: no comment yet -> no output (select(. != null)); CRLF -> stripped
   # with the whitespace; a last line that is not a verdict -> "SIGN-OFF NOT
   # LAST LINE: ..." (a hard stop, see below). A failed gh call exits 2 with
   # its own message: it must never surface as a 30-minute timeout blamed on
   # the review workflow.
   VERDICT_JQ='[.[] | select((.user.login | test("^github-actions(\\[bot\\])?$"))
-                            and (.body | test("✅ Approved|⚠️ Issues found")))]
+                            and (.body | test("✅ *Approved|⚠️? *Issues +found")))]
               | last | select(. != null)
               | (.body | split("\n") | map(select(test("\\S"))) | last
                  | sub("^[\\s*]+"; "") | sub("[\\s*]+$"; "")) as $line
