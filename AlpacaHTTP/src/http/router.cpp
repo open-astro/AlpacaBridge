@@ -6996,7 +6996,7 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
 }
 
 bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message,
-                                         [[maybe_unused]] ConfigSource source) {
+                                         ConfigSource source) {
     std::string device_type_str = config.value("deviceType", "");
     std::string vendor = config.value("vendor", "");
     int device_number = config.value("deviceNumber", -1);
@@ -7917,6 +7917,36 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             }
             sw = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(device_number,
                                                                        plus_config);
+
+            // Boot-safety default (issue #300): a persisted device is only
+            // ever *constructed* at process startup — load_persisted_devices()
+            // never calls connect() on anything it loads, so a device stays
+            // ASCOM-disconnected until some client (NINA, the web UI, ...)
+            // explicitly connects it, which can be minutes after boot or
+            // never. Gating the driver's default-off-at-connect logic behind
+            // an actual ASCOM connect therefore does not fix "ports are still
+            // on after a reboot" on its own. Run one synchronous connect +
+            // disconnect cycle right here, ONLY for a persisted (startup-time)
+            // load, so every port is physically defaulted off the moment
+            // AlpacaBridge itself starts — independent of whether any client
+            // ever connects. ASCOM Connected still correctly reads false
+            // afterward (this leaves the device disconnected, matching
+            // normal ASCOM semantics); only the physical port state changes,
+            // and the kernel module retains that state across the fd close
+            // that set_connected(false) performs (see the protocol wrapper's
+            // close() note — releasing the fd never power-cycles anything).
+            // Best-effort: never blocks registration if the hardware isn't
+            // ready yet at this exact moment during boot.
+            if (source == ConfigSource::Persisted) {
+                try {
+                    sw->set_connected(true);
+                    sw->set_connected(false);
+                } catch (const std::exception& e) {
+                    util::log_warning(
+                        "ASIAIR Plus (RK3568) boot-safety default-off failed: " +
+                        std::string(e.what()));
+                }
+            }
 
             if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
                 util::log_info("Registered ZWO ASIAIR Plus (RK3568) switch");
