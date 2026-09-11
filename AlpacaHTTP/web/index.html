@@ -743,7 +743,7 @@
                             <small>Path to the ZWO <code>pwm_gpio.ko</code> kernel module's character device. Default <code>/dev/pwm-gpio-misc</code> is correct for stock ASIAIR Plus (RK3568) hardware.</small>
                         </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
-                        <small style="color: #666;">The ASIAIR Plus exposes four 12V DC ports through ZWO's kernel module. The kernel index for each port is fixed (DC1=4, DC2=5, DC3=6, DC4=7) so only the channel name and PWM mode are configurable here.</small>
+                        <small style="color: #666;">The ASIAIR Plus exposes four 12V DC ports through ZWO's kernel module. The kernel index for each port is fixed (DC1=4, DC2=5, DC3=6, DC4=7) so only the channel name and PWM mode are configurable here. Every port always starts OFF when AlpacaBridge connects, regardless of what the hardware or a previous session left it at.</small>
                         <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
                             <thead>
                                 <tr>

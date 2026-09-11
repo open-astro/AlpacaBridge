@@ -146,6 +146,7 @@ public:
         if (connected) {
             if (!wrapper_.is_open()) {
                 wrapper_.open();
+                apply_default_off_ports();
             }
         } else {
             if (wrapper_.is_open()) {
@@ -280,6 +281,29 @@ public:
     }
 
 private:
+    // Called exactly once, right after a fresh wrapper_.open() succeeds
+    // (never on an idempotent already-open connect). Unconditionally writes
+    // every port to OFF, individually — never the kernel's master-enable
+    // line (see the protocol wrapper's open() for why that line is never
+    // touched). This makes every connect start from a known, predictable
+    // state (issue #300: ports previously came up however the hardware/
+    // previous session left them, which meant a dew heater or panel could
+    // be silently live at 100% after a reboot). Best-effort: a failure on
+    // one port is logged and does not fail the connect or block the
+    // remaining ports. See AGENTS.md (ZWO ASIAIR Plus section) for the
+    // hardware validation behind this being safe on this device.
+    void apply_default_off_ports() {
+        for (std::size_t i = 0; i < config_.ports.size(); ++i) {
+            try {
+                wrapper_.set_value(i, 0);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN(kLogCategory,
+                                "Failed to default port " + std::to_string(i + 1) +
+                                    " off at connect: " + e.what());
+            }
+        }
+    }
+
     void ensure_connected() const {
         if (!wrapper_.is_open()) {
             throw AlpacaException("ASIAIR Plus switch not connected", AlpacaError::NotConnected);
