@@ -2041,8 +2041,8 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
 namespace {
 // Defined further down with the management guards; also used by the one
 // device setter with a host-level side effect (open-astro#401).
-std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t server_tx_id,
-                                                    const char* what);
+std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t client_tx_id,
+                                                    std::uint32_t server_tx_id, const char* what);
 
 void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
     const auto cutoff = std::chrono::steady_clock::now() - kClientConnectionStaleAfter;
@@ -2222,7 +2222,7 @@ Response Router::dispatch_device_method(
                 // driver's get_connected() may take the state mutex that its
                 // connect sequence holds for the whole handshake (SynScan was
                 // the original: 25 s on a silent handset, issue #130, whose
-                // fix made that getter lock-free; five telescopes still have
+                // fix made that getter lock-free; the telescopes named there still have
                 // the shape -- see async_connectable.h). Reading it
                 // mid-transition stalled this poll for the entire connect,
                 // the very client timeout the PUT wait below exists to
@@ -2319,7 +2319,8 @@ Response Router::dispatch_device_method(
                 // driver's get_connected() may block on the state mutex its
                 // connect sequence holds for the whole handshake (the SynScan
                 // hand controller was the original, issue #130; its getter is
-                // lock-free now, five telescopes still block), and calling it
+                // lock-free now, the telescopes named in async_connectable.h
+                // still block), and calling it
                 // while a task is in
                 // flight stalled this handler for the entire connect, so the
                 // 8 s deadline below never fired. A connect requested while a
@@ -3239,7 +3240,7 @@ Response Router::dispatch_telescope_method(
             // and latch ClockSource, the same host-level effect the synctime
             // endpoint guards. A browser page on another origin must not be
             // able to fire it; native Alpaca clients send no Origin and pass.
-            if (auto rejected = reject_cross_origin_request(request, server_tx_id, "UTCDate")) {
+            if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "UTCDate")) {
                 return *rejected;
             }
             if (request.method() == HttpMethod::GET) {
@@ -6012,6 +6013,128 @@ Response Router::handle_setup(const Request& request, std::uint32_t server_tx_id
     return response;
 }
 
+namespace {
+
+// Reading an optional device-config field, with an explicit JSON `null`
+// treated as absence (issue #388).
+//
+// The old shape was `config.contains(k)` followed by `config.value(k, dflt)`.
+// `contains()` is true for an explicit null, and `nlohmann::json::value()`
+// THROWS `type_error` rather than returning the default when the stored value
+// is not convertible -- so `{"siteLatitude": null}` threw out of whichever
+// vendor branch read it, was caught by the handler's outer catch, and came
+// back as a generic nlohmann message instead of the specific one the field
+// has. Since the site fields became mandatory for Sky-Watcher (#274/#353),
+// that is the difference between "siteLatitude is required" and a JSON
+// library's type complaint on the one field that decides whether the device
+// connects at all. A null is easy to produce from any client that serialises
+// an unset value rather than omitting the key.
+
+// True when `key` is present AND carries an actual value. An explicit null
+// reads as absent, which is what a client that serialised "unset" meant.
+bool config_has(const nlohmann::json& config, const char* key) {
+    const auto it = config.find(key);
+    return it != config.end() && !it->is_null();
+}
+
+// `config[key]`, or `fallback` when the key is absent or explicitly null. A
+// value of a genuinely incompatible type is still an error -- silently
+// falling back there would accept a typo'd config and register a device with
+// defaults nobody asked for -- but it is reported as an AlpacaException
+// naming the field, which the handler's outer catch surfaces verbatim,
+// instead of an nlohmann type_error that names nothing.
+template <typename T>
+T config_get(const nlohmann::json& config, const char* key, const T& fallback) {
+    const auto it = config.find(key);
+    if (it == config.end() || it->is_null()) {
+        return fallback;
+    }
+    try {
+        return it->template get<T>();
+    } catch (const nlohmann::json::exception&) {
+        throw alpacacore::AlpacaException(
+            std::string("Device config field '") + key + "' has the wrong type (got " + it->type_name() + ")",
+            alpacacore::AlpacaError::InvalidValue);
+    }
+}
+
+// String-literal defaults deduce `const char*`, which nlohmann cannot `get<>`.
+// A null fallback becomes an empty string rather than std::string(nullptr),
+// which is undefined behaviour -- cppcheck's whole-program pass flags the
+// unguarded construction, and "" is what every caller means by "no default".
+std::string config_get(const nlohmann::json& config, const char* key, const char* fallback) {
+    return config_get<std::string>(config, key, fallback != nullptr ? std::string(fallback) : std::string());
+}
+
+// Reads siteLatitude/siteLongitude out of a device config and range-checks
+// them (issue #398).
+//
+// Both fields used to be checked for PRESENCE (#274/#353) and never for
+// plausibility, and neither did any driver constructor. So a config carrying
+// `{"siteLatitude": 200, "siteLongitude": 999}` registered, connected and was
+// used: Sky-Watcher's `hemisphere_south_locked()` reads latitude 200 as
+// northern, and every LST computation took longitude 999 at face value. The
+// mount pointed somewhere meaningless and nothing said why. The same drivers
+// already reject exactly these values through the ASCOM setters, which throw
+// InvalidValue outside +/-90 and +/-180, so a client could not do this at
+// runtime -- only a config could.
+//
+// `from_api` carries #353's asymmetry, for the reason spelled out on
+// Router::ConfigSource: a config arriving over /management/v1/configuredevice
+// can still be corrected by its caller, so it is rejected; one already on
+// disk is registered anyway (dropping it would remove the device from
+// configureddevices, which is the web UI's only source of devices, leaving
+// no way to edit the entry at fault) with the offending coordinate cleared
+// and a WARN naming it. Clearing it is what makes the two paths agree: an
+// out-of-range coordinate is exactly as unusable as an absent one, so the
+// driver's own unset handling -- refusing the connect, for Sky-Watcher --
+// applies to both.
+bool read_site_coordinates(const nlohmann::json& config, bool from_api, const std::string& vendor, int device_number,
+                           std::optional<double>& site_latitude, std::optional<double>& site_longitude,
+                           std::string& error_message) {
+    struct Field {
+        const char* key;
+        double limit;
+        std::optional<double>* out;
+    };
+    const Field fields[] = {
+        {"siteLatitude", 90.0, &site_latitude},
+        {"siteLongitude", 180.0, &site_longitude},
+    };
+
+    for (const Field& field : fields) {
+        if (!config_has(config, field.key)) {
+            continue;
+        }
+        const double value = config_get(config, field.key, 0.0);
+        // Rejects NaN and the infinities too: both comparisons are false for
+        // NaN, so the !(in range) form below catches it where (out of range)
+        // would not.
+        if (!(value >= -field.limit && value <= field.limit)) {
+            const std::string detail = std::string(field.key) + " " + std::to_string(value) +
+                                       " is out of range: must be between " + std::to_string(-field.limit) + " and " +
+                                       std::to_string(field.limit) + " degrees";
+            if (from_api) {
+                error_message = detail;
+                return false;
+            }
+            std::string warning = "Persisted ";
+            warning += vendor;
+            warning += " device ";
+            warning += std::to_string(device_number);
+            warning += ": ";
+            warning += detail;
+            warning += ". The coordinate is ignored; set a valid one in the web UI.";
+            util::log_warning(warning);
+            continue;
+        }
+        *field.out = value;
+    }
+    return true;
+}
+
+}  // namespace
+
 Response Router::handle_configure_device(const Request& request, std::uint32_t server_tx_id) {
     Response response;
     response.set_content_type("application/json");
@@ -6049,9 +6172,9 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             response.set_body(alpaca_response);
             return response;
         }
-        
-        std::string vendor = config.value("vendor", "");
-        std::string device_type_str = config.value("deviceType", "");
+
+        std::string vendor = config_get(config, "vendor", "");
+        std::string device_type_str = config_get(config, "deviceType", "");
 
         if (vendor.empty() || device_type_str.empty()) {
             AlpacaResponse alpaca_response = make_error_response(
@@ -6138,11 +6261,11 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
             response.set_body(alpaca_response);
             return response;
         }
-        
-        std::string device_type_str = config.value("deviceType", "");
-        std::string vendor = config.value("vendor", "");
-        int device_number = config.value("deviceNumber", -1);
-        
+
+        std::string device_type_str = config_get(config, "deviceType", "");
+        std::string vendor = config_get(config, "vendor", "");
+        int device_number = config_get(config, "deviceNumber", -1);
+
         if (device_type_str.empty() || device_number < 0) {
             AlpacaResponse alpaca_response = make_error_response(
                 client_tx_id, server_tx_id,
@@ -6697,8 +6820,14 @@ namespace {
 //
 // Returns the 403 response to send, or std::nullopt when the request may
 // proceed. `what` names the endpoint in the error message.
-std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t server_tx_id,
-                                                    const char* what) {
+// `client_tx_id` is the value the caller already parsed from the request.
+// The Alpaca convention is that ClientTransactionID echoes what the client
+// sent, and clients are allowed to match responses to requests on it; this
+// path used to hardcode 0, so the one reply whose explanation a client most
+// needs to surface ("your origin was refused") was the one reply it could not
+// attribute (issue #384).
+std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t client_tx_id,
+                                                    std::uint32_t server_tx_id, const char* what) {
     if (request.method() == HttpMethod::GET || !request.has_header("Origin")) {
         return std::nullopt;
     }
@@ -6711,7 +6840,7 @@ std::optional<Response> reject_cross_origin_request(const Request& request, std:
         return std::nullopt;
     }
     AlpacaResponse alpaca_response =
-        make_error_response(0, server_tx_id, util::ErrorCode::INVALID_VALUE,
+        make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
                             std::string("Cross-origin ") + what + " requests are not allowed");
     Response resp;
     resp.set_content_type("application/json");
@@ -6743,7 +6872,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // undisciplined-clock WARN on the next telescope connect. A cross-origin
     // POST could otherwise move the clock by years *and* hide the log line
     // that would have explained the resulting pointing error.
-    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "time synchronisation")) {
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "time synchronisation")) {
         return *rejected;
     }
 
@@ -6851,7 +6980,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
 
     // CSRF guard for state-changing operations (PR #198 follow-up). Same
     // rejection the synctime endpoint uses; see reject_cross_origin_request().
-    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "WiFi management")) {
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "WiFi management")) {
         return *rejected;
     }
 
@@ -7047,10 +7176,10 @@ std::string Router::normalize_persisted_connection_type(ConfigSource source, con
 }
 
 bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message,
-                                         [[maybe_unused]] ConfigSource source) {
-    std::string device_type_str = config.value("deviceType", "");
-    std::string vendor = config.value("vendor", "");
-    int device_number = config.value("deviceNumber", -1);
+                                         ConfigSource source) {
+    std::string device_type_str = config_get(config, "deviceType", "");
+    std::string vendor = config_get(config, "vendor", "");
+    int device_number = config_get(config, "deviceNumber", -1);
 
     if (device_type_str.empty() || vendor.empty() || device_number < 0) {
         error_message = "Missing required fields: deviceType, vendor, and deviceNumber";
@@ -7061,7 +7190,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "ioptron" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
         // Issue #380: an unrecognised connectionType on a persisted config is
         // normalised to "serial" rather than dropping the device, so it stays
         // listed and editable in the web UI and its connect fails on the port
@@ -7075,23 +7204,21 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::optional<double> site_elevation;
         std::optional<bool> sync_time_on_connect;
 
-        if (config.contains("siteLatitude")) {
-            site_latitude = config.value("siteLatitude", 0.0);
+        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
+                                   site_longitude, error_message)) {
+            return false;
         }
-        if (config.contains("siteLongitude")) {
-            site_longitude = config.value("siteLongitude", 0.0);
+        if (config_has(config, "siteElevation")) {
+            site_elevation = config_get(config, "siteElevation", 0.0);
         }
-        if (config.contains("siteElevation")) {
-            site_elevation = config.value("siteElevation", 0.0);
-        }
-        if (config.contains("syncTimeOnConnect")) {
-            sync_time_on_connect = config.value("syncTimeOnConnect", false);
+        if (config_has(config, "syncTimeOnConnect")) {
+            sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
         }
 
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
 
         if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config.value("mountIndex", 0);
+            int mount_index = config_get(config, "mountIndex", 0);
             telescope = alpacacore::vendor::ioptron::create_ioptron_telescope_auto(
                 device_number, mount_index, site_latitude, site_longitude,
                 site_elevation, sync_time_on_connect);
@@ -7100,8 +7227,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
             if (conn_type == "serial") {
                 conn_info.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
-                conn_info.port_path = config.value("portPath", "");
-                conn_info.baud_rate = config.value("baudRate", 115200);
+                conn_info.port_path = config_get(config, "portPath", "");
+                conn_info.baud_rate = config_get(config, "baudRate", 115200);
 
                 if (conn_info.port_path.empty() &&
                     reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
@@ -7110,11 +7237,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 }
             } else if (conn_type == "network") {
                 conn_info.type = alpacacore::vendor::ioptron::ConnectionType::Network;
-                conn_info.host = config.value("host", "");
-                conn_info.tcp_port = config.value("tcpPort", 4030);
+                conn_info.host = config_get(config, "host", "");
+                conn_info.tcp_port = config_get(config, "tcpPort", 4030);
 
                 if (conn_info.host.empty()) {
-                    int mount_index = config.value("mountIndex", 0);
+                    int mount_index = config_get(config, "mountIndex", 0);
                     telescope = alpacacore::vendor::ioptron::create_ioptron_telescope_auto_network(
                         device_number, mount_index, site_latitude, site_longitude,
                         site_elevation, sync_time_on_connect);
@@ -7125,7 +7252,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             }
 
             if (!telescope) {
-                conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+                conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
                 telescope = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
                     device_number, conn_info, site_latitude, site_longitude,
@@ -7133,10 +7260,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             }
         }
 
-        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
             telescope->set_aperture_diameter(aperture);
         }
-        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
             telescope->set_focal_length(focal);
         }
         if (site_elevation.has_value()) {
@@ -7163,12 +7290,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // the always-on DC pass-through (read-only); switches 1/2 are the
         // controllable DC1/DC2 lines.
         auto powerbox_config = alpacacore::vendor::ioptron::default_imate_powerbox_config();
-        powerbox_config.gpio_chip_path = config.value("gpioChip", powerbox_config.gpio_chip_path);
-        powerbox_config.pwm_frequency_hz = config.value("pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
+        powerbox_config.gpio_chip_path = config_get(config, "gpioChip", powerbox_config.gpio_chip_path);
+        powerbox_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
         // Per-port PWM/name overrides applied positionally onto the fixed
         // DC3/DC1/DC2 layout. The always-on pass-through has no GPIO line and
         // can't be PWM, so its pwm flag is ignored.
-        if (config.contains("ports") && config["ports"].is_array()) {
+        if (config_has(config, "ports") && config["ports"].is_array()) {
             const auto& port_overrides = config["ports"];
             auto& ports = powerbox_config.ports;
             for (std::size_t i = 0; i < ports.size() && i < port_overrides.size(); ++i) {
@@ -7210,17 +7337,17 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "ioptron" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_IOPTRON
         // iEAF / iAFS2/3 electronic focuser — USB-serial only, fixed 115200 baud.
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
         // "ieaf" (default) or "iafs2": identical protocol, sets the reported
         // device name.
-        std::string model = config.value("model", "ieaf");
+        std::string model = config_get(config, "model", "ieaf");
 
         std::unique_ptr<alpacacore::FocuserDriver> focuser;
         if (conn_type == "serial") {
-            std::string port_path = config.value("portPath", "");
+            std::string port_path = config_get(config, "portPath", "");
             if (port_path.empty()) {
                 // No port specified with serial mode — fall through to auto-detect
-                int focuser_index = config.value("focuserIndex", 0);
+                int focuser_index = config_get(config, "focuserIndex", 0);
                 focuser =
                     alpacacore::vendor::ioptron::create_ieaf_focuser_by_index(device_number, focuser_index, model);
             } else {
@@ -7228,7 +7355,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             }
         } else {
             // "auto" or unset — auto-detect
-            int focuser_index = config.value("focuserIndex", 0);
+            int focuser_index = config_get(config, "focuserIndex", 0);
             focuser = alpacacore::vendor::ioptron::create_ieaf_focuser_by_index(device_number, focuser_index, model);
         }
 
@@ -7251,7 +7378,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // name ("iCAM178M"). Reuse the Player One camera driver directly;
         // there is no iOptron camera SDK. Requires the Player One build flag.
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-        int camera_index = config.value("cameraIndex", 0);
+        int camera_index = config_get(config, "cameraIndex", 0);
 
         auto camera = alpacacore::vendor::playerone::create_playerone_camera(device_number, camera_index);
 
@@ -7272,14 +7399,14 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #ifdef ALPACACORE_ENABLE_IOPTRON
         // iEFW-15 / iEFW-18 filter wheel — USB-serial only, fixed 115200 baud.
         // Slot count comes from the wheel's handshake, not from config.
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
         // "iefw15" (default) or "iefw18": sets the reported device name; the
         // slot count is always read from the wheel.
-        std::string model = config.value("model", "iefw15");
+        std::string model = config_get(config, "model", "iefw15");
 
         std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
         if (conn_type == "serial") {
-            std::string port_path = config.value("portPath", "");
+            std::string port_path = config_get(config, "portPath", "");
             if (port_path.empty()) {
                 error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
                 return false;
@@ -7287,7 +7414,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             wheel = alpacacore::vendor::ioptron::create_iefw_filterwheel(device_number, port_path, model);
         } else {
             // "auto" or unset — auto-detect at connect
-            int wheel_index = config.value("filterwheelIndex", 0);
+            int wheel_index = config_get(config, "filterwheelIndex", 0);
             if (wheel_index < 0) {
                 error_message = "filterwheelIndex must be >= 0.";
                 return false;
@@ -7295,7 +7422,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             wheel = alpacacore::vendor::ioptron::create_iefw_filterwheel_by_index(device_number, wheel_index, model);
         }
 
-        if (config.contains("filterNames")) {
+        if (config_has(config, "filterNames")) {
             const auto& names_value = config.at("filterNames");
             if (!names_value.is_array()) {
                 error_message = "iOptron filter wheel filterNames must be an array";
@@ -7325,7 +7452,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "synscan" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
         // Issue #380: an unrecognised connectionType on a persisted config is
         // normalised to "serial" rather than dropping the device, so it stays
         // listed and editable in the web UI and its connect fails on the port
@@ -7334,7 +7461,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
                                                         device_type_str, device_number);
 
-        std::string version_value = config.value("synscanVersion", "auto");
+        std::string version_value = config_get(config, "synscanVersion", "auto");
         std::string version_normalized = to_lower_copy(version_value);
         alpacacore::vendor::synscan::SynScanVersion version = alpacacore::vendor::synscan::SynScanVersion::Auto;
         if (version_normalized == "v3" || version_normalized == "3") {
@@ -7348,23 +7475,21 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::optional<double> site_elevation;
         std::optional<bool> sync_time_on_connect;
 
-        if (config.contains("siteLatitude")) {
-            site_latitude = config.value("siteLatitude", 0.0);
+        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
+                                   site_longitude, error_message)) {
+            return false;
         }
-        if (config.contains("siteLongitude")) {
-            site_longitude = config.value("siteLongitude", 0.0);
+        if (config_has(config, "siteElevation")) {
+            site_elevation = config_get(config, "siteElevation", 0.0);
         }
-        if (config.contains("siteElevation")) {
-            site_elevation = config.value("siteElevation", 0.0);
-        }
-        if (config.contains("syncTimeOnConnect")) {
-            sync_time_on_connect = config.value("syncTimeOnConnect", false);
+        if (config_has(config, "syncTimeOnConnect")) {
+            sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
         }
 
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
 
         if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config.value("mountIndex", 0);
+            int mount_index = config_get(config, "mountIndex", 0);
             telescope = alpacacore::vendor::synscan::create_synscan_telescope_auto(
                 device_number, mount_index, version, site_latitude, site_longitude,
                 site_elevation, sync_time_on_connect);
@@ -7373,8 +7498,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
             if (conn_type == "serial") {
                 conn_info.type = alpacacore::vendor::synscan::ConnectionType::Serial;
-                conn_info.port_path = config.value("portPath", "");
-                conn_info.baud_rate = config.value("baudRate", 9600);
+                conn_info.port_path = config_get(config, "portPath", "");
+                conn_info.baud_rate = config_get(config, "baudRate", 9600);
 
                 if (conn_info.port_path.empty() &&
                     reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
@@ -7383,8 +7508,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 }
             } else if (conn_type == "network") {
                 conn_info.type = alpacacore::vendor::synscan::ConnectionType::Network;
-                conn_info.host = config.value("host", "");
-                conn_info.tcp_port = config.value("tcpPort", conn_info.tcp_port);
+                conn_info.host = config_get(config, "host", "");
+                conn_info.tcp_port = config_get(config, "tcpPort", conn_info.tcp_port);
 
                 if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
                                                                     device_type_str, device_number, error_message)) {
@@ -7395,16 +7520,16 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 return false;
             }
 
-            conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
             telescope = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
                 device_number, conn_info, version, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
         }
 
-        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
             telescope->set_aperture_diameter(aperture);
         }
-        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
             telescope->set_focal_length(focal);
         }
         if (site_elevation.has_value()) {
@@ -7426,7 +7551,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "skywatcher" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
         // Issue #380: an unrecognised connectionType on a persisted config is
         // normalised to "serial" rather than dropping the device, so it stays
         // listed and editable in the web UI and its connect fails on the port
@@ -7439,14 +7564,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::optional<double> site_longitude;
         std::optional<double> site_elevation;
 
-        if (config.contains("siteLatitude")) {
-            site_latitude = config.value("siteLatitude", 0.0);
+        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
+                                   site_longitude, error_message)) {
+            return false;
         }
-        if (config.contains("siteLongitude")) {
-            site_longitude = config.value("siteLongitude", 0.0);
-        }
-        if (config.contains("siteElevation")) {
-            site_elevation = config.value("siteElevation", 0.0);
+        if (config_has(config, "siteElevation")) {
+            site_elevation = config_get(config, "siteElevation", 0.0);
         }
 
         // open-astro#274: /management/v1/configuredevice is a first-class REST
@@ -7478,7 +7601,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
 
         if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config.value("mountIndex", 0);
+            int mount_index = config_get(config, "mountIndex", 0);
             telescope = alpacacore::vendor::skywatcher::create_skywatcher_telescope_auto(
                 device_number, mount_index, site_latitude, site_longitude, site_elevation);
         } else {
@@ -7486,8 +7609,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
             if (conn_type == "serial") {
                 conn_info.type = alpacacore::vendor::skywatcher::ConnectionType::Serial;
-                conn_info.port_path = config.value("portPath", "");
-                conn_info.baud_rate = config.value("baudRate", 9600);
+                conn_info.port_path = config_get(config, "portPath", "");
+                conn_info.baud_rate = config_get(config, "baudRate", 9600);
 
                 if (conn_info.port_path.empty() &&
                     reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
@@ -7496,8 +7619,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 }
             } else if (conn_type == "network") {
                 conn_info.type = alpacacore::vendor::skywatcher::ConnectionType::Network;
-                conn_info.host = config.value("host", "");
-                conn_info.udp_port = config.value("udpPort", conn_info.udp_port);
+                conn_info.host = config_get(config, "host", "");
+                conn_info.udp_port = config_get(config, "udpPort", conn_info.udp_port);
 
                 if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
                                                                     device_type_str, device_number, error_message)) {
@@ -7508,16 +7631,16 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 return false;
             }
 
-            conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
             telescope = alpacacore::vendor::skywatcher::create_skywatcher_telescope(
                 device_number, conn_info, site_latitude, site_longitude, site_elevation);
         }
 
-        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
             telescope->set_aperture_diameter(aperture);
         }
-        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
             telescope->set_focal_length(focal);
         }
 
@@ -7536,7 +7659,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "onstep" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
         // Issue #380: an unrecognised connectionType on a persisted config is
         // normalised to "serial" rather than dropping the device, so it stays
         // listed and editable in the web UI and its connect fails on the port
@@ -7550,17 +7673,15 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::optional<double> site_elevation;
         std::optional<bool> sync_time_on_connect;
 
-        if (config.contains("siteLatitude")) {
-            site_latitude = config.value("siteLatitude", 0.0);
+        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
+                                   site_longitude, error_message)) {
+            return false;
         }
-        if (config.contains("siteLongitude")) {
-            site_longitude = config.value("siteLongitude", 0.0);
+        if (config_has(config, "siteElevation")) {
+            site_elevation = config_get(config, "siteElevation", 0.0);
         }
-        if (config.contains("siteElevation")) {
-            site_elevation = config.value("siteElevation", 0.0);
-        }
-        if (config.contains("syncTimeOnConnect")) {
-            sync_time_on_connect = config.value("syncTimeOnConnect", false);
+        if (config_has(config, "syncTimeOnConnect")) {
+            sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
         }
 
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
@@ -7569,21 +7690,21 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // (The protocol wrapper's ConnectionType::Network exists purely as an
         // internal test seam; see AlpacaCore/tests/test_onstep_concurrency_stress.cpp.)
         if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config.value("mountIndex", 0);
+            int mount_index = config_get(config, "mountIndex", 0);
             telescope = alpacacore::vendor::onstep::create_onstep_telescope_auto(
                 device_number, mount_index, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
         } else if (conn_type == "serial") {
             alpacacore::vendor::onstep::ConnectionInfo conn_info;
             conn_info.type = alpacacore::vendor::onstep::ConnectionType::Serial;
-            conn_info.port_path = config.value("portPath", "");
-            conn_info.baud_rate = config.value("baudRate", 9600);
+            conn_info.port_path = config_get(config, "portPath", "");
+            conn_info.baud_rate = config_get(config, "baudRate", 9600);
 
             if (conn_info.port_path.empty() && reject_invalid_config(source, "Serial port path is required", vendor,
                                                                      device_type_str, device_number, error_message)) {
                 return false;
             }
 
-            conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
             telescope = alpacacore::vendor::onstep::create_onstep_telescope_with_site(
                 device_number, conn_info, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
@@ -7592,10 +7713,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
             telescope->set_aperture_diameter(aperture);
         }
-        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
             telescope->set_focal_length(focal);
         }
         if (site_elevation.has_value()) {
@@ -7617,7 +7738,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "celestron" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_CELESTRON
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
         // Issue #380: an unrecognised connectionType on a persisted config is
         // normalised to "serial" rather than dropping the device, so it stays
         // listed and editable in the web UI and its connect fails on the port
@@ -7631,23 +7752,21 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::optional<double> site_elevation;
         std::optional<bool> sync_time_on_connect;
 
-        if (config.contains("siteLatitude")) {
-            site_latitude = config.value("siteLatitude", 0.0);
+        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
+                                   site_longitude, error_message)) {
+            return false;
         }
-        if (config.contains("siteLongitude")) {
-            site_longitude = config.value("siteLongitude", 0.0);
+        if (config_has(config, "siteElevation")) {
+            site_elevation = config_get(config, "siteElevation", 0.0);
         }
-        if (config.contains("siteElevation")) {
-            site_elevation = config.value("siteElevation", 0.0);
-        }
-        if (config.contains("syncTimeOnConnect")) {
-            sync_time_on_connect = config.value("syncTimeOnConnect", false);
+        if (config_has(config, "syncTimeOnConnect")) {
+            sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
         }
 
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
 
         if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config.value("mountIndex", 0);
+            int mount_index = config_get(config, "mountIndex", 0);
             telescope = alpacacore::vendor::celestron::create_celestron_telescope_auto(
                 device_number, mount_index, site_latitude, site_longitude,
                 site_elevation, sync_time_on_connect);
@@ -7656,8 +7775,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
             if (conn_type == "serial") {
                 conn_info.type = alpacacore::vendor::celestron::ConnectionType::Serial;
-                conn_info.port_path = config.value("portPath", "");
-                conn_info.baud_rate = config.value("baudRate", 9600);
+                conn_info.port_path = config_get(config, "portPath", "");
+                conn_info.baud_rate = config_get(config, "baudRate", 9600);
 
                 if (conn_info.port_path.empty() &&
                     reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
@@ -7666,8 +7785,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 }
             } else if (conn_type == "network") {
                 conn_info.type = alpacacore::vendor::celestron::ConnectionType::Network;
-                conn_info.host = config.value("host", "");
-                conn_info.tcp_port = config.value("tcpPort", conn_info.tcp_port);
+                conn_info.host = config_get(config, "host", "");
+                conn_info.tcp_port = config_get(config, "tcpPort", conn_info.tcp_port);
 
                 if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
                                                                     device_type_str, device_number, error_message)) {
@@ -7678,17 +7797,17 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 return false;
             }
 
-            conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
             telescope = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
                 device_number, conn_info, site_latitude, site_longitude,
                 site_elevation, sync_time_on_connect);
         }
 
-        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
             telescope->set_aperture_diameter(aperture);
         }
-        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
             telescope->set_focal_length(focal);
         }
         if (site_elevation.has_value()) {
@@ -7711,9 +7830,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "bisque" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_BISQUE
         alpacacore::vendor::bisque::ConnectionInfo conn_info;
-        conn_info.host = config.value("host", "localhost");
-        conn_info.tcp_port = config.value("tcpPort", 3040);
-        conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+        conn_info.host = config_get(config, "host", "localhost");
+        conn_info.tcp_port = config_get(config, "tcpPort", 3040);
+        conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
         if (conn_info.host.empty()) {
             error_message = "Host is required for Bisque/TheSkyX connection";
@@ -7724,23 +7843,21 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::optional<double> site_longitude;
         std::optional<double> site_elevation;
 
-        if (config.contains("siteLatitude")) {
-            site_latitude = config.value("siteLatitude", 0.0);
+        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
+                                   site_longitude, error_message)) {
+            return false;
         }
-        if (config.contains("siteLongitude")) {
-            site_longitude = config.value("siteLongitude", 0.0);
-        }
-        if (config.contains("siteElevation")) {
-            site_elevation = config.value("siteElevation", 0.0);
+        if (config_has(config, "siteElevation")) {
+            site_elevation = config_get(config, "siteElevation", 0.0);
         }
 
         auto telescope = alpacacore::vendor::bisque::create_bisque_telescope_with_site(
             device_number, conn_info, site_latitude, site_longitude, site_elevation);
 
-        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
             telescope->set_aperture_diameter(aperture);
         }
-        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
             telescope->set_focal_length(focal);
         }
         if (site_elevation.has_value()) {
@@ -7762,8 +7879,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "zwo" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_ZWO
-        int camera_id = config.value("cameraId", -1);
-        int camera_index = config.value("cameraIndex", -1);
+        int camera_id = config_get(config, "cameraId", -1);
+        int camera_index = config_get(config, "cameraIndex", -1);
 
         std::unique_ptr<alpacacore::CameraDriver> camera;
         if (camera_id >= 0) {
@@ -7791,7 +7908,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "zwo" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_ZWO
         alpacacore::vendor::zwo::ConnectionInfo conn_info;
-        std::string conn_type = config.value("connectionType", "");
+        std::string conn_type = config_get(config, "connectionType", "");
         // Issue #380: an unrecognised connectionType on a persisted config is
         // normalised to "serial" rather than dropping the device, so it stays
         // listed and editable in the web UI and its connect fails on the port
@@ -7814,8 +7931,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.type = alpacacore::vendor::zwo::ConnectionType::Auto;
         } else if (conn_type == "serial") {
             conn_info.type = alpacacore::vendor::zwo::ConnectionType::Serial;
-            conn_info.port_path = config.value("portPath", "");
-            conn_info.baud_rate = config.value("baudRate", 9600);
+            conn_info.port_path = config_get(config, "portPath", "");
+            conn_info.baud_rate = config_get(config, "baudRate", 9600);
 
             if (conn_info.port_path.empty() && reject_invalid_config(source, "Serial port path is required", vendor,
                                                                      device_type_str, device_number, error_message)) {
@@ -7823,8 +7940,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             }
         } else if (conn_type == "network") {
             conn_info.type = alpacacore::vendor::zwo::ConnectionType::Network;
-            conn_info.host = config.value("host", "");
-            conn_info.tcp_port = config.value("tcpPort", 4030);
+            conn_info.host = config_get(config, "host", "");
+            conn_info.tcp_port = config_get(config, "tcpPort", 4030);
 
             if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
                                                                 device_type_str, device_number, error_message)) {
@@ -7835,23 +7952,21 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        conn_info.response_timeout_ms = config.value("responseTimeoutMs", conn_info.response_timeout_ms);
+        conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
         std::optional<double> site_elevation;
         std::optional<bool> sync_time_on_connect;
-        if (config.contains("siteLatitude")) {
-            site_latitude = config.value("siteLatitude", 0.0);
+        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
+                                   site_longitude, error_message)) {
+            return false;
         }
-        if (config.contains("siteLongitude")) {
-            site_longitude = config.value("siteLongitude", 0.0);
+        if (config_has(config, "siteElevation")) {
+            site_elevation = config_get(config, "siteElevation", 0.0);
         }
-        if (config.contains("siteElevation")) {
-            site_elevation = config.value("siteElevation", 0.0);
-        }
-        if (config.contains("syncTimeOnConnect")) {
-            sync_time_on_connect = config.value("syncTimeOnConnect", false);
+        if (config_has(config, "syncTimeOnConnect")) {
+            sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
         }
         auto telescope = alpacacore::vendor::zwo::create_zwo_telescope_with_site(
             device_number,
@@ -7861,10 +7976,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             site_elevation,
             sync_time_on_connect);
 
-        if (double aperture = config.value("apertureDiameter", 0.0); aperture > 0.0) {
+        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
             telescope->set_aperture_diameter(aperture);
         }
-        if (double focal = config.value("focalLength", 0.0); focal > 0.0) {
+        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
             telescope->set_focal_length(focal);
         }
         if (site_elevation.has_value()) {
@@ -7886,8 +8001,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "zwo" && device_type_str == "filterwheel") {
 #ifdef ALPACACORE_ENABLE_ZWO
-        int wheel_id = config.value("filterwheelId", -1);
-        int wheel_index = config.value("filterwheelIndex", -1);
+        int wheel_id = config_get(config, "filterwheelId", -1);
+        int wheel_index = config_get(config, "filterwheelIndex", -1);
 
         std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
         if (wheel_id >= 0) {
@@ -7899,7 +8014,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        if (config.contains("filterNames")) {
+        if (config_has(config, "filterNames")) {
             const auto& names_value = config.at("filterNames");
             if (!names_value.is_array()) {
                 error_message = "ZWO filter wheel filterNames must be an array";
@@ -7929,8 +8044,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "zwo" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_ZWO
-        int focuser_id = config.value("focuserId", -1);
-        int focuser_index = config.value("focuserIndex", -1);
+        int focuser_id = config_get(config, "focuserId", -1);
+        int focuser_index = config_get(config, "focuserIndex", -1);
 
         std::unique_ptr<alpacacore::FocuserDriver> focuser;
         if (focuser_id >= 0) {
@@ -7957,8 +8072,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "zwo" && device_type_str == "rotator") {
 #ifdef ALPACACORE_ENABLE_ZWO
-        int rotator_id = config.value("rotatorId", -1);
-        int rotator_index = config.value("rotatorIndex", -1);
+        int rotator_id = config_get(config, "rotatorId", -1);
+        int rotator_index = config_get(config, "rotatorIndex", -1);
 
         std::unique_ptr<alpacacore::RotatorDriver> rotator;
         if (rotator_id >= 0) {
@@ -7985,7 +8100,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "zwo" && device_type_str == "switch") {
 #ifdef ALPACACORE_ENABLE_ZWO
-        std::string switch_type = config.value("switchType", "dewheater");
+        std::string switch_type = config_get(config, "switchType", "dewheater");
         switch_type = to_lower_copy(switch_type);
         if (switch_type != "dewheater" && switch_type != "asiair" &&
             switch_type != "asiair-plus-picm4" &&
@@ -8000,12 +8115,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         if (switch_type == "asiair-plus-rk3568") {
             auto plus_config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
-            plus_config.device_path =
-                config.value("devicePath", plus_config.device_path);
-            plus_config.pwm_frequency_hz =
-                config.value("pwmFrequencyHz", plus_config.pwm_frequency_hz);
-            if (config.contains("ports") && config["ports"].is_array() &&
-                !config["ports"].empty()) {
+            plus_config.device_path = config_get(config, "devicePath", plus_config.device_path);
+            plus_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", plus_config.pwm_frequency_hz);
+            if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
                 std::vector<alpacacore::vendor::zwo::AsiairPlusPortConfig> ports;
                 ports.reserve(config["ports"].size());
                 for (const auto& p : config["ports"]) {
@@ -8045,9 +8157,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (switch_type == "asiair-plus-picm4") {
                 asiair_config.model_name = "ASIAIR Plus (Pi CM4)";
             }
-            asiair_config.gpio_chip_path = config.value("gpioChip", asiair_config.gpio_chip_path);
-            asiair_config.pwm_frequency_hz = config.value("pwmFrequencyHz", asiair_config.pwm_frequency_hz);
-            if (config.contains("ports") && config["ports"].is_array() && !config["ports"].empty()) {
+            asiair_config.gpio_chip_path = config_get(config, "gpioChip", asiair_config.gpio_chip_path);
+            asiair_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", asiair_config.pwm_frequency_hz);
+            if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
                 std::vector<alpacacore::vendor::zwo::AsiairPortConfig> ports;
                 ports.reserve(config["ports"].size());
                 for (const auto& p : config["ports"]) {
@@ -8087,8 +8199,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        int camera_id = config.value("cameraId", -1);
-        int camera_index = config.value("cameraIndex", -1);
+        int camera_id = config_get(config, "cameraId", -1);
+        int camera_index = config_get(config, "cameraIndex", -1);
 
         if (camera_id >= 0) {
             sw = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(device_number, camera_id);
@@ -8115,9 +8227,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "weewx" && device_type_str == "observingconditions") {
 #ifdef ALPACACORE_ENABLE_WEEWX
         alpacacore::vendor::weewx::WeeWxHttpConfig weewx_config;
-        weewx_config.url = config.value("weewxUrl", "");
-        int poll_interval = config.value("pollIntervalSeconds", 900);
-        int timeout_ms = config.value("timeoutMs", 5000);
+        weewx_config.url = config_get(config, "weewxUrl", "");
+        int poll_interval = config_get(config, "pollIntervalSeconds", 900);
+        int timeout_ms = config_get(config, "timeoutMs", 5000);
         if (weewx_config.url.empty()) {
             error_message = "WeeWX observing conditions requires weewxUrl";
             return false;
@@ -8150,8 +8262,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "qhy" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_QHY
-        std::string camera_id = config.value("cameraId", "");
-        int camera_index = config.value("cameraIndex", -1);
+        std::string camera_id = config_get(config, "cameraId", "");
+        int camera_index = config_get(config, "cameraIndex", -1);
 
         std::unique_ptr<alpacacore::CameraDriver> camera;
         if (!camera_id.empty()) {
@@ -8182,8 +8294,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // physical handle as its paired camera (QHYSDKWrapper ref-counts the
         // shared open), so it is addressed by the same cameraId/cameraIndex
         // as the camera device rather than a separate wheel enumeration.
-        std::string camera_id = config.value("cameraId", "");
-        int camera_index = config.value("cameraIndex", -1);
+        std::string camera_id = config_get(config, "cameraId", "");
+        int camera_index = config_get(config, "cameraIndex", -1);
 
         std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
         if (!camera_id.empty()) {
@@ -8195,7 +8307,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
-        if (config.contains("filterNames")) {
+        if (config_has(config, "filterNames")) {
             const auto& names_value = config.at("filterNames");
             if (!names_value.is_array()) {
                 error_message = "QHY filter wheel filterNames must be an array";
@@ -8225,7 +8337,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "svbony" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_SVBONY
-        int camera_index = config.value("cameraIndex", 0);
+        int camera_index = config_get(config, "cameraIndex", 0);
 
         auto camera = alpacacore::vendor::svbony::create_svbony_camera(device_number, camera_index);
 
@@ -8244,7 +8356,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "touptek" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-        int camera_index = config.value("cameraIndex", 0);
+        int camera_index = config_get(config, "cameraIndex", 0);
 
         auto camera = alpacacore::vendor::touptek::create_touptek_camera(device_number, camera_index);
 
@@ -8264,12 +8376,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "touptek" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_TOUPTEK
         std::unique_ptr<alpacacore::FocuserDriver> focuser;
-        std::string focuser_id = config.value("focuserId", "");
+        std::string focuser_id = config_get(config, "focuserId", "");
         if (!focuser_id.empty()) {
             focuser = alpacacore::vendor::touptek::create_touptek_focuser_by_id(
                 device_number, focuser_id);
         } else {
-            int focuser_index = config.value("focuserIndex", 0);
+            int focuser_index = config_get(config, "focuserIndex", 0);
             focuser = alpacacore::vendor::touptek::create_touptek_focuser_by_index(
                 device_number, focuser_index);
         }
@@ -8293,15 +8405,15 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // Enumerated by the toupcam SDK; the slot count is read from the wheel
         // firmware at connect, so no slot count is supplied here.
         std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
-        std::string wheel_id = config.value("filterwheelId", "");
+        std::string wheel_id = config_get(config, "filterwheelId", "");
         if (!wheel_id.empty()) {
             wheel = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(device_number, wheel_id);
         } else {
-            int wheel_index = config.value("filterwheelIndex", 0);
+            int wheel_index = config_get(config, "filterwheelIndex", 0);
             wheel = alpacacore::vendor::touptek::create_touptek_filterwheel_by_index(device_number, wheel_index);
         }
 
-        if (config.contains("filterNames")) {
+        if (config_has(config, "filterNames")) {
             const auto& names_value = config.at("filterNames");
             if (!names_value.is_array()) {
                 error_message = "ToupTek filter wheel filterNames must be an array";
@@ -8336,9 +8448,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         //    (shared handle), available on any ToupTek build.
         //  - "stellavita" (default): the StellaVita PowerBox's 12V GPIO ports,
         //    only built when libgpiod (>= 2.0) is present.
-        const std::string switch_type = config.value("switchType", "stellavita");
+        const std::string switch_type = config_get(config, "switchType", "stellavita");
         if (switch_type == "thermal") {
-            int camera_index = config.value("cameraIndex", 0);
+            int camera_index = config_get(config, "cameraIndex", 0);
             auto sw = alpacacore::vendor::touptek::create_touptek_thermal_switch(device_number, camera_index);
             if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
                 util::log_info("Registered ToupTek thermal switch");
@@ -8361,11 +8473,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // ToupTek camera SDK. Switches 0..3 are the controllable Port 1..4
         // lines (BCM GPIO 18/10/17/4).
         auto powerbox_config = alpacacore::vendor::touptek::default_stellavita_config();
-        powerbox_config.gpio_chip_path = config.value("gpioChip", powerbox_config.gpio_chip_path);
-        powerbox_config.pwm_frequency_hz = config.value("pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
+        powerbox_config.gpio_chip_path = config_get(config, "gpioChip", powerbox_config.gpio_chip_path);
+        powerbox_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
         // Per-port PWM/name overrides applied positionally onto the fixed
         // Port 1..4 layout.
-        if (config.contains("ports") && config["ports"].is_array()) {
+        if (config_has(config, "ports") && config["ports"].is_array()) {
             const auto& port_overrides = config["ports"];
             auto& ports = powerbox_config.ports;
             for (std::size_t i = 0; i < ports.size() && i < port_overrides.size(); ++i) {
@@ -8404,7 +8516,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "playerone" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-        int camera_index = config.value("cameraIndex", 0);
+        int camera_index = config_get(config, "cameraIndex", 0);
 
         auto camera = alpacacore::vendor::playerone::create_playerone_camera(device_number, camera_index);
 
@@ -8423,11 +8535,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "playerone" && device_type_str == "filterwheel") {
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-        int wheel_index = config.value("filterwheelIndex", 0);
+        int wheel_index = config_get(config, "filterwheelIndex", 0);
 
         auto wheel = alpacacore::vendor::playerone::create_playerone_filterwheel(device_number, wheel_index);
 
-        if (config.contains("filterNames")) {
+        if (config_has(config, "filterNames")) {
             const auto& names_value = config.at("filterNames");
             if (!names_value.is_array()) {
                 error_message = "Player One filter wheel filterNames must be an array";
@@ -8457,7 +8569,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "playerone" && device_type_str == "switch") {
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-        int camera_index = config.value("cameraIndex", 0);
+        int camera_index = config_get(config, "cameraIndex", 0);
 
         auto sw = alpacacore::vendor::playerone::create_playerone_switch(device_number, camera_index);
 
@@ -8476,22 +8588,22 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "gemini" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_GEMINI
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
 
         std::unique_ptr<alpacacore::FocuserDriver> focuser;
         if (conn_type == "serial") {
-            std::string port_path = config.value("portPath", "");
+            std::string port_path = config_get(config, "portPath", "");
             if (port_path.empty()) {
                 // No port specified with serial mode — fall through to auto-detect
-                int focuser_index = config.value("focuserIndex", 0);
+                int focuser_index = config_get(config, "focuserIndex", 0);
                 focuser = alpacacore::vendor::gemini::create_gemini_focuser_by_index(device_number, focuser_index);
             } else {
-                int baud_rate = config.value("baudRate", 9600);
+                int baud_rate = config_get(config, "baudRate", 9600);
                 focuser = alpacacore::vendor::gemini::create_gemini_focuser(device_number, port_path, baud_rate);
             }
         } else {
             // "auto" or unset — auto-detect
-            int focuser_index = config.value("focuserIndex", 0);
+            int focuser_index = config_get(config, "focuserIndex", 0);
             focuser = alpacacore::vendor::gemini::create_gemini_focuser_by_index(device_number, focuser_index);
         }
 
@@ -8510,11 +8622,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "astroasis" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_ASTROASIS
-        std::string hid_path = config.value("hidPath", "");
+        std::string hid_path = config_get(config, "hidPath", "");
 
         std::unique_ptr<alpacacore::FocuserDriver> focuser;
         if (hid_path.empty()) {
-            int focuser_index = config.value("focuserIndex", 0);
+            int focuser_index = config_get(config, "focuserIndex", 0);
             focuser = alpacacore::vendor::astroasis::create_astroasis_focuser_by_index(device_number, focuser_index);
         } else {
             focuser = alpacacore::vendor::astroasis::create_astroasis_focuser(device_number, hid_path);
@@ -8535,11 +8647,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "gemini" && device_type_str == "covercalibrator") {
 #ifdef ALPACACORE_ENABLE_GEMINI
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
         // "lite" (default, back-compat) = Astro Flat Panel Cover Lite (light-only);
         // "v2" = Astro Automatic FlatPanel v2 (motorized cover);
         // "pro" = Motorized Flat Panel V3 (INDI "Pro" firmware, motorized cover).
-        std::string model = config.value("flatPanelModel", "lite");
+        std::string model = config_get(config, "flatPanelModel", "lite");
         bool is_v2 = (model == "v2");
         bool is_pro = (model == "pro");
 
@@ -8560,16 +8672,16 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         std::unique_ptr<alpacacore::CoverCalibratorDriver> panel;
         if (conn_type == "serial") {
-            std::string port_path = config.value("portPath", "");
+            std::string port_path = config_get(config, "portPath", "");
             if (port_path.empty()) {
                 // No port specified with serial mode — fall through to auto-detect
-                panel = make_by_index(config.value("panelIndex", 0));
+                panel = make_by_index(config_get(config, "panelIndex", 0));
             } else {
-                panel = make_serial(port_path, config.value("baudRate", 9600));
+                panel = make_serial(port_path, config_get(config, "baudRate", 9600));
             }
         } else {
             // "auto" or unset — auto-detect
-            panel = make_by_index(config.value("panelIndex", 0));
+            panel = make_by_index(config_get(config, "panelIndex", 0));
         }
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(panel)))) {
@@ -8592,28 +8704,28 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // switchType discriminates the vendor's switch backends. Only the
         // Power & Data Hubs Advanced 3 exists today; the PowerBox Mini 2 is a
         // candidate second backend under the same vendor/device-type pair.
-        std::string switch_type = config.value("switchType", "pdh-adv3");
+        std::string switch_type = config_get(config, "switchType", "pdh-adv3");
         if (switch_type != "pdh-adv3") {
             error_message = "Unknown Gemini switchType: " + switch_type + " (supported: pdh-adv3)";
             return false;
         }
 
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
 
         std::unique_ptr<alpacacore::SwitchDriver> hub;
         if (conn_type == "serial") {
-            std::string port_path = config.value("portPath", "");
+            std::string port_path = config_get(config, "portPath", "");
             if (port_path.empty()) {
                 // Serial mode means an explicit port. Don't silently auto-detect
                 // behind the user's back -- surface a clear validation error.
                 error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
                 return false;
             }
-            int baud_rate = config.value("baudRate", 19200);
+            int baud_rate = config_get(config, "baudRate", 19200);
             hub = alpacacore::vendor::gemini::create_gemini_pdh_switch(device_number, port_path, baud_rate);
         } else {
             // "auto" or unset -- auto-detect
-            int hub_index = config.value("hubIndex", 0);
+            int hub_index = config_get(config, "hubIndex", 0);
             if (hub_index < 0) {
                 error_message = "hubIndex must be >= 0.";
                 return false;
@@ -8636,23 +8748,23 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "wandererastro" && device_type_str == "covercalibrator") {
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
 
         std::unique_ptr<alpacacore::CoverCalibratorDriver> cover;
         if (conn_type == "serial") {
-            std::string port_path = config.value("portPath", "");
+            std::string port_path = config_get(config, "portPath", "");
             if (port_path.empty()) {
                 // Serial mode means an explicit port. Don't silently auto-detect
                 // behind the user's back — surface a clear validation error.
                 error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
                 return false;
             }
-            int baud_rate = config.value("baudRate", 19200);
+            int baud_rate = config_get(config, "baudRate", 19200);
             cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(device_number, port_path,
                                                                                             baud_rate);
         } else {
             // "auto" or unset — auto-detect
-            int cover_index = config.value("coverIndex", 0);
+            int cover_index = config_get(config, "coverIndex", 0);
             if (cover_index < 0) {
                 error_message = "coverIndex must be >= 0.";
                 return false;
@@ -8676,23 +8788,23 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "wandererastro" && device_type_str == "rotator") {
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
 
         std::unique_ptr<alpacacore::RotatorDriver> rotator;
         if (conn_type == "serial") {
-            std::string port_path = config.value("portPath", "");
+            std::string port_path = config_get(config, "portPath", "");
             if (port_path.empty()) {
                 // Serial mode means an explicit port. Don't silently auto-detect
                 // behind the user's back — surface a clear validation error.
                 error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
                 return false;
             }
-            int baud_rate = config.value("baudRate", 19200);
+            int baud_rate = config_get(config, "baudRate", 19200);
             rotator =
                 alpacacore::vendor::wandererastro::create_wandererastro_rotator(device_number, port_path, baud_rate);
         } else {
             // "auto" or unset — auto-detect
-            int rotator_index = config.value("rotatorIndex", 0);
+            int rotator_index = config_get(config, "rotatorIndex", 0);
             if (rotator_index < 0) {
                 error_message = "rotatorIndex must be >= 0.";
                 return false;
@@ -8716,23 +8828,23 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "wandererastro" && device_type_str == "filterwheel") {
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
 
         std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
         if (conn_type == "serial") {
-            std::string port_path = config.value("portPath", "");
+            std::string port_path = config_get(config, "portPath", "");
             if (port_path.empty()) {
                 // Serial mode means an explicit port. Don't silently auto-detect
                 // behind the user's back — surface a clear validation error.
                 error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
                 return false;
             }
-            int baud_rate = config.value("baudRate", 19200);
+            int baud_rate = config_get(config, "baudRate", 19200);
             wheel = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(device_number, port_path,
                                                                                         baud_rate);
         } else {
             // "auto" or unset — auto-detect
-            int wheel_index = config.value("wandererFilterwheelIndex", 0);
+            int wheel_index = config_get(config, "wandererFilterwheelIndex", 0);
             if (wheel_index < 0) {
                 error_message = "wandererFilterwheelIndex must be >= 0.";
                 return false;
@@ -8741,7 +8853,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                                                                                                  wheel_index);
         }
 
-        if (config.contains("filterNames")) {
+        if (config_has(config, "filterNames")) {
             const auto& names_value = config.at("filterNames");
             if (!names_value.is_array()) {
                 error_message = "Wanderer filter wheel filterNames must be an array";
@@ -8774,29 +8886,29 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // switchType discriminates the vendor's switch backends. Only the
         // WandererBox Pro V3 exists today; the ETA tilt adjuster is planned as
         // a second backend under the same vendor/device-type pair.
-        std::string switch_type = config.value("switchType", "wandererbox-pro-v3");
+        std::string switch_type = config_get(config, "switchType", "wandererbox-pro-v3");
         if (switch_type != "wandererbox-pro-v3") {
             error_message = "Unknown WandererAstro switchType: " + switch_type + " (supported: wandererbox-pro-v3)";
             return false;
         }
 
-        std::string conn_type = config.value("connectionType", "auto");
+        std::string conn_type = config_get(config, "connectionType", "auto");
 
         std::unique_ptr<alpacacore::SwitchDriver> box;
         if (conn_type == "serial") {
-            std::string port_path = config.value("portPath", "");
+            std::string port_path = config_get(config, "portPath", "");
             if (port_path.empty()) {
                 // Serial mode means an explicit port. Don't silently auto-detect
                 // behind the user's back — surface a clear validation error.
                 error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
                 return false;
             }
-            int baud_rate = config.value("baudRate", 19200);
+            int baud_rate = config_get(config, "baudRate", 19200);
             box =
                 alpacacore::vendor::wandererastro::create_wandererastro_box_switch(device_number, port_path, baud_rate);
         } else {
             // "auto" or unset — auto-detect
-            int box_index = config.value("boxIndex", 0);
+            int box_index = config_get(config, "boxIndex", 0);
             if (box_index < 0) {
                 error_message = "boxIndex must be >= 0.";
                 return false;
@@ -8825,7 +8937,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     nlohmann::json sanitized = nlohmann::json::object();
 
     auto copy_if_present = [&](const char* key) {
-        if (config.contains(key)) {
+        if (config_has(config, key)) {
             sanitized[key] = config.at(key);
         }
     };
@@ -8834,8 +8946,8 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     copy_if_present("deviceType");
     copy_if_present("deviceNumber");
 
-    std::string vendor = config.value("vendor", "");
-    std::string device_type = config.value("deviceType", "");
+    std::string vendor = config_get(config, "vendor", "");
+    std::string device_type = config_get(config, "deviceType", "");
     if (vendor == "ioptron") {
         if (device_type == "switch") {
             // iMate PowerBox: local GPIO. Persist the optional chip path plus
@@ -8853,7 +8965,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("model");
             copy_if_present("filterwheelIndex");
             copy_if_present("filterNames");
-            std::string connection_type = config.value("connectionType", "");
+            std::string connection_type = config_get(config, "connectionType", "");
             if (connection_type == "serial") {
                 copy_if_present("portPath");
             }
@@ -8862,7 +8974,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("connectionType");
             copy_if_present("focuserIndex");
             copy_if_present("model");
-            std::string connection_type = config.value("connectionType", "");
+            std::string connection_type = config_get(config, "connectionType", "");
             if (connection_type == "serial") {
                 copy_if_present("portPath");
             }
@@ -8872,7 +8984,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             // it here the saved index silently reverted to 0 (issue #102 —
             // Celestron was the only mount vendor allowlisting it).
             copy_if_present("mountIndex");
-            std::string connection_type = config.value("connectionType", "");
+            std::string connection_type = config_get(config, "connectionType", "");
             if (connection_type == "serial") {
                 copy_if_present("portPath");
                 copy_if_present("baudRate");
@@ -8885,7 +8997,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("synscanVersion");
         copy_if_present("connectionType");
         copy_if_present("mountIndex");  // same issue-#102 gap as ioptron above
-        std::string connection_type = config.value("connectionType", "");
+        std::string connection_type = config_get(config, "connectionType", "");
         if (connection_type == "serial") {
             copy_if_present("portPath");
             copy_if_present("baudRate");
@@ -8899,7 +9011,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("siteLatitude");
         copy_if_present("siteLongitude");
         copy_if_present("siteElevation");
-        std::string connection_type = config.value("connectionType", "");
+        std::string connection_type = config_get(config, "connectionType", "");
         if (connection_type == "serial") {
             copy_if_present("portPath");
             copy_if_present("baudRate");
@@ -8913,7 +9025,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         // internally).
         copy_if_present("connectionType");
         copy_if_present("mountIndex");
-        std::string connection_type = config.value("connectionType", "");
+        std::string connection_type = config_get(config, "connectionType", "");
         if (connection_type == "serial") {
             copy_if_present("portPath");
             copy_if_present("baudRate");
@@ -8921,7 +9033,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "zwo") {
         if (device_type == "telescope") {
             copy_if_present("connectionType");
-            std::string connection_type = config.value("connectionType", "");
+            std::string connection_type = config_get(config, "connectionType", "");
             if (connection_type == "serial") {
                 copy_if_present("portPath");
                 copy_if_present("baudRate");
@@ -8937,7 +9049,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         // both persist per-port configuration. Without these the user's
         // PWM-mode toggles and channel renames silently revert after save
         // because sanitize_device_config strips anything not allowlisted.
-        const std::string switch_type = config.value("switchType", "");
+        const std::string switch_type = config_get(config, "switchType", "");
         if (switch_type == "asiair" || switch_type == "asiair-plus-picm4" ||
             switch_type == "asiair-plus-rk3568") {
             copy_if_present("pwmFrequencyHz");
@@ -8971,7 +9083,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             // PowerBox (local GPIO) and the cooled-camera thermal switch (dew
             // heater + fan). switchType selects; persist the fields each needs.
             copy_if_present("switchType");
-            const std::string touptek_switch_type = config.value("switchType", "stellavita");
+            const std::string touptek_switch_type = config_get(config, "switchType", "stellavita");
             if (touptek_switch_type == "thermal") {
                 copy_if_present("cameraIndex");
             } else {
@@ -9008,7 +9120,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "celestron") {
         copy_if_present("connectionType");
         copy_if_present("mountIndex");
-        std::string connection_type = config.value("connectionType", "");
+        std::string connection_type = config_get(config, "connectionType", "");
         if (connection_type == "serial") {
             copy_if_present("portPath");
             copy_if_present("baudRate");
@@ -9027,7 +9139,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("switchType");  // backend selector (pdh-adv3)
             copy_if_present("hubIndex");    // Power & Data Hub auto-detect index
         }
-        std::string connection_type = config.value("connectionType", "auto");
+        std::string connection_type = config_get(config, "connectionType", "auto");
         if (connection_type == "serial") {
             copy_if_present("portPath");
             copy_if_present("baudRate");
@@ -9047,7 +9159,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("wandererFilterwheelIndex");  // SFW auto-detect index
             copy_if_present("filterNames");
         }
-        std::string connection_type = config.value("connectionType", "auto");
+        std::string connection_type = config_get(config, "connectionType", "auto");
         if (connection_type == "serial") {
             copy_if_present("portPath");
             copy_if_present("baudRate");
@@ -9069,15 +9181,15 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
 }
 
 void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
-    if (!config.contains("deviceType") || !config.contains("vendor") || !config.contains("deviceNumber")) {
+    if (!config_has(config, "deviceType") || !config_has(config, "vendor") || !config_has(config, "deviceNumber")) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
     for (auto& existing : persisted_devices_) {
-        if (existing.value("vendor", "") == config.value("vendor", "") &&
-            existing.value("deviceType", "") == config.value("deviceType", "") &&
-            existing.value("deviceNumber", -1) == config.value("deviceNumber", -1)) {
+        if (existing.value("vendor", "") == config_get(config, "vendor", "") &&
+            existing.value("deviceType", "") == config_get(config, "deviceType", "") &&
+            existing.value("deviceNumber", -1) == config_get(config, "deviceNumber", -1)) {
             existing = config;
             return;
         }
