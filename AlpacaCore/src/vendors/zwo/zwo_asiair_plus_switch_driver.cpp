@@ -300,8 +300,7 @@ private:
                 wrapper_.set_value(i, 0);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(kLogCategory,
-                                "Failed to default port " + std::to_string(i + 1) +
-                                    " off at connect: " + e.what());
+                                "Failed to default port " + std::to_string(i + 1) + " off at connect: " + e.what());
             }
             any_pwm = any_pwm || config_.ports[i].pwm_enabled;
         }

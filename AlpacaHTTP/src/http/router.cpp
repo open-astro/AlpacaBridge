@@ -7956,9 +7956,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                     sw->set_connected(true);
                     sw->set_connected(false);
                 } catch (const std::exception& e) {
-                    util::log_warning(
-                        "ASIAIR Plus (RK3568) boot-safety default-off failed: " +
-                        std::string(e.what()));
+                    util::log_warning("ASIAIR Plus (RK3568) boot-safety default-off failed: " + std::string(e.what()));
                 }
             }
 
