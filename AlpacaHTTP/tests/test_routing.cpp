@@ -3500,9 +3500,13 @@ int main() {
             const auto blocked_json = nlohmann::json::parse(blocked.body(), nullptr, false);
             EXPECT(!blocked_json.is_discarded());
             EXPECT(blocked_json.value("ErrorMessage", "").find("Cross-origin") != std::string::npos);
-            // ClientTransactionID is deliberately not asserted here: the
-            // shared helper still hardcodes 0 on main, and making it echo the
-            // client's id is issue #384's change, not this one's.
+            EXPECT(blocked_json.value("ClientTransactionID", 0U) == 77U);
+            // The echo IS asserted: #384 landed on main before this branch
+            // merged, so the shared helper now carries the client's id into
+            // the 403 body instead of a hardcoded 0. request_with() sends 77,
+            // and each of these endpoints reaches the helper through its own
+            // handler -- so this also checks every one of them passes a real
+            // client id rather than a literal, which is the mistake #384 was.
 
             // The same-origin portal is unaffected. What the handler then
             // does with the request is its own business -- these run against a
