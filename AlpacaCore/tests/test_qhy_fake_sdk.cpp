@@ -16,11 +16,15 @@
 // a real driver leak into a green test.
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -35,6 +39,15 @@ namespace AlpacaError = alpacacore::AlpacaError;
 namespace control = alpacacore::vendor::qhy::control;
 
 namespace {
+
+void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+    }
+}
 
 // One-camera fake, shared with the other QHY seam test files (issue #342):
 // this was three verbatim copies, so a change to what a default test fake
@@ -346,6 +359,14 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
     sdk.get_sdk_version();
     sdk.close_camera(id);
 
+    // open-astro#339, the other half: the sweep above is the one place every
+    // forward goes through the decorator, so it is where the no-blocking rule
+    // is checked for ALL of them. A 2 s sleep added to any fake method (guide,
+    // control_temp, get_single_frame, set_readout_mode, ...) fails here by
+    // name instead of hanging the first [stress] run that reaches it.
+    INFO("slowest forward: " << sdk.slowest_call_ms() << " ms");
+    CHECK(sdk.slowest_call_ms() < 100);
+
     const std::vector<std::string> methods{
         "enumerate_cameras",
         "get_camera_model",
@@ -577,4 +598,278 @@ TEST_CASE("FakeQHYSDK - with_one_camera is the shared one-camera setup", "[qhy][
     REQUIRE(cooled.cameras.size() == 1);
     CHECK(cooled.cameras[0].has_cooler);
     CHECK(cooled.cameras[0].max_width == fake.cameras[0].max_width);
+}
+
+TEST_CASE("FakeQHYSDK - get_single_frame never writes past what get_mem_length promised", "[qhy][fake][unit]") {
+    // open-astro#328. The driver's exposure worker sizes its buffer once from
+    // get_mem_length(), then calls get_single_frame() to fill it. LockedQHYSDK
+    // serialises individual calls but NOT that three-step sequence, so a
+    // [stress] storm can land a set_resolution() in the window between them.
+    //
+    // Sized deliberately: the buffer is allocated for the SMALL frame, then
+    // the ROI is widened behind the caller's back. Before the fix the memset
+    // used the current (larger) ROI and ran off the end of the allocation --
+    // a real out-of-bounds write, in the test double rather than in the code
+    // under test. ASan reports it; this case makes it a plain assertion too.
+    auto fake = FakeQHYSDK::with_one_camera();
+    fake.open_camera("fake-qhy-0");
+    fake.set_resolution("fake-qhy-0", 0, 0, 8, 8);
+    fake.set_bits_mode("fake-qhy-0", 8);
+
+    const uint32_t promised = fake.get_mem_length("fake-qhy-0");
+    CHECK(promised == 8U * 8U);
+
+    // The caller allocates for exactly what it was promised, with a guard
+    // pattern after it: anything written past `promised` lands in the tail.
+    std::vector<uint8_t> buffer(promised + 64, 0xAB);
+
+    // The storm widens the ROI after the allocation.
+    fake.set_resolution("fake-qhy-0", 0, 0, 32, 32);
+
+    uint32_t w = 0;
+    uint32_t h = 0;
+    uint32_t bpp = 0;
+    uint32_t channels = 0;
+    REQUIRE(fake.get_single_frame("fake-qhy-0", buffer.data(), w, h, bpp, channels));
+
+    // The tail is untouched: the write was clamped to the promise, not to the
+    // fake's current state.
+    for (std::size_t i = promised; i < buffer.size(); ++i) {
+        REQUIRE(buffer[i] == 0xAB);
+    }
+
+    // And the normal path still fills the whole frame when nothing raced: a
+    // fresh get_mem_length() re-promises the larger size.
+    const uint32_t repromised = fake.get_mem_length("fake-qhy-0");
+    CHECK(repromised == 32U * 32U);
+    std::vector<uint8_t> big(repromised + 64, 0xAB);
+    REQUIRE(fake.get_single_frame("fake-qhy-0", big.data(), w, h, bpp, channels));
+    CHECK(big[0] == 0x00);
+    CHECK(big[repromised - 1] == 0x00);
+    for (std::size_t i = repromised; i < big.size(); ++i) {
+        REQUIRE(big[i] == 0xAB);
+    }
+
+    fake.close_camera("fake-qhy-0");
+}
+
+TEST_CASE("FakeQHYSDK - open_camera refuses while a zombie exposure worker is live", "[qhy][fake][unit]") {
+    // open-astro#324. QHYSDKWrapper::open_camera() refuses a fresh open while
+    // a previously registered exposure worker's flag is still true: that
+    // worker may have timed out its join and been DETACHED, leaving it blocked
+    // inside GetQHYCCDSingleFrame on the old handle (the PR #201 finding).
+    //
+    // exposure_workers_ was written and never read, so the fake could not fail
+    // a reconnect storm here -- and a reconnect storm is the single most likely
+    // [stress] scenario for this driver, i.e. the guard most likely to regress
+    // with every test still green.
+    auto fake = FakeQHYSDK::with_one_camera();
+    auto running = std::make_shared<std::atomic<bool>>(true);
+
+    fake.open_camera("fake-qhy-0");
+    fake.register_exposure_worker("fake-qhy-0", running);
+    fake.close_camera("fake-qhy-0");
+    const int opens_before = fake.physical_opens;
+
+    require_alpaca_error([&] { fake.open_camera("fake-qhy-0"); }, alpacacore::AlpacaError::InvalidOperation);
+    // Refused BEFORE any second physical open.
+    CHECK(fake.physical_opens == opens_before);
+
+    // Once the worker finishes, the reopen goes through.
+    running->store(false);
+    fake.open_camera("fake-qhy-0");
+    CHECK(fake.physical_opens == opens_before + 1);
+    fake.close_camera("fake-qhy-0");
+}
+
+TEST_CASE("FakeQHYSDK - a shared open during a live exposure still succeeds", "[qhy][fake][unit]") {
+    // The other half of the #324 refusal, from the review on PR #463.
+    // QHYSDKWrapper::open_camera() reuses a live handle FIRST (open_count > 0
+    // just bumps the count) and consults the zombie-worker flag only when
+    // there is no handle to reuse. The camera + CFW pairing AGENTS.md
+    // documents relies on that: the wheel connecting while the camera is
+    // mid-exposure is an ordinary shared open, not a reopen over a zombie.
+    // The fake once checked the flag before the reuse branch, so that
+    // pairing threw InvalidOperation here where production returns.
+    auto fake = FakeQHYSDK::with_one_camera();
+    auto running = std::make_shared<std::atomic<bool>>(true);
+
+    fake.open_camera("fake-qhy-0");                        // camera driver connects
+    fake.register_exposure_worker("fake-qhy-0", running);  // exposure in flight
+    const int opens_before = fake.physical_opens;
+
+    CHECK_NOTHROW(fake.open_camera("fake-qhy-0"));  // paired CFW driver connects
+    CHECK(fake.physical_opens == opens_before);     // reused, not reopened
+
+    fake.close_camera("fake-qhy-0");
+    fake.close_camera("fake-qhy-0");
+    // With every owner gone the refusal applies again.
+    require_alpaca_error([&] { fake.open_camera("fake-qhy-0"); }, alpacacore::AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("FakeQHYSDK - move_cfw enforces the single-digit protocol ceiling", "[qhy][fake][unit]") {
+    // open-astro#324 (absorbed from #327). The CFW wire protocol is one ASCII
+    // digit, so the real wrapper throws InvalidValue above 9. The fake took
+    // any int, so the filter-wheel case "A slot above the protocol ceiling
+    // issues no move" was passing on the DRIVER's own copy of the guard and
+    // would have stayed green if that copy were narrowed.
+    auto fake = FakeQHYSDK::with_one_camera();
+    fake.open_camera("fake-qhy-0");
+
+    fake.move_cfw("fake-qhy-0", 9);
+    CHECK(fake.last_cfw_target == 9);
+
+    require_alpaca_error([&] { fake.move_cfw("fake-qhy-0", 10); }, alpacacore::AlpacaError::InvalidValue);
+    // Refused without recording a target.
+    CHECK(fake.last_cfw_target == 9);
+
+    fake.close_camera("fake-qhy-0");
+
+    // Same order as QHYSDKWrapper::move_cfw(): the ceiling is checked before
+    // the handle lookup, so a CLOSED camera at position 10 answers
+    // InvalidValue, not NotConnected (review round 5 on PR #463 -- with
+    // require_open() first this reads NotConnected and nothing else notices).
+    require_alpaca_error([&] { fake.move_cfw("fake-qhy-0", 10); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { fake.move_cfw("fake-qhy-0", 3); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("LockedQHYSDK - records the slowest forward so a blocking fake is nameable", "[qhy][fake][unit]") {
+    // open-astro#339. "No QHY fake method may block" was prose in two headers,
+    // and two things depend on it: the camera driver's detachable workers (a
+    // blocking fake turns a timed-out join into a detached thread still
+    // calling into a fake the test body has destroyed) and cancel_exposure's
+    // exemption below. A future fake method gaining a reasonable-looking
+    // sleep_for broke both, and the symptom was a HUNG [stress] run -- no
+    // assertion to fail, nothing pointing at the offending method.
+    auto fake = FakeQHYSDK::with_one_camera();
+    LockedQHYSDK sdk(fake);
+
+    CHECK(sdk.slowest_call_ms() == 0);
+
+    for (int i = 0; i < 50; ++i) {
+        sdk.open_camera("fake-qhy-0");
+        static_cast<void>(sdk.get_mem_length("fake-qhy-0"));
+        sdk.close_camera("fake-qhy-0");
+    }
+
+    // Deliberately generous: every fake method is pure bookkeeping, so this is
+    // orders of magnitude of headroom rather than a timing assertion. The
+    // point is to catch a method that has gained a real block, not to measure
+    // one that has not -- a tight bound here would only buy CI flakes.
+    CHECK(sdk.slowest_call_ms() < 100);
+
+    // And it really does measure: a method that blocks is reported, which is
+    // what turns "the [stress] run hung" into "this call took 250 ms". Without
+    // this half the assertion above could never fail.
+    fake.before_call = [](const std::string& name) {
+        if (name == "get_mem_length") {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+    };
+    sdk.open_camera("fake-qhy-0");
+    static_cast<void>(sdk.get_mem_length("fake-qhy-0"));
+    sdk.close_camera("fake-qhy-0");
+    fake.before_call = nullptr;
+    CHECK(sdk.slowest_call_ms() >= 200);
+}
+
+TEST_CASE("LockedQHYSDK - the cancel forward is timed by its own Guard", "[qhy][fake][unit]") {
+    // cancel_exposure() is the one forward outside locked(), so it carries
+    // its own Guard (review round 4 on PR #463). Without this case, deleting
+    // that Guard left every test green while the watchdog silently stopped
+    // covering the one method production most needs to stay non-blocking.
+    auto fake = FakeQHYSDK::with_one_camera();
+    LockedQHYSDK sdk(fake);
+    sdk.open_camera("fake-qhy-0");
+    CHECK(sdk.slowest_call_ms() < 100);  // bookkeeping only so far; the >= 200 below is the signal
+
+    fake.before_call = [](const std::string& name) {
+        if (name == "cancel_exposure") {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+    };
+    sdk.cancel_exposure("fake-qhy-0");
+    fake.before_call = nullptr;
+    CHECK(sdk.slowest_call_ms() >= 200);
+    sdk.close_camera("fake-qhy-0");
+}
+
+TEST_CASE("LockedQHYSDK - cancel_exposure forwards without taking the decorator's mutex", "[qhy][fake][unit]") {
+    // open-astro#339, the half that matters most. QHYSDKWrapper::cancel_exposure()
+    // deliberately SKIPS the per-handle call mutex, because its whole job is to
+    // interrupt a GetQHYCCDSingleFrame already blocked on the same handle from
+    // another thread. The decorator forwarded it through its one mutex, which
+    // inverted exactly that invariant: the safety valve would have queued
+    // behind the call it exists to interrupt.
+    //
+    // Driven with the decorator's mutex deliberately held by another thread,
+    // which is the shape production has to survive. Before the fix this
+    // deadlocks; the bounded wait turns that into a failure rather than a hang.
+    auto fake = FakeQHYSDK::with_one_camera();
+    LockedQHYSDK sdk(fake);
+    sdk.open_camera("fake-qhy-0");
+
+    std::atomic<bool> holder_in{false};
+    std::atomic<bool> release{false};
+    std::atomic<bool> cancelled{false};
+
+    // Hold the decorator's mutex from inside a forward, the way an in-flight
+    // get_single_frame would.
+    fake.before_call = [&](const std::string& name) {
+        if (name == "get_mem_length") {
+            holder_in.store(true);
+            while (!release.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    };
+
+    std::thread holder([&] { static_cast<void>(sdk.get_mem_length("fake-qhy-0")); });
+    while (!holder_in.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    std::thread canceller([&] {
+        sdk.cancel_exposure("fake-qhy-0");
+        cancelled.store(true);
+    });
+
+    // The cancel must complete while the other call still holds the mutex.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!cancelled.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(cancelled.load());
+
+    release.store(true);
+    holder.join();
+    canceller.join();
+    fake.before_call = nullptr;
+    sdk.close_camera("fake-qhy-0");
+}
+
+TEST_CASE("QHYSeamFixture - owns the fake, decorator and driver in destruction order", "[qhy][fake][unit]") {
+    // open-astro#338. Every QHY seam test must outlive the driver with the
+    // fake: the driver holds a QHYSDK& and its detachable workers capture a
+    // raw QHYSDK*. A case that declares them the other way round, or stashes
+    // the driver anywhere outliving the fake, compiles cleanly and is
+    // undefined behaviour -- most likely a use-after-free inside a detached
+    // worker, the failure mode hardest to attribute when it surfaces.
+    //
+    // The rule was stated in three places and enforced by nothing. This
+    // fixture makes it unwritable: member order gives the destruction order
+    // once, here, instead of every case getting it right.
+    alpacacore::test::QHYSeamFixture<alpacacore::CameraDriver> rig(
+        FakeQHYSDK::with_one_camera(), [](alpacacore::test::LockedQHYSDK& sdk) {
+            return alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+        });
+
+    rig->set_connected(true);
+    REQUIRE(rig->get_connected());
+    CHECK(rig.fake().physical_opens == 1);
+    rig->set_connected(false);
+
+    // The destructor runs driver -> decorator -> fake. Under ASan a reversed
+    // member order here is a use-after-free at scope exit; the assertion above
+    // is what makes an ordinary run notice the fixture works at all.
 }

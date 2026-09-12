@@ -15,6 +15,7 @@
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -22,11 +23,14 @@
 #include <utility>
 #include <vector>
 
+#include "fake_qhy_sdk.h"
+
 namespace alpacacore::test {
 
 /**
  * Thread-safe decorator over any QHYSDK — every call forwards to the inner
- * implementation under one mutex.
+ * implementation under one mutex, except cancel_exposure(), which has its
+ * own (see below).
  *
  * Exists for the concurrency stress harness (issue #101): FakeQHYSDK is
  * deliberately NOT thread-hardened (single-connect-path tests don't need it),
@@ -42,19 +46,21 @@ namespace alpacacore::test {
  * holding one mutex across a blocking call would serialize the storm into a
  * queue. See rule 1 in FakeQHYSDK's class comment.
  *
- * One production rule this decorator deliberately does NOT preserve:
+ * One production rule this decorator DOES preserve, since open-astro#339:
  * QHYSDKWrapper::cancel_exposure() skips the per-handle call_mutex on purpose
  * (AGENTS.md, "Every SDK call is serialized against its physical handle"),
  * because its whole job is to interrupt a GetQHYCCDSingleFrame blocked on
  * another thread — serializing it the same way as every other call would
  * deadlock it behind the very call it needs to cancel. Here, cancel_exposure()
- * goes through the SAME mutex as everything else. That is safe only as long
- * as the rule above holds (no fake method blocks) — the moment a fake gains a
- * deliberate delay (to test a real timeout path, say), this decorator turns
- * that production safety valve into a deadlock instead of a no-op. Nothing
- * mechanical stops that: the no-blocking rule is convention, and making it
- * enforceable is issue #339 — this decorator is the reason that issue matters
- * rather than being tidiness.
+ * takes cancel_mutex_ instead of mutex_: cancels are serialised against each
+ * other but NOT against the other forwards, so a cancel can overtake an
+ * in-flight call (e.g. a fake method blocked in before_call to model a
+ * timeout) exactly as production lets it. That is sound only because the
+ * fake's cancel_exposure body touches no state shared with the call it
+ * overtakes; a fake whose cancel starts mutating shared state must go back
+ * under mutex_ and give up the overtaking property. slowest_call_ms() is the
+ * mechanical check that no OTHER fake method has quietly gained a blocking
+ * call.
  */
 class LockedQHYSDK : public vendor::qhy::QHYSDK {
 public:
@@ -62,6 +68,16 @@ public:
     using QHYControlRange = vendor::qhy::QHYControlRange;
 
     explicit LockedQHYSDK(QHYSDK& inner) : inner_(inner) {}
+
+    /// The longest any of the 26 forwards has spent INSIDE the inner call,
+    /// in milliseconds (open-astro#339); time queued behind another forward
+    /// on a mutex is not counted, since the clock starts after the lock is
+    /// taken. cancel_exposure() is timed too, by its own Guard, even though it
+    /// is the one forward outside locked(). Every fake method is pure bookkeeping,
+    /// so this stays at or near zero; a test asserts a generous ceiling on it
+    /// to catch a fake method that has gained a blocking call, which would
+    /// otherwise show up as a hung [stress] run.
+    long long slowest_call_ms() const { return slowest_call_ms_.load(std::memory_order_relaxed); }
 
     std::vector<QHYCameraInfo> enumerate_cameras() override {
         return locked([&] { return inner_.enumerate_cameras(); });
@@ -123,7 +139,33 @@ public:
         return locked([&] { return inner_.get_single_frame(camera_id, buffer, width, height, bpp, channels); });
     }
     void cancel_exposure(const std::string& camera_id) override {
-        locked([&] { inner_.cancel_exposure(camera_id); });
+        // open-astro#339: its OWN mutex, not the shared one.
+        //
+        // QHYSDKWrapper::cancel_exposure() deliberately skips the per-handle
+        // call mutex, because its whole job is to interrupt a
+        // GetQHYCCDSingleFrame already blocked on the same handle from another
+        // thread. Forwarding it through this decorator's one mutex inverted
+        // exactly that invariant: the safety valve would queue behind the very
+        // call it exists to interrupt.
+        //
+        // The issue offered two fixes -- forward unlocked, or give the cancel
+        // its own mutex. Unlocked is what production does, but it would make
+        // this the one racy forward in the decorator, which is the confusion
+        // the decorator was built to prevent (and which check_docs_drift.py
+        // rightly refuses). A second mutex keeps every forward serialised
+        // while letting a cancel proceed against an in-flight call, which is
+        // the property production actually needs. It is sound here because
+        // the fake's cancel_exposure body touches no shared state -- it has no
+        // in-flight exposure to interrupt -- so it cannot race the call it
+        // overtakes.
+        std::lock_guard<std::mutex> lock(cancel_mutex_);
+        // Timed like every other forward (review round 4 on PR #463): this
+        // is the one body outside locked(), so without its own Guard a fake
+        // cancel that gained a block was the single method the watchdog
+        // could not name.
+        const auto started = std::chrono::steady_clock::now();
+        Guard guard{started, slowest_call_ms_};
+        inner_.cancel_exposure(camera_id);
     }
 
     void guide(const std::string& camera_id, uint32_t qhy_direction, uint16_t duration_ms) override {
@@ -159,11 +201,85 @@ private:
     template <typename Fn>
     auto locked(Fn&& fn) -> decltype(fn()) {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto started = std::chrono::steady_clock::now();
+        Guard guard{started, slowest_call_ms_};
         return fn();
     }
 
+    // open-astro#339: the "no QHY fake method may block" rule was prose in two
+    // headers, and two things depend on it -- the camera driver's detachable
+    // workers (a blocking fake turns a timed-out join into a detached thread
+    // still calling into a fake the test body has already destroyed) and the
+    // cancel_exposure exemption above. A future fake method gaining a
+    // perfectly reasonable-looking sleep_for silently broke both, and the
+    // symptom was a HUNG [stress] run rather than a named failure.
+    //
+    // Recording the slowest forward turns that into something a test can
+    // assert on. Every fake method is pure bookkeeping, so the bar is orders
+    // of magnitude of headroom rather than a tight timing assertion -- this
+    // must not become a flaky test on a loaded CI box.
+    struct Guard {
+        std::chrono::steady_clock::time_point started;
+        std::atomic<long long>& slowest;
+        ~Guard() {
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
+                    .count();
+            long long previous = slowest.load(std::memory_order_relaxed);
+            while (elapsed > previous && !slowest.compare_exchange_weak(previous, elapsed, std::memory_order_relaxed)) {
+            }
+        }
+    };
+
     QHYSDK& inner_;
     std::mutex mutex_;
+    // open-astro#339: cancel-only, so a cancel never queues behind the call
+    // it exists to interrupt. See cancel_exposure().
+    std::mutex cancel_mutex_;
+    std::atomic<long long> slowest_call_ms_{0};
+};
+
+/**
+ * Owns the fake, the locking decorator and the driver in ONE object, so the
+ * lifetime rule cannot be written wrong (open-astro#338).
+ *
+ * Every QHY seam test must outlive the driver with the fake: the driver holds
+ * a QHYSDK& and its detachable workers capture a raw QHYSDK*, so a case that
+ * declares them the other way round -- or stashes the driver in a Catch2
+ * fixture member, a vector, or anything outliving the fake -- compiles
+ * cleanly and is undefined behaviour, most likely a use-after-free inside a
+ * detached worker. That is the failure mode hardest to attribute when it
+ * surfaces, and the [stress] storms raise the stakes: exposure, temperature,
+ * cooler-off, pulse-guide and telemetry workers are all detachable.
+ *
+ * The rule was stated in three places (the QHYSDK interface comment, the
+ * FakeQHYSDK class comment, and AGENTS.md) and enforced by nothing. Member
+ * declaration order here gives the right destruction order once, in one
+ * place: driver first, then the decorator, then the fake.
+ */
+template <typename Driver>
+class QHYSeamFixture {
+public:
+    /// `make` receives the decorator and returns the driver, so the driver is
+    /// built from a decorator that is already a member of this object rather
+    /// than from a caller's local.
+    template <typename MakeDriver>
+    QHYSeamFixture(FakeQHYSDK fake, MakeDriver&& make) : fake_(std::move(fake)), sdk_(fake_), driver_(make(sdk_)) {}
+
+    FakeQHYSDK& fake() { return fake_; }
+    LockedQHYSDK& sdk() { return sdk_; }
+    Driver& driver() { return *driver_; }
+    Driver* operator->() { return driver_.get(); }
+
+private:
+    // DECLARATION ORDER IS THE CONTRACT. Members destroy in reverse, so the
+    // driver goes first (joining or detaching its workers), then the
+    // decorator, then the fake those workers may still be calling into.
+    // Reordering these three lines reintroduces exactly the bug this exists
+    // to make unwritable.
+    FakeQHYSDK fake_;
+    LockedQHYSDK sdk_;
+    std::unique_ptr<Driver> driver_;
 };
 
 }  // namespace alpacacore::test
