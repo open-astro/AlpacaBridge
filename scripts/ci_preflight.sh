@@ -200,7 +200,7 @@ fi
 # --- gate 2: unicode / Trojan-Source scan ----------------------------------
 
 section "Unicode / Trojan-Source scan"
-if python3 .github/scripts/check-unicode.py; then
+if python3 .github/scripts/check-unicode.py --self-test && python3 .github/scripts/check-unicode.py; then
   record PASS "unicode scan"
 else
   record FAIL "unicode scan"
@@ -218,7 +218,7 @@ fi
 # --- gate 2c: ConformU report validation ------------------------------------
 
 section "ConformU report validation"
-if python3 scripts/check_conformu_reports.py "${MERGE_BASE}"; then
+if python3 scripts/check_conformu_reports.py --self-test && python3 scripts/check_conformu_reports.py "${MERGE_BASE}"; then
   record PASS "ConformU report validation"
 else
   record FAIL "ConformU report validation"

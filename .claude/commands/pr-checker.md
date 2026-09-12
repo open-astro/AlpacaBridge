@@ -256,12 +256,14 @@ For **every** Defect, in this order:
      the two agree.
    - `scripts/*.py`: run the script itself against the real repo, plus its own probe.
    - docs / skill / CHANGELOG (and every branch, since CI runs these on every PR regardless of
-     what changed): `python3 scripts/check_docs_drift.py`, `python3 .github/scripts/check-unicode.py`,
+     what changed): `python3 scripts/check_docs_drift.py`,
+     `python3 .github/scripts/check-unicode.py --self-test && python3 .github/scripts/check-unicode.py`,
      `python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py`
      (the self-test first, as `ci_preflight.sh` and CI both run it),
      `python3 scripts/check_connect_error_hook.py --self-test && python3 scripts/check_connect_error_hook.py`
      (the self-test first, same as the stress-registration gate), and on a PR also
-     `python3 scripts/check_conformu_reports.py origin/main` (CI passes `origin/$GITHUB_BASE_REF`;
+     `python3 scripts/check_conformu_reports.py --self-test && python3 scripts/check_conformu_reports.py origin/main`
+     (CI passes `origin/$GITHUB_BASE_REF`;
      the pre-flight passes the merge base, which differs only when `origin/main` has moved
      ahead). The exit code is the signal
      (each prints its own wording, `Docs drift check OK.`, `Unicode scan OK -- ...`, and so on).
@@ -300,10 +302,12 @@ git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 if git diff origin/main...HEAD --name-only | grep -qE '\.(c|cc|cpp|cxx|h|hh|hpp|hxx|js|sh|yml|yaml)$'; then
   run_gates() { ./scripts/ci_preflight.sh; }
 else
-  run_gates() { python3 scripts/check_docs_drift.py && python3 .github/scripts/check-unicode.py \
+  run_gates() { python3 scripts/check_docs_drift.py \
+    && python3 .github/scripts/check-unicode.py --self-test && python3 .github/scripts/check-unicode.py \
     && python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py \
     && python3 scripts/check_connect_error_hook.py --self-test \
     && python3 scripts/check_connect_error_hook.py \
+    && python3 scripts/check_conformu_reports.py --self-test \
     && python3 scripts/check_conformu_reports.py origin/main; }
 fi
 run_gates > "$LOG" 2>&1 \

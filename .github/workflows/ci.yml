@@ -500,6 +500,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Self-test the Unicode scanner
+        # The scanner's failure mode is silence: a regressed scan_text() or
+        # an empty file list reads as a clean tree. The self-test pins the
+        # FORBIDDEN table, every helper, git-backed file listing and main()
+        # over fixture files, so a broken gate fails here instead of passing
+        # (issue #449).
+        run: python3 .github/scripts/check-unicode.py --self-test
+
       - name: Scan for Trojan-Source / invisible Unicode
         # Guards against CVE-2021-42574: bidi controls / zero-width characters
         # that make source render differently than it compiles. Excludes the
@@ -583,6 +591,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Self-test the ConformU report checker
+        # main() returns 0 with "nothing to check" whenever the changed-file
+        # list is empty, which is right for a PR that touches no report and
+        # identical to the prefix filter, rename rule or base-ref resolution
+        # having broken. The self-test drives every rule over synthetic
+        # reports and the file list over a real temporary git repository
+        # (issue #449).
+        run: python3 scripts/check_conformu_reports.py --self-test
 
       - name: Reject a failing or missing ConformU report
         # /submit-pr already blocks this locally (a driver PR must ship a
