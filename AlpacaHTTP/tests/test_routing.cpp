@@ -3530,10 +3530,27 @@ int main() {
         // from any origin -- including the log viewer and the level readback,
         // whose handlers share a function with the guarded methods.
         for (const char* path : {"/management/v1/description", "/management/v1/loglevel", "/management/v1/logfiles",
-                                 "/management/v1/configureddevices"}) {
+                                 // The log VIEWER, not just the listing: this
+                                 // is the one read path whose handler guards
+                                 // ahead of all its own logic, so it is the
+                                 // one most likely to lose its GET exemption.
+                                 "/management/v1/logfiles/alpaca.log", "/management/v1/configureddevices"}) {
             const auto response = router.route(request_with("GET", path, "http://evil.example", ""), 1);
             EXPECT(response.status_code() != 403);
         }
+
+        // The one documented asymmetry, pinned so docs/wifi-api.md cannot
+        // drift from it: the collection's guard sits inside its DELETE
+        // branch, so a cross-origin PUT here is answered by the method check
+        // rather than refused, while the per-file form returns 403.
+        const auto collection_put =
+            router.route(request_with("PUT", "/management/v1/logfiles", "http://evil.example", ""), 1);
+        EXPECT(collection_put.status_code() == 200);
+        const auto collection_json = nlohmann::json::parse(collection_put.body(), nullptr, false);
+        EXPECT(!collection_json.is_discarded() && collection_json.value("ErrorNumber", 0) != 0);
+        const auto item_put =
+            router.route(request_with("PUT", "/management/v1/logfiles/alpaca.log", "http://evil.example", ""), 1);
+        EXPECT(item_put.status_code() == 403);
     }
 
     std::cout << "All routing tests passed!\n";
