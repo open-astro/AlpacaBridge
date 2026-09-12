@@ -7029,9 +7029,9 @@ std::string Router::normalize_persisted_connection_type(ConfigSource source, con
                                                         std::initializer_list<const char*> valid,
                                                         const std::string& vendor, const std::string& device_type,
                                                         int device_number) {
-    // Empty means auto-detect everywhere this is called from, and is what an
-    // entry written before the field existed looks like.
-    if (conn_type.empty() || source == ConfigSource::Api) {
+    // The API's own else still rejects an unrecognised value, with the same
+    // message it always did.
+    if (source == ConfigSource::Api) {
         return conn_type;
     }
     for (const char* candidate : valid) {
@@ -7067,7 +7067,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // listed and editable in the web UI and its connect fails on the port
         // path instead of auto-probing and attaching to whatever answers. The
         // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
                                                         device_type_str, device_number);
 
         std::optional<double> site_latitude;
@@ -7331,7 +7331,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // listed and editable in the web UI and its connect fails on the port
         // path instead of auto-probing and attaching to whatever answers. The
         // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
                                                         device_type_str, device_number);
 
         std::string version_value = config.value("synscanVersion", "auto");
@@ -7432,7 +7432,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // listed and editable in the web UI and its connect fails on the port
         // path instead of auto-probing and attaching to whatever answers. The
         // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
                                                         device_type_str, device_number);
 
         std::optional<double> site_latitude;
@@ -7542,8 +7542,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // listed and editable in the web UI and its connect fails on the port
         // path instead of auto-probing and attaching to whatever answers. The
         // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial"}, vendor, device_type_str,
-                                                        device_number);
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial"}, vendor,
+                                                        device_type_str, device_number);
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -7623,7 +7623,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // listed and editable in the web UI and its connect fails on the port
         // path instead of auto-probing and attaching to whatever answers. The
         // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
                                                         device_type_str, device_number);
 
         std::optional<double> site_latitude;
@@ -7797,6 +7797,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // listed and editable in the web UI and its connect fails on the port
         // path instead of auto-probing and attaching to whatever answers. The
         // else below still rejects the value when it came from the API.
+        //
+        // NOTE the valid list here, unlike the other five: this branch tests a
+        // bare `conn_type == "auto"` below, not `|| conn_type.empty()`, so an
+        // entry with no connectionType key at all falls to the else. Empty is
+        // therefore NOT valid here and normalises to serial like any other
+        // unrecognised value -- which is what keeps such an entry listed
+        // instead of vanishing from the web UI.
         conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
                                                         device_type_str, device_number);
 

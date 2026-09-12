@@ -200,12 +200,20 @@ private:
                                       const std::string& device_type, int device_number, std::string& error_message);
 
     // The connection-type half of the same rule. Returns conn_type unchanged
-    // when it is empty (which every branch reads as auto-detect), when it is
-    // one of `valid`, or when the config came from the API -- there the
-    // branch's own else still rejects it. For a persisted config with an
+    // when it is one of `valid`, or when the config came from the API -- there
+    // the branch's own else still rejects it. For a persisted config with an
     // unrecognised value it warns and returns "serial", so the device
     // registers and stays editable and the connect then fails on the port
     // path rather than auto-probing and attaching to whatever mount answers.
+    //
+    // `valid` is per-vendor and each caller passes its OWN branch's list,
+    // empty string included where that branch reads empty as auto-detect.
+    // There is no blanket "empty is always fine" rule here, because it is not
+    // true: five branches test `conn_type == "auto" || conn_type.empty()`, but
+    // the ZWO branch tests a bare `conn_type == "auto"`, so an entry with no
+    // connectionType key falls to its else. Treating empty as universally
+    // valid would have left that one branch dropping persisted devices, which
+    // is the failure this whole change exists to remove.
     static std::string normalize_persisted_connection_type(ConfigSource source, const std::string& conn_type,
                                                            std::initializer_list<const char*> valid,
                                                            const std::string& vendor, const std::string& device_type,

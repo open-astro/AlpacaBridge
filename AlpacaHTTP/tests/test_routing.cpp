@@ -2221,6 +2221,25 @@ int main() {
                            {"baudRate", 9600},
                            {"siteLatitude", 39.7392},
                            {"siteLongitude", -104.9903}});
+#ifdef ALPACACORE_ENABLE_ZWO
+        // Review finding: the ZWO branch tests a bare `conn_type == "auto"`,
+        // not `|| conn_type.empty()`, so an entry with no connectionType key
+        // falls to its else and used to be dropped regardless of source -- the
+        // one branch a blanket "empty is always valid" rule in the helper
+        // would have left unfixed. The off-UI path: hand-edited, or written by
+        // a non-web-UI client, since the form always sets the field.
+        entries.push_back({{"vendor", "zwo"}, {"deviceType", "telescope"}, {"deviceNumber", 9644}});
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        // OnStep is serial-only, so its valid list is shorter: a persisted
+        // "network" is unrecognised HERE even though it is valid for the other
+        // four, and normalises to serial rather than dropping the device.
+        entries.push_back({{"vendor", "onstep"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9645},
+                           {"connectionType", "network"},
+                           {"host", "192.168.1.50"}});
+#endif
         std::filesystem::create_directories(persisted.parent_path());
         {
             std::ofstream out(persisted, std::ios::trunc);
@@ -2252,10 +2271,23 @@ int main() {
         remove_device(startup_router, "skywatcher", "telescope", 9640);
         remove_device(startup_router, "skywatcher", "telescope", 9641);
         remove_device(startup_router, "skywatcher", "telescope", 9642);
+#ifdef ALPACACORE_ENABLE_ZWO
+        remove_device(startup_router, "zwo", "telescope", 9644);
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        remove_device(startup_router, "onstep", "telescope", 9645);
+#endif
         restore_original();
 
         EXPECT(!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array());
-        for (int device_number : {9640, 9641, 9642}) {
+        std::vector<int> expected_listed = {9640, 9641, 9642};
+#ifdef ALPACACORE_ENABLE_ZWO
+        expected_listed.push_back(9644);
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        expected_listed.push_back(9645);
+#endif
+        for (int device_number : expected_listed) {
             bool found = false;
             for (const auto& entry : listed_json["Value"]) {
                 if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == device_number) {
@@ -2290,6 +2322,32 @@ int main() {
         EXPECT(warned_port);
         EXPECT(warned_host);
         EXPECT(warned_conn_type);
+
+#ifdef ALPACACORE_ENABLE_ZWO
+        bool warned_zwo_empty = false;
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        bool warned_onstep_network = false;
+#endif
+        for (const auto& w : warnings) {
+#ifdef ALPACACORE_ENABLE_ZWO
+            if (w.find("telescope 9644") != std::string::npos && w.find("serial") != std::string::npos) {
+                warned_zwo_empty = true;
+            }
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+            if (w.find("telescope 9645") != std::string::npos && w.find("network") != std::string::npos &&
+                w.find("serial") != std::string::npos) {
+                warned_onstep_network = true;
+            }
+#endif
+        }
+#ifdef ALPACACORE_ENABLE_ZWO
+        EXPECT(warned_zwo_empty);
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        EXPECT(warned_onstep_network);
+#endif
     }
     {
         // The other half of the rule, unchanged: the same three configs are
