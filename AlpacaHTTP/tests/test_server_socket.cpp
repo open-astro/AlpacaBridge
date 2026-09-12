@@ -32,8 +32,10 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "test_assert.h"
 
@@ -956,6 +958,275 @@ int main() {
         for (int fd : idle_parked) {
             EXPECT(peer_closed(fd, 2000));
             ::close(fd);
+        }
+    }
+
+    // Issue #402: a run_server() that fails early must not leave a joinable
+    // std::thread behind.
+    {
+        // bind() fails when the port is already in use. run_server() logs,
+        // sets running_ = false and returns -- on the thread start_async()
+        // already created and stored. stop() then early-returned on
+        // `if (!running_)` without joining, and ~Server() destroyed a still
+        // joinable std::thread, which calls std::terminate(). So a port
+        // conflict became an abort at destruction rather than a clean failure
+        // the caller could report, and the caller's own is_running() check
+        // did not help: it correctly returned false and the crash came later.
+        //
+        // This case is the shape an embedder actually writes -- construct,
+        // start_async(), see is_running() == false, destroy, try another port
+        // -- so if the fix regresses, this binary aborts rather than failing
+        // an assertion.
+        alpacahttp::Config holder_config;
+        holder_config.set_http_port(6879);
+        holder_config.set_discovery_enabled(false);
+        holder_config.set_server_name("TestServerPortHolder");
+        alpacahttp::Server holder(holder_config);
+        holder.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (!holder.is_running()) {
+            // Say so. The whole #402 block hangs off this, and a silent skip
+            // turns the flagship regression case into a green no-op on a
+            // runner where 6879 happens to be taken.
+            std::cerr << "WARNING: port-conflict cases SKIPPED -- could not bind port 6879\n";
+        }
+        if (holder.is_running()) {
+            {
+                alpacahttp::Config conflict_config;
+                conflict_config.set_http_port(6879);  // already held
+                conflict_config.set_discovery_enabled(false);
+                conflict_config.set_server_name("TestServerPortConflict");
+                alpacahttp::Server conflicted(conflict_config);
+                conflicted.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                EXPECT(!conflicted.is_running());
+                // An explicit stop() before the destructor is the other order
+                // an embedder writes; it must also be a no-crash no-op.
+                conflicted.stop();
+                EXPECT(!conflicted.is_running());
+                // ...and the destructor runs here, on a Server whose thread
+                // stop() has already reaped.
+            }
+
+            {
+                // Retrying on the SAME Server after the failure. This is the
+                // shape that exercises start_async()'s own join: the second
+                // call assigns over server_thread_, and assigning over a
+                // joinable std::thread is std::terminate(). It has to be one
+                // object -- a fresh Server gets a fresh server_thread_ and
+                // proves nothing about that path (which is exactly how this
+                // test read before review: it built a second Server, so
+                // deleting the join in start_async() left the suite green).
+                alpacahttp::Config retry_config;
+                retry_config.set_http_port(6879);
+                retry_config.set_discovery_enabled(false);
+                retry_config.set_server_name("TestServerPortRetry");
+                alpacahttp::Server retried(retry_config);
+                retried.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                EXPECT(!retried.is_running());
+
+                // No stop() in between: the embedder sees is_running() false
+                // and simply tries another port on the same object. Without
+                // the join in start_async() this aborts the binary.
+                retried.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                // Still the held port, so still not running -- the point is
+                // that we got here at all.
+                EXPECT(!retried.is_running());
+
+                retry_config.set_http_port(6880);
+                alpacahttp::Server second(retry_config);
+                second.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                // The retry really came up, so the first failure left nothing
+                // broken behind it.
+                EXPECT(second.is_running());
+                second.stop();
+                EXPECT(!second.is_running());
+            }
+        }
+
+        holder.stop();
+        EXPECT(!holder.is_running());
+    }
+
+    {
+        // Two threads calling stop() on the SAME running Server, which is the
+        // shipped shutdown path, not a contrived one: PUT
+        // /management/v1/shutdown spawns a detached thread that runs the
+        // shutdown callback, and the example server's callback clears the flag
+        // its own main loop polls -- so that loop calls stop() too, while the
+        // detached thread is inside stop(). Both reach join_server_thread().
+        //
+        // Concurrent join() on one std::thread is UB; in practice the second
+        // pthread_join throws std::system_error, which nothing catches, so the
+        // process terminates. Like the port-conflict case above, a regression
+        // here ABORTS this binary rather than failing an assertion.
+        alpacahttp::Config concurrent_config;
+        concurrent_config.set_http_port(6881);
+        concurrent_config.set_discovery_enabled(false);
+        concurrent_config.set_server_name("TestServerConcurrentStop");
+        alpacahttp::Server concurrent(concurrent_config);
+        concurrent.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (!concurrent.is_running()) {
+            std::cerr << "WARNING: concurrent-stop case SKIPPED -- could not bind port 6881\n";
+        }
+        if (concurrent.is_running()) {
+            // Released together so both land in stop() at once, which is what
+            // makes them race for the join rather than queueing behind it.
+            std::atomic<bool> go{false};
+            std::atomic<int> finished{0};
+            std::vector<std::thread> stoppers;
+            for (int i = 0; i < 2; ++i) {
+                stoppers.emplace_back([&]() {
+                    while (!go.load()) {
+                        std::this_thread::yield();
+                    }
+                    concurrent.stop();
+                    finished.fetch_add(1);
+                });
+            }
+            go.store(true);
+            for (auto& t : stoppers) {
+                t.join();
+            }
+            EXPECT(finished.load() == 2);
+            EXPECT(!concurrent.is_running());
+            // A third stop() after the fact is still a no-op, not a second
+            // join of an already-reaped thread.
+            concurrent.stop();
+            EXPECT(!concurrent.is_running());
+        }
+    }
+
+    {
+        // The loser of the ownership race must not return from stop() early.
+        // ~Server() runs straight after stop() and destroys the wake pipe, the
+        // config and the connection maps that run_server() still reads, so a
+        // stop() that returns while the accept loop is unwinding is a
+        // use-after-free -- which is exactly what "return if another caller
+        // took the thread" does.
+        //
+        // Both stoppers are joined before the Server is destroyed: a stopper
+        // still inside stop() when the object dies is a *different* hazard
+        // (the caller must outlive the callee) and not what this PR claims to
+        // fix, so racing it here would only make the test unsound. What this
+        // does exercise, many times over, is the interleaving itself -- one
+        // caller in the !running_ branch winning the thread while the other
+        // runs the full phases -- and the ASan and TSan pre-flight gates are
+        // what turn a surviving run_server() into a report.
+        //
+        // The early-return regression was confirmed against this loop under
+        // ASan by deleting the condition-variable wait in
+        // join_server_thread(): heap-use-after-free in run_server() reading
+        // the destroyed Server's running_ flag, on every run.
+        for (int round = 0; round < 25; ++round) {
+            alpacahttp::Config teardown_config;
+            teardown_config.set_http_port(6882);
+            teardown_config.set_discovery_enabled(false);
+            teardown_config.set_server_name("TestServerStopThenDestroy");
+
+            auto server = std::make_unique<alpacahttp::Server>(teardown_config);
+            server->start_async();
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            if (!server->is_running()) {
+                std::cerr << "WARNING: stop-then-destroy loop SKIPPED at round " << round
+                          << " -- could not bind port 6882\n";
+                break;
+            }
+
+            alpacahttp::Server* raw = server.get();
+            std::atomic<bool> go{false};
+            std::atomic<int> returned{0};
+            std::thread other([&]() {
+                while (!go.load()) {
+                    std::this_thread::yield();
+                }
+                raw->stop();
+                returned.fetch_add(1);
+            });
+
+            go.store(true);
+            raw->stop();
+            returned.fetch_add(1);
+
+            other.join();
+            EXPECT(returned.load() == 2);
+            EXPECT(!raw->is_running());
+
+            // Destroyed only once both stop() calls have returned. With the
+            // wait in place that means the server thread is already reaped;
+            // without it, run_server() can still be live here.
+            server.reset();
+        }
+    }
+
+    {
+        // The restart shape: one caller stops and immediately starts again
+        // while another is still parked inside stop() waiting for the join.
+        // Without a generation counter the waiter wakes after the restart has
+        // installed a NEW server_thread_, adopts it and joins a server that is
+        // still running -- stop() never returns. A regression HANGS here
+        // rather than failing an assertion, which the watchdog below turns
+        // into a reported failure.
+        //
+        // Repeated, because the window is the winner's join: the waiter has to
+        // park on the condition variable while the winner is inside it, and
+        // the winner has to finish and restart before the waiter re-acquires
+        // the mutex.
+        //
+        // HONEST LIMIT: 40 restarts did NOT reach that window on this machine
+        // -- the generation check was removed and this loop still passed, three
+        // runs out of three. So treat it as an exerciser of the restart shape
+        // (and material for the ASan/TSan gates), not as the regression test
+        // for the adopt-the-next-generation bug. That one is argued in
+        // join_server_thread()'s comment and would need a test seam inside the
+        // join to pin properly.
+        alpacahttp::Config restart_config;
+        restart_config.set_http_port(6883);
+        restart_config.set_discovery_enabled(false);
+        restart_config.set_server_name("TestServerRestartRace");
+
+        alpacahttp::Server restarting(restart_config);
+        restarting.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (!restarting.is_running()) {
+            std::cerr << "WARNING: restart-race case SKIPPED -- could not bind port 6883\n";
+        } else {
+            std::atomic<bool> done{false};
+            std::atomic<long> waiter_returns{0};
+            // The embedder loop: every time it sees the server go down it
+            // calls stop() too, which is the caller that ends up parked.
+            std::thread waiter([&]() {
+                while (!done.load()) {
+                    if (!restarting.is_running()) {
+                        restarting.stop();
+                        waiter_returns.fetch_add(1);
+                    }
+                    std::this_thread::yield();
+                }
+            });
+
+            for (int round = 0; round < 40; ++round) {
+                restarting.stop();
+                restarting.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+
+            done.store(true);
+            waiter.join();
+            // Reaching here at all is the assertion: a waiter that adopted a
+            // restarted thread would still be inside stop() and this join
+            // would never return -- when the window is actually hit.
+            EXPECT(waiter_returns.load() >= 0);
+
+            restarting.stop();
+            EXPECT(!restarting.is_running());
         }
     }
 

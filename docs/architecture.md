@@ -153,7 +153,7 @@ AlpacaHTTP is the HTTP server layer. It translates Alpaca REST/JSON requests int
 
 ### Web management UI
 
-The web UI (`web/index.html`, `web/app.js`, `web/style.css`) provides:
+The web UI (`web/index.html`, `web/format.js`, `web/app.js`, `web/style.css`) provides:
 
 - Device listing and status
 - Add/remove/configure devices

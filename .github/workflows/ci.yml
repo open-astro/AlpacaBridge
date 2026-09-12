@@ -20,7 +20,7 @@
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   unicode        scan sources for Trojan-Source / invisible Unicode
 #   shellcheck     lint the project's shell scripts
-#   javascript     node --check the hand-written web UI JavaScript
+#   javascript     node --check AND node --test the hand-written web UI JavaScript
 #   cppcheck       second C/C++ static-analysis engine, PR changed files only
 #   zizmor         security audit of these GitHub Actions workflows
 #
@@ -519,8 +519,12 @@ jobs:
       - name: Check docs/config for self-inconsistency
         # Catches drift between the repo's own docs and its actual config
         # (CMake options vs docs/development.md, zizmor/cppcheck pins between
-        # ci.yml and ci_preflight.sh, VERSION vs the README badge, and stale
-        # paths in AGENTS.md) that nothing previously caught automatically.
+        # ci.yml and ci_preflight.sh, VERSION vs the README badge, stale
+        # paths in AGENTS.md, and async_connectable.h's blocking-get_connected()
+        # lists vs the drivers -- including a count of either list stated
+        # anywhere, issue #381) that nothing previously caught automatically.
+        # The script's module docstring is the authoritative list; keep this
+        # summary in step with it or drop it rather than letting it go stale.
         run: python3 scripts/check_docs_drift.py
 
   stress-registration:
@@ -604,8 +608,8 @@ jobs:
           shellcheck "${scripts[@]}"
 
   javascript:
-    name: JavaScript syntax
-    runs-on: ubuntu-24.04-arm   # syntax-only check; arch-independent
+    name: JavaScript syntax + unit tests
+    runs-on: ubuntu-24.04-arm   # parses and runs pure JS only; arch-independent
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -620,7 +624,8 @@ jobs:
 
       - name: Syntax-check web UI JavaScript
         # The web UI is hand-written static JS served as-is (no bundler/build
-        # step), so `node --check` is its only automated gate. It parses each
+        # step). `node --check` is the first half of its gate -- the unit-test
+        # step below is the other -- and it parses each
         # file and reports syntax errors (stray braces, etc.) without executing
         # anything. Kept in sync with the javascript gate in
         # scripts/ci_preflight.sh.
@@ -635,6 +640,29 @@ jobs:
           for f in "${files[@]}"; do
             node --check "$f"
           done
+
+      - name: Unit-test web UI JavaScript
+        # `node --check` parses; it does not execute. web/format.js holds the
+        # page's pure formatting helpers, whose contract includes three
+        # fallback guards -- one of them (an engine that ignores hourCycle and
+        # answers in 12-hour form) renders a plausible-looking WRONG time
+        # rather than an obvious failure. `node --test` ships with the Node
+        # the step above installs, so this needs no dependency and no
+        # package.json. Kept in sync with the javascript gate in
+        # scripts/ci_preflight.sh. See open-astro#385.
+        run: |
+          set -euo pipefail
+          # Explicit file list, not `node --test <dir>`: the directory form
+          # works on Node 20 but the runner's Node 22 resolves the path as a
+          # module and dies with MODULE_NOT_FOUND, which is how this job first
+          # failed. A glob of the test files behaves the same on both.
+          mapfile -t tests < <(git ls-files 'AlpacaHTTP/tests/web/*.test.js')
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "No web JavaScript tests — nothing to run."
+            exit 1
+          fi
+          echo "Running: ${tests[*]}"
+          node --test "${tests[@]}"
 
   cppcheck:
     name: cppcheck (changed files)
