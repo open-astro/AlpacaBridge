@@ -41,7 +41,11 @@ using alpacacore::AlpacaDriver;
 TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[astroasis][focuser][stress]") {
     auto driver = alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw-alpacabridge-absent");
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: StressCallGuard replaces the local call() lambda. Same
+    // per-call isolation, but it now COUNTS what it swallows, so an unexpected
+    // throw fails the case instead of being discarded silently.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
         // Every one of these throws NotConnected on this sentinel path,
         // every time (the storm never actually connects) -- the harness
@@ -49,21 +53,15 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
         // without individual catches here the first throw (get_is_moving)
         // would short-circuit the rest and every other locked getter/setter
         // below would go completely unexercised, not just unconnected.
-        auto call = [](auto&& fn) {
-            try {
-                fn();
-            } catch (const alpacacore::AlpacaException&) {
-            }
-        };
-        call([&] { static_cast<void>(focuser.get_is_moving()); });
-        call([&] { static_cast<void>(focuser.get_position()); });
-        call([&] { static_cast<void>(focuser.get_max_step()); });
-        call([&] { static_cast<void>(focuser.get_max_increment()); });
-        call([&] { static_cast<void>(focuser.get_temperature()); });
-        call([&] { static_cast<void>(focuser.get_step_size()); });
-        call([&] { focuser.set_temp_comp(true); });
-        call([&] { focuser.move(1234); });
-        call([&] { focuser.halt(); });
+        guard([&] { static_cast<void>(focuser.get_is_moving()); });
+        guard([&] { static_cast<void>(focuser.get_position()); });
+        guard([&] { static_cast<void>(focuser.get_max_step()); });
+        guard([&] { static_cast<void>(focuser.get_max_increment()); });
+        guard([&] { static_cast<void>(focuser.get_temperature()); });
+        guard([&] { static_cast<void>(focuser.get_step_size()); });
+        guard([&] { focuser.set_temp_comp(true); });
+        guard([&] { focuser.move(1234); });
+        guard([&] { focuser.halt(); });
     });
 
     // Still alive and coherent after the storm. Unlike the SVBONY/ZWO
@@ -71,8 +69,15 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
     // never resolves to a real HID node, so no connect in the storm ever
     // succeeds.
     CHECK(driver->get_connected() == false);
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected():
+    // right after a storm the last async task may still be in flight, so a
+    // single sync disconnect can legitimately no-op against the pending-
+    // disconnect machinery and a bare CHECK would fail on a correct driver.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("Astroasis focuser - destruction races an in-flight connect", "[astroasis][focuser][stress]") {

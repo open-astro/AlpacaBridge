@@ -282,23 +282,11 @@ ALLOWLIST = {
 # Default is MANDATORY: a new registration file must use the guard or be added
 # here deliberately. Remove an entry in the same PR that migrates its file; a
 # stale entry is itself a failure below, so nothing here can silently go stale.
-GUARD_ALLOWLIST = {
-    "test_astroasis_concurrency_stress.cpp",
-    "test_bisque_concurrency_stress.cpp",
-    "test_celestron_concurrency_stress.cpp",
-    "test_gemini_concurrency_stress.cpp",
-    "test_ioptron_concurrency_stress.cpp",
-    "test_ioptron_switch_concurrency_stress.cpp",
-    "test_onstep_concurrency_stress.cpp",
-    "test_playerone_concurrency_stress.cpp",
-    "test_skywatcher_concurrency_stress.cpp",
-    "test_svbony_concurrency_stress.cpp",
-    "test_synscan_concurrency_stress.cpp",
-    "test_touptek_concurrency_stress.cpp",
-    "test_wandererastro_concurrency_stress.cpp",
-    "test_weewx_concurrency_stress.cpp",
-    "test_zwo_concurrency_stress.cpp",
-}
+# Empty since open-astro#326: every registration file now uses the guard. An
+# entry here is a deliberate, explained exception -- and the stale-entry rule
+# in check_guard_usage() means one left behind after its file is migrated is
+# itself a failure, so this cannot quietly refill.
+GUARD_ALLOWLIST = set()
 
 
 # A hand-rolled call() wrapper in either form the registrations used:

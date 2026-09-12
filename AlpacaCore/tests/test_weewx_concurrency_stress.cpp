@@ -49,7 +49,19 @@ TEST_CASE("WeeWX observing conditions - concurrent connect/disconnect/operate st
           "[weewx][observingconditions][stress]") {
     auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, unreachable_config());
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: StressCallGuard replaces the local call() lambda. It
+    // catches std::exception as well, like the lambda did, but records rather
+    // than discards -- so anything escaping curl teardown now fails the case
+    // instead of vanishing.
+    // The set REPLACES the default {NotConnected}. NotImplemented is here
+    // because a WeeWX station legitimately does not carry every sensor this
+    // callback reads, so those getters throw "Sensor not implemented" on every
+    // pass -- the ASCOM contract working, not a defect. The old call() lambda
+    // discarded it; the guard counts it, so it has to be named. (The three
+    // NotImplemented variants share one numeric code, so this covers all.)
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::NotImplemented};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& oc = static_cast<alpacacore::ObservingConditionsDriver&>(d);
         // The sensor getters throw NotConnected on this unreachable URL
         // (AveragePeriod answers without the device, DeviceState swallows
@@ -58,25 +70,19 @@ TEST_CASE("WeeWX observing conditions - concurrent connect/disconnect/operate st
         // throw would skip every call below it and they would never be
         // exercised at all. std::exception rather than AlpacaException:
         // anything else escaping curl teardown would unwind just the same.
-        auto call = [](auto&& fn) {
-            try {
-                fn();
-            } catch (const std::exception&) {
-            }
-        };
-        call([&] { static_cast<void>(oc.get_temperature()); });
-        call([&] { static_cast<void>(oc.get_humidity()); });
-        call([&] { static_cast<void>(oc.get_dew_point()); });
-        call([&] { static_cast<void>(oc.get_pressure()); });
-        call([&] { static_cast<void>(oc.get_wind_speed()); });
-        call([&] { static_cast<void>(oc.get_sky_quality()); });
-        call([&] { static_cast<void>(oc.get_sky_temperature()); });
-        call([&] { static_cast<void>(oc.get_average_period()); });
-        call([&] { oc.set_average_period(0.0); });
-        call([&] { static_cast<void>(oc.get_time_since_last_update("temperature")); });
-        call([&] { static_cast<void>(oc.get_sensor_description("temperature")); });
-        call([&] { static_cast<void>(oc.get_device_state()); });
-        call([&] { oc.refresh(); });
+        guard([&] { static_cast<void>(oc.get_temperature()); });
+        guard([&] { static_cast<void>(oc.get_humidity()); });
+        guard([&] { static_cast<void>(oc.get_dew_point()); });
+        guard([&] { static_cast<void>(oc.get_pressure()); });
+        guard([&] { static_cast<void>(oc.get_wind_speed()); });
+        guard([&] { static_cast<void>(oc.get_sky_quality()); });
+        guard([&] { static_cast<void>(oc.get_sky_temperature()); });
+        guard([&] { static_cast<void>(oc.get_average_period()); });
+        guard([&] { oc.set_average_period(0.0); });
+        guard([&] { static_cast<void>(oc.get_time_since_last_update("temperature")); });
+        guard([&] { static_cast<void>(oc.get_sensor_description("temperature")); });
+        guard([&] { static_cast<void>(oc.get_device_state()); });
+        guard([&] { oc.refresh(); });
     });
 
     // Connected can only be false here: the sentinel URL can never resolve to
@@ -84,6 +90,10 @@ TEST_CASE("WeeWX observing conditions - concurrent connect/disconnect/operate st
     CHECK(driver->get_connected() == false);
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("WeeWX observing conditions - destruction races an in-flight connect",

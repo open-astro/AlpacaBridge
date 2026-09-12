@@ -39,17 +39,27 @@ TEST_CASE("iMate PowerBox Switch - concurrent connect/disconnect/operate stress"
     auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(
         0, alpacacore::vendor::ioptron::default_imate_powerbox_config());
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call -- before this the callback stopped
+    // at the first throw, so only get_max_switch() was ever storm-tested.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
-        static_cast<void>(sw.get_max_switch());
-        static_cast<void>(sw.get_switch(1));
-        sw.set_switch(1, true);  // switch 1 ("DC1"); switch 0 is read-only pass-through
-        static_cast<void>(sw.get_switch_value(1));
+        guard([&] { static_cast<void>(sw.get_max_switch()); });
+        guard([&] { static_cast<void>(sw.get_switch(1)); });
+        // switch 1 ("DC1"); switch 0 is read-only pass-through
+        guard([&] { sw.set_switch(1, true); });
+        guard([&] { static_cast<void>(sw.get_switch_value(1)); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected():
+    // right after a storm the last async task may still be in flight, so a
+    // single sync disconnect can legitimately no-op against the pending-
+    // disconnect machinery and the CHECK below would fail on a correct driver.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("iMate PowerBox Switch - destruction races an in-flight connect", "[ioptron][switch][stress]") {

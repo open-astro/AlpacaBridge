@@ -40,19 +40,25 @@ using alpacacore::AlpacaDriver;
 TEST_CASE("ZWO EFW - concurrent connect/disconnect/operate stress", "[zwo][filterwheel][stress]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(0, 0);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call -- before this the callback stopped at
+    // the first throw, so only the first getter was ever storm-tested.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
-        static_cast<void>(wheel.get_position());
-        wheel.set_position(1);
-        static_cast<void>(wheel.get_names());
-        static_cast<void>(wheel.get_focus_offsets());
+        guard([&] { static_cast<void>(wheel.get_position()); });
+        guard([&] { wheel.set_position(1); });
+        guard([&] { static_cast<void>(wheel.get_names()); });
+        guard([&] { static_cast<void>(wheel.get_focus_offsets()); });
     });
 
     // Still alive and coherent after the storm (Connected reflects whether a
     // physical wheel is attached; both outcomes are valid here).
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected().
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("ZWO EFW - destruction races an in-flight connect", "[zwo][filterwheel][stress]") {
@@ -70,18 +76,24 @@ TEST_CASE("ZWO EFW - destruction races an in-flight connect", "[zwo][filterwheel
 TEST_CASE("ZWO camera - concurrent connect/disconnect/operate stress", "[zwo][camera][stress]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call -- before this the callback stopped at
+    // the first throw, so only the first getter was ever storm-tested.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& camera = static_cast<alpacacore::CameraDriver&>(d);
-        static_cast<void>(camera.get_camera_state());
-        static_cast<void>(camera.get_ccd_temperature());
-        camera.set_gain(50);
-        static_cast<void>(camera.get_image_ready());
-        camera.stop_exposure();
+        guard([&] { static_cast<void>(camera.get_camera_state()); });
+        guard([&] { static_cast<void>(camera.get_ccd_temperature()); });
+        guard([&] { camera.set_gain(50); });
+        guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { camera.stop_exposure(); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected().
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("ZWO camera - destruction races an in-flight connect", "[zwo][camera][stress]") {
@@ -97,17 +109,23 @@ TEST_CASE("ZWO camera - destruction races an in-flight connect", "[zwo][camera][
 TEST_CASE("ZWO EAF focuser - concurrent connect/disconnect/operate stress", "[zwo][focuser][stress]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(0, 0);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call -- before this the callback stopped at
+    // the first throw, so only the first getter was ever storm-tested.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
-        static_cast<void>(focuser.get_position());
-        static_cast<void>(focuser.get_temperature());
-        focuser.move(100);
-        focuser.halt();
+        guard([&] { static_cast<void>(focuser.get_position()); });
+        guard([&] { static_cast<void>(focuser.get_temperature()); });
+        guard([&] { focuser.move(100); });
+        guard([&] { focuser.halt(); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected().
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("ZWO EAF focuser - destruction races an in-flight connect", "[zwo][focuser][stress]") {
@@ -119,17 +137,23 @@ TEST_CASE("ZWO EAF focuser - destruction races an in-flight connect", "[zwo][foc
 TEST_CASE("ZWO CAA rotator - concurrent connect/disconnect/operate stress", "[zwo][rotator][stress]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call -- before this the callback stopped at
+    // the first throw, so only the first getter was ever storm-tested.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& rotator = static_cast<alpacacore::RotatorDriver&>(d);
-        static_cast<void>(rotator.get_position());
-        static_cast<void>(rotator.get_reverse());
-        rotator.move(10.0);
-        rotator.halt();
+        guard([&] { static_cast<void>(rotator.get_position()); });
+        guard([&] { static_cast<void>(rotator.get_reverse()); });
+        guard([&] { rotator.move(10.0); });
+        guard([&] { rotator.halt(); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected().
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("ZWO CAA rotator - destruction races an in-flight connect", "[zwo][rotator][stress]") {
@@ -147,17 +171,23 @@ TEST_CASE("ZWO CAA rotator - destruction races an in-flight connect", "[zwo][rot
 TEST_CASE("ZWO dew heater switch - concurrent connect/disconnect/operate stress", "[zwo][switch][stress]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call -- before this the callback stopped at
+    // the first throw, so only the first getter was ever storm-tested.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
-        static_cast<void>(sw.get_max_switch());
-        static_cast<void>(sw.get_switch(0));
-        sw.set_switch(0, true);
-        static_cast<void>(sw.get_switch_value(0));
+        guard([&] { static_cast<void>(sw.get_max_switch()); });
+        guard([&] { static_cast<void>(sw.get_switch(0)); });
+        guard([&] { sw.set_switch(0, true); });
+        guard([&] { static_cast<void>(sw.get_switch_value(0)); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected().
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("ZWO dew heater switch - destruction races an in-flight connect", "[zwo][switch][stress]") {
@@ -206,22 +236,39 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(server.port()));
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call -- before this the callback stopped at
+    // the first throw, so only the first getter was ever storm-tested.
+    // Unlike the other five storms in this file, this one runs CONNECTED over
+    // FakeMountServer, so the set is widened per AGENTS.md. The set REPLACES
+    // the default {NotConnected}. DriverException is here for the FAKE rather
+    // than the driver: the canned replies cannot answer a position query, so
+    // the driver correctly reports "Invalid RA response from ZWO mount".
+    // InvalidValue/InvalidOperation cover a slew or pulse racing another
+    // motion. A real defect shows up as a code outside this set, and
+    // guard.report() names every distinct one it saw.
+    alpacacore::test::StressCallGuard guard{
+        alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::NotImplemented,
+        alpacacore::AlpacaError::DriverException};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
-        static_cast<void>(scope.get_tracking());
-        static_cast<void>(scope.get_right_ascension());
-        static_cast<void>(scope.get_declination());
-        static_cast<void>(scope.get_slewing());
+        guard([&] { static_cast<void>(scope.get_tracking()); });
+        guard([&] { static_cast<void>(scope.get_right_ascension()); });
+        guard([&] { static_cast<void>(scope.get_declination()); });
+        guard([&] { static_cast<void>(scope.get_slewing()); });
         // The newly-fixed thread paths: async GOTO (goto_thread_) and pulse
         // guiding (pulse thread queue) issued while other threads disconnect.
-        scope.slew_to_coordinates_async(5.0, 20.0);
-        scope.pulse_guide(0, 50);
-        scope.abort_slew();
+        guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
+        guard([&] { scope.pulse_guide(0, 50); });
+        guard([&] { scope.abort_slew(); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected().
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("ZWO mount - destruction races an in-flight connect", "[zwo][telescope][stress]") {

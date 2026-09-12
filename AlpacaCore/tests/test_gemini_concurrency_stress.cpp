@@ -73,40 +73,32 @@ using alpacacore::test::FakeGeminiPdh;
 
 namespace {
 
-// A racing disconnect makes any of these throw NotConnected, and the harness
-// only swallows the callback as a whole -- per-call guards keep one throw
-// from skipping every call below it for that whole iteration. std::exception
-// rather than AlpacaException: anything else escaping the serial teardown
-// would otherwise unwind past the remaining calls, which is the exact
-// failure mode this helper exists to prevent.
-template <typename Fn>
-void call(Fn&& fn) {
-    try {
-        fn();
-    } catch (const std::exception&) {
-    }
-}
-
-void pdh_switch_operate(AlpacaDriver& d) {
+// open-astro#326: the operate callbacks take the storm's StressCallGuard by
+// reference instead of the file-scope call() template they used to share. Same
+// per-call isolation -- run_lifecycle_stress wraps the WHOLE callback in one
+// try/catch, so an unguarded throw skips every call below it for that whole
+// iteration -- but the guard COUNTS what it swallows, so an unexpected throw
+// fails the case rather than being discarded.
+void pdh_switch_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
-    call([&] { static_cast<void>(sw.get_max_switch()); });
-    call([&] { static_cast<void>(sw.get_switch_value(0)); });
-    call([&] { static_cast<void>(sw.get_switch_name(0)); });
-    call([&] { static_cast<void>(sw.get_can_write(1)); });
+    guard([&] { static_cast<void>(sw.get_max_switch()); });
+    guard([&] { static_cast<void>(sw.get_switch_value(0)); });
+    guard([&] { static_cast<void>(sw.get_switch_name(0)); });
+    guard([&] { static_cast<void>(sw.get_can_write(1)); });
     // ids 0 and 1 are USB A and USB B, both writable; the always-on
     // pass-through rail that refuses writes is id 6 ("DC1").
-    call([&] { sw.set_switch_value(1, 1.0); });
-    call([&] { static_cast<void>(sw.get_device_state()); });
+    guard([&] { sw.set_switch_value(1, 1.0); });
+    guard([&] { static_cast<void>(sw.get_device_state()); });
 }
 
-void flatpanel_operate(AlpacaDriver& d) {
+void flatpanel_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& panel = static_cast<alpacacore::CoverCalibratorDriver&>(d);
-    call([&] { static_cast<void>(panel.get_calibrator_state()); });
-    call([&] { static_cast<void>(panel.get_cover_state()); });
-    call([&] { static_cast<void>(panel.get_brightness()); });
-    call([&] { static_cast<void>(panel.get_max_brightness()); });
-    call([&] { static_cast<void>(panel.get_calibrator_changing()); });
-    call([&] { static_cast<void>(panel.get_cover_moving()); });
+    guard([&] { static_cast<void>(panel.get_calibrator_state()); });
+    guard([&] { static_cast<void>(panel.get_cover_state()); });
+    guard([&] { static_cast<void>(panel.get_brightness()); });
+    guard([&] { static_cast<void>(panel.get_max_brightness()); });
+    guard([&] { static_cast<void>(panel.get_calibrator_changing()); });
+    guard([&] { static_cast<void>(panel.get_cover_moving()); });
     // Submit a calibrator change only when one is not already in flight.
     // Unconditional submission is what builds an unbounded thread chain
     // here: on the background path calibrator_on()/calibrator_off() return
@@ -134,7 +126,7 @@ void flatpanel_operate(AlpacaDriver& d) {
     // instead of unbounded. That is what keeps it survivable on a faster
     // runner (pthread_create failing, or TSan's live-thread ceiling) without
     // losing coverage of the task path.
-    call([&] {
+    guard([&] {
         if (!panel.get_calibrator_changing()) {
             // Alternate on/off per thread so run_calibrator_command(false, 0)
             // and the off-behind-inline-on ordering both get stormed, not
@@ -148,18 +140,18 @@ void flatpanel_operate(AlpacaDriver& d) {
             on = !on;
         }
     });
-    call([&] { static_cast<void>(panel.get_device_state()); });
+    guard([&] { static_cast<void>(panel.get_device_state()); });
 }
 
-void focuser_operate(AlpacaDriver& d) {
+void focuser_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
-    call([&] { static_cast<void>(focuser.get_is_moving()); });
-    call([&] { static_cast<void>(focuser.get_position()); });
-    call([&] { static_cast<void>(focuser.get_max_step()); });
-    call([&] { static_cast<void>(focuser.get_max_increment()); });
-    call([&] { static_cast<void>(focuser.get_temperature()); });
-    call([&] { focuser.move(1234); });
-    call([&] { focuser.halt(); });
+    guard([&] { static_cast<void>(focuser.get_is_moving()); });
+    guard([&] { static_cast<void>(focuser.get_position()); });
+    guard([&] { static_cast<void>(focuser.get_max_step()); });
+    guard([&] { static_cast<void>(focuser.get_max_increment()); });
+    guard([&] { static_cast<void>(focuser.get_temperature()); });
+    guard([&] { focuser.move(1234); });
+    guard([&] { focuser.halt(); });
 }
 
 // Never a real device path: the storm connects hundreds of times, so a
@@ -196,13 +188,18 @@ TEST_CASE("Gemini PDH Advanced 3 switch - concurrent connect/disconnect/operate 
     // than as an unexpected exception attributed to the whole TEST_CASE.
     CHECK_NOTHROW(driver->set_connected(false));
 
-    alpacacore::test::run_lifecycle_stress(*driver, pdh_switch_operate);
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { pdh_switch_operate(guard, d); });
 
     // Still 10 s here, deliberately: a disconnect closes the port and reaps
     // the reader thread, it never walks the handshake ladder, so the
     // connect side's extra margin buys nothing on this call.
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("Gemini PDH Advanced 3 switch - destruction races an in-flight connect", "[gemini][switch][stress]") {
@@ -241,10 +238,15 @@ TEST_CASE("Gemini Flat Panel Pro - concurrent connect/disconnect/operate stress"
     // than as an unexpected exception attributed to the whole TEST_CASE.
     CHECK_NOTHROW(driver->set_connected(false));
 
-    alpacacore::test::run_lifecycle_stress(*driver, flatpanel_operate);
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { flatpanel_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("Gemini Flat Panel Pro - destruction races an in-flight connect", "[gemini][covercalibrator][stress]") {
@@ -264,12 +266,17 @@ TEST_CASE("Gemini Flat Panel Pro - racing disconnect is never dropped", "[gemini
 TEST_CASE("Gemini focuser - concurrent connect/disconnect/operate stress", "[gemini][focuser][stress]") {
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, kAbsentSerialPort);
 
-    alpacacore::test::run_lifecycle_stress(*driver, focuser_operate);
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { focuser_operate(guard, d); });
 
     // The port cannot exist, so no connect in the storm can have succeeded.
     CHECK(driver->get_connected() == false);
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("Gemini focuser - destruction races an in-flight connect", "[gemini][focuser][stress]") {

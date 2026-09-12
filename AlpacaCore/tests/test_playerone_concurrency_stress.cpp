@@ -31,17 +31,25 @@ using alpacacore::AlpacaDriver;
 TEST_CASE("Player One Phoenix - concurrent connect/disconnect/operate stress", "[playerone][filterwheel][stress]") {
     auto driver = alpacacore::vendor::playerone::create_playerone_filterwheel(0, 0);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call, and it COUNTS what it swallows.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
-        static_cast<void>(wheel.get_position());
-        wheel.set_position(1);
-        static_cast<void>(wheel.get_names());
-        static_cast<void>(wheel.get_focus_offsets());
+        guard([&] { static_cast<void>(wheel.get_position()); });
+        guard([&] { wheel.set_position(1); });
+        guard([&] { static_cast<void>(wheel.get_names()); });
+        guard([&] { static_cast<void>(wheel.get_focus_offsets()); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected():
+    // right after a storm the last async task may still be in flight, so a
+    // single sync disconnect can legitimately no-op against the pending-
+    // disconnect machinery and a bare CHECK would fail on a correct driver.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("Player One Phoenix - destruction races an in-flight connect", "[playerone][filterwheel][stress]") {
@@ -58,18 +66,26 @@ TEST_CASE("Player One Phoenix - destruction races an in-flight connect", "[playe
 TEST_CASE("Player One camera - concurrent connect/disconnect/operate stress", "[playerone][camera][stress]") {
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call, and it COUNTS what it swallows.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& camera = static_cast<alpacacore::CameraDriver&>(d);
-        static_cast<void>(camera.get_camera_state());
-        static_cast<void>(camera.get_ccd_temperature());
-        static_cast<void>(camera.get_gain());
-        static_cast<void>(camera.get_cooler_on());
-        camera.stop_exposure();
+        guard([&] { static_cast<void>(camera.get_camera_state()); });
+        guard([&] { static_cast<void>(camera.get_ccd_temperature()); });
+        guard([&] { static_cast<void>(camera.get_gain()); });
+        guard([&] { static_cast<void>(camera.get_cooler_on()); });
+        guard([&] { camera.stop_exposure(); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected():
+    // right after a storm the last async task may still be in flight, so a
+    // single sync disconnect can legitimately no-op against the pending-
+    // disconnect machinery and a bare CHECK would fail on a correct driver.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("Player One camera - destruction races an in-flight connect", "[playerone][camera][stress]") {
@@ -84,7 +100,9 @@ TEST_CASE("Player One camera - destruction races an in-flight connect", "[player
 TEST_CASE("Player One switch - concurrent connect/disconnect/operate stress", "[playerone][switch][stress]") {
     auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call, and it COUNTS what it swallows.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
         // Wrapped per call: with no camera attached most of these throw
         // NotConnected (get_max_switch and get_device_state answer without
@@ -93,30 +111,30 @@ TEST_CASE("Player One switch - concurrent connect/disconnect/operate stress", "[
         // rest, leaving them unexercised. std::exception, not just
         // AlpacaException: anything escaping the SDK layer would otherwise
         // unwind past the remaining calls too.
-        auto call = [](auto&& fn) {
-            try {
-                fn();
-            } catch (const std::exception&) {
-            }
-        };
-        call([&] { static_cast<void>(sw.get_max_switch()); });
-        call([&] { static_cast<void>(sw.get_can_write(0)); });
-        call([&] { static_cast<void>(sw.get_switch(0)); });
-        call([&] { static_cast<void>(sw.get_switch_value(0)); });
+        guard([&] { static_cast<void>(sw.get_max_switch()); });
+        guard([&] { static_cast<void>(sw.get_can_write(0)); });
+        guard([&] { static_cast<void>(sw.get_switch(0)); });
+        guard([&] { static_cast<void>(sw.get_switch_value(0)); });
         // On a host with a real Player One camera attached, this drives
         // switch 0 (DewHeater when the camera reports heater_power, else Fan
         // -- build_elements_locked() pushes Fan first when no heater is
         // present) to 1% repeatedly for the storm's duration -- intended,
         // but worth knowing before running [stress] on a live rig.
-        call([&] { sw.set_switch_value(0, 1.0); });
-        call([&] { static_cast<void>(sw.get_switch_name(0)); });
-        call([&] { static_cast<void>(sw.get_switch_description(0)); });
-        call([&] { static_cast<void>(sw.get_device_state()); });
+        guard([&] { sw.set_switch_value(0, 1.0); });
+        guard([&] { static_cast<void>(sw.get_switch_name(0)); });
+        guard([&] { static_cast<void>(sw.get_switch_description(0)); });
+        guard([&] { static_cast<void>(sw.get_device_state()); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected():
+    // right after a storm the last async task may still be in flight, so a
+    // single sync disconnect can legitimately no-op against the pending-
+    // disconnect machinery and a bare CHECK would fail on a correct driver.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("Player One switch - destruction races an in-flight connect", "[playerone][switch][stress]") {

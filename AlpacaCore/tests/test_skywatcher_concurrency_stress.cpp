@@ -72,30 +72,31 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(const FakeSkyWatcherMou
 // axes the setter only stores the rate for the restore path.
 std::atomic<int> g_rate_toggle{0};
 
-void skywatcher_operate(AlpacaDriver& d) {
+void skywatcher_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
-    static_cast<void>(scope.get_tracking());
-    static_cast<void>(scope.get_right_ascension());
-    static_cast<void>(scope.get_declination());
-    static_cast<void>(scope.get_slewing());
+    guard([&] { static_cast<void>(scope.get_tracking()); });
+    guard([&] { static_cast<void>(scope.get_right_ascension()); });
+    guard([&] { static_cast<void>(scope.get_declination()); });
+    guard([&] { static_cast<void>(scope.get_slewing()); });
 
-    scope.set_tracking(true);
+    guard([&] { scope.set_tracking(true); });
     const double ra_rate = (g_rate_toggle.fetch_add(1) % 2 == 0) ? 0.25 : 0.0;
-    scope.set_right_ascension_rate(ra_rate);  // in-place change spawns rate_verify_thread_ (#248)
+    // in-place change spawns rate_verify_thread_ (#248)
+    guard([&] { scope.set_right_ascension_rate(ra_rate); });
 
-    scope.slew_to_coordinates_async(5.0, 20.0);
-    scope.pulse_guide(0, 50);
+    guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
+    guard([&] { scope.pulse_guide(0, 50); });
 
     // Alternating-axis MoveAxis start/stop pairs close together — CCDciel
     // issues these ~44 ms apart on button release, which is what let a
     // second axis's stop supersede the first axis's still-ramping stop task.
-    scope.move_axis(0, 1.0);
-    scope.move_axis(1, 1.0);
-    scope.move_axis(0, 0.0);
-    scope.move_axis(1, 0.0);
+    guard([&] { scope.move_axis(0, 1.0); });
+    guard([&] { scope.move_axis(1, 1.0); });
+    guard([&] { scope.move_axis(0, 0.0); });
+    guard([&] { scope.move_axis(1, 0.0); });
 
-    scope.set_tracking(false);
-    scope.abort_slew();
+    guard([&] { scope.set_tracking(false); });
+    guard([&] { scope.abort_slew(); });
 }
 
 }  // namespace
@@ -117,10 +118,28 @@ TEST_CASE("SkyWatcher telescope - concurrent connect/disconnect/slew/pulse/movea
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->set_connected(false);
 
-    alpacacore::test::run_lifecycle_stress(*driver, skywatcher_operate);
+    // open-astro#326: one guard per call. This callback makes fifteen calls,
+    // so before this a storm racing a disconnect exercised get_tracking() and
+    // skipped the MoveAxis pairs and rate changes the registration exists for.
+    //
+    // The set REPLACES the default {NotConnected}. Connected over the UDP
+    // simulator, so the driver legitimately reports InvalidValue and
+    // InvalidOperation from motion racing motion, the shared NotImplemented
+    // code, and DriverException where the simulator's canned replies cannot
+    // answer. A real defect shows up as a code outside this set, and
+    // guard.report() names every distinct one it saw.
+    alpacacore::test::StressCallGuard guard{
+        alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::NotImplemented,
+        alpacacore::AlpacaError::DriverException};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { skywatcher_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("SkyWatcher telescope - destruction races an in-flight connect", "[skywatcher][telescope][stress]") {

@@ -58,66 +58,66 @@ const char* const kBoxFrame =
 // port would put "1500001" on whatever device is really attached.
 constexpr const char* kAbsentSerialPort = "/dev/wanderer-alpacabridge-absent";
 
-// A racing disconnect makes any operate call throw NotConnected (or
-// DriverException once the link-health latch trips), and the harness only
-// swallows the callback as a whole -- per-call guards keep one throw from
-// skipping every call below it for that iteration. std::exception rather
-// than AlpacaException: anything else escaping the serial teardown would
-// otherwise unwind past the remaining calls just the same.
-template <typename Fn>
-void call(Fn&& fn) {
-    try {
-        fn();
-    } catch (const std::exception&) {
-    }
-}
+// open-astro#326: the operate callbacks take the storm's StressCallGuard by
+// reference instead of the file-scope call() template they used to share. A
+// racing disconnect makes any operate call throw NotConnected (or
+// DriverException once the link-health latch trips), and run_lifecycle_stress
+// only swallows the callback as a whole -- so per-call guarding is what keeps
+// one throw from skipping every call below it for that iteration. The guard
+// also COUNTS what it swallows, so an unexpected throw now fails the case.
+// The three full-seam storms therefore widen the expected set to
+// {NotConnected, DriverException}: the link-fault latch needs ~6-10 s of
+// silence, far longer than a storm, so DriverException is not expected in
+// practice, but it is the code these calls legitimately throw once the latch
+// trips, and a set that counts it as a regression would contradict this
+// comment (review note on PR #468).
 
-void cover_operate(AlpacaDriver& d) {
+void cover_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& panel = static_cast<alpacacore::CoverCalibratorDriver&>(d);
-    call([&] { static_cast<void>(panel.get_cover_state()); });
-    call([&] { static_cast<void>(panel.get_calibrator_state()); });
-    call([&] { static_cast<void>(panel.get_brightness()); });
-    call([&] { static_cast<void>(panel.get_max_brightness()); });
-    call([&] { panel.calibrator_on(100); });
-    call([&] { panel.calibrator_off(); });
-    call([&] { panel.open_cover(); });
-    call([&] { panel.halt_cover(); });
-    call([&] { static_cast<void>(panel.get_device_state()); });
+    guard([&] { static_cast<void>(panel.get_cover_state()); });
+    guard([&] { static_cast<void>(panel.get_calibrator_state()); });
+    guard([&] { static_cast<void>(panel.get_brightness()); });
+    guard([&] { static_cast<void>(panel.get_max_brightness()); });
+    guard([&] { panel.calibrator_on(100); });
+    guard([&] { panel.calibrator_off(); });
+    guard([&] { panel.open_cover(); });
+    guard([&] { panel.halt_cover(); });
+    guard([&] { static_cast<void>(panel.get_device_state()); });
 }
 
-void filterwheel_operate(AlpacaDriver& d) {
+void filterwheel_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
-    call([&] { static_cast<void>(wheel.get_position()); });
-    call([&] { wheel.set_position(1); });
-    call([&] { static_cast<void>(wheel.get_names()); });
-    call([&] { static_cast<void>(wheel.get_focus_offsets()); });
-    call([&] { static_cast<void>(wheel.get_device_state()); });
+    guard([&] { static_cast<void>(wheel.get_position()); });
+    guard([&] { wheel.set_position(1); });
+    guard([&] { static_cast<void>(wheel.get_names()); });
+    guard([&] { static_cast<void>(wheel.get_focus_offsets()); });
+    guard([&] { static_cast<void>(wheel.get_device_state()); });
 }
 
-void box_switch_operate(AlpacaDriver& d) {
+void box_switch_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
-    call([&] { static_cast<void>(sw.get_max_switch()); });
-    call([&] { static_cast<void>(sw.get_switch_value(0)); });
-    call([&] { static_cast<void>(sw.get_switch_name(0)); });
-    call([&] { static_cast<void>(sw.get_can_write(0)); });
+    guard([&] { static_cast<void>(sw.get_max_switch()); });
+    guard([&] { static_cast<void>(sw.get_switch_value(0)); });
+    guard([&] { static_cast<void>(sw.get_switch_name(0)); });
+    guard([&] { static_cast<void>(sw.get_can_write(0)); });
     // Write to id 2 ("DC3-4"), not id 0: ids 0/1 are the always-on
     // read-only rails, so a write there throws NotImplemented before
     // reaching dispatch_write() and the state_mutex_-guarded commanded-value
     // path this storm is supposed to exercise would never run.
-    call([&] { sw.set_switch_value(2, 1.0); });
-    call([&] { static_cast<void>(sw.get_device_state()); });
+    guard([&] { sw.set_switch_value(2, 1.0); });
+    guard([&] { static_cast<void>(sw.get_device_state()); });
 }
 
-void rotator_operate(AlpacaDriver& d) {
+void rotator_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& rotator = static_cast<alpacacore::RotatorDriver&>(d);
-    call([&] { static_cast<void>(rotator.get_position()); });
-    call([&] { static_cast<void>(rotator.get_mechanical_position()); });
-    call([&] { static_cast<void>(rotator.get_is_moving()); });
-    call([&] { static_cast<void>(rotator.get_target_position()); });
-    call([&] { rotator.move(1.0); });
-    call([&] { rotator.move_absolute(10.0); });
-    call([&] { rotator.halt(); });
-    call([&] { static_cast<void>(rotator.get_device_state()); });
+    guard([&] { static_cast<void>(rotator.get_position()); });
+    guard([&] { static_cast<void>(rotator.get_mechanical_position()); });
+    guard([&] { static_cast<void>(rotator.get_is_moving()); });
+    guard([&] { static_cast<void>(rotator.get_target_position()); });
+    guard([&] { rotator.move(1.0); });
+    guard([&] { rotator.move_absolute(10.0); });
+    guard([&] { rotator.halt(); });
+    guard([&] { static_cast<void>(rotator.get_device_state()); });
 }
 
 }  // namespace
@@ -132,10 +132,16 @@ TEST_CASE("WandererAstro cover calibrator - concurrent connect/disconnect/operat
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->set_connected(false);
 
-    alpacacore::test::run_lifecycle_stress(*driver, cover_operate);
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::DriverException};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { cover_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("WandererAstro cover calibrator - destruction races an in-flight connect",
@@ -171,10 +177,16 @@ TEST_CASE("WandererAstro filter wheel - concurrent connect/disconnect/operate st
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     driver->set_connected(false);
 
-    alpacacore::test::run_lifecycle_stress(*driver, filterwheel_operate);
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::DriverException};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { filterwheel_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("WandererAstro filter wheel - destruction races an in-flight connect",
@@ -198,10 +210,16 @@ TEST_CASE("WandererAstro box switch - concurrent connect/disconnect/operate stre
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     driver->set_connected(false);
 
-    alpacacore::test::run_lifecycle_stress(*driver, box_switch_operate);
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::DriverException};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { box_switch_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("WandererAstro box switch - destruction races an in-flight connect", "[wandererastro][switch][stress]") {
@@ -217,12 +235,17 @@ TEST_CASE("WandererAstro box switch - destruction races an in-flight connect", "
 TEST_CASE("WandererAstro rotator - concurrent connect/disconnect/operate stress", "[wandererastro][rotator][stress]") {
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, kAbsentSerialPort);
 
-    alpacacore::test::run_lifecycle_stress(*driver, rotator_operate);
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { rotator_operate(guard, d); });
 
     // The port cannot exist, so no connect in the storm can have succeeded.
     CHECK(driver->get_connected() == false);
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("WandererAstro rotator - destruction races an in-flight connect", "[wandererastro][rotator][stress]") {

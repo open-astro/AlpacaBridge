@@ -2258,7 +2258,20 @@ private:
     mutable bool pulse_guide_active_ = false;
     mutable std::chrono::steady_clock::time_point pulse_guide_end_time_;
     int pulse_guide_axis_ = -1;
-    bool has_autoguider_port_ = false;
+    // open-astro#326: atomic, not a plain bool. set_connected() writes this
+    // during the AUX-bus probe while get_can_pulse_guide(),
+    // get_can_set_guide_rates(), get_guide_rate()/set_guide_rate() and
+    // pulse_guide() all read it WITHOUT taking mutex_ -- a genuine data race
+    // that ThreadSanitizer reports, found when the [stress] migration made the
+    // Celestron operate callback reach pulse_guide() for the first time (until
+    // then the callback aborted at the first throw and never got past
+    // get_tracking()).
+    //
+    // Atomic rather than moving the reads under mutex_ deliberately: these are
+    // capability getters that AGENTS.md requires to be cheap, and mutex_ is
+    // held across the whole blocking connect handshake, so locking them would
+    // park a polling client for the duration -- the issue #130 shape.
+    std::atomic<bool> has_autoguider_port_{false};
 
     mutable double pg_hold_ra_hours_ = 0.0;
     mutable bool pg_hold_ra_valid_ = false;

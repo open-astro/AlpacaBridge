@@ -54,17 +54,27 @@ TEST_CASE("Bisque telescope - concurrent connect/disconnect/operate stress (mute
           "[bisque][telescope][stress]") {
     auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, refused_endpoint());
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call. run_lifecycle_stress wraps the WHOLE
+    // callback in a single try/catch, so before this a storm racing a
+    // disconnect exercised get_tracking() and skipped the other three.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
-        static_cast<void>(scope.get_tracking());
-        static_cast<void>(scope.get_right_ascension());
-        static_cast<void>(scope.get_declination());
-        static_cast<void>(scope.get_at_park());
+        guard([&] { static_cast<void>(scope.get_tracking()); });
+        guard([&] { static_cast<void>(scope.get_right_ascension()); });
+        guard([&] { static_cast<void>(scope.get_declination()); });
+        guard([&] { static_cast<void>(scope.get_at_park()); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected():
+    // right after a storm the last async task may still be in flight, so a
+    // single sync disconnect can legitimately no-op against the pending-
+    // disconnect machinery and the CHECK below would fail on a correct driver.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("Bisque telescope - destruction races an in-flight connect", "[bisque][telescope][stress]") {

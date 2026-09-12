@@ -44,15 +44,15 @@ alpacacore::vendor::onstep::ConnectionInfo onstep_endpoint(int port) {
     return info;
 }
 
-void telescope_operate(AlpacaDriver& d) {
+void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
-    static_cast<void>(scope.get_tracking());
-    static_cast<void>(scope.get_right_ascension());
-    static_cast<void>(scope.get_declination());
-    static_cast<void>(scope.get_slewing());
-    scope.slew_to_coordinates_async(5.0, 20.0);
-    scope.pulse_guide(0, 50);
-    scope.abort_slew();
+    guard([&] { static_cast<void>(scope.get_tracking()); });
+    guard([&] { static_cast<void>(scope.get_right_ascension()); });
+    guard([&] { static_cast<void>(scope.get_declination()); });
+    guard([&] { static_cast<void>(scope.get_slewing()); });
+    guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
+    guard([&] { scope.pulse_guide(0, 50); });
+    guard([&] { scope.abort_slew(); });
 }
 
 }  // namespace
@@ -62,11 +62,41 @@ TEST_CASE("OnStep telescope - concurrent connect/disconnect/slew/pulse stress", 
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, onstep_endpoint(server.port()));
 
-    alpacacore::test::run_lifecycle_stress(*driver, telescope_operate);
+    // open-astro#326: one guard per call, replacing no isolation at all --
+    // run_lifecycle_stress wraps the WHOLE callback in one try/catch, so a
+    // storm racing a disconnect exercised get_tracking() and skipped the six
+    // calls below it, including the async slew and pulse-guide paths this
+    // registration exists to storm.
+    //
+    // The set REPLACES the default {NotConnected}. This registration runs
+    // CONNECTED over FakeMountServer, so a live driver's operate callback
+    // legitimately throws more than that: InvalidValue and InvalidOperation
+    // from a slew or pulse racing a park or another motion, and the shared
+    // NotImplemented code where the canned fake cannot answer.
+    //
+    // DriverException is here for the FAKE, not the driver: FakeMountServer
+    // answers with deliberately dumb canned replies (this file's own
+    // destruction case notes the connect sequence "rides several read
+    // timeouts" because of them), so the driver correctly reports "Invalid
+    // status response from mount" and the like. Those were invisible while the
+    // callback aborted at the first throw; the guard counts them, so they have
+    // to be named. A real driver defect would show up as a code outside this
+    // set, and guard.report() names every distinct one it saw.
+    alpacacore::test::StressCallGuard guard{
+        alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::NotImplemented,
+        alpacacore::AlpacaError::DriverException};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { telescope_operate(guard, d); });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected():
+    // right after a storm the last async task may still be in flight, so a
+    // single sync disconnect can legitimately no-op against the pending-
+    // disconnect machinery and a bare CHECK would fail on a correct driver.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("OnStep telescope - destruction races an in-flight connect", "[onstep][telescope][stress]") {

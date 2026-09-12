@@ -29,6 +29,8 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
+#include <atomic>
+
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_touptek_sdk.h"
@@ -78,14 +80,28 @@ TEST_CASE("ToupTek camera - concurrent connect/disconnect/operate stress", "[tou
     LockedToupTekSDK sdk(fake);
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, sdk);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call. run_lifecycle_stress wraps the WHOLE
+    // callback in a single try/catch, so a storm racing a disconnect used to
+    // exercise get_camera_state() and skip the other five outright. This file
+    // is the one AGENTS.md points new authors at for the overall shape, which
+    // is why it had the most to gain from being fixed.
+    // The set REPLACES the default {NotConnected} rather than extending it.
+    // InvalidOperation belongs here because this callback both starts
+    // exposures and sets gain: once the calls are individually guarded, a
+    // set_gain() landing while a PREVIOUS iteration's exposure is still
+    // running hits the driver's "Cannot change camera settings during an
+    // exposure" guard, which is the ASCOM contract working, not a defect.
+    // Unguarded, that throw was invisible -- it aborted the callback instead.
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& cam = static_cast<alpacacore::CameraDriver&>(d);
-        static_cast<void>(cam.get_camera_state());
-        static_cast<void>(cam.get_gain());
-        cam.set_gain(100);
-        static_cast<void>(cam.get_readout_mode());
-        cam.start_exposure(0.001, true);
-        cam.abort_exposure();
+        guard([&] { static_cast<void>(cam.get_camera_state()); });
+        guard([&] { static_cast<void>(cam.get_gain()); });
+        guard([&] { cam.set_gain(100); });
+        guard([&] { static_cast<void>(cam.get_readout_mode()); });
+        guard([&] { cam.start_exposure(0.001, true); });
+        guard([&] { cam.abort_exposure(); });
     });
 
     // The driver must still be usable after the storm, and the ref-counted
@@ -95,6 +111,10 @@ TEST_CASE("ToupTek camera - concurrent connect/disconnect/operate stress", "[tou
     CHECK(fake.ref_count("fake-cam-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
     CHECK(fake.underflow_closes == 0);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("ToupTek camera - destruction races an in-flight connect", "[touptek][camera][stress]") {
@@ -151,13 +171,14 @@ TEST_CASE("ToupTek AFW - concurrent connect/disconnect/operate stress", "[toupte
     // Give it a longer window so many full home cycles interleave the storm.
     StressOptions opt;
     opt.duration = std::chrono::milliseconds(1500);
+    alpacacore::test::StressCallGuard guard;
     alpacacore::test::run_lifecycle_stress(
         *driver,
-        [](AlpacaDriver& d) {
+        [&guard](AlpacaDriver& d) {
             auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
-            static_cast<void>(wheel.get_position());
-            wheel.set_position(1);
-            static_cast<void>(wheel.get_names());
+            guard([&] { static_cast<void>(wheel.get_position()); });
+            guard([&] { wheel.set_position(1); });
+            guard([&] { static_cast<void>(wheel.get_names()); });
         },
         opt);
 
@@ -166,6 +187,10 @@ TEST_CASE("ToupTek AFW - concurrent connect/disconnect/operate stress", "[toupte
     CHECK(fake.ref_count("fake-afw-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
     CHECK(fake.underflow_closes == 0);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("ToupTek AFW - destruction races an in-flight connect", "[touptek][filterwheel][stress]") {
@@ -193,15 +218,16 @@ TEST_CASE("ToupTek AAF focuser - concurrent connect/disconnect/operate stress", 
     LockedToupTekSDK sdk(fake);
     auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", sdk);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
-        static_cast<void>(focuser.get_is_moving());
-        static_cast<void>(focuser.get_position());
-        static_cast<void>(focuser.get_max_step());
-        static_cast<void>(focuser.get_max_increment());
-        static_cast<void>(focuser.get_temperature());
-        focuser.move(1234);
-        focuser.halt();
+        guard([&] { static_cast<void>(focuser.get_is_moving()); });
+        guard([&] { static_cast<void>(focuser.get_position()); });
+        guard([&] { static_cast<void>(focuser.get_max_step()); });
+        guard([&] { static_cast<void>(focuser.get_max_increment()); });
+        guard([&] { static_cast<void>(focuser.get_temperature()); });
+        guard([&] { focuser.move(1234); });
+        guard([&] { focuser.halt(); });
     });
 
     CHECK(alpacacore::test::settle_connected(*driver, true));
@@ -209,6 +235,10 @@ TEST_CASE("ToupTek AAF focuser - concurrent connect/disconnect/operate stress", 
     CHECK(fake.ref_count("fake-aaf-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
     CHECK(fake.underflow_closes == 0);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("ToupTek AAF focuser - destruction races an in-flight connect", "[touptek][focuser][stress]") {
@@ -233,14 +263,25 @@ TEST_CASE("ToupTek thermal switch - concurrent connect/disconnect/operate stress
     LockedToupTekSDK sdk(fake);
     auto driver = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, sdk);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    alpacacore::test::StressCallGuard guard;
+    // A throw from get_max_switch() leaves max_switch at 0 and skips the
+    // per-switch loop for that iteration; total_calls() still counts the two
+    // calls outside it, so coverage could erode with the case green. The
+    // per-switch tally pins that the loop ran at least once in the storm.
+    std::atomic<int> switch_calls{0};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard, &switch_calls](AlpacaDriver& d) {
         auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
-        const int max_switch = sw.get_max_switch();
+        // get_max_switch() drives the loop bound, so it is guarded with a
+        // local default rather than inline: a throw here must not skip the
+        // loop AND the device-state read below it.
+        int max_switch = 0;
+        guard([&] { max_switch = sw.get_max_switch(); });
         for (int id = 0; id < max_switch; ++id) {
-            static_cast<void>(sw.get_switch_value(id));
-            sw.set_switch_value(id, 1.0);
+            guard([&] { static_cast<void>(sw.get_switch_value(id)); });
+            guard([&] { sw.set_switch_value(id, 1.0); });
+            switch_calls.fetch_add(1, std::memory_order_relaxed);
         }
-        static_cast<void>(sw.get_device_state());
+        guard([&] { static_cast<void>(sw.get_device_state()); });
     });
 
     CHECK(alpacacore::test::settle_connected(*driver, true));
@@ -248,6 +289,11 @@ TEST_CASE("ToupTek thermal switch - concurrent connect/disconnect/operate stress
     CHECK(fake.ref_count("fake-cam-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
     CHECK(fake.underflow_closes == 0);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(switch_calls.load() > 0);
 }
 
 TEST_CASE("ToupTek thermal switch - destruction races an in-flight connect", "[touptek][switch][stress]") {
@@ -268,17 +314,22 @@ TEST_CASE("ToupTek camera + thermal switch - shared open under concurrent lifecy
 
     // Two drivers share one ref-counted physical open; storm both at once so
     // open/close interleavings from different drivers hit the shared ledger.
+    // One guard per driver: StressCallGuard is itself thread-safe, but keeping
+    // them separate means a failure names which of the two drivers sharing the
+    // handle produced it.
+    alpacacore::test::StressCallGuard camera_guard;
+    alpacacore::test::StressCallGuard thermal_guard;
     std::thread camera_storm([&]() {
-        alpacacore::test::run_lifecycle_stress(*camera, [](AlpacaDriver& d) {
+        alpacacore::test::run_lifecycle_stress(*camera, [&camera_guard](AlpacaDriver& d) {
             auto& cam = static_cast<alpacacore::CameraDriver&>(d);
-            static_cast<void>(cam.get_camera_state());
-            static_cast<void>(cam.get_gain());
+            camera_guard([&] { static_cast<void>(cam.get_camera_state()); });
+            camera_guard([&] { static_cast<void>(cam.get_gain()); });
         });
     });
-    alpacacore::test::run_lifecycle_stress(*thermal, [](AlpacaDriver& d) {
+    alpacacore::test::run_lifecycle_stress(*thermal, [&thermal_guard](AlpacaDriver& d) {
         auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
-        static_cast<void>(sw.get_max_switch());
-        static_cast<void>(sw.get_device_state());
+        thermal_guard([&] { static_cast<void>(sw.get_max_switch()); });
+        thermal_guard([&] { static_cast<void>(sw.get_device_state()); });
     });
     camera_storm.join();
 
@@ -287,4 +338,11 @@ TEST_CASE("ToupTek camera + thermal switch - shared open under concurrent lifecy
     CHECK(fake.ref_count("fake-cam-0") == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
     CHECK(fake.underflow_closes == 0);
+
+    INFO(camera_guard.report());
+    CHECK(camera_guard.unexpected_count() == 0);
+    CHECK(camera_guard.total_calls() > 0);
+    INFO(thermal_guard.report());
+    CHECK(thermal_guard.unexpected_count() == 0);
+    CHECK(thermal_guard.total_calls() > 0);
 }

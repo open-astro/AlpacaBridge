@@ -30,18 +30,27 @@ using alpacacore::AlpacaDriver;
 TEST_CASE("SVBONY camera - concurrent connect/disconnect/operate stress", "[svbony][camera][stress]") {
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0);
 
-    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+    // open-astro#326: one guard per call -- before this the callback stopped
+    // at the first throw, so only get_camera_state() was ever storm-tested.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& camera = static_cast<alpacacore::CameraDriver&>(d);
-        static_cast<void>(camera.get_camera_state());
-        static_cast<void>(camera.get_ccd_temperature());
-        camera.set_gain(50);
-        static_cast<void>(camera.get_image_ready());
-        camera.stop_exposure();
+        guard([&] { static_cast<void>(camera.get_camera_state()); });
+        guard([&] { static_cast<void>(camera.get_ccd_temperature()); });
+        guard([&] { camera.set_gain(50); });
+        guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { camera.stop_exposure(); });
     });
 
-    static_cast<void>(driver->get_connected());
-    driver->set_connected(false);
-    CHECK(driver->get_connected() == false);
+    // open-astro#326: settle_connected() rather than a bare set_connected():
+    // right after a storm the last async task may still be in flight, so a
+    // single sync disconnect can legitimately no-op against the pending-
+    // disconnect machinery and the CHECK below would fail on a correct driver.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }
 
 TEST_CASE("SVBONY camera - destruction races an in-flight connect", "[svbony][camera][stress]") {
