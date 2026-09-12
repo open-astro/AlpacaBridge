@@ -7576,14 +7576,15 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // API independent of the web UI, and used to accept a skywatcher
         // config with no coordinates at all. The mount stores no site of its
         // own, so both would then collapse to 0.0 and a southern rig would run
-        // northern pointing math -- silently undoing #250, #253 and #261. The
-        // The check goes inline here, unlike the portPath/host/connectionType
-        // checks below, which since #380 delegate the source decision to
-        // reject_invalid_config(). Those three have a usable fallback -- the
-        // device is registered and the driver's connect reports the real
-        // error -- whereas a missing site has none: there is no safe value to
-        // carry forward, since 0.0 is a real place and reads as northern.
-        // Refusing outright regardless of source is the point of #274.
+        // northern pointing math -- silently undoing #250, #253 and #261.
+        // This check follows the SAME source rule as the
+        // portPath/host/connectionType checks below (reject the API, warn and
+        // register a persisted config), but it is spelled out inline rather
+        // than delegated to reject_invalid_config() because it needs the
+        // which-coordinate-is-missing detail in its WARN, and because
+        // normalize_persisted_connection_type()'s trick of substituting a safe
+        // value has no equivalent here: 0.0 is a real place that reads as
+        // northern, so there is nothing to carry forward.
         if (!site_latitude.has_value() || !site_longitude.has_value()) {
             static constexpr const char* kMissingSite =
                 "Site latitude and longitude are required for the Sky-Watcher direct driver: this mount stores no "
