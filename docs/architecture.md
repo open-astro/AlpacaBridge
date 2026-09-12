@@ -200,7 +200,13 @@ issue #348 the rest:
 collection and a single named file). Note that
 it compares the request's `Origin` against the request's own `Host`, so it
 stops a drive-by from an attacker-controlled origin but not DNS rebinding
-(issue #392). The persisted wifi
+(issue #392). `GET /management/v1/buildinfo` (3.6.0) is a read-only companion
+to `description`, kept separate because the `description` payload is fixed by
+the ASCOM spec: it serves the git branch, short commit, dirty flag,
+release-tag state and normalized `origin` URL captured at CMake configure
+time, which is what lets the web UI badge a build that did not come from a
+release tag. Being part of the same unauthenticated surface, it publishes the
+checkout's branch name and remote URL to anyone on the LAN. The persisted wifi
 country lives in `/var/lib/alpacabridge/config/wifi_country` and is
 re-applied at daemon startup in `main()` before NetworkManager's boot-time
 hotspot autoconnect.

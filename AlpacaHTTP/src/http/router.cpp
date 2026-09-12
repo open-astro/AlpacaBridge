@@ -1453,6 +1453,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "apiversions";
         return match;
     }
+    if (path == "/management/v1/buildinfo" || path == "/management/buildinfo") {
+        match.is_management = true;
+        match.management_endpoint = "buildinfo";
+        return match;
+    }
     if (path == "/management/v1/configureddevices" || path == "/management/configureddevices") {
         match.is_management = true;
         match.management_endpoint = "configureddevices";
@@ -1543,6 +1548,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_description(request, server_tx_id);
     } else if (match.management_endpoint == "apiversions") {
         return handle_api_versions(request, server_tx_id);
+    } else if (match.management_endpoint == "buildinfo") {
+        return handle_build_info(request, server_tx_id);
     } else if (match.management_endpoint == "configureddevices") {
         return handle_configured_devices(request, server_tx_id);
     } else if (match.management_endpoint == "configuredevice") {
@@ -5876,6 +5883,40 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
             util::exception_to_error_code(e),
             util::exception_to_error_message(e)
         );
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
+Response Router::handle_build_info(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    try {
+        // Independent of the ASCOM-spec description payload's ManufacturerVersion
+        // (a static release number from VERSION) -- this reflects the actual git
+        // checkout, so a dev build on a feature branch doesn't read as a release.
+        nlohmann::json info;
+        info["Version"] = alpacahttp::kVersion;
+        info["GitBranch"] = alpacahttp::kGitBranch;
+        info["GitCommit"] = alpacahttp::kGitCommit;
+        info["GitDirty"] = alpacahttp::kGitDirty;
+        info["GitIsRelease"] = alpacahttp::kGitIsRelease;
+        info["GitRemoteUrl"] = alpacahttp::kGitRemoteUrl;
+
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = info;
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        util::log_error("Error getting build info: " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
         response.set_body(alpaca_response);
     }
 
