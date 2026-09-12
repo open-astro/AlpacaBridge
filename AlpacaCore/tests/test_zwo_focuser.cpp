@@ -46,9 +46,12 @@ TEST_CASE("ZWO EAF Focuser Driver - Disconnected Behavior", "[zwo][focuser][unit
 
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_absolute() == true);
-    require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::PropertyNotImplemented);
-    REQUIRE(driver->get_temp_comp_available() == false);
-    REQUIRE(driver->get_temp_comp() == false);
+    require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::NotConnected);
+    // open-astro#309: TempCompAvailable and TempComp are properties, so a
+    // disconnected read refuses rather than answering. These used to assert
+    // the value, which is what let the missing connection check survive.
+    require_alpaca_error([&]() { (void)driver->get_temp_comp_available(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_temp_comp(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_supported_actions().empty());
 
     // Platform 7 DeviceState: while disconnected the operational getters throw
@@ -72,7 +75,9 @@ TEST_CASE("ZWO EAF Focuser Driver - Disconnected Behavior", "[zwo][focuser][unit
     require_alpaca_error([&]() { driver->halt(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->move(0); }, alpacacore::AlpacaError::NotConnected);
 
-    require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotImplemented);
+    // open-astro#309: the connection check precedes the not-implemented
+    // answer, so a disconnected write refuses on connection grounds.
+    require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->action("noop", ""); }, alpacacore::AlpacaError::ActionNotImplemented);
     require_alpaca_error([&]() { driver->command_blind("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->command_bool("noop", false); }, alpacacore::AlpacaError::MethodNotImplemented);

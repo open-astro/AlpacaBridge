@@ -62,8 +62,14 @@ TEST_CASE("Gemini Focuser Driver - Disconnected Behavior", "[gemini][focuser][un
 
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_absolute() == true);
-    REQUIRE(driver->get_temp_comp_available() == true);
-    REQUIRE(driver->get_temp_comp() == false);
+    // open-astro#309: TempCompAvailable and TempComp are properties, so a
+    // disconnected read refuses rather than answering. These used to assert
+    // the value, which is what let the missing connection check survive.
+    // This focuser DOES support temperature compensation, so the connected
+    // answer is true -- all the more reason the disconnected read must refuse
+    // instead of reporting a capability nobody has asked the hardware about.
+    require_alpaca_error([&]() { (void)driver->get_temp_comp_available(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_temp_comp(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_supported_actions().empty());
 
     // Platform 7 DeviceState: while disconnected the operational getters throw

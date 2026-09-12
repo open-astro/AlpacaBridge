@@ -232,13 +232,20 @@ public:
     }
 
     bool get_temp_comp_available() const override {
+        // open-astro#309: the connection check comes first. AGENTS.md's ASCOM
+        // contract precedence rule is that only parameter/range validation
+        // precedes it -- every other property throws NotConnected when
+        // disconnected, with no early return that skips it. ensure_connected()
+        // is a lock-free atomic read, so this costs a getter nothing.
+        ensure_connected();
         return true;
     }
 
     bool get_temp_comp() const override {
-        if (!connected_.load()) {
-            return false;
-        }
+        // Was an early return of false while disconnected, which answered a
+        // property that should have refused. The try/catch below still covers
+        // a transport failure on a CONNECTED focuser.
+        ensure_connected();
         try {
             return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_temp_comp_enabled();
         } catch (const std::exception&) {

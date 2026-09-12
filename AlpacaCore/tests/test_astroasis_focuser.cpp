@@ -56,8 +56,11 @@ TEST_CASE("Astroasis Focuser Driver - Disconnected Behavior", "[astroasis][focus
 
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_absolute() == true);
-    REQUIRE(driver->get_temp_comp_available() == false);
-    REQUIRE(driver->get_temp_comp() == false);
+    // open-astro#309: TempCompAvailable and TempComp are properties, so a
+    // disconnected read refuses rather than answering. These used to assert
+    // the value, which is what let the missing connection check survive.
+    require_alpaca_error([&]() { (void)driver->get_temp_comp_available(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_temp_comp(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_supported_actions().empty());
 
     const auto state = driver->get_device_state();

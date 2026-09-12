@@ -222,19 +222,30 @@ public:
         // The AAF firmware reports a step size in some configurations, but
         // the value is unitless across mechanical setups so the driver does
         // not expose it as microns-per-step.
+        // open-astro#309: connection check before the not-implemented throw,
+        // the same order astroasis's get_step_size() already used.
+        ensure_connected();
         throw AlpacaException("Step size is not available for this focuser",
                               AlpacaError::PropertyNotImplemented);
     }
 
     bool get_temp_comp_available() const override {
+        // open-astro#309: the connection check comes first. AGENTS.md's ASCOM
+        // contract precedence rule is that only parameter/range validation
+        // precedes it -- every other property throws NotConnected when
+        // disconnected, with no early return that skips it. ensure_connected()
+        // is a lock-free atomic read, so this costs a getter nothing.
+        ensure_connected();
         return false;
     }
 
     bool get_temp_comp() const override {
+        ensure_connected();
         return false;
     }
 
     void set_temp_comp(bool) override {
+        ensure_connected();
         throw AlpacaException("Temperature compensation not supported",
                               AlpacaError::NotImplemented);
     }

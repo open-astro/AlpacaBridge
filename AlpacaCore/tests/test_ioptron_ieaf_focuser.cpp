@@ -39,8 +39,11 @@ TEST_CASE("iOptron iEAF Focuser Driver - Defaults", "[ioptron][focuser][unit]") 
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_name() == "iOptron iEAF");
+    // open-astro#309: TempCompAvailable and TempComp are properties, so a
+    // disconnected read refuses rather than answering. These used to assert
+    // the value, which is what let the missing connection check survive.
     CHECK(driver->get_absolute() == true);
-    CHECK(driver->get_temp_comp_available() == false);
+    require_alpaca_error([&]() { (void)driver->get_temp_comp_available(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("iOptron iEAF Focuser Driver - Metadata", "[ioptron][focuser][unit]") {
@@ -87,20 +90,24 @@ TEST_CASE("iOptron iEAF Focuser Driver - Static capabilities", "[ioptron][focuse
     CHECK(driver->get_max_step() == 99999);
     CHECK(driver->get_max_increment() == 99999);
 
-    // Step size in microns is not exposed by the iEAF protocol.
-    require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    // Step size in microns is not exposed by the iEAF protocol -- but
+    // disconnected, the connection check answers first (open-astro#309).
+    require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("iOptron iEAF Focuser Driver - Unsupported methods", "[ioptron][focuser][unit]") {
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
 
-    // No temperature compensation in hardware: available=false, get=false,
-    // and a write must report NotImplemented (not a generic driver error),
-    // regardless of connection state.
-    CHECK(driver->get_temp_comp_available() == false);
-    CHECK(driver->get_temp_comp() == false);
-    require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->set_temp_comp(false); }, alpacacore::AlpacaError::NotImplemented);
+    // No temperature compensation in hardware. Disconnected, all three are
+    // NotConnected: open-astro#309: the connection check precedes the
+    // not-implemented answer, so the driver never reports a capability -- or
+    // refuses a write on capability grounds -- for hardware it has not opened.
+    // The NotImplemented answer on a CONNECTED focuser is unchanged and is
+    // covered by the fake-backed cases.
+    require_alpaca_error([&]() { (void)driver->get_temp_comp_available(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_temp_comp(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_temp_comp(false); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("iOptron iEAF Focuser Driver - State machine", "[ioptron][focuser][unit]") {
