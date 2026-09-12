@@ -7834,8 +7834,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         conn_info.tcp_port = config_get(config, "tcpPort", 3040);
         conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
-        if (conn_info.host.empty()) {
-            error_message = "Host is required for Bisque/TheSkyX connection";
+        if (conn_info.host.empty() && reject_invalid_config(source, "Host is required for Bisque/TheSkyX connection",
+                                                            vendor, device_type_str, device_number, error_message)) {
             return false;
         }
 

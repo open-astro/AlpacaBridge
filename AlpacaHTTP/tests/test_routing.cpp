@@ -2288,6 +2288,13 @@ int main() {
         // a non-web-UI client, since the form always sets the field.
         entries.push_back({{"vendor", "zwo"}, {"deviceType", "telescope"}, {"deviceNumber", 9644}});
 #endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        // Review finding: the bisque branch has no connectionType at all --
+        // it is TCP-only -- and its host check was the one telescope branch
+        // still doing an inline `return false`, so a persisted entry with an
+        // empty host was dropped at startup while the other six were kept.
+        entries.push_back({{"vendor", "bisque"}, {"deviceType", "telescope"}, {"deviceNumber", 9646}, {"host", ""}});
+#endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
         // OnStep is serial-only, so its valid list is shorter: a persisted
         // "network" is unrecognised HERE even though it is valid for the other
@@ -2332,6 +2339,9 @@ int main() {
 #ifdef ALPACACORE_ENABLE_ZWO
         remove_device(startup_router, "zwo", "telescope", 9644);
 #endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        remove_device(startup_router, "bisque", "telescope", 9646);
+#endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
         remove_device(startup_router, "onstep", "telescope", 9645);
 #endif
@@ -2341,6 +2351,9 @@ int main() {
         std::vector<int> expected_listed = {9640, 9641, 9642};
 #ifdef ALPACACORE_ENABLE_ZWO
         expected_listed.push_back(9644);
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        expected_listed.push_back(9646);
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
         expected_listed.push_back(9645);
@@ -2381,6 +2394,9 @@ int main() {
         EXPECT(warned_host);
         EXPECT(warned_conn_type);
 
+#ifdef ALPACACORE_ENABLE_BISQUE
+        bool warned_bisque_host = false;
+#endif
 #ifdef ALPACACORE_ENABLE_ZWO
         bool warned_zwo_empty = false;
 #endif
@@ -2388,6 +2404,12 @@ int main() {
         bool warned_onstep_network = false;
 #endif
         for (const auto& w : warnings) {
+#ifdef ALPACACORE_ENABLE_BISQUE
+            if (w.find("telescope 9646") != std::string::npos &&
+                w.find("Host is required for Bisque/TheSkyX connection") != std::string::npos) {
+                warned_bisque_host = true;
+            }
+#endif
 #ifdef ALPACACORE_ENABLE_ZWO
             if (w.find("telescope 9644") != std::string::npos && w.find("serial") != std::string::npos) {
                 warned_zwo_empty = true;
@@ -2400,6 +2422,9 @@ int main() {
             }
 #endif
         }
+#ifdef ALPACACORE_ENABLE_BISQUE
+        EXPECT(warned_bisque_host);
+#endif
 #ifdef ALPACACORE_ENABLE_ZWO
         EXPECT(warned_zwo_empty);
 #endif
@@ -2439,6 +2464,13 @@ int main() {
         bad_type["connectionType"] = "carrier-pigeon";
         bad_type["portPath"] = "/dev/ttyUSB8";
         reject(bad_type, "Invalid connection type");
+
+#ifdef ALPACACORE_ENABLE_BISQUE
+        // Bisque has no connectionType and no portPath: its host is the whole
+        // config, so it gets its own API case rather than a variant of base.
+        reject({{"vendor", "bisque"}, {"deviceType", "telescope"}, {"deviceNumber", 9647}, {"host", ""}},
+               "Host is required for Bisque/TheSkyX connection");
+#endif
     }
 
 #endif
