@@ -527,100 +527,67 @@ TEST_CASE("iOptron Telescope Driver - Position Tracking", "[ioptron][telescope][
 - **Error conditions**: Test error handling without triggering real errors
 - **CI/CD environments**: Run tests in environments without hardware
 
-### Pattern: Mock SDK Wrapper
+### Pattern: an abstract SDK seam plus a scripted fake
 
-Create a mock wrapper for testing:
+Do not subclass a vendor's `*SDKWrapper` singleton. The ZWO wrapper is a plain class with
+no virtual functions at all, so an `override` on any of its methods is a compile error
+(there is nothing to override), and its constructor and destructor are private, so a
+derived class could not be instantiated even without one; most of the other wrappers are
+the same shape. A mock that "overrides" `open_camera` or
+`start_exposure` on `ZWOSDKWrapper` does not build, and worse, it suggests the seam exists
+when it does not.
 
-```cpp
-// tests/mocks/mock_zwo_sdk_wrapper.h
-#pragma once
+The pattern this repo actually uses is an **abstract interface** that the driver holds by
+reference, with the real wrapper implementing it and a scripted fake standing in for it in
+tests. QHY and ToupTek have it; ZWO, Player One and SVBONY do not yet (their hardware-free
+tests cannot reach any connected path: the unit files such as `tests/test_zwo_camera.cpp`
+never connect, and the `[stress]` registrations reach only the connect-failure path; see
+issue #362).
+Read the shape from the code rather than from a copy here, which is how the ZWO snippet this
+section used to carry went stale:
 
-#include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
-#include <vector>
-#include <memory>
+- Interface: `QHYSDK` in `include/alpacacore/vendor/qhy/qhy_sdk_wrapper.h`, and every
+  `create_qhy_*` factory has an overload taking a `QHYSDK&`.
+- Fake: `tests/fake_qhy_sdk.h` (`FakeQHYSDK`), scripted through public knobs
+  (`throw_from`, canned cameras, a CFW position script) and observable through counters.
+- Decorator: `tests/locked_qhy_sdk.h` (`LockedQHYSDK`) wraps the fake wherever it is injected
+  into a driver, so a `[stress]` storm's ThreadSanitizer reports point at driver code, not at
+  the fake.
+- ToupTek mirrors all three: `ToupTekSDK`, `tests/fake_touptek_sdk.h`,
+  `tests/locked_touptek_sdk.h`.
 
-namespace alpacacore::vendor::zwo::testing {
+### Using the fake in a test
 
-class MockZWOSDKWrapper : public ZWOSDKWrapper {
-public:
-    // Override methods to return test data
-    std::vector<ZWOCameraInfo> enumerate_cameras() override {
-        return mock_cameras_;
-    }
-    
-    bool open_camera(int camera_id) override {
-        if (camera_id < 0 || camera_id >= static_cast<int>(mock_cameras_.size())) {
-            return false;
-        }
-        opened_camera_id_ = camera_id;
-        return true;
-    }
-    
-    void close_camera() override {
-        opened_camera_id_ = -1;
-    }
-    
-    bool start_exposure(int camera_id, double duration, bool light) override {
-        if (opened_camera_id_ != camera_id) {
-            return false;
-        }
-        exposure_duration_ = duration;
-        exposure_light_ = light;
-        exposure_in_progress_ = true;
-        return true;
-    }
-    
-    bool is_exposure_ready(int camera_id) override {
-        if (!exposure_in_progress_) {
-            return false;
-        }
-        // Simulate exposure completion after duration
-        return true;  // Simplified for example
-    }
-    
-    // Test helpers
-    void set_mock_cameras(const std::vector<ZWOCameraInfo>& cameras) {
-        mock_cameras_ = cameras;
-    }
-    
-    void set_exposure_ready(bool ready) {
-        exposure_in_progress_ = !ready;
-    }
-    
-private:
-    std::vector<ZWOCameraInfo> mock_cameras_;
-    int opened_camera_id_ = -1;
-    double exposure_duration_ = 0.0;
-    bool exposure_light_ = false;
-    bool exposure_in_progress_ = false;
-};
-
-} // namespace alpacacore::vendor::zwo::testing
-```
-
-### Using Mocks in Tests
+This is abridged from the real connect-path test in `tests/test_qhy_camera.cpp` (the fake
+helper is inlined and the sequencing checks and disconnect half are dropped); everything
+shown is what the real case does, not a sketch:
 
 ```cpp
-TEST_CASE("ZWO Camera Driver - Mocked SDK", "[zwo][camera][unit][mock]") {
-    // Setup mock cameras
-    std::vector<ZWOCameraInfo> mock_cameras = {
-        {0, "ZWO ASI294MC Pro", 4144, 2816, true},
-        {1, "ZWO ASI1600MM Pro", 4656, 3520, false}
-    };
-    
-    // Inject mock (implementation depends on your design)
-    // This is a conceptual example - actual implementation may vary
-    
-    auto driver = create_zwo_camera(0, 0);
-    
-    SECTION("Enumerate cameras via mock") {
-        // Test with mocked SDK
-        REQUIRE(driver->get_name().find("ZWO") != std::string::npos);
-    }
+#include "fake_qhy_sdk.h"
+#include "locked_qhy_sdk.h"
+
+using alpacacore::test::FakeQHYSDK;
+using alpacacore::test::LockedQHYSDK;
+
+TEST_CASE("QHY Camera Driver - Connects over the SDK seam", "[qhy][camera][unit]") {
+    auto fake = FakeQHYSDK::with_one_camera("fake-qhy-0");
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
 }
 ```
 
-**Note**: The actual mocking strategy depends on your wrapper design. Consider using dependency injection or a factory pattern to enable mocking.
+Steer a failure by naming the call in `fake.throw_from` before connecting; assert the
+driver's sequencing through the fake's call counters. `tests/test_qhy_fake_sdk.cpp` pins the
+fake's own contract, so a test that fails against it is a driver finding, not a fake finding.
+
+**Adding a seam to a vendor that has none**: extract the wrapper's public surface into an
+abstract interface, make the real wrapper implement it, add the `&`-taking factory overload
+beside the existing one, and write the fake against the interface. `/driver-build` does not
+ask for this yet; issue #369 proposes that it should, so that no new driver lands without a
+seam. The same steps apply retroactively.
 
 ---
 

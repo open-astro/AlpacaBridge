@@ -339,11 +339,21 @@ searched for. The ZWO block below is the shape to copy: set the root, then hard-
 with that same path in the message so a missing SDK says where it was expected.
 
 ```cmake
-set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ZWO/ASI_Camera_SDK")
-if(NOT EXISTS "${ZWO_SDK_DIR}/include/ASICamera2.h")
-    message(FATAL_ERROR "ZWO SDK not found at ${ZWO_SDK_DIR}")
+# The vendor CMakeLists lives three levels below the AlpacaCore root, so it
+# derives the root from its own location rather than from CMAKE_SOURCE_DIR
+# (which is a different directory when AlpacaCore is built as a subproject).
+get_filename_component(ALPACACORE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+set(ZWO_SDK_ROOT "${ALPACACORE_ROOT}/external/ZWO/ASI_Camera_SDK")
+set(ZWO_SDK_INCLUDE "${ZWO_SDK_ROOT}/include")
+if(NOT EXISTS "${ZWO_SDK_INCLUDE}/ASICamera2.h")
+    message(FATAL_ERROR "ZWO SDK header not found at ${ZWO_SDK_INCLUDE}/ASICamera2.h")
 endif()
 ```
+
+That is the real `src/vendors/zwo/CMakeLists.txt` shape, message included: the
+"SDK Not Found" troubleshooting entry below quotes this exact string, so a template
+that emitted a different one would send the reader looking for an error that never
+appears.
 
 ### Vendor CMakeLists.txt Template
 
@@ -351,9 +361,11 @@ endif()
 # src/vendors/zwo/CMakeLists.txt
 
 if(ALPACACORE_ENABLE_ZWO)
-    set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ZWO/ASI_Camera_SDK")
-    if(NOT EXISTS "${ZWO_SDK_DIR}/include/ASICamera2.h")
-        message(FATAL_ERROR "ZWO SDK not found at ${ZWO_SDK_DIR}")
+    get_filename_component(ALPACACORE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+    set(ZWO_SDK_DIR "${ALPACACORE_ROOT}/external/ZWO/ASI_Camera_SDK")
+    set(ZWO_SDK_INCLUDE "${ZWO_SDK_DIR}/include")
+    if(NOT EXISTS "${ZWO_SDK_INCLUDE}/ASICamera2.h")
+        message(FATAL_ERROR "ZWO SDK header not found at ${ZWO_SDK_INCLUDE}/ASICamera2.h")
     endif()
 
     message(STATUS "Found ZWO SDK at: ${ZWO_SDK_DIR}")
@@ -381,8 +393,8 @@ if(ALPACACORE_ENABLE_ZWO)
     
     # Include directories
     target_include_directories(alpacacore_zwo PRIVATE
-        ${ZWO_SDK_DIR}/include
-        ${CMAKE_SOURCE_DIR}/include
+        ${ZWO_SDK_INCLUDE}
+        ${ALPACACORE_ROOT}/include
     )
     
     # Link SDK library
@@ -603,10 +615,15 @@ The testing guide covers:
 - `include/ASICamera2.h`
 - `lib/<platform>/<arch>/libASICamera2.*` (or `ASICamera2.lib` on Windows)
 
-**Wrapper API**:
-- `ZWOSDKWrapper::enumerate_cameras()`
-- `ZWOSDKWrapper::open_camera(int id)`
-- `ZWOSDKWrapper::start_exposure(...)`
+**Wrapper API**: read it from `include/alpacacore/vendor/zwo/zwo_sdk_wrapper.h`, which is the
+only copy. Two facts worth knowing before assuming the QHY shape below: `ZWOSDKWrapper` is a
+plain singleton (`ZWOSDKWrapper::instance()`) with **no virtual functions and no injectable
+seam**, so it cannot be subclassed or faked, and a camera is addressed by the integer id the
+SDK enumerates. Hardware-free tests cannot reach any connected path: `tests/test_zwo_camera.cpp`
+covers defaults, metadata, `DeviceState`, `NotConnected` codes and the state-machine contracts
+without ever connecting, and the `[stress]` registration reaches only the connect-failure path.
+The abstract-interface seam QHY and ToupTek use is the pattern to follow if that gap is ever
+closed.
 
 ### QHY Camera Driver
 
@@ -668,7 +685,7 @@ tells you exactly where it looked.
    `src/vendors/<vendor>/CMakeLists.txt` — nothing globs for it, so a new folder name is invisible
    until that path is edited
 3. Check the architecture if the failure is not about a header at all: the build is arm64-only and
-   every SDK vendor's CMake hard-fails on anything else -- zwo, qhy, playerone, svbony and touptek
+   every vendor that vendors an SDK hard-fails on anything else -- zwo, qhy, playerone, svbony and touptek
    check `CMAKE_SYSTEM_PROCESSOR`; the ten protocol-only vendors ship no SDK and check nothing.
    QHY checks the architecture before its
    headers, ZWO after, so which failure you see first depends on the vendor
@@ -736,7 +753,7 @@ tells you exactly where it looked.
 
 | Component | Location |
 |-----------|----------|
-| SDK Files | `external/<vendor_sdk_folder>/` (folder name varies by vendor) |
+| SDK Files | the literal root in that vendor's `CMakeLists.txt`: `external/<Vendor>/<sdk folder>/` for ZWO, QHY, ToupTek and Player One, but `external/SVBONY/` itself (with `include/` and `lib/` directly under it) for SVBONY |
 | Wrapper Header | `include/alpacacore/vendor/<vendor>/<vendor>_sdk_wrapper.h` |
 | Wrapper Implementation | `src/vendors/<vendor>/<vendor>_sdk_wrapper.cpp` |
 | Driver Implementation | `src/vendors/<vendor>/<vendor>_<device>_driver.cpp` |

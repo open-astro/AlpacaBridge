@@ -5,10 +5,11 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
 ## Quick Start
 
 1. **Download the vendor SDK** from the vendor's official website
-2. **Extract the SDK archive** - the vendor's SDK will typically extract into a folder (e.g., `ASI_Camera_SDK/`, `qhy_sdk/`, etc.)
-3. **Place the extracted SDK folder** directly into this `external/` directory
-   - No need to create subdirectories or reorganize files
-   - Use the SDK structure exactly as provided by the vendor
+2. **Read the SDK root** that vendor's `src/vendors/<vendor>/CMakeLists.txt` sets and hard-fails on. Nothing searches for the SDK: the path is literal and its shape differs per vendor. Most vendors keep the extracted folder as a level of its own (`external/ZWO/ASI_Camera_SDK/`, `external/QHY/sdk_linux_arm64_26.06.04/`, `external/ToupTek/toupcamsdk.20260128/`, `external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/`); SVBONY does not: `SVB_SDK_ROOT` is `external/SVBONY/` itself, and CMake looks for `include/SVBCameraSDK.h` and `lib/` directly under it
+3. **Extract the SDK archive** so that its contents land at exactly that root
+   - Two-level vendors: place the vendor-named folder under `external/<Vendor>/`
+   - SVBONY: place the archive's `include/`, `lib/` and the rest directly in `external/SVBONY/`, with no extra folder level
+   - Use the SDK structure exactly as provided by the vendor below that root
 4. **Build with vendor support**:
    ```bash
    mkdir build && cd build
