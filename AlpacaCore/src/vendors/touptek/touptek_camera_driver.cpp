@@ -66,6 +66,9 @@ std::pair<int, int> bayer_offsets(ToupBayerPattern pattern) {
 
 class ToupTekCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     ToupTekCameraDriver(int device_number, int camera_index, ToupTekSDK& sdk)
         : AsyncConnectable("ToupTek"),
           sdk_(sdk),

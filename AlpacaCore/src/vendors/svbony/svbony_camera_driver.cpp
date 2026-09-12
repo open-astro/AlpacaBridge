@@ -58,6 +58,9 @@ bool supports_bin(const std::vector<int>& bins, int bin) {
 
 class SVBONYCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     SVBONYCameraDriver(int device_number, int camera_index)
         : AsyncConnectable("SVBONY"),
           device_number_(device_number),

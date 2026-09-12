@@ -94,6 +94,9 @@ double shortest_ra_delta_hours(double a, double b) {
 
 class BisqueTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     BisqueTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                           std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                           std::optional<double> site_elevation_m)

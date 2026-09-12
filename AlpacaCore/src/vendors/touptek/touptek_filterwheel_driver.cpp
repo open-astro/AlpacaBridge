@@ -38,6 +38,9 @@ constexpr const char* kLogTag = "ToupTek";
 
 class ToupTekFilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     ToupTekFilterWheelDriver(int device_number, std::optional<int> wheel_index, std::optional<std::string> wheel_id,
                              ToupTekSDK& sdk)
         : AsyncConnectable(kLogTag),

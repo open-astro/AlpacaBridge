@@ -48,6 +48,9 @@ TouptekSwitchConfig default_stellavita_config() {
 
 class TouptekSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     TouptekSwitchDriver(int device_number, TouptekSwitchConfig config)
         : AsyncConnectable(kLogCategory),
           device_number_(device_number),

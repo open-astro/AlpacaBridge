@@ -210,9 +210,21 @@ vendor-agnostic; do them in the driver from the start.
 > the client instead of a bare "Connection failed", so the message is read by
 > an operator in NINA, not only in the log. Write it for someone standing at
 > the mount — name the setting to change, not the internal state that was
-> wrong. It also reaches the web UI as `LastConnectError` on
+> wrong — and **never interpolate a credential or token into it**, because it
+> is now a client-facing string on an unauthenticated LAN surface, not a log
+> line. It also reaches the web UI as `LastConnectError` on
 > `/management/v1/configureddevices`, which is the only place the Platform 7
 > `PUT /connect` path can surface a reason at all.
+>
+> Every driver that mixes in `AsyncConnectable` must carry
+> `ALPACA_EXPOSE_CONNECT_ERROR()` in a public section: it forwards the new
+> `AlpacaDriver::get_last_connect_error()` virtual to the mixin's stored
+> string. The router cannot reach the mixin by `dynamic_cast`, because the
+> base is inherited `protected` everywhere and a cross-cast only traverses
+> **public** base paths — such a cast compiles, always returns `nullptr`, and
+> silently drops every reason. A driver that omits the macro compiles and
+> tests green while reporting nothing, so `scripts/check_connect_error_hook.py`
+> gates it in CI and in `ci_preflight.sh`.
 
 Two of our worst deadlocks are documented later, not in the checklist above — read
 [`disconnect_locked()`](#reconnect-must-not-self-deadlock-disconnect_locked) and the

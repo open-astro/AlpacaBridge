@@ -11,7 +11,6 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/alpaca_defs.h>
-#include <alpacacore/async_connectable.h>
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/device_registry.h>
 #include <alpacacore/filterwheel_driver.h>
@@ -1326,13 +1325,8 @@ namespace {
 // operator needs to act on and is no more than the same message already
 // visible in the log file the web UI serves.
 std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
-    if (const auto* async = dynamic_cast<const alpacacore::AsyncConnectable*>(&device)) {
-        std::string reason = async->get_last_connect_error();
-        if (!reason.empty()) {
-            return reason;
-        }
-    }
-    return "Connection failed";
+    std::string reason = device.get_last_connect_error();
+    return reason.empty() ? std::string("Connection failed") : reason;
 }
 }  // namespace
 
@@ -1923,10 +1917,8 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 // Present only while a failure stands; the next attempt clears
                 // it. Like Firmware and SdkVersion, deliberately not part of
                 // any ASCOM response.
-                if (const auto* async = dynamic_cast<const alpacacore::AsyncConnectable*>(driver.get())) {
-                    if (std::string reason = async->get_last_connect_error(); !reason.empty()) {
-                        device["LastConnectError"] = reason;
-                    }
+                if (std::string reason = driver->get_last_connect_error(); !reason.empty()) {
+                    device["LastConnectError"] = reason;
                 }
             }
             devices.push_back(device);

@@ -59,6 +59,9 @@ bool supports_bin(const std::vector<int>& bins, int bin) {
 
 class ZWOCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     ZWOCameraDriver(int device_number, std::optional<int> camera_id, std::optional<int> camera_index)
         : AsyncConnectable("ZWO"),
           device_number_(device_number),

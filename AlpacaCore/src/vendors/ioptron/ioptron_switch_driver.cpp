@@ -45,6 +45,9 @@ IoptronSwitchConfig default_imate_powerbox_config() {
 
 class IoptronSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     IoptronSwitchDriver(int device_number, IoptronSwitchConfig config)
         : AsyncConnectable(kLogCategory),
           device_number_(device_number),

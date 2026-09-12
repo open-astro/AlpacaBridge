@@ -32,6 +32,9 @@ namespace alpacacore::vendor::ioptron {
 // learned at connect, and single-token shorthand ("LRGB") expands per slot.
 class IefwFilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     IefwFilterWheelDriver(int device_number, std::optional<std::string> serial_port, std::optional<int> wheel_index,
                           const std::string& model)
         : AsyncConnectable("iOptron"),

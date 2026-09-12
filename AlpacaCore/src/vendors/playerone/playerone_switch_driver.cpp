@@ -48,6 +48,9 @@ struct ThermalElement {
 
 class PlayerOneSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     PlayerOneSwitchDriver(int device_number, int camera_index)
         : AsyncConnectable("PlayerOne"),
           device_number_(device_number),

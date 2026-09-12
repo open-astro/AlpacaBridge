@@ -97,10 +97,10 @@ public:
     /// True while a connect or disconnect task is in flight (get_connecting()).
     bool connection_task_active() const { return conn_task_.load() != kConnIdle; }
 
-public:
+protected:
     /// The reason the most recent connect attempt failed, or "" when the last
-    /// attempt succeeded, none has been made, or the failure has since been
-    /// cleared by a new attempt (issue #358).
+    /// attempt succeeded, none has been made, or a new attempt has cleared it
+    /// (issue #358).
     ///
     /// run_connection_task() runs as a std::thread entry point, where an
     /// escaping exception calls std::terminate, so the catch blocks there are
@@ -114,12 +114,17 @@ public:
     /// Published under its own leaf mutex rather than connection_mutex_: the
     /// task tail holds that one across deferred set_connected() calls, and a
     /// client polling for the reason must not be parked behind a handshake.
-    std::string get_last_connect_error() const {
+    ///
+    /// PROTECTED on purpose. The router reads this through the
+    /// AlpacaDriver::get_last_connect_error() virtual, which a driver supplies
+    /// with ALPACA_EXPOSE_CONNECT_ERROR() below -- never by dynamic_cast to
+    /// this base, which every driver mixes in as `protected` and a cross-cast
+    /// only traverses PUBLIC base paths.
+    std::string last_connect_error() const {
         std::lock_guard<std::mutex> lock(connect_error_mutex_);
         return last_connect_error_;
     }
 
-protected:
     explicit AsyncConnectable(std::string log_tag) : log_tag_(std::move(log_tag)) {}
 
     // Destructor intentionally does NOT stop the thread: by the time this
@@ -442,3 +447,11 @@ private:
 };
 
 }  // namespace alpacacore
+
+/// Forward AlpacaDriver::get_last_connect_error() to the AsyncConnectable
+/// mixin. Every driver that inherits AsyncConnectable must use this once, in a
+/// public section; a driver that omits it silently reports no reason and the
+/// client is back to the bare "Connection failed" (issue #358). Enforced by
+/// scripts/check_connect_error_hook.py.
+#define ALPACA_EXPOSE_CONNECT_ERROR() \
+    std::string get_last_connect_error() const override { return AsyncConnectable::last_connect_error(); }

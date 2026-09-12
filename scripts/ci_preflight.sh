@@ -233,6 +233,15 @@ else
   record FAIL "docs drift check"
 fi
 
+# --- gate 2e: connect-error hook -------------------------------------------
+
+section "Connect-error hook"
+if python3 scripts/check_connect_error_hook.py; then
+  record PASS "connect-error hook"
+else
+  record FAIL "connect-error hook"
+fi
+
 # --- gate 3: build + unit tests, vendor-neutral ----------------------------
 
 section "Build + tests (vendors OFF)"

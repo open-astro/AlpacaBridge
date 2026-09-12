@@ -28,6 +28,9 @@ namespace alpacacore::vendor::zwo {
 
 class ZWOEFWFilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     ZWOEFWFilterWheelDriver(int device_number, std::optional<int> wheel_id, std::optional<int> wheel_index)
         : AsyncConnectable("ZWO"),
           device_number_(device_number),

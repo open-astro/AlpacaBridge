@@ -28,6 +28,9 @@ namespace alpacacore::vendor::zwo {
 
 class ZWOCAARotatorDriver : public RotatorDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     ZWOCAARotatorDriver(int device_number, std::optional<int> rotator_id, std::optional<int> rotator_index)
         : AsyncConnectable("ZWO"),
           device_number_(device_number),

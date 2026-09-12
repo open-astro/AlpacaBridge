@@ -282,6 +282,9 @@ std::string http_get(const std::string& url, std::chrono::milliseconds timeout) 
 
 class WeeWxObservingConditionsDriver final : public ObservingConditionsDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     WeeWxObservingConditionsDriver(int device_number, WeeWxHttpConfig config)
         : AsyncConnectable(kDriverComponent),
           device_number_(device_number),

@@ -28,6 +28,9 @@ namespace alpacacore::vendor::wandererastro {
 
 class WandererRotatorDriver : public RotatorDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     WandererRotatorDriver(int device_number, RotatorConnectionConfig config)
         : AsyncConnectable("WandererAstro"),
           device_number_(device_number),

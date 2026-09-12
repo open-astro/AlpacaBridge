@@ -523,6 +523,23 @@ jobs:
         # paths in AGENTS.md) that nothing previously caught automatically.
         run: python3 scripts/check_docs_drift.py
 
+  connect-error-hook:
+    name: Connect-error hook
+    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Every AsyncConnectable driver exposes its connect-failure reason
+        # A driver that inherits AsyncConnectable but omits
+        # ALPACA_EXPOSE_CONNECT_ERROR() compiles and tests green while its
+        # operators are told nothing but "Connection failed" (issue #358).
+        # Nothing but this scan catches it.
+        run: python3 scripts/check_connect_error_hook.py
+
   stress-registration:
     name: Stress-test registration
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent

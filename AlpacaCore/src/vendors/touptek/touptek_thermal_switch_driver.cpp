@@ -50,6 +50,9 @@ struct ThermalElement {
 
 class ToupTekThermalSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     ToupTekThermalSwitchDriver(int device_number, int camera_index, ToupTekSDK& sdk)
         : AsyncConnectable(kLogTag),
           sdk_(sdk),

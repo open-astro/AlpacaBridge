@@ -153,7 +153,7 @@ private:
 // disconnect() or get_connecting() would imply coverage of the async
 // initiator that this block does not have. LockedSlowConnectStubDriver
 // below is the stub that does exercise it.
-class TelescopeClockStubDriver : public alpacacore::TelescopeDriver {
+class TelescopeClockStubDriver final : public alpacacore::TelescopeDriver {
 public:
     explicit TelescopeClockStubDriver(int number) : number_(number) {}
 
@@ -328,7 +328,7 @@ private:
 // handshake (issue #130). SynScan is deliberately absent: it was the driver
 // that produced #130, and its fix made its getter a bare atomic load, so it
 // no longer has this shape -- see async_connectable.h for the full list.
-class LockedSlowConnectStubDriver final : public alpacacore::AlpacaDriver, public alpacacore::AsyncConnectable {
+class LockedSlowConnectStubDriver final : public alpacacore::AlpacaDriver, protected alpacacore::AsyncConnectable {
 public:
     LockedSlowConnectStubDriver(int number, std::chrono::milliseconds connect_delay)
         : AsyncConnectable("LockedSlowStub"), number_(number), connect_delay_(connect_delay) {}
@@ -384,8 +384,17 @@ private:
 // Issue #358: a driver that refuses a connect and explains why, wired through
 // AsyncConnectable the way all 38 real drivers are, so the router path under
 // test is the real one.
-class RefusingConnectStubDriver final : public alpacacore::AlpacaDriver, public alpacacore::AsyncConnectable {
+class RefusingConnectStubDriver final : public alpacacore::AlpacaDriver, protected alpacacore::AsyncConnectable {
 public:
+    // `protected`, exactly as all 38 shipped drivers mix this base in, and the
+    // reason reaches the router through the AlpacaDriver virtual rather than a
+    // cross-cast. An earlier version of this stub inherited publicly, which is
+    // the ONE shape in the tree that makes a dynamic_cast to AsyncConnectable
+    // succeed -- so the test passed while every real driver fell back to the
+    // bare constant. Keep it protected: that is what makes this case able to
+    // fail.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     // Deliberately the multi-clause shape a real driver's guard produces: the
     // sentence that tells the operator what to fix is the whole point, so a
     // test that pinned a one-word message would not show it survives.

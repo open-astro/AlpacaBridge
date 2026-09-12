@@ -90,6 +90,11 @@ public:
         ++connect_completions_;
     }
 
+    // This double is not an AlpacaDriver, so there is no virtual to forward
+    // to -- it reads the protected accessor directly. A real driver uses
+    // ALPACA_EXPOSE_CONNECT_ERROR().
+    using alpacacore::AsyncConnectable::last_connect_error;
+
     void connect() { start_connection_task(true); }
     void disconnect() { start_connection_task(false); }
 
@@ -287,7 +292,7 @@ TEST_CASE("AsyncConnectable - a failed connect keeps the driver's reason", "[asy
     // Nothing has happened yet, so there is no reason to report. The router
     // falls back to its old constant on an empty string, so "" has to mean
     // "no failure stands" and never "failed for reasons unknown".
-    CHECK(d.get_last_connect_error().empty());
+    CHECK(d.last_connect_error().empty());
 
     d.fail_connect_.store(true);
     d.connect();
@@ -295,7 +300,7 @@ TEST_CASE("AsyncConnectable - a failed connect keeps the driver's reason", "[asy
     CHECK(!d.get_connected());
     // Verbatim, not a category: the whole point is that the sentence telling
     // the operator what to fix reaches them instead of stopping at the log.
-    CHECK(d.get_last_connect_error() == "site latitude and longitude must be set before connecting");
+    CHECK(d.last_connect_error() == "site latitude and longitude must be set before connecting");
 
     // A later successful connect clears it. Cleared at the START of the
     // attempt, so a client polling during a retry cannot read the previous
@@ -304,7 +309,7 @@ TEST_CASE("AsyncConnectable - a failed connect keeps the driver's reason", "[asy
     d.connect();
     wait_until_idle(d);
     CHECK(d.get_connected());
-    CHECK(d.get_last_connect_error().empty());
+    CHECK(d.last_connect_error().empty());
 }
 
 TEST_CASE("AsyncConnectable - a failed disconnect does not write the connect reason", "[async_connectable][unit]") {
@@ -313,7 +318,7 @@ TEST_CASE("AsyncConnectable - a failed disconnect does not write the connect rea
     d.connect();
     wait_until_idle(d);
     REQUIRE(d.get_connected());
-    REQUIRE(d.get_last_connect_error().empty());
+    REQUIRE(d.last_connect_error().empty());
 
     // A teardown failure is reported on its own path and has no client waiting
     // on a reason here. Were it allowed to write this string, the next thing a
@@ -323,5 +328,5 @@ TEST_CASE("AsyncConnectable - a failed disconnect does not write the connect rea
     d.disconnect();
     wait_until_idle(d);
     CHECK(!d.get_connected());
-    CHECK(d.get_last_connect_error().empty());
+    CHECK(d.last_connect_error().empty());
 }

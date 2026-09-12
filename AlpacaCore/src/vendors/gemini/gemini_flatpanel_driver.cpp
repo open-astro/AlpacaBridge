@@ -37,6 +37,9 @@ constexpr int kMaxBrightness = 255;
 
 class GeminiFlatPanelDriver : public CoverCalibratorDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     GeminiFlatPanelDriver(int device_number, FlatPanelConnectionConfig config)
         : AsyncConnectable("Gemini"),
           device_number_(device_number),
@@ -357,6 +360,9 @@ std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_by_index(int devi
 
 class GeminiFlatPanelV2Driver : public CoverCalibratorDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     GeminiFlatPanelV2Driver(int device_number, FlatPanelConnectionConfig config)
         : AsyncConnectable("Gemini"),
           device_number_(device_number),
