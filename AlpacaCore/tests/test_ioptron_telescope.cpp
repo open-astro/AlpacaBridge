@@ -251,4 +251,52 @@ TEST_CASE("iOptron Telescope Driver - HEM27 (0025) GOTO settle is left to the fi
 
     driver->set_connected(false);
 }
+// open-astro#346, the shape #304 fixed on the Sky-Watcher driver: ASCOM treats
+// TargetRightAscension and TargetDeclination as independent properties, each
+// throwing ValueNotSet until that property itself has been written. One shared
+// flag let a write to either unlock both, so a client reading the target it
+// did not set got a default 0 rather than an error -- which ConformU reports as
+// "Read before write should generate an error and didn't".
+TEST_CASE("iOptron Telescope Driver - the two target properties are independent", "[ioptron][telescope][unit][fake]") {
+    // Over the fake mount rather than disconnected: this driver's target
+    // setters write the value to the mount (:SRA / :Sd), so they need a live
+    // connection -- the four sibling drivers only store it.
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Neither written yet: both refuse.
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // RA alone unlocks RA alone. This is the assertion that fails on one
+    // shared flag: Dec used to read back 0.0 here.
+    driver->set_target_right_ascension(7.25);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // SlewToTarget, SlewToTargetAsync and SyncToTarget still need BOTH halves:
+    // a half-set pair must refuse rather than slew to a default Dec.
+    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // Once Dec is written too, both read back.
+    driver->set_target_declination(-30.25);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    CHECK(driver->get_target_declination() == -30.25);
+
+    // A reconnect clears both, so the next session starts from "unset" the
+    // same way -- the connect/disconnect resets write the pair, not one half.
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    driver->set_connected(false);
+}
+
 #endif  // !_WIN32

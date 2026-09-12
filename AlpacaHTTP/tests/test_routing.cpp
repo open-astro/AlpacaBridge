@@ -3478,19 +3478,24 @@ int main() {
             const char* method;
             const char* path;
             const char* body;
+            // The endpoint's own `what` label. docs/wifi-api.md and the
+            // CHANGELOG both claim "the rejection message names the
+            // endpoint"; asserting only "Cross-origin" left all eight free to
+            // pass the same string with the loop still green.
+            const char* what;
         };
         const Endpoint endpoints[] = {
-            {"PUT", "/management/v1/description", R"({"Location":"moved"})"},
-            {"POST", "/management/v1/configuredevice", R"({"DeviceType":"telescope"})"},
-            {"POST", "/management/v1/removedevice", R"({"DeviceType":"telescope","DeviceNumber":0})"},
-            {"PUT", "/management/v1/loglevel", R"({"Level":"TRACE"})"},
-            {"POST", "/management/v1/shutdown", "{}"},
-            {"POST", "/management/v1/restart", "{}"},
-            {"DELETE", "/management/v1/logfiles/alpaca.log", ""},
+            {"PUT", "/management/v1/description", R"({"Location":"moved"})", "server description"},
+            {"POST", "/management/v1/configuredevice", R"({"DeviceType":"telescope"})", "device configuration"},
+            {"POST", "/management/v1/removedevice", R"({"DeviceType":"telescope","DeviceNumber":0})", "device removal"},
+            {"PUT", "/management/v1/loglevel", R"({"Level":"TRACE"})", "log level"},
+            {"POST", "/management/v1/shutdown", "{}", "shutdown"},
+            {"POST", "/management/v1/restart", "{}", "restart"},
+            {"DELETE", "/management/v1/logfiles/alpaca.log", "", "log file"},
             // The collection form deletes EVERY log file. Guarding the
             // per-file DELETE and not this one would have been exactly the
             // accidental difference the audit exists to remove.
-            {"DELETE", "/management/v1/logfiles", ""},
+            {"DELETE", "/management/v1/logfiles", "", "log files"},
         };
 
         for (const auto& ep : endpoints) {
@@ -3499,7 +3504,8 @@ int main() {
             EXPECT(blocked.status_code() == 403);
             const auto blocked_json = nlohmann::json::parse(blocked.body(), nullptr, false);
             EXPECT(!blocked_json.is_discarded());
-            EXPECT(blocked_json.value("ErrorMessage", "").find("Cross-origin") != std::string::npos);
+            EXPECT(blocked_json.value("ErrorMessage", "") ==
+                   std::string("Cross-origin ") + ep.what + " requests are not allowed");
             EXPECT(blocked_json.value("ClientTransactionID", 0U) == 77U);
             // The echo IS asserted: #384 landed on main before this branch
             // merged, so the shared helper now carries the client's id into
