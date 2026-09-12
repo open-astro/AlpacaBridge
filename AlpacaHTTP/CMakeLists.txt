@@ -6,6 +6,89 @@ string(STRIP "${PROJECT_VERSION}" PROJECT_VERSION)
 
 project(AlpacaHTTP VERSION ${PROJECT_VERSION} LANGUAGES CXX)
 
+# Git branch/commit for the running build, shown in the web UI so a dev build
+# checked out on a feature branch doesn't read as an official release
+# (VERSION stays a static release number regardless of what's checked out).
+find_package(Git QUIET)
+set(ALPACAHTTP_GIT_BRANCH "unknown")
+set(ALPACAHTTP_GIT_COMMIT "unknown")
+set(ALPACAHTTP_GIT_DIRTY "0")
+if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../.git")
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --abbrev-ref HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE ALPACAHTTP_GIT_BRANCH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE ALPACAHTTP_GIT_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} diff --quiet HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        RESULT_VARIABLE ALPACAHTTP_GIT_DIRTY_RESULT
+        ERROR_QUIET
+    )
+    if(NOT ALPACAHTTP_GIT_DIRTY_RESULT EQUAL 0)
+        set(ALPACAHTTP_GIT_DIRTY "1")
+    endif()
+    if(ALPACAHTTP_GIT_BRANCH STREQUAL "")
+        set(ALPACAHTTP_GIT_BRANCH "unknown")
+    endif()
+    if(ALPACAHTTP_GIT_COMMIT STREQUAL "")
+        set(ALPACAHTTP_GIT_COMMIT "unknown")
+    endif()
+    # A release build is identified by sitting exactly on a vX.Y.Z tag, not by
+    # branch name -- packaging checks out the tag, which is detached HEAD
+    # (rev-parse --abbrev-ref HEAD returns literal "HEAD", not "main").
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --exact-match --match "v[0-9]*.[0-9]*.[0-9]*" HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        RESULT_VARIABLE ALPACAHTTP_GIT_TAG_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(ALPACAHTTP_GIT_TAG_RESULT EQUAL 0)
+        set(ALPACAHTTP_GIT_IS_RELEASE "1")
+    else()
+        set(ALPACAHTTP_GIT_IS_RELEASE "0")
+    endif()
+
+    # Normalize the origin remote to a browsable https://github.com/<owner>/<repo>
+    # URL (handles both https and ssh remote forms) so the build badge can link
+    # straight to the commit, without hardcoding a fork's own path. The commit
+    # and not the branch: a PR head fetched under an arbitrary local name has
+    # no matching branch ref on the remote, but the commit object always
+    # resolves there (see updateHeaderBuildBadge in web/app.js).
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} remote get-url origin
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE ALPACAHTTP_GIT_REMOTE_RAW
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    set(ALPACAHTTP_GIT_REMOTE_URL "")
+    if(ALPACAHTTP_GIT_REMOTE_RAW MATCHES "^git@github\\.com:(.+)$")
+        set(ALPACAHTTP_GIT_REMOTE_URL "https://github.com/${CMAKE_MATCH_1}")
+    elseif(ALPACAHTTP_GIT_REMOTE_RAW MATCHES "^(https://github\\.com/.+)$")
+        set(ALPACAHTTP_GIT_REMOTE_URL "${CMAKE_MATCH_1}")
+    endif()
+    if(ALPACAHTTP_GIT_REMOTE_URL MATCHES "\\.git$")
+        string(REGEX REPLACE "\\.git$" "" ALPACAHTTP_GIT_REMOTE_URL "${ALPACAHTTP_GIT_REMOTE_URL}")
+    endif()
+endif()
+if(NOT DEFINED ALPACAHTTP_GIT_IS_RELEASE)
+    set(ALPACAHTTP_GIT_IS_RELEASE "0")
+endif()
+if(NOT DEFINED ALPACAHTTP_GIT_REMOTE_URL)
+    set(ALPACAHTTP_GIT_REMOTE_URL "")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -197,6 +280,7 @@ endif()
 # Create library
 add_library(alpacahttp STATIC ${ALPACAHTTP_SOURCES})
 target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_VERSION=\"${PROJECT_VERSION}\")
+target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_GIT_BRANCH="${ALPACAHTTP_GIT_BRANCH}" ALPACAHTTP_GIT_COMMIT="${ALPACAHTTP_GIT_COMMIT}" ALPACAHTTP_GIT_DIRTY=${ALPACAHTTP_GIT_DIRTY} ALPACAHTTP_GIT_IS_RELEASE=${ALPACAHTTP_GIT_IS_RELEASE} ALPACAHTTP_GIT_REMOTE_URL=\"${ALPACAHTTP_GIT_REMOTE_URL}\")
 
 # zlib: gzip framing for the combined log download endpoint
 find_package(ZLIB REQUIRED)

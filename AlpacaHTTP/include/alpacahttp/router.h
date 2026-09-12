@@ -132,6 +132,7 @@ private:
     Response handle_root(const Request& request, std::uint32_t server_tx_id);
     Response handle_description(const Request& request, std::uint32_t server_tx_id);
     Response handle_api_versions(const Request& request, std::uint32_t server_tx_id);
+    Response handle_build_info(const Request& request, std::uint32_t server_tx_id);
     Response handle_configured_devices(const Request& request, std::uint32_t server_tx_id);
     Response handle_configure_device(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);

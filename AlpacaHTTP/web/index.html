@@ -24,7 +24,7 @@
 <body>
     <div class="container">
         <header>
-            <h1 class="title"><img src="/web/assets/oa512.png" alt="OpenAstro logo" class="logo"><span class="title-text">OpenAstro <span class="brand-name">AlpacaBridge</span></span><span id="header-version" class="version"></span><span id="header-profile" class="profile-name"></span></h1>
+            <h1 class="title"><img src="/web/assets/oa512.png" alt="OpenAstro logo" class="logo"><span class="title-text">OpenAstro <span class="brand-name">AlpacaBridge</span></span><span id="header-version" class="version"></span><a id="header-build-badge" class="build-badge" hidden title="" href="#" target="_blank" rel="noopener"></a><span id="header-profile" class="profile-name"></span></h1>
             <span id="server-clock" class="server-clock" title="Live server (SBC) clock, shown in this browser's time zone, or UTC if the browser cannot format it">--:--:--</span>
         </header>
 
@@ -81,9 +81,9 @@
                         <option value="playerone">Player One</option>
                         <option value="onstep">OnStep</option>
                         <option value="qhy">QHY</option>
+                        <option value="synscan">Sky-Watcher Mount via SynScan (Hand Controller)</option>
+                        <option value="skywatcher">Sky-Watcher Mount via EQMOD (Direct)</option>
                         <option value="svbony">SVBONY</option>
-                        <option value="synscan">SynScan V3/V4</option>
-                        <option value="skywatcher">Sky-Watcher Wave (Direct)</option>
                         <option value="touptek">ToupTek</option>
                         <option value="wandererastro">WandererAstro</option>
                         <option value="weewx">WeeWX</option>
@@ -325,9 +325,9 @@
                   </div>
                 </div>
 
-                <!-- SynScan Telescope Configuration -->
+                <!-- Sky-Watcher via SynScan (hand controller) Configuration -->
                 <div id="synscan-config" class="vendor-config" style="display: none;">
-                    <h3>SynScan V3/V4 Telescope Configuration</h3>
+                    <h3>Sky-Watcher Mount via SynScan (Hand Controller) Configuration</h3>
 
                     <div class="form-group">
                         <label for="synscan-version">Handset Version:</label>
@@ -392,10 +392,10 @@
                     </div>
                 </div>
 
-                <!-- SkyWatcher (Wave / direct motor controller) Telescope Configuration -->
+                <!-- Sky-Watcher via EQMOD (direct motor controller) Configuration -->
                 <div id="skywatcher-config" class="vendor-config" style="display: none;">
-                    <h3>Sky-Watcher Wave Telescope Configuration</h3>
-                    <p><small>Talks directly to the mount motor controller (Wave 100i/150i) over USB or the mount's built-in WiFi. No hand controller or SynScan app required.</small></p>
+                    <h3>Sky-Watcher Mount via EQMOD (Direct) Configuration</h3>
+                    <p><small>Talks straight to the mount's motor controller, the path the ecosystem calls EQMOD. Speaks the protocol used by the Wave series, Synta EQ boards and AZ-GTi class mounts, over an EQDIRECT cable, the mount's own USB port, a handset in PC Direct Mode, or built-in WiFi. No hand controller or SynScan app required. See SUPPORTED-DRIVERS.md for the models that are validated.</small></p>
 
                     <div class="form-group">
                         <label for="skywatcher-connection-type">Connection Type:</label>
@@ -1681,7 +1681,7 @@
         </div>
     </div>
 
-    <script src="/web/format.js?v=1"></script>
-    <script src="/web/app.js?v=33"></script>
+    <script src="/web/format.js?v=2"></script>
+    <script src="/web/app.js?v=34"></script>
 </body>
 </html>

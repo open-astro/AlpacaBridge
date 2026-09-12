@@ -227,6 +227,17 @@ a userspace `hwclock --hctosys` under a non-systemd init, or a kernel without
 client that switches on `ClockSource` should treat any unknown value as
 "not NTP".
 
+## Related: build info
+
+- `GET /management/v1/buildinfo` (3.6.0) — `Value` carries `Version` plus the
+  git state captured when the binary was configured: `GitBranch`,
+  `GitCommit`, `GitDirty`, `GitIsRelease` and `GitRemoteUrl`. Read-only, same
+  envelope and trusted-LAN model as the calls above. It is kept out of
+  `description`, whose payload the ASCOM spec fixes; the web UI reads it to
+  badge a build that did not come from a release tag. A detached checkout
+  reports `GitBranch` as the literal `HEAD`, which says nothing about whether
+  the build is a release — `GitIsRelease` is the only field that does.
+
 ## Feature detection
 
 - Old server (pre-3.4.0): the routes return "Endpoint not found" —

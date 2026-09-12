@@ -18,6 +18,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
+#include <alpacahttp/version.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -3689,6 +3690,48 @@ int main() {
         }
     }
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
+
+    // Issue #444: the buildinfo endpoint the header badge reads. Nothing
+    // pinned the route, the endpoint name, or the payload keys before this,
+    // so a rename on either side would have been caught only by opening the
+    // web UI and noticing the badge had gone quiet.
+    {
+        alpacahttp::Router router;
+
+        const auto fetch_build_info = [&router](const std::string& path) {
+            const auto response = route_request(router, "GET", path);
+            return nlohmann::json::parse(response.body(), nullptr, false);
+        };
+
+        const auto json = fetch_build_info("/management/v1/buildinfo");
+        EXPECT(!json.is_discarded());
+        EXPECT(json.value("ErrorNumber", -1) == 0);
+        EXPECT(json.contains("Value") && json["Value"].is_object());
+
+        // Every key the badge reads, with the type it reads it as. The two
+        // booleans matter most: GitIsRelease arriving as a string would be
+        // truthy in JS for BOTH "true" and "false", which would hide the
+        // badge on every build.
+        const auto& value = json["Value"];
+        EXPECT(value.contains("Version") && value["Version"].is_string());
+        EXPECT(value.contains("GitBranch") && value["GitBranch"].is_string());
+        EXPECT(value.contains("GitCommit") && value["GitCommit"].is_string());
+        EXPECT(value.contains("GitRemoteUrl") && value["GitRemoteUrl"].is_string());
+        EXPECT(value.contains("GitDirty") && value["GitDirty"].is_boolean());
+        EXPECT(value.contains("GitIsRelease") && value["GitIsRelease"].is_boolean());
+        EXPECT(value.value("Version", "") == std::string(alpacahttp::kVersion));
+
+        // The unversioned alias resolves to the same handler.
+        const auto alias = fetch_build_info("/management/buildinfo");
+        EXPECT(!alias.is_discarded());
+        EXPECT(alias.value("ErrorNumber", -1) == 0);
+        EXPECT(alias["Value"] == value);
+
+        // ClientTransactionID is echoed, as on every other management route.
+        const auto echoed = fetch_build_info("/management/v1/buildinfo?ClientTransactionID=8271");
+        EXPECT(!echoed.is_discarded());
+        EXPECT(echoed.value("ClientTransactionID", 0) == 8271);
+    }
 
     std::cout << "All routing tests passed!\n";
     return 0;
