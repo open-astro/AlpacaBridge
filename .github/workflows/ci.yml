@@ -522,8 +522,10 @@ jobs:
         # ci.yml and ci_preflight.sh, VERSION vs the README badge, stale
         # paths in AGENTS.md, async_connectable.h's blocking-get_connected()
         # lists vs the drivers -- including a count of either list stated
-        # anywhere, issue #381 -- and this workflow's own TSan filtered runs
-        # and their zero-test greps vs ci_preflight.sh's, issue #341) that
+        # anywhere, issue #381 -- this workflow's own TSan filtered runs
+        # and their zero-test greps vs ci_preflight.sh's, issue #341, and
+        # repo paths in the Cursor rule files and external/README.md,
+        # resolved against their component, issue #457) that
         # nothing previously caught automatically.
         # The script's module docstring is the authoritative list; keep this
         # summary in step with it or drop it rather than letting it go stale.

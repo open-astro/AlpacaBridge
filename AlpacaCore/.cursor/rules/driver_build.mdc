@@ -548,7 +548,7 @@ When adding a new vendor driver, ensure you've completed all 4 steps:
 - [ ] **Step 3**: Added `add_subdirectory()` and `target_link_libraries()` in Vendor support section
 - [ ] **Step 4**: Added `install(TARGETS ...)` in Installation section
 
-**Note**: AlpacaHTTP automatically gets all enabled vendors through its link to `alpacacore`, so no changes are needed in AlpacaHTTP's CMakeLists.txt. However, if your application code uses vendor-specific headers directly, you'll need `#ifdef ALPACACORE_ENABLE_<VENDOR>` guards (see `examples/simple_server/main.cpp` for examples).
+**Note**: AlpacaHTTP automatically gets all enabled vendors through its link to `alpacacore`, so no changes are needed in AlpacaHTTP's CMakeLists.txt. However, if your application code uses vendor-specific headers directly, you'll need `#ifdef ALPACACORE_ENABLE_<VENDOR>` guards (see `AlpacaHTTP/examples/simple_server/main.cpp` for examples).
 
 ---
 
@@ -600,8 +600,8 @@ The testing guide covers:
 **SDK Location**: `external/ZWO/ASI_Camera_SDK/` (vendored subset)
 
 **Required Files**:
-- `include/ASICamera2.h`
-- `lib/<platform>/<arch>/libASICamera2.*` (or `ASICamera2.lib` on Windows)
+- `external/ZWO/ASI_Camera_SDK/include/ASICamera2.h`
+- `external/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.a` (arm64 only; the build is Linux arm64-only)
 
 **Wrapper API**:
 - `ZWOSDKWrapper::enumerate_cameras()`

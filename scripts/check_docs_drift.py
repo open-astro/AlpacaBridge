@@ -40,6 +40,19 @@ Checks:
      pre-flight script only has value while it runs what CI runs, and this
      pair is written out twice with nothing comparing it -- the same shape as
      checks 2 and 3.
+  9. Every backticked repo path in the Cursor rule files
+     (AlpacaCore/.cursor/rules/*.mdc, AlpacaHTTP/.cursor/rules/*.mdc) and in
+     AlpacaCore/external/README.md exists, the same way check 7 does it for
+     AGENTS.md (issue #457). Those files are `alwaysApply: true`, so an agent
+     reads them before touching a driver, and #453 found a versioned QHY SDK
+     path and a directory that never existed in one of them. Paths in these
+     files are relative to the component the file lives under
+     (`external/QHY/...` in an AlpacaCore rule means `AlpacaCore/external/QHY/...`),
+     so each span is resolved against its component root as well as the
+     repo root. Fenced blocks, including the illustrative directory trees,
+     are skipped exactly as in check 7; a stale entry inside a tree block
+     stays unchecked, and that is an accepted limit of this check, not an
+     oversight. Each file carries its own floor.
 """
 
 import glob
@@ -600,6 +613,7 @@ def check_qhy_seam_lists():
 # these top-level dirs/files (spaces allowed only for a verbatim tracked path), and are not a bare CLI flag
 # or a URL.
 PATH_PREFIXES = (
+    ".cursor/",
     "AlpacaCore/", "AlpacaHTTP/", "scripts/", "docs/", ".github/",
     ".claude/", "debian/",
 )
@@ -639,18 +653,16 @@ def _is_gitignored(path):
     return _run_git(["check-ignore", "-q", path], check=False).returncode == 0
 
 
-def check_agents_md_paths_exist():
-    failures = []
-    text = FENCED_BLOCK_RE.sub("", read("AGENTS.md"))
-    text = DOUBLE_BACKTICK_SPAN_RE.sub("", text)
-    # With fences gone every backtick must pair up; one stray backtick would
-    # invert every span after it, and the count floor below only catches a
-    # large inversion. Fail loudly on parity instead.
-    if text.count("`") % 2 != 0:
-        return ["AGENTS.md has an unbalanced backtick outside fenced blocks; "
-                "the path-reference check cannot pair code spans reliably"]
-    seen = set()
+_TRACKED_PATHS_CACHE = None
 
+
+def _tracked_paths():
+    """(tracked files, tracked directories with a trailing slash), computed once
+    per invocation: six documents share it and the listing walks the vendored
+    SDK trees."""
+    global _TRACKED_PATHS_CACHE
+    if _TRACKED_PATHS_CACHE is not None:
+        return _TRACKED_PATHS_CACHE
     # core.quotePath=false: a tracked path with non-ASCII bytes must not
     # come back quoted, or it would never match a span.
     tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"]).stdout.splitlines())
@@ -659,14 +671,47 @@ def check_agents_md_paths_exist():
         parts = f.split("/")
         for i in range(1, len(parts)):
             tracked_dirs.add("/".join(parts[:i]) + "/")
+    _TRACKED_PATHS_CACHE = (tracked, tracked_dirs)
+    return _TRACKED_PATHS_CACHE
+
+
+def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefixes=()):
+    """Every backticked path span in `doc` names a tracked file or directory.
+
+    `component` (e.g. "AlpacaCore/") is where a span starting with one of
+    `relative_prefixes` ("src/", "external/", ...) is resolved: the Cursor
+    rule files write paths relative to the component they live under, not
+    to the repo root. Repo-root spans (PATH_PREFIXES) are accepted in every
+    document. Returns (failures, checked).
+    """
+    failures = []
+    if not (ROOT / doc).is_file():
+        return (["%s is listed for path checking but does not exist -- it was renamed or deleted; "
+                 "update the list" % doc], 0)
+    text = FENCED_BLOCK_RE.sub("", read(doc))
+    text = DOUBLE_BACKTICK_SPAN_RE.sub("", text)
+    # With fences gone every backtick must pair up; one stray backtick would
+    # invert every span after it, and the count floor below only catches a
+    # large inversion. Fail loudly on parity instead.
+    if text.count("`") % 2 != 0:
+        return ["%s has an unbalanced backtick outside fenced blocks; "
+                "the path-reference check cannot pair code spans reliably" % doc], 0
+    seen = set()
+    tracked, tracked_dirs = _tracked_paths()
 
     checked = 0
     for m in CODE_SPAN_RE.finditer(text):
         span = m.group(1)
-        if "\n" in span or not span.startswith(PATH_PREFIXES):
+        if "\n" in span:
+            continue
+        if span.startswith(PATH_PREFIXES):
+            span_path = span
+        elif component and span.startswith(relative_prefixes):
+            span_path = component + span
+        else:
             continue
         checked += 1
-        path = TRIM_SUFFIX_RE.sub("", span)
+        path = TRIM_SUFFIX_RE.sub("", span_path)
         # Markdown anchors / fragments (`docs/x.md#section`), glob patterns,
         # and template placeholders (`AlpacaCore/src/vendors/<vendor>/...`)
         # aren't real filesystem paths.
@@ -676,7 +721,8 @@ def check_agents_md_paths_exist():
             continue
         seen.add(path)
 
-        if path in tracked or path in tracked_dirs:
+        # A directory may be named with or without its trailing slash.
+        if path in tracked or path in tracked_dirs or path + "/" in tracked_dirs:
             continue
         # A span with whitespace is validated only when it names a tracked
         # file or directory verbatim (e.g. `AlpacaCore/conformu/Astroasis/
@@ -691,13 +737,62 @@ def check_agents_md_paths_exist():
         # be absent from a clean checkout, so it isn't a documentation error.
         if _is_gitignored(path):
             continue
-        failures.append("AGENTS.md references a path that does not exist: %s" % path)
-    if checked < MIN_AGENTS_MD_PATH_REFS:
+        failures.append("%s references a path that does not exist: %s" % (doc, path))
+    if checked < floor:
         failures.append(
-            "only %d backticked path references found in AGENTS.md (floor %d): "
-            "either the code-span matcher regressed, or AGENTS.md was trimmed "
-            "and MIN_AGENTS_MD_PATH_REFS should be lowered"
-            % (checked, MIN_AGENTS_MD_PATH_REFS))
+            "only %d backticked path references found in %s (floor %d): "
+            "either the code-span matcher regressed, or the file was trimmed "
+            "and %s should be lowered" % (checked, doc, floor, floor_name))
+    return failures, checked
+
+
+def check_agents_md_paths_exist():
+    failures, _ = _check_doc_path_refs("AGENTS.md", MIN_AGENTS_MD_PATH_REFS, "MIN_AGENTS_MD_PATH_REFS")
+    return failures
+
+
+# --- check 9: Cursor rule files' path references exist (issue #457) --------
+
+# Spans in a rule file that are relative to its component root. `include/`
+# is here for `include/alpacacore/...`; a vendor SDK's own `include/` is
+# not a repo-relative path and must be written out from `external/` (the
+# ZWO block was, in #457).
+# No `docs/` here: PATH_PREFIXES already holds it and is tried first, so a
+# `docs/x` span in a rule file always resolves at the repo root (neither
+# component has a docs/ tree of its own today).
+RULE_FILE_RELATIVE_PREFIXES = (
+    "src/", "include/", "tests/", "external/", "conformu/", "examples/", "web/",
+)
+# (document, component root, floor). Floors are per file, as the issue asks,
+# so a matcher that stops working on one of them fails rather than reporting
+# nothing to check; each is set well under today's count and is a tripwire,
+# not a target. AlpacaHTTP's rule file names no repo paths today (its spans
+# are URL shapes), so its floor is 0: it is listed so a path added there
+# later is checked, not to guard the matcher.
+RULE_FILE_PATH_CHECKS = (
+    ("AlpacaCore/.cursor/rules/driver_build.mdc", "AlpacaCore/", 20),
+    ("AlpacaCore/.cursor/rules/driver_test.mdc", "AlpacaCore/", 3),
+    ("AlpacaCore/.cursor/rules/rules.mdc", "AlpacaCore/", 5),
+    ("AlpacaHTTP/.cursor/rules/rules.mdc", "AlpacaHTTP/", 0),
+    ("AlpacaCore/external/README.md", "AlpacaCore/", 3),
+)
+
+
+def check_rule_file_paths_exist():
+    failures = []
+    # The tuple is hand-written; every tracked rule file must be in it, or a
+    # fifth .mdc added later is silently unchecked -- the drift class this
+    # check exists for (review note on PR #474).
+    listed = {doc for doc, _, _ in RULE_FILE_PATH_CHECKS}
+    tracked_rule_files = [f for f in _run_git(["-c", "core.quotePath=false", "ls-files",
+                                               "*/.cursor/rules/*.mdc", ".cursor/rules/*.mdc"]).stdout.splitlines() if f]
+    for f in sorted(set(tracked_rule_files) - listed):
+        failures.append("%s is a tracked Cursor rule file but is not in RULE_FILE_PATH_CHECKS -- add it "
+                        "with its component and a floor" % f)
+    for doc, component, floor in RULE_FILE_PATH_CHECKS:
+        doc_failures, _ = _check_doc_path_refs(
+            doc, floor, "its RULE_FILE_PATH_CHECKS floor", component, RULE_FILE_RELATIVE_PREFIXES)
+        failures.extend(doc_failures)
     return failures
 
 
@@ -802,6 +897,7 @@ CHECKS = [
     ("AGENTS.md path references exist", check_agents_md_paths_exist),
     ("QHY SDK seam lists agree (interface / LockedQHYSDK / sweep)", check_qhy_seam_lists),
     ("TSan filtered runs sync (ci.yml vs ci_preflight.sh)", check_tsan_filtered_runs_sync),
+    ("Cursor rule file path references exist", check_rule_file_paths_exist),
 ]
 
 
