@@ -30,10 +30,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <string>
+#include <thread>
 
 #include "catch2_compat.h"
 #include "fake_pty_write.h"
+#include "fake_serial_streamer.h"
 
 namespace {
 
@@ -83,9 +86,13 @@ TEST_CASE("fake pty write - make_pty_nonblocking actually sets O_NONBLOCK", "[fa
     UndrainedPty pty;
     REQUIRE(pty.ok());
 
-    // The property the whole fix rests on: without it, the write below is the
-    // one that parks forever.
+    // The pre-condition is libc/kernel behaviour, not something this helper
+    // owns -- it is asserted only to show the next line is doing real work,
+    // and a platform whose posix_openpt() ever returned a non-blocking master
+    // would make this line, not the helper, the thing that went red.
     REQUIRE((fcntl(pty.master(), F_GETFL, 0) & O_NONBLOCK) == 0);
+    // The property the whole fix rests on: without it, a write to a full pty
+    // parks forever.
     REQUIRE(make_pty_nonblocking(pty.master()));
     CHECK((fcntl(pty.master(), F_GETFL, 0) & O_NONBLOCK) != 0);
 }
@@ -176,6 +183,41 @@ TEST_CASE("fake pty write - a drained pty still receives the whole reply", "[fak
 
     close(slave);
     close(master);
+}
+
+// The end-to-end shape #424 actually reported: a real fake, nothing draining
+// its pty, destroyed. The helper cases above pin the mechanism; this one pins
+// that a fake built on it cannot hang its own destructor.
+//
+// FakeSerialStreamer is the one that needs no driver to reach the state --
+// it writes its frame on an interval whether or not anyone reads, so the pty
+// buffer fills on its own within a few hundred milliseconds.
+TEST_CASE("fake pty write - a fake whose pty is never drained still destructs", "[fakes][pty][unit]") {
+    using namespace std::chrono_literals;
+
+    // Big frame, short interval: fill the buffer well before the destruction.
+    auto* streamer = new alpacacore::test::FakeSerialStreamer(std::string(4096, 'x'), 1ms);
+    std::this_thread::sleep_for(400ms);
+
+    // The destruction runs on its own thread so a hang is a FAILED assertion
+    // rather than a hung test process -- which is the whole problem with this
+    // bug: the old code gave no assertion to fail, it just stopped.
+    std::promise<void> destroyed;
+    auto done = destroyed.get_future();
+    std::thread destroyer([&] {
+        delete streamer;
+        destroyed.set_value();
+    });
+
+    const bool finished = done.wait_for(10s) == std::future_status::ready;
+    if (finished) {
+        destroyer.join();
+    } else {
+        // Deliberately leaked: the thread is parked inside the destructor and
+        // joining it would hang the run we are trying to report on.
+        destroyer.detach();
+    }
+    CHECK(finished);
 }
 
 #endif  // _WIN32

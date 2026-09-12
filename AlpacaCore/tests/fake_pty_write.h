@@ -31,8 +31,10 @@
 // It is a race, not a reproducible red -- the same tree passes a full ctest
 // run most of the time -- so it surfaces as an occasional CI hang.
 //
-// Two rules, applied to all five fakes rather than to the one that was caught
-// (AGENTS.md: a template bug found in one place is fixed everywhere):
+// Two rules, applied to all six pty-backed fakes rather than to the one that
+// was caught (AGENTS.md: a template bug found in one place is fixed
+// everywhere) -- the five fake_*.h doubles plus FakeSerialHandset in
+// test_synscan_handset_probe.cpp:
 //
 //   1. The master is opened non-blocking, so a write can never park.
 //   2. A reply that cannot be written within a short bound, or while the fake

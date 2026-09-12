@@ -44,10 +44,13 @@ public:
 
     explicit FakeSerialHandset(Responder responder) : responder_(std::move(responder)) {
         master_fd_ = posix_openpt(O_RDWR | O_NOCTTY);
-        if (master_fd_ >= 0) {
-            alpacacore::test::make_pty_nonblocking(master_fd_);
-        }
-        if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0) {
+        // Issue #424: the master goes non-blocking here, so a reply to a probe
+        // that has stopped draining can never park this thread inside write()
+        // and hang the join. Folded into the same throw as the other setup
+        // failures: a silent fallback to a blocking master would look exactly
+        // like the hang this exists to remove.
+        if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0 ||
+            !alpacacore::test::make_pty_nonblocking(master_fd_)) {
             throw std::runtime_error("FakeSerialHandset: cannot open pty");
         }
         const char* name = ptsname(master_fd_);
