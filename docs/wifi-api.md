@@ -151,7 +151,12 @@ Every request except `GET` that carries a browser `Origin` header not
 matching the request's `Host` is rejected with HTTP 403. That covers the
 state-changing methods these endpoints accept (`PUT`/`POST`/`DELETE`) and
 anything unrecognised, which the server treats as an unknown method and the
-guard refuses before the endpoint's own method check runs. This
+guard refuses before the endpoint's own method check runs -- with one
+exception: on the `logfiles` collection the guard sits inside the `DELETE`
+branch, so a cross-origin `PUT /management/v1/logfiles` is answered by the
+method check (200 with `INVALID_OPERATION`) rather than 403, while
+`PUT /management/v1/logfiles/<name>` is refused at 403. Neither mutates
+anything, so the difference is in the status code only. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
 not affect native clients (no `Origin` header is sent — Ara over HTTP is
 unaffected) or the same-origin web portal. One device endpoint takes the same
@@ -162,7 +167,9 @@ other device setter is unguarded.
 Since issue #348 this is not specific to the WiFi endpoints: every
 state-changing management endpoint carries the same guard — `synctime`,
 `restart`, `shutdown`, `configuredevice`, `removedevice`, `loglevel`, the
-`description` PUT, and both `DELETE /management/v1/logfiles` (all files) and
+`description` `PUT`/`POST` (as with `configuredevice` and `removedevice`, the
+handler accepts both and the guard covers both), and both
+`DELETE /management/v1/logfiles` (all files) and
 `DELETE /management/v1/logfiles/<name>` (one file). The rejection message names
 the endpoint.
 

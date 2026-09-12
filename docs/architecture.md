@@ -193,9 +193,10 @@ stance from extending to pages the operator merely has open in a browser on
 the same LAN. `GET` is exempt everywhere, so the web portal's polling is
 unaffected, and non-browser clients send no `Origin` at all. The guard
 reached the WiFi endpoints first (PR #198), then `synctime` and the
-`Telescope.UTCDate` setter (issue #298), and as of issue #348 the rest:
+`Telescope.UTCDate` setter (issues #298 and #401 respectively), and as of
+issue #348 the rest:
 `restart`, `shutdown`, `configuredevice`, `removedevice`, `loglevel`, the
-`description` PUT and both forms of `DELETE /management/v1/logfiles` (the
+`description` `PUT`/`POST` and both forms of `DELETE /management/v1/logfiles` (the
 collection and a single named file). Note that
 it compares the request's `Origin` against the request's own `Host`, so it
 stops a drive-by from an attacker-controlled origin but not DNS rebinding
