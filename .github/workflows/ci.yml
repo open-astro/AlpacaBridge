@@ -538,7 +538,9 @@ jobs:
         # ALPACA_EXPOSE_CONNECT_ERROR() compiles and tests green while its
         # operators are told nothing but "Connection failed" (issue #358).
         # Nothing but this scan catches it.
-        run: python3 scripts/check_connect_error_hook.py
+        run: |
+          python3 scripts/check_connect_error_hook.py --self-test
+          python3 scripts/check_connect_error_hook.py
 
   stress-registration:
     name: Stress-test registration
