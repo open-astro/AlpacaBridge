@@ -1596,6 +1596,13 @@ datagrams before each send so replies cannot get off-by-one.
   the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
   the entry that is at fault. That asymmetry is the rule for any new validation in
   `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`.
+  Since #380 that rule is not left to each branch to remember: `Router::reject_invalid_config()`
+  takes the source and the reason and returns whether the caller must refuse, and
+  `Router::normalize_persisted_connection_type()` does the same for an unrecognised
+  `connectionType`, which has no value to carry forward — it returns `"serial"` for a persisted
+  config, never `"auto"`, so the connect fails on the port path instead of auto-probing and
+  attaching to whatever mount answers. Use them rather than an inline `return false`; the
+  `portPath`, `host` and `connectionType` checks in every telescope branch do.
   Both coordinates are also **range-checked** (#398), inclusive of ±90/±180 since the poles and
   the antimeridian are real places, and rejecting NaN and the infinities: presence alone let a
   config carry latitude 200, which reads as northern to `hemisphere_south_locked()`, while the

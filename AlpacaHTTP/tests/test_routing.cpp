@@ -2239,6 +2239,251 @@ int main() {
         EXPECT(lat_only);
         EXPECT(lon_only);
     }
+    {
+        // Issue #380: the portPath / host / connectionType checks follow the
+        // same source rule as the site-coordinate check above. All three used
+        // to `return false` regardless of source, so a persisted entry with an
+        // empty portPath vanished from the web UI at startup -- the exact
+        // failure the rule exists to prevent, and the one an operator is most
+        // likely to hit, since the port path is what goes wrong after a USB
+        // device is renamed.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+
+        // One entry per check. Site coordinates are present throughout so a
+        // failure here cannot be the #274 rule firing instead.
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9640},
+                           {"connectionType", "serial"},
+                           {"portPath", ""},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 39.7392},
+                           {"siteLongitude", -104.9903}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9641},
+                           {"connectionType", "network"},
+                           {"host", ""},
+                           {"siteLatitude", 39.7392},
+                           {"siteLongitude", -104.9903}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9642},
+                           {"connectionType", "carrier-pigeon"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 39.7392},
+                           {"siteLongitude", -104.9903}});
+#ifdef ALPACACORE_ENABLE_ZWO
+        // Review finding: the ZWO branch tests a bare `conn_type == "auto"`,
+        // not `|| conn_type.empty()`, so an entry with no connectionType key
+        // falls to its else and used to be dropped regardless of source -- the
+        // one branch a blanket "empty is always valid" rule in the helper
+        // would have left unfixed. The off-UI path: hand-edited, or written by
+        // a non-web-UI client, since the form always sets the field.
+        entries.push_back({{"vendor", "zwo"}, {"deviceType", "telescope"}, {"deviceNumber", 9644}});
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        // Review finding: the bisque branch has no connectionType at all --
+        // it is TCP-only -- and its host check was the one telescope branch
+        // still doing an inline `return false`, so a persisted entry with an
+        // empty host was dropped at startup while the other six were kept.
+        entries.push_back({{"vendor", "bisque"}, {"deviceType", "telescope"}, {"deviceNumber", 9646}, {"host", ""}});
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        // OnStep is serial-only, so its valid list is shorter: a persisted
+        // "network" is unrecognised HERE even though it is valid for the other
+        // four, and normalises to serial rather than dropping the device.
+        entries.push_back({{"vendor", "onstep"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9645},
+                           {"connectionType", "network"},
+                           {"host", "192.168.1.50"}});
+#endif
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+
+        std::vector<std::string> warnings;
+        std::mutex warnings_mutex;
+        auto previous_sink = alpacacore::logging::get_log_sink();
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn) {
+                    std::lock_guard<std::mutex> lock(warnings_mutex);
+                    warnings.emplace_back(message);
+                }
+            });
+        alpacahttp::Router startup_router;
+        const auto listed_json = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        alpacacore::logging::set_log_sink(previous_sink);
+
+        // Restore before anything that can abort, and not from a destructor:
+        // EXPECT is abort(), which neither unwinds nor runs a scope guard.
+        const auto restore_original = [&] {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        };
+        restore_original();
+        remove_device(startup_router, "skywatcher", "telescope", 9640);
+        remove_device(startup_router, "skywatcher", "telescope", 9641);
+        remove_device(startup_router, "skywatcher", "telescope", 9642);
+#ifdef ALPACACORE_ENABLE_ZWO
+        remove_device(startup_router, "zwo", "telescope", 9644);
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        remove_device(startup_router, "bisque", "telescope", 9646);
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        remove_device(startup_router, "onstep", "telescope", 9645);
+#endif
+        restore_original();
+
+        EXPECT(!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array());
+        std::vector<int> expected_listed = {9640, 9641, 9642};
+#ifdef ALPACACORE_ENABLE_ZWO
+        expected_listed.push_back(9644);
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        expected_listed.push_back(9646);
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        expected_listed.push_back(9645);
+#endif
+        for (int device_number : expected_listed) {
+            bool found = false;
+            for (const auto& entry : listed_json["Value"]) {
+                if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == device_number) {
+                    found = true;
+                }
+            }
+            EXPECT(found);
+        }
+
+        // Each registration is accompanied by a WARN that names the reason, so
+        // "registered anyway" never means "registered silently". The
+        // connection-type line is distinct: that entry is not merely warned
+        // about, it is normalised to serial, and the log has to say so or the
+        // operator cannot explain the connect error they then get.
+        bool warned_port = false;
+        bool warned_host = false;
+        bool warned_conn_type = false;
+        for (const auto& w : warnings) {
+            if (w.find("telescope 9640") != std::string::npos &&
+                w.find("Serial port path is required") != std::string::npos) {
+                warned_port = true;
+            }
+            if (w.find("telescope 9641") != std::string::npos &&
+                w.find("Host IP address is required") != std::string::npos) {
+                warned_host = true;
+            }
+            // The fallback VALUE is the judgement this whole change rests on:
+            // "serial" makes the connect fail on the port path, while "auto"
+            // would auto-probe and attach to whatever mount answers. Nothing
+            // pinned it, so flipping the helper to "auto" kept the suite
+            // green -- assert the fragment, not just that a WARN happened.
+            if (w.find("telescope 9642") != std::string::npos &&
+                w.find("has connectionType \"carrier-pigeon\"") != std::string::npos &&
+                w.find("treating it as \"serial\"") != std::string::npos) {
+                warned_conn_type = true;
+            }
+        }
+        EXPECT(warned_port);
+        EXPECT(warned_host);
+        EXPECT(warned_conn_type);
+
+#ifdef ALPACACORE_ENABLE_BISQUE
+        bool warned_bisque_host = false;
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+        bool warned_zwo_empty = false;
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        bool warned_onstep_network = false;
+#endif
+        for (const auto& w : warnings) {
+#ifdef ALPACACORE_ENABLE_BISQUE
+            if (w.find("telescope 9646") != std::string::npos &&
+                w.find("Host is required for Bisque/TheSkyX connection") != std::string::npos) {
+                warned_bisque_host = true;
+            }
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+            // Match the normalisation line's own distinctive wording, not a
+            // bare "serial": the sibling port-path WARN only fails to match
+            // that because it capitalises "Serial", which is a coincidence of
+            // wording rather than something this case should rest on.
+            if (w.find("telescope 9644") != std::string::npos && w.find("has connectionType") != std::string::npos) {
+                warned_zwo_empty = true;
+            }
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+            if (w.find("telescope 9645") != std::string::npos &&
+                w.find("has connectionType \"network\"") != std::string::npos) {
+                warned_onstep_network = true;
+            }
+#endif
+        }
+#ifdef ALPACACORE_ENABLE_BISQUE
+        EXPECT(warned_bisque_host);
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+        EXPECT(warned_zwo_empty);
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        EXPECT(warned_onstep_network);
+#endif
+    }
+    {
+        // The other half of the rule, unchanged: the same three configs are
+        // still rejected outright when they arrive through the API, where the
+        // caller can fix them and nothing has been written to disk yet.
+        alpacahttp::Router router;
+        const nlohmann::json base = {{"vendor", "skywatcher"},
+                                     {"deviceType", "telescope"},
+                                     {"deviceNumber", 9643},
+                                     {"siteLatitude", 39.7392},
+                                     {"siteLongitude", -104.9903}};
+        const auto reject = [&router](nlohmann::json body, const std::string& expected) {
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", body.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            EXPECT(json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find(expected) != std::string::npos);
+        };
+
+        nlohmann::json no_port = base;
+        no_port["connectionType"] = "serial";
+        no_port["portPath"] = "";
+        reject(no_port, "Serial port path is required");
+
+        nlohmann::json no_host = base;
+        no_host["connectionType"] = "network";
+        no_host["host"] = "";
+        reject(no_host, "Host IP address is required");
+
+        nlohmann::json bad_type = base;
+        bad_type["connectionType"] = "carrier-pigeon";
+        bad_type["portPath"] = "/dev/ttyUSB8";
+        reject(bad_type, "Invalid connection type");
+
+#ifdef ALPACACORE_ENABLE_BISQUE
+        // Bisque has no connectionType and no portPath: its host is the whole
+        // config, so it gets its own API case rather than a variant of base.
+        reject({{"vendor", "bisque"}, {"deviceType", "telescope"}, {"deviceNumber", 9647}, {"host", ""}},
+               "Host is required for Bisque/TheSkyX connection");
+#endif
+    }
+
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
