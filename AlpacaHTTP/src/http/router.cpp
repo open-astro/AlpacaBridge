@@ -7025,7 +7025,7 @@ bool Router::reject_invalid_config(ConfigSource source, const char* reason, cons
     return false;
 }
 
-std::string Router::normalize_persisted_connection_type(ConfigSource source, std::string conn_type,
+std::string Router::normalize_persisted_connection_type(ConfigSource source, const std::string& conn_type,
                                                         std::initializer_list<const char*> valid,
                                                         const std::string& vendor, const std::string& device_type,
                                                         int device_number) {

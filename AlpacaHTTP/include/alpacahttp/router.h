@@ -206,7 +206,7 @@ private:
     // unrecognised value it warns and returns "serial", so the device
     // registers and stays editable and the connect then fails on the port
     // path rather than auto-probing and attaching to whatever mount answers.
-    static std::string normalize_persisted_connection_type(ConfigSource source, std::string conn_type,
+    static std::string normalize_persisted_connection_type(ConfigSource source, const std::string& conn_type,
                                                            std::initializer_list<const char*> valid,
                                                            const std::string& vendor, const std::string& device_type,
                                                            int device_number);
