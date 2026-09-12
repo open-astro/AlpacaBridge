@@ -25,7 +25,9 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -2829,8 +2831,9 @@ int main() {
             return desc["Value"][key];
         };
 
-        // The five sub-blocks below share this stub, so each starts from a
-        // known count rather than inheriting the previous block's. Calling
+        // The sub-blocks below (six, the last carrying the five UTCDate
+        // ladder cases) share this stub, so each starts from a known count
+        // rather than inheriting the previous block's. Calling
         // this is what makes a block order-independent; a block that forgets
         // would assert against a carried-over number.
         auto fresh_counts = [&] {
@@ -2994,6 +2997,160 @@ int main() {
             EXPECT(clock_field(desc, "ClockSource") == "none");
         }
 
+        // The UTCDate outcome ladder (#397): the handler logs the step's
+        // outcome at INFO for Stepped, WARN for Failed, WARN for
+        // SkippedSynchronized past kClientDisagreementWarn, and DEBUG for
+        // everything else. The blocks above assert the step and the driver
+        // write; none asserted which branch was logged or at what level, and
+        // a ladder that silently inverted (INFO where a WARN belongs) is what
+        // #349 found on the connect warning before it asserted levels. The
+        // sink is captured with the level, and the minimum log level is
+        // lowered to Debug for the block so the DEBUG arm is observable at
+        // all (the default Info floor drops it before the sink).
+        {
+            struct CapturedLine {
+                alpacacore::logging::LogLevel level;
+                std::string message;
+            };
+            std::vector<CapturedLine> captured;
+            std::mutex captured_mutex;
+            // Restored by a guard rather than straight-line statements, so the
+            // restore does not depend on where the block exits (review note on
+            // PR #475; EXPECT aborts today, but a non-aborting assert would
+            // otherwise leak the lowered level into every later block).
+            struct LoggingRestore {
+                alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+                alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+                ~LoggingRestore() {
+                    alpacacore::logging::set_log_sink(sink);
+                    alpacacore::logging::set_log_level(level);
+                }
+            } logging_restore;
+            alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+            alpacacore::logging::set_log_sink(
+                [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                    std::lock_guard<std::mutex> lock(captured_mutex);
+                    captured.push_back({level, std::string(message)});
+                });
+            // The one line the handler writes for a UTCDate step, by its
+            // fixed prefix; returns (level, message) so a case can pin both.
+            auto outcome_line = [&]() -> std::optional<CapturedLine> {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                for (const auto& line : captured) {
+                    if (line.message.find("UTCDate from ") != std::string::npos &&
+                        line.message.find(": host clock ") != std::string::npos) {
+                        return line;
+                    }
+                }
+                return std::nullopt;
+            };
+            auto clear = [&] {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.clear();
+            };
+            auto write_ok = [&](alpacahttp::Router& router_under_test) {
+                const auto response = route_request(router_under_test, "PUT", base + "/utcdate", client_utc_body);
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+            };
+
+            // Stepped: INFO, naming the outcome.
+            {
+                alpacahttp::Router clock_router;
+                clock_router.set_host_clock_hooks(
+                    [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
+                fresh_counts();
+                clear();
+                write_ok(clock_router);
+                const auto line = outcome_line();
+                EXPECT(line.has_value());
+                EXPECT(line && line->level == alpacacore::logging::LogLevel::Info);
+                EXPECT(line && line->message.find("host clock stepped") != std::string::npos);
+            }
+
+            // Failed (clock_settime refused): WARN, carrying the setter's
+            // error text so the operator sees why.
+            {
+                alpacahttp::Router clock_router;
+                clock_router.set_host_clock_hooks([] { return false; },
+                                                  [](std::chrono::system_clock::time_point, std::string& error) {
+                                                      error = "operation not permitted";
+                                                      return false;
+                                                  });
+                fresh_counts();
+                clear();
+                write_ok(clock_router);
+                const auto line = outcome_line();
+                EXPECT(line.has_value());
+                EXPECT(line && line->level == alpacacore::logging::LogLevel::Warn);
+                EXPECT(line && line->message.find("operation not permitted") != std::string::npos);
+            }
+
+            // SkippedSynchronized with the client far out (the fixture's
+            // 2001 instant against the real clock): WARN, naming the shared
+            // threshold in ms.
+            {
+                alpacahttp::Router clock_router;
+                clock_router.set_host_clock_hooks(
+                    [] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
+                fresh_counts();
+                clear();
+                write_ok(clock_router);
+                const auto line = outcome_line();
+                EXPECT(line.has_value());
+                EXPECT(line && line->level == alpacacore::logging::LogLevel::Warn);
+                EXPECT(line &&
+                       line->message.find("NTP-disciplined host and client disagree by more than " +
+                                          std::to_string(alpacacore::util::HostClock::kClientDisagreementWarn.count()) +
+                                          " ms") != std::string::npos);
+            }
+
+            // SkippedSynchronized with the client in agreement: the quiet
+            // arm, DEBUG. A stub that reports the host's own "now" as the
+            // client value keeps the delta under the threshold.
+            {
+                alpacahttp::Router clock_router;
+                clock_router.set_host_clock_hooks(
+                    [] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
+                fresh_counts();
+                clear();
+                const auto now = std::chrono::system_clock::now();
+                const std::time_t now_t = std::chrono::system_clock::to_time_t(now);
+                // Carry the milliseconds: to_time_t truncates to the second,
+                // which alone ate up to ~1 s of the 2 s agreement margin
+                // before any request time was added.
+                const auto now_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+                char stamp[32];
+                std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", std::gmtime(&now_t));
+                char stamp_ms[8];
+                std::snprintf(stamp_ms, sizeof(stamp_ms), ".%03lldZ", static_cast<long long>(now_ms));
+                const std::string agreeing_body = std::string(R"({"UTCDate":")") + stamp + stamp_ms + R"("})";
+                const auto response = route_request(clock_router, "PUT", base + "/utcdate", agreeing_body);
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+                const auto line = outcome_line();
+                EXPECT(line.has_value());
+                EXPECT(line && line->level == alpacacore::logging::LogLevel::Debug);
+                EXPECT(line && line->message.find("NTP-disciplined host and client disagree") == std::string::npos);
+            }
+
+            // SkippedDisabled (the opt-out): DEBUG, naming the outcome.
+            {
+                alpacahttp::Router clock_router;
+                clock_router.set_sync_system_clock_from_clients(false);
+                clock_router.set_host_clock_hooks(
+                    [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
+                fresh_counts();
+                clear();
+                write_ok(clock_router);
+                const auto line = outcome_line();
+                EXPECT(line.has_value());
+                EXPECT(line && line->level == alpacacore::logging::LogLevel::Debug);
+                EXPECT(line && line->message.find("syncSystemClockFromClients is off") != std::string::npos);
+            }
+        }
+
         // A hardware RTC the kernel booted from is reported as the source
         // while the clock is undisciplined and unstepped (#292).
         {
@@ -3144,6 +3301,78 @@ int main() {
                 // distinguished by level alone.
                 EXPECT(rtc_line_level() == alpacacore::logging::LogLevel::Info);
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9806);
+            }
+
+            // The other two message variants, both on an RTC-booted host so
+            // that RTC alone cannot be what picks the level (#397).
+            //
+            // Refused: a step was attempted and clock_settime said no (no
+            // CAP_SYS_TIME). The refusal latches, so an RTC host that would
+            // otherwise be the INFO arm is now WARN, and the message tells
+            // the operator to set the clock outside the service rather than
+            // recommending the Sync Time button that the same refusal killed.
+            {
+                auto scope_f = std::make_shared<TelescopeClockStubDriver>(9807);
+                EXPECT(registry.register_device(scope_f));
+                alpacahttp::Router clock_router;
+                clock_router.set_host_clock_hooks([] { return false; },
+                                                  [](std::chrono::system_clock::time_point, std::string& error) {
+                                                      error = "operation not permitted";
+                                                      return false;
+                                                  },
+                                                  [] { return true; });
+                route_request(clock_router, "PUT", "/api/v1/telescope/9807/utcdate", client_utc_body);
+                clear();
+                connect_ok(clock_router, "/api/v1/telescope/9807/connected", "Connected=true");
+                EXPECT(rtc_line_level() == alpacacore::logging::LogLevel::Warn);
+                {
+                    std::lock_guard<std::mutex> lock(captured_mutex);
+                    bool refused_text = false;
+                    bool sync_time_recommended = false;
+                    bool sync_script_recommended = false;
+                    for (const auto& line : captured) {
+                        if (line.message.find("hardware RTC's time") == std::string::npos) {
+                            continue;
+                        }
+                        refused_text |= line.message.find("setting the clock was refused") != std::string::npos;
+                        sync_time_recommended |= line.message.find("Use the web UI's Sync Time") != std::string::npos;
+                        sync_script_recommended |= line.message.find("scripts/sync-clock.sh") != std::string::npos;
+                    }
+                    EXPECT(refused_text);
+                    EXPECT(!sync_time_recommended);
+                    EXPECT(sync_script_recommended);  // the replacement advice, not just the absence of the old
+                }
+                registry.unregister_device(alpacacore::DeviceType::Telescope, 9807);
+            }
+
+            // Opt-out: syncSystemClockFromClients is off, so no client will
+            // correct the clock. WARN even on an RTC host, and the message
+            // points at Sync Time, which still works here because nothing
+            // has been refused.
+            {
+                auto scope_g = std::make_shared<TelescopeClockStubDriver>(9808);
+                EXPECT(registry.register_device(scope_g));
+                alpacahttp::Router clock_router;
+                clock_router.set_sync_system_clock_from_clients(false);
+                clock_router.set_host_clock_hooks(
+                    [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
+                    [] { return true; });
+                clear();
+                connect_ok(clock_router, "/api/v1/telescope/9808/connected", "Connected=true");
+                EXPECT(rtc_line_level() == alpacacore::logging::LogLevel::Warn);
+                {
+                    std::lock_guard<std::mutex> lock(captured_mutex);
+                    bool opt_out_text = false;
+                    for (const auto& line : captured) {
+                        if (line.message.find("hardware RTC's time") != std::string::npos) {
+                            opt_out_text |=
+                                line.message.find("syncSystemClockFromClients is off") != std::string::npos &&
+                                line.message.find("Use the web UI's Sync Time") != std::string::npos;
+                        }
+                    }
+                    EXPECT(opt_out_text);
+                }
+                registry.unregister_device(alpacacore::DeviceType::Telescope, 9808);
             }
 
             alpacacore::logging::set_log_sink(previous_sink);
