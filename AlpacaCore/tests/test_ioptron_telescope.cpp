@@ -251,8 +251,6 @@ TEST_CASE("iOptron Telescope Driver - HEM27 (0025) GOTO settle is left to the fi
 
     driver->set_connected(false);
 }
-#endif  // !_WIN32
-
 // open-astro#346, the shape #304 fixed on the Sky-Watcher driver: ASCOM treats
 // TargetRightAscension and TargetDeclination as independent properties, each
 // throwing ValueNotSet until that property itself has been written. One shared
@@ -300,3 +298,5 @@ TEST_CASE("iOptron Telescope Driver - the two target properties are independent"
 
     driver->set_connected(false);
 }
+
+#endif  // !_WIN32
