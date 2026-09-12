@@ -35,11 +35,13 @@ Checks:
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
      that looks like a real repo path actually exists.
   8. The TSan job's filtered runs are identical between ci.yml and
-     ci_preflight.sh: the same set of `alpacacore_tests "<tag>"` invocations,
-     and the same zero-test grep pattern guarding each one (issue #341). The
-     pre-flight script only has value while it runs what CI runs, and this
-     pair is written out twice with nothing comparing it -- the same shape as
-     checks 2 and 3.
+     ci_preflight.sh: the same ordered `alpacacore_tests "<tag>"` invocations
+     out of the same build directory, each one followed by a zero-test
+     `grep -qE` that reads the log that run's `tee` wrote, with the same
+     pattern in both files (issue #341, tightened in issue #455: a guard is
+     paired with the run it reads, not counted). The pre-flight script only
+     has value while it runs what CI runs, and this pair is written out twice
+     with nothing comparing it -- the same shape as checks 2 and 3.
 """
 
 import glob
@@ -124,6 +126,33 @@ def check_zizmor_pin_sync():
 SUPPRESS_RE = re.compile(r"--suppress=(\S+)")
 
 
+_CI_JOB_RE = re.compile(r"^  [A-Za-z0-9_-]+:[ \t]*$", re.MULTILINE)
+
+
+def _ci_job_block(ci_text, job_name):
+    r"""The text of one top-level job in ci.yml, from its `  <job>:` line to the
+    next job's line (or EOF).
+
+    Checks 3 and 8 used to end their scope at a NAMED neighbour (`\n  zizmor:`,
+    `\n  format:`), which silently widened the scope whenever a job was
+    inserted between the two -- and a widened scope carrying a `grep -qE` or a
+    `--suppress=` of its own would then fire the check with a message pointing
+    at the wrong gate (issue #455). Ending at "the next job at this indent"
+    makes the scope follow the job, not the file's current ordering.
+    """
+    start = ci_text.find("\n  %s:" % job_name)
+    if start == -1:
+        return None
+    start += 1
+    # Search from the end of the job's own line, not from an arithmetic
+    # offset that hard-codes the indent and the colon.
+    line_end = ci_text.find("\n", start)
+    if line_end == -1:
+        return ci_text[start:]
+    m = _CI_JOB_RE.search(ci_text, line_end)
+    return ci_text[start:m.start()] if m else ci_text[start:]
+
+
 def _scoped_block(text, start_marker, end_markers):
     """text from start_marker to the first of end_markers found after it (or EOF).
 
@@ -154,7 +183,7 @@ def check_cppcheck_suppress_sync():
     # scope explicitly anyway (mirroring check_zizmor_pin_sync) so this stays
     # correct if a second tool with its own --suppress flag is ever added to
     # either file.
-    ci = _scoped_block(ci_full, "- name: Analyze changed C/C++ files", ("\n  zizmor:",))
+    ci = _scoped_block(_ci_job_block(ci_full, "cppcheck") or "", "- name: Analyze changed C/C++ files", ())
     preflight = _scoped_block(preflight_full, 'section "cppcheck (changed files)"', ('section "',))
     if ci is None or preflight is None:
         failures.append(
@@ -712,12 +741,28 @@ def check_agents_md_paths_exist():
 # pre-flight would stop being a faithful mirror of CI. Issue #341.
 #
 # Matches both spellings of the invocation: bare in ci.yml
-# (`alpacacore_tests "[stress]"`) and quoted-path in ci_preflight.sh
-# (`"${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]"`). The trailing
-# quoted tag is what distinguishes a real run from the `test -x` / `[ -x ... ]`
-# existence probes on the same binary in both files.
-TSAN_RUN_RE = re.compile(r'alpacacore_tests"?\s+"(\[[^"]+\])"')
-TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'")
+# (`./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" | tee stress-run.log`)
+# and quoted-path in ci_preflight.sh
+# (`"${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" | tee "${TSAN_BUILD_DIR}/stress-run.log"`).
+# The trailing quoted tag is what distinguishes a real run from the `test -x`
+# / `[ -x ... ]` existence probes on the same binary in both files. The build
+# directory (the path segment before `/tests/`) and the `tee` target are
+# captured too: the first so a build-directory rename in one file only is
+# visible, the second so each zero-test grep can be paired with the log its
+# run actually wrote (issue #455).
+# The tag is what makes an invocation a run; the `| tee <log>` that follows is
+# OPTIONAL in the match so a run written without one is still counted, still
+# tag-compared and still required to have a guard -- which it cannot have,
+# since no grep can read a log it never wrote, so the pairing reports it
+# (review finding on PR #472: with `tee` mandatory, such a run was invisible
+# to the whole check).
+TSAN_RUN_RE = re.compile(
+    r'([^\s"]*)/tests/alpacacore_tests"?\s+"(\[[^"]+\])"'
+    r'(?:\s*(?:2>&1\s*)?\|&?\s*tee\s+"?([^\s"]+)"?)?')
+TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'\s+(?:<\s*)?\"?([^\s\"<]+)\"?")
+# ci_preflight.sh spells the build directory through a variable; this is its
+# one assignment, so the two paths can be compared by basename.
+TSAN_BUILD_DIR_RE = re.compile(r'^\s*TSAN_BUILD_DIR="?([^"\n]+?)"?\s*$', re.MULTILINE)
 
 # A floor, not a count: it exists only so a regex that stops matching fails
 # loudly instead of comparing two empty sets and passing. Deliberately NOT set
@@ -727,12 +772,86 @@ TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'")
 MIN_TSAN_FILTERED_RUNS = 1
 
 
+def _basename(path):
+    return path.rsplit("/", 1)[-1]
+
+
+def _tsan_events(block):
+    """The filtered runs and zero-test greps of one TSan block, in file order.
+
+    Each run is ("run", tag, build_dir, tee_log) and each grep is
+    ("grep", pattern, log), all paths reduced to their basename so ci.yml's
+    literal `stress-run.log` pairs with ci_preflight.sh's
+    `"${TSAN_BUILD_DIR}/stress-run.log"` without expanding the variable.
+    A run with no `| tee` has tee_log None: it is still a run, and the
+    pairing below reports it, because no grep can guard a log never written.
+    """
+    events = []
+    for m in TSAN_RUN_RE.finditer(block):
+        tee_log = _basename(m.group(3)) if m.group(3) else None
+        events.append((m.start(), ("run", m.group(2), _basename(m.group(1)), tee_log)))
+    for m in TSAN_GREP_RE.finditer(block):
+        events.append((m.start(), ("grep", m.group(1), _basename(m.group(2)))))
+    return [event for _, event in sorted(events)]
+
+
+def _pair_tsan_runs(label, events, failures):
+    """Pair every run with the grep that follows it; return [(tag, pattern)].
+
+    The rule is positional, not a count: a retagged run whose `tee` target
+    was not retagged would leave the run count and the grep count equal
+    while its grep read the PREVIOUS run's log, which is the vacuous-pass
+    shape the greps exist to prevent, reached from a direction a count
+    cannot see (issue #455).
+    """
+    pairs = []
+    pending = None
+    for event in events:
+        if event[0] == "run":
+            if pending is not None:
+                failures.append(
+                    "%s: filtered TSan run %s is not followed by a zero-test "
+                    "grep of its log %s before the next run -- every filtered "
+                    "run needs its own guard, or the run reports success having "
+                    "executed nothing" % (label, pending[1], pending[3] or "(no tee)"))
+            pending = event
+            continue
+        _, pattern, log = event
+        if pending is None:
+            failures.append(
+                "%s: zero-test grep of %s has no filtered TSan run before it -- "
+                "an unpaired guard means the two files have drifted"
+                % (label, log))
+            continue
+        if pending[3] is None:
+            failures.append(
+                "%s: filtered TSan run %s does not `| tee` a log, so the grep of "
+                "%s that follows it cannot be reading that run's output -- pipe "
+                "the run into a log and grep that log" % (label, pending[1], log))
+            pending = None
+            continue
+        if log != pending[3]:
+            failures.append(
+                "%s: filtered TSan run %s writes %s but the grep that follows "
+                "it reads %s -- the guard must read the log of the run it "
+                "guards" % (label, pending[1], pending[3], log))
+        pairs.append((pending[1], pattern))
+        pending = None
+    if pending is not None:
+        failures.append(
+            "%s: filtered TSan run %s is not followed by a zero-test grep of "
+            "its log %s -- every filtered run needs its own guard, or the run "
+            "reports success having executed nothing"
+            % (label, pending[1], pending[3] or "(no tee)"))
+    return pairs
+
+
 def check_tsan_filtered_runs_sync():
     failures = []
     ci_full = read(".github/workflows/ci.yml")
     preflight_full = read("scripts/ci_preflight.sh")
 
-    ci = _scoped_block(ci_full, "  sanitizers-tsan:", ("\n  format:",))
+    ci = _ci_job_block(ci_full, "sanitizers-tsan")
     preflight = _scoped_block(
         preflight_full,
         'section "ThreadSanitizer (concurrency stress, all vendors)"',
@@ -746,50 +865,61 @@ def check_tsan_filtered_runs_sync():
         )
         return failures
 
-    ci_tags = sorted(TSAN_RUN_RE.findall(ci))
-    pf_tags = sorted(TSAN_RUN_RE.findall(preflight))
-    ci_greps = TSAN_GREP_RE.findall(ci)
-    pf_greps = TSAN_GREP_RE.findall(preflight)
+    ci_events = _tsan_events(ci)
+    pf_events = _tsan_events(preflight)
+    ci_runs = [e for e in ci_events if e[0] == "run"]
+    pf_runs = [e for e in pf_events if e[0] == "run"]
 
-    for label, tags in (("ci.yml", ci_tags), ("ci_preflight.sh", pf_tags)):
-        if len(tags) < MIN_TSAN_FILTERED_RUNS:
+    for label, runs in (("ci.yml", ci_runs), ("ci_preflight.sh", pf_runs)):
+        if len(runs) < MIN_TSAN_FILTERED_RUNS:
             failures.append(
                 "found %d filtered TSan run(s) in %s (floor %d) -- either the "
                 "invocation matcher regressed or the TSan gate was removed"
-                % (len(tags), label, MIN_TSAN_FILTERED_RUNS)
+                % (len(runs), label, MIN_TSAN_FILTERED_RUNS)
             )
     if failures:
         return failures
 
-    if ci_tags != pf_tags:
+    # Ordered, not a set: swapping the two guards between the two runs in one
+    # file is harmless only while both patterns are identical.
+    ci_pairs = _pair_tsan_runs("ci.yml", ci_events, failures)
+    pf_pairs = _pair_tsan_runs("ci_preflight.sh", pf_events, failures)
+    if [tag for tag, _ in ci_pairs] != [tag for tag, _ in pf_pairs]:
         failures.append(
             "TSan filtered runs differ: ci.yml runs %s, ci_preflight.sh runs "
-            "%s -- a filtered run must be added, retagged or removed in both"
-            % (ci_tags, pf_tags)
+            "%s -- a filtered run must be added, retagged or removed in both, "
+            "in the same order"
+            % ([tag for tag, _ in ci_pairs], [tag for tag, _ in pf_pairs])
         )
-
-    # One zero-test guard per filtered run, in each file. A run that loses its
-    # grep goes green on zero tests, which is the whole reason the grep is
-    # there; a count mismatch catches that without depending on the two
-    # appearing in any particular order.
-    for label, tags, greps in (
-        ("ci.yml", ci_tags, ci_greps),
-        ("ci_preflight.sh", pf_tags, pf_greps),
-    ):
-        if len(greps) != len(tags):
-            failures.append(
-                "%s has %d filtered TSan run(s) but %d zero-test grep(s) -- "
-                "every filtered run needs its own guard, or the run reports "
-                "success having executed nothing"
-                % (label, len(tags), len(greps))
-            )
-
-    if set(ci_greps) != set(pf_greps):
+    elif ci_pairs != pf_pairs:
         failures.append(
             "TSan zero-test grep pattern differs: ci.yml has %s, "
             "ci_preflight.sh has %s"
-            % (sorted(set(ci_greps)), sorted(set(pf_greps)))
+            % (ci_pairs, pf_pairs)
         )
+
+    # The build directory: ci.yml names it literally, ci_preflight.sh through
+    # TSAN_BUILD_DIR. Renaming it in one file only leaves the other running
+    # (or failing to find) a different tree.
+    ci_dirs = sorted({run[2] for run in ci_runs})
+    pf_dirs = set()
+    for run in pf_runs:
+        d = run[2]
+        if d.startswith("${") and d.endswith("}"):
+            m = TSAN_BUILD_DIR_RE.search(preflight_full)
+            if m is None:
+                failures.append(
+                    "ci_preflight.sh runs the TSan binary out of %s but assigns "
+                    "no TSAN_BUILD_DIR -- update this check's variable matcher "
+                    "if the gate's structure changed" % d)
+                continue
+            d = _basename(m.group(1))
+        pf_dirs.add(d)
+    pf_dirs = sorted(pf_dirs)
+    if ci_dirs != pf_dirs:
+        failures.append(
+            "TSan build directory differs: ci.yml runs out of %s, "
+            "ci_preflight.sh out of %s" % (ci_dirs, pf_dirs))
     return failures
 
 

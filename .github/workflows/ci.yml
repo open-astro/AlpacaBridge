@@ -518,15 +518,10 @@ jobs:
 
       - name: Check docs/config for self-inconsistency
         # Catches drift between the repo's own docs and its actual config
-        # (CMake options vs docs/development.md, zizmor/cppcheck pins between
-        # ci.yml and ci_preflight.sh, VERSION vs the README badge, stale
-        # paths in AGENTS.md, async_connectable.h's blocking-get_connected()
-        # lists vs the drivers -- including a count of either list stated
-        # anywhere, issue #381 -- and this workflow's own TSan filtered runs
-        # and their zero-test greps vs ci_preflight.sh's, issue #341) that
-        # nothing previously caught automatically.
-        # The script's module docstring is the authoritative list; keep this
-        # summary in step with it or drop it rather than letting it go stale.
+        # that nothing previously caught automatically. The script's module
+        # docstring is the authoritative, numbered list of what it checks;
+        # this comment deliberately does not repeat it (a summary here went
+        # stale twice, issue #455).
         run: python3 scripts/check_docs_drift.py
 
   connect-error-hook:
