@@ -75,7 +75,22 @@ public:
     // describe the same event, so they share one threshold rather than two
     // literals that can drift apart.
     static constexpr std::chrono::milliseconds kClientDisagreementWarn{2000};
+    // host_booted_from_rtc() re-probes a missing RTC at most this often; a
+    // refresh_rtc() that lands sooner returns the cached answer. The server's
+    // probe timer (Config::rtc_probe_interval_seconds) must run SLOWER than
+    // this, or passes are swallowed and each one costs the process an extra
+    // interval with nothing failing (exactly every other pass, i.e. a doubled
+    // period, when the two are equal); Config derives its default from this constant so
+    // the two cannot drift apart (open-astro#406).
+    static constexpr std::chrono::seconds kRtcProbeRateLimit{30};
 
+    // CONSTRUCTION CONTRACT (open-astro#406): the default constructor primes
+    // the RTC probe, which reads /sys/class/rtc/... and on a bus-attached RTC
+    // is an I2C transaction that can sit out the adapter timeout on a wedged
+    // bus. Construct a HostClock at startup, never on a request path or per
+    // request. Today the only production instance belongs to the only
+    // production Router, built by the Server before it listens. Code that
+    // must build one elsewhere injects a HasRtcFn that does no I/O.
     HostClock()
         : HostClock(&HostClock::kernel_is_synchronized, &HostClock::kernel_set_time, &HostClock::host_booted_from_rtc) {
     }
@@ -85,7 +100,8 @@ public:
               Hooks{std::move(is_synchronized), std::move(set_time), std::move(has_rtc)})) {
         // open-astro#314: prime the probe here, at construction, so that no
         // request path ever pays for it. Construction is startup, where a
-        // wedged I2C bus costs a second that nobody is waiting on.
+        // wedged I2C bus costs a second that nobody is waiting on (see the
+        // construction contract above).
         refresh_rtc();
     }
 
@@ -187,8 +203,8 @@ public:
      * the RTC itself (open-astro#307).
      *
      * Cheap and safe to call when the answer has already settled: the probe
-     * itself short-circuits, and it is rate-limited to once per 30 s while no
-     * device has been found.
+     * itself short-circuits, and it is rate-limited to once per
+     * kRtcProbeRateLimit while no device has been found.
      */
     void refresh_rtc() { rtc_.store(hooks()->has_rtc(), std::memory_order_relaxed); }
 

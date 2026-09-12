@@ -1245,10 +1245,10 @@ void Server::wake_reactor() {
 // one successful read, so on a host with an RTC this costs nothing within a
 // minute of start; on a host without one each pass is an opendir.
 //
-// The interval comes from Config (31 s by default, deliberately not the 30 s
-// of the probe's own rate limiter: equal periods race, and a pass landing a
-// few microseconds early is silently swallowed, which would make the
-// effective period 60 s). It is settable for the same reason the keep-alive
+// The interval comes from Config (HostClock::kRtcProbeRateLimit + 1 s by
+// default, deliberately not the limiter itself: equal periods race, and a
+// pass landing a few microseconds early is silently swallowed, which would
+// make the effective period 60 s). It is settable for the same reason the keep-alive
 // cap is -- a test cannot wait half a minute to see the thread do its job.
 void Server::rtc_probe_loop() {
     const auto interval = std::chrono::seconds(config_.rtc_probe_interval_seconds());

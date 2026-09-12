@@ -837,7 +837,7 @@ int main() {
     // startup answer is pinned for the life of the process.
     //
     // Drive it end to end instead: a real Server, a counting has_rtc hook, a
-    // 1 s interval from Config (the default 31 s is unwaitable), and an
+    // 1 s interval from Config (the default, one second past the probe's rate limit, is unwaitable), and an
     // assertion that the count rises on its own.
     {
         alpacahttp::Config rtc_config;

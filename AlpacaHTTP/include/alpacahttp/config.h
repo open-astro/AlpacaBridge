@@ -12,10 +12,12 @@
 
 #pragma once
 
-#include <string>
+#include <alpacacore/util/host_clock.h>
+
 #include <cstdint>
-#include <unordered_map>
 #include <optional>
+#include <string>
+#include <unordered_map>
 
 namespace alpacahttp {
 
@@ -84,6 +86,10 @@ public:
         if (seconds < 1) seconds = 1;
         keep_alive_lifetime_seconds_ = seconds;
     }
+    // Values at or below HostClock::kRtcProbeRateLimit are a TEST seam
+    // (test_server_socket.cpp drives the thread at 1 s): the probe's own
+    // limiter still swallows the extra passes, so in production such a value
+    // buys nothing and the default below is what a deployment runs on.
     void set_rtc_probe_interval_seconds(int seconds) {
         if (seconds < 1) seconds = 1;
         rtc_probe_interval_seconds_ = seconds;
@@ -115,10 +121,14 @@ private:
     // client). Settable so the cap can be tested without waiting five
     // minutes.
     int keep_alive_lifetime_seconds_ = 300;
-    // 31 s, deliberately not the probe's own 30 s rate limit: equal periods
-    // race, and a pass landing microseconds early is silently swallowed,
-    // which would make the effective period 60 s (#314).
-    int rtc_probe_interval_seconds_ = 31;
+    // One second above the probe's own rate limit, deliberately not equal
+    // to it: equal periods race, and a pass landing microseconds early is
+    // silently swallowed, which would make the effective period 60 s (#314).
+    // Derived from the limiter rather than a second literal, so moving one
+    // moves the other (#406).
+    static constexpr int kDefaultRtcProbeIntervalSeconds =
+        static_cast<int>(alpacacore::util::HostClock::kRtcProbeRateLimit.count()) + 1;
+    int rtc_probe_interval_seconds_ = kDefaultRtcProbeIntervalSeconds;
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever
