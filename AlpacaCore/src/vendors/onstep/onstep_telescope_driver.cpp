@@ -216,7 +216,8 @@ public:
             altaz_cache_valid_ = false;
             site_info_valid_ = false;
             last_utc_valid_ = false;
-            target_set_ = false;
+            target_ra_set_ = false;
+            target_dec_set_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             slewing_cached_ = false;
@@ -332,7 +333,8 @@ public:
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 firmware_cache_.clear();
             }
-            target_set_ = false;
+            target_ra_set_ = false;
+            target_dec_set_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             slewing_cached_ = false;
@@ -660,7 +662,7 @@ public:
     }
 
     double get_target_declination() const override {
-        if (!target_set_) {
+        if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
         return target_dec_degrees_;
@@ -671,11 +673,11 @@ public:
             throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_dec_set_ = true;
     }
 
     double get_target_right_ascension() const override {
-        if (!target_set_) {
+        if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
         return target_ra_hours_;
@@ -686,7 +688,7 @@ public:
             throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours", AlpacaError::InvalidValue);
         }
         target_ra_hours_ = ra;
-        target_set_ = true;
+        target_ra_set_ = true;
     }
 
     int get_tracking_rate() const override { return 0; }
@@ -817,14 +819,14 @@ public:
     }
 
     void slew_to_target() override {
-        if (!target_set_) {
+        if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
         slew_to_coordinates(target_ra_hours_, target_dec_degrees_);
     }
 
     void slew_to_target_async() override {
-        if (!target_set_) {
+        if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
         slew_to_coordinates_async(target_ra_hours_, target_dec_degrees_);
@@ -844,7 +846,8 @@ public:
         protocol.sync_to_target();
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         cached_ra_hours_ = ra;
         cached_dec_degrees_ = dec;
         equatorial_cache_valid_ = true;
@@ -852,7 +855,7 @@ public:
     }
 
     void sync_to_target() override {
-        if (!target_set_) {
+        if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
         sync_to_coordinates(target_ra_hours_, target_dec_degrees_);
@@ -1017,7 +1020,8 @@ private:
         }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
         status_cache_valid_ = false;
@@ -1227,7 +1231,16 @@ private:
 
     double target_ra_hours_ = 0.0;
     double target_dec_degrees_ = 0.0;
-    mutable bool target_set_ = false;
+    // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
+    // treats the two target properties as independent, so each must throw
+    // ValueNotSet until that property itself has been written. One shared flag
+    // let a write to either unlock both, and a client reading the one it did
+    // not set got a default 0 instead of an error. The paths that legitimately
+    // define both coordinates at once -- the slew and sync coordinate forms,
+    // the position-override and arrival reads, and the connect/disconnect
+    // resets -- still set or clear both.
+    mutable bool target_ra_set_ = false;
+    mutable bool target_dec_set_ = false;
 
     double aperture_diameter_m_ = 0.0;
     double aperture_area_m2_ = 0.0;

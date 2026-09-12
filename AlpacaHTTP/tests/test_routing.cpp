@@ -18,6 +18,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
+#include <alpacahttp/version.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -2290,6 +2291,251 @@ int main() {
         EXPECT(lat_only);
         EXPECT(lon_only);
     }
+    {
+        // Issue #380: the portPath / host / connectionType checks follow the
+        // same source rule as the site-coordinate check above. All three used
+        // to `return false` regardless of source, so a persisted entry with an
+        // empty portPath vanished from the web UI at startup -- the exact
+        // failure the rule exists to prevent, and the one an operator is most
+        // likely to hit, since the port path is what goes wrong after a USB
+        // device is renamed.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+
+        // One entry per check. Site coordinates are present throughout so a
+        // failure here cannot be the #274 rule firing instead.
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9640},
+                           {"connectionType", "serial"},
+                           {"portPath", ""},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 39.7392},
+                           {"siteLongitude", -104.9903}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9641},
+                           {"connectionType", "network"},
+                           {"host", ""},
+                           {"siteLatitude", 39.7392},
+                           {"siteLongitude", -104.9903}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9642},
+                           {"connectionType", "carrier-pigeon"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 39.7392},
+                           {"siteLongitude", -104.9903}});
+#ifdef ALPACACORE_ENABLE_ZWO
+        // Review finding: the ZWO branch tests a bare `conn_type == "auto"`,
+        // not `|| conn_type.empty()`, so an entry with no connectionType key
+        // falls to its else and used to be dropped regardless of source -- the
+        // one branch a blanket "empty is always valid" rule in the helper
+        // would have left unfixed. The off-UI path: hand-edited, or written by
+        // a non-web-UI client, since the form always sets the field.
+        entries.push_back({{"vendor", "zwo"}, {"deviceType", "telescope"}, {"deviceNumber", 9644}});
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        // Review finding: the bisque branch has no connectionType at all --
+        // it is TCP-only -- and its host check was the one telescope branch
+        // still doing an inline `return false`, so a persisted entry with an
+        // empty host was dropped at startup while the other six were kept.
+        entries.push_back({{"vendor", "bisque"}, {"deviceType", "telescope"}, {"deviceNumber", 9646}, {"host", ""}});
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        // OnStep is serial-only, so its valid list is shorter: a persisted
+        // "network" is unrecognised HERE even though it is valid for the other
+        // four, and normalises to serial rather than dropping the device.
+        entries.push_back({{"vendor", "onstep"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9645},
+                           {"connectionType", "network"},
+                           {"host", "192.168.1.50"}});
+#endif
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+
+        std::vector<std::string> warnings;
+        std::mutex warnings_mutex;
+        auto previous_sink = alpacacore::logging::get_log_sink();
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn) {
+                    std::lock_guard<std::mutex> lock(warnings_mutex);
+                    warnings.emplace_back(message);
+                }
+            });
+        alpacahttp::Router startup_router;
+        const auto listed_json = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        alpacacore::logging::set_log_sink(previous_sink);
+
+        // Restore before anything that can abort, and not from a destructor:
+        // EXPECT is abort(), which neither unwinds nor runs a scope guard.
+        const auto restore_original = [&] {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        };
+        restore_original();
+        remove_device(startup_router, "skywatcher", "telescope", 9640);
+        remove_device(startup_router, "skywatcher", "telescope", 9641);
+        remove_device(startup_router, "skywatcher", "telescope", 9642);
+#ifdef ALPACACORE_ENABLE_ZWO
+        remove_device(startup_router, "zwo", "telescope", 9644);
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        remove_device(startup_router, "bisque", "telescope", 9646);
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        remove_device(startup_router, "onstep", "telescope", 9645);
+#endif
+        restore_original();
+
+        EXPECT(!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array());
+        std::vector<int> expected_listed = {9640, 9641, 9642};
+#ifdef ALPACACORE_ENABLE_ZWO
+        expected_listed.push_back(9644);
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        expected_listed.push_back(9646);
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        expected_listed.push_back(9645);
+#endif
+        for (int device_number : expected_listed) {
+            bool found = false;
+            for (const auto& entry : listed_json["Value"]) {
+                if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == device_number) {
+                    found = true;
+                }
+            }
+            EXPECT(found);
+        }
+
+        // Each registration is accompanied by a WARN that names the reason, so
+        // "registered anyway" never means "registered silently". The
+        // connection-type line is distinct: that entry is not merely warned
+        // about, it is normalised to serial, and the log has to say so or the
+        // operator cannot explain the connect error they then get.
+        bool warned_port = false;
+        bool warned_host = false;
+        bool warned_conn_type = false;
+        for (const auto& w : warnings) {
+            if (w.find("telescope 9640") != std::string::npos &&
+                w.find("Serial port path is required") != std::string::npos) {
+                warned_port = true;
+            }
+            if (w.find("telescope 9641") != std::string::npos &&
+                w.find("Host IP address is required") != std::string::npos) {
+                warned_host = true;
+            }
+            // The fallback VALUE is the judgement this whole change rests on:
+            // "serial" makes the connect fail on the port path, while "auto"
+            // would auto-probe and attach to whatever mount answers. Nothing
+            // pinned it, so flipping the helper to "auto" kept the suite
+            // green -- assert the fragment, not just that a WARN happened.
+            if (w.find("telescope 9642") != std::string::npos &&
+                w.find("has connectionType \"carrier-pigeon\"") != std::string::npos &&
+                w.find("treating it as \"serial\"") != std::string::npos) {
+                warned_conn_type = true;
+            }
+        }
+        EXPECT(warned_port);
+        EXPECT(warned_host);
+        EXPECT(warned_conn_type);
+
+#ifdef ALPACACORE_ENABLE_BISQUE
+        bool warned_bisque_host = false;
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+        bool warned_zwo_empty = false;
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        bool warned_onstep_network = false;
+#endif
+        for (const auto& w : warnings) {
+#ifdef ALPACACORE_ENABLE_BISQUE
+            if (w.find("telescope 9646") != std::string::npos &&
+                w.find("Host is required for Bisque/TheSkyX connection") != std::string::npos) {
+                warned_bisque_host = true;
+            }
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+            // Match the normalisation line's own distinctive wording, not a
+            // bare "serial": the sibling port-path WARN only fails to match
+            // that because it capitalises "Serial", which is a coincidence of
+            // wording rather than something this case should rest on.
+            if (w.find("telescope 9644") != std::string::npos && w.find("has connectionType") != std::string::npos) {
+                warned_zwo_empty = true;
+            }
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+            if (w.find("telescope 9645") != std::string::npos &&
+                w.find("has connectionType \"network\"") != std::string::npos) {
+                warned_onstep_network = true;
+            }
+#endif
+        }
+#ifdef ALPACACORE_ENABLE_BISQUE
+        EXPECT(warned_bisque_host);
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+        EXPECT(warned_zwo_empty);
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        EXPECT(warned_onstep_network);
+#endif
+    }
+    {
+        // The other half of the rule, unchanged: the same three configs are
+        // still rejected outright when they arrive through the API, where the
+        // caller can fix them and nothing has been written to disk yet.
+        alpacahttp::Router router;
+        const nlohmann::json base = {{"vendor", "skywatcher"},
+                                     {"deviceType", "telescope"},
+                                     {"deviceNumber", 9643},
+                                     {"siteLatitude", 39.7392},
+                                     {"siteLongitude", -104.9903}};
+        const auto reject = [&router](nlohmann::json body, const std::string& expected) {
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", body.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            EXPECT(json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find(expected) != std::string::npos);
+        };
+
+        nlohmann::json no_port = base;
+        no_port["connectionType"] = "serial";
+        no_port["portPath"] = "";
+        reject(no_port, "Serial port path is required");
+
+        nlohmann::json no_host = base;
+        no_host["connectionType"] = "network";
+        no_host["host"] = "";
+        reject(no_host, "Host IP address is required");
+
+        nlohmann::json bad_type = base;
+        bad_type["connectionType"] = "carrier-pigeon";
+        bad_type["portPath"] = "/dev/ttyUSB8";
+        reject(bad_type, "Invalid connection type");
+
+#ifdef ALPACACORE_ENABLE_BISQUE
+        // Bisque has no connectionType and no portPath: its host is the whole
+        // config, so it gets its own API case rather than a variant of base.
+        reject({{"vendor", "bisque"}, {"deviceType", "telescope"}, {"deviceNumber", 9647}, {"host", ""}},
+               "Host is required for Bisque/TheSkyX connection");
+#endif
+    }
+
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
@@ -3542,6 +3788,156 @@ int main() {
         }
     }
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
+
+    // Issue #348: every state-changing management endpoint carries the
+    // cross-origin guard, not just synctime and wifi.
+    {
+        alpacahttp::Router router;
+
+        // The management surface is unauthenticated by design under the
+        // trusted-LAN model. The guard is what stops that stance from also
+        // covering a page the operator merely has open in a browser on the
+        // same LAN: a POST with Content-Type: text/plain is not preflighted,
+        // and these handlers parse the body regardless of content type, so
+        // nothing on the browser side would have stopped a drive-by.
+        const auto request_with = [](const std::string& method, const std::string& path, const std::string& origin,
+                                     const std::string& body) {
+            std::ostringstream raw;
+            raw << method << " " << path << "?ClientTransactionID=77 HTTP/1.1\r\n"
+                << "Host: localhost\r\n";
+            if (!origin.empty()) {
+                raw << "Origin: " << origin << "\r\n";
+            }
+            // text/plain on purpose: the un-preflighted shape is the one the
+            // guard exists for, and it must reach the handler all the same.
+            raw << "Content-Type: text/plain\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            return request;
+        };
+
+        struct Endpoint {
+            const char* method;
+            const char* path;
+            const char* body;
+            // The endpoint's own `what` label. docs/wifi-api.md and the
+            // CHANGELOG both claim "the rejection message names the
+            // endpoint"; asserting only "Cross-origin" left all eight free to
+            // pass the same string with the loop still green.
+            const char* what;
+        };
+        const Endpoint endpoints[] = {
+            {"PUT", "/management/v1/description", R"({"Location":"moved"})", "server description"},
+            {"POST", "/management/v1/configuredevice", R"({"DeviceType":"telescope"})", "device configuration"},
+            {"POST", "/management/v1/removedevice", R"({"DeviceType":"telescope","DeviceNumber":0})", "device removal"},
+            {"PUT", "/management/v1/loglevel", R"({"Level":"TRACE"})", "log level"},
+            {"POST", "/management/v1/shutdown", "{}", "shutdown"},
+            {"POST", "/management/v1/restart", "{}", "restart"},
+            {"DELETE", "/management/v1/logfiles/alpaca.log", "", "log file"},
+            // The collection form deletes EVERY log file. Guarding the
+            // per-file DELETE and not this one would have been exactly the
+            // accidental difference the audit exists to remove.
+            {"DELETE", "/management/v1/logfiles", "", "log files"},
+        };
+
+        for (const auto& ep : endpoints) {
+            // A foreign origin is refused before the handler does anything.
+            const auto blocked = router.route(request_with(ep.method, ep.path, "http://evil.example", ep.body), 1);
+            EXPECT(blocked.status_code() == 403);
+            const auto blocked_json = nlohmann::json::parse(blocked.body(), nullptr, false);
+            EXPECT(!blocked_json.is_discarded());
+            EXPECT(blocked_json.value("ErrorMessage", "") ==
+                   std::string("Cross-origin ") + ep.what + " requests are not allowed");
+            EXPECT(blocked_json.value("ClientTransactionID", 0U) == 77U);
+            // The echo IS asserted: #384 landed on main before this branch
+            // merged, so the shared helper now carries the client's id into
+            // the 403 body instead of a hardcoded 0. request_with() sends 77,
+            // and each of these endpoints reaches the helper through its own
+            // handler -- so this also checks every one of them passes a real
+            // client id rather than a literal, which is the mistake #384 was.
+
+            // The same-origin portal is unaffected. What the handler then
+            // does with the request is its own business -- these run against a
+            // router with no shutdown/restart callback and no such device --
+            // so the assertion is only that the guard did not fire.
+            const auto same_origin = router.route(request_with(ep.method, ep.path, "http://localhost", ep.body), 1);
+            EXPECT(same_origin.status_code() != 403);
+
+            // A non-browser client (curl, a native app) sends no Origin at all.
+            const auto no_origin = router.route(request_with(ep.method, ep.path, "", ep.body), 1);
+            EXPECT(no_origin.status_code() != 403);
+        }
+
+        // GET stays exempt everywhere, so the web UI's polling keeps working
+        // from any origin -- including the log viewer and the level readback,
+        // whose handlers share a function with the guarded methods.
+        for (const char* path : {"/management/v1/description", "/management/v1/loglevel", "/management/v1/logfiles",
+                                 // The log VIEWER, not just the listing: this
+                                 // is the one read path whose handler guards
+                                 // ahead of all its own logic, so it is the
+                                 // one most likely to lose its GET exemption.
+                                 "/management/v1/logfiles/alpaca.log", "/management/v1/configureddevices"}) {
+            const auto response = router.route(request_with("GET", path, "http://evil.example", ""), 1);
+            EXPECT(response.status_code() != 403);
+        }
+
+        // The one documented asymmetry, pinned so docs/wifi-api.md cannot
+        // drift from it: the collection's guard sits inside its DELETE
+        // branch, so a cross-origin PUT here is answered by the method check
+        // rather than refused, while the per-file form returns 403.
+        const auto collection_put =
+            router.route(request_with("PUT", "/management/v1/logfiles", "http://evil.example", ""), 1);
+        EXPECT(collection_put.status_code() == 200);
+        const auto collection_json = nlohmann::json::parse(collection_put.body(), nullptr, false);
+        EXPECT(!collection_json.is_discarded() && collection_json.value("ErrorNumber", 0) != 0);
+        const auto item_put =
+            router.route(request_with("PUT", "/management/v1/logfiles/alpaca.log", "http://evil.example", ""), 1);
+        EXPECT(item_put.status_code() == 403);
+    }
+
+    // Issue #444: the buildinfo endpoint the header badge reads. Nothing
+    // pinned the route, the endpoint name, or the payload keys before this,
+    // so a rename on either side would have been caught only by opening the
+    // web UI and noticing the badge had gone quiet.
+    {
+        alpacahttp::Router router;
+
+        const auto fetch_build_info = [&router](const std::string& path) {
+            const auto response = route_request(router, "GET", path);
+            return nlohmann::json::parse(response.body(), nullptr, false);
+        };
+
+        const auto json = fetch_build_info("/management/v1/buildinfo");
+        EXPECT(!json.is_discarded());
+        EXPECT(json.value("ErrorNumber", -1) == 0);
+        EXPECT(json.contains("Value") && json["Value"].is_object());
+
+        // Every key the badge reads, with the type it reads it as. The two
+        // booleans matter most: GitIsRelease arriving as a string would be
+        // truthy in JS for BOTH "true" and "false", which would hide the
+        // badge on every build.
+        const auto& value = json["Value"];
+        EXPECT(value.contains("Version") && value["Version"].is_string());
+        EXPECT(value.contains("GitBranch") && value["GitBranch"].is_string());
+        EXPECT(value.contains("GitCommit") && value["GitCommit"].is_string());
+        EXPECT(value.contains("GitRemoteUrl") && value["GitRemoteUrl"].is_string());
+        EXPECT(value.contains("GitDirty") && value["GitDirty"].is_boolean());
+        EXPECT(value.contains("GitIsRelease") && value["GitIsRelease"].is_boolean());
+        EXPECT(value.value("Version", "") == std::string(alpacahttp::kVersion));
+
+        // The unversioned alias resolves to the same handler.
+        const auto alias = fetch_build_info("/management/buildinfo");
+        EXPECT(!alias.is_discarded());
+        EXPECT(alias.value("ErrorNumber", -1) == 0);
+        EXPECT(alias["Value"] == value);
+
+        // ClientTransactionID is echoed, as on every other management route.
+        const auto echoed = fetch_build_info("/management/v1/buildinfo?ClientTransactionID=8271");
+        EXPECT(!echoed.is_discarded());
+        EXPECT(echoed.value("ClientTransactionID", 0) == 8271);
+    }
 
     std::cout << "All routing tests passed!\n";
     return 0;

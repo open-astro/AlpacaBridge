@@ -186,17 +186,27 @@ Privileged operations use two mechanisms, both scoped tightly:
   systemd applies them at exec; `CapabilityBoundingSet` is limited to the
   same two.
 
-State-changing WiFi requests additionally carry a CSRF guard (browser
-`Origin` header must match `Host`, else 403); the management surface is
-otherwise unauthenticated per the trusted-LAN model. The `synctime` endpoint
-shares that guard on every method but `GET` (issue #298): it sets the system clock and
-marks the host client-stepped, which suppresses the undisciplined-clock
-warning at the next telescope connect, so a drive-by cross-origin request
-could otherwise move the clock and hide the pointing error it causes. The
-remaining state-changing management endpoints (`restart`, `shutdown`,
-`configuredevice`, `removedevice`, `loglevel`, the `description` PUT and the
-`DELETE /management/v1/logfiles/<name>` that deletes a log file) do not
-carry it yet. The persisted wifi
+Every state-changing management request carries a CSRF guard (browser
+`Origin` header must match `Host`, else 403); the surface is otherwise
+unauthenticated per the trusted-LAN model, and the guard is what keeps that
+stance from extending to pages the operator merely has open in a browser on
+the same LAN. `GET` is exempt everywhere, so the web portal's polling is
+unaffected, and non-browser clients send no `Origin` at all. The guard
+reached the WiFi endpoints first (PR #198), then `synctime` and the
+`Telescope.UTCDate` setter (issues #298 and #401 respectively), and as of
+issue #348 the rest:
+`restart`, `shutdown`, `configuredevice`, `removedevice`, `loglevel`, the
+`description` `PUT`/`POST` and both forms of `DELETE /management/v1/logfiles` (the
+collection and a single named file). Note that
+it compares the request's `Origin` against the request's own `Host`, so it
+stops a drive-by from an attacker-controlled origin but not DNS rebinding
+(issue #392). `GET /management/v1/buildinfo` (3.6.0) is a read-only companion
+to `description`, kept separate because the `description` payload is fixed by
+the ASCOM spec: it serves the git branch, short commit, dirty flag,
+release-tag state and normalized `origin` URL captured at CMake configure
+time, which is what lets the web UI badge a build that did not come from a
+release tag. Being part of the same unauthenticated surface, it publishes the
+checkout's branch name and remote URL to anyone on the LAN. The persisted wifi
 country lives in `/var/lib/alpacabridge/config/wifi_country` and is
 re-applied at daemon startup in `main()` before NetworkManager's boot-time
 hotspot autoconnect.

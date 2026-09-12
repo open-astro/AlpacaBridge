@@ -151,13 +151,32 @@ Every request except `GET` that carries a browser `Origin` header not
 matching the request's `Host` is rejected with HTTP 403. That covers the
 state-changing methods these endpoints accept (`PUT`/`POST`/`DELETE`) and
 anything unrecognised, which the server treats as an unknown method and the
-guard refuses before the endpoint's own method check runs. This
+guard refuses before the endpoint's own method check runs -- with one
+exception: on the `logfiles` collection the guard sits inside the `DELETE`
+branch, so a cross-origin `PUT /management/v1/logfiles` is answered by the
+method check (200 with `INVALID_OPERATION`) rather than 403, while
+`PUT /management/v1/logfiles/<name>` is refused at 403. Neither mutates
+anything, so the difference is in the status code only. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
 not affect native clients (no `Origin` header is sent — Ara over HTTP is
 unaffected) or the same-origin web portal. One device endpoint takes the same
 guard: `PUT`/`POST /api/v1/telescope/{n}/utcdate`, because on an NTP-less host
 a UTCDate write steps the system clock (see the Clock section above). Every
 other device setter is unguarded.
+
+Since issue #348 this is not specific to the WiFi endpoints: every
+state-changing management endpoint carries the same guard — `synctime`,
+`restart`, `shutdown`, `configuredevice`, `removedevice`, `loglevel`, the
+`description` `PUT`/`POST` (as with `configuredevice` and `removedevice`, the
+handler accepts both and the guard covers both), and both
+`DELETE /management/v1/logfiles` (all files) and
+`DELETE /management/v1/logfiles/<name>` (one file). The rejection message names
+the endpoint.
+
+The guard compares the request's `Origin` against the request's own `Host`,
+which stops a page served from an attacker-controlled origin. It does not
+stop DNS rebinding, where the attacker's hostname resolves to the device and
+both headers agree; see issue #392.
 
 ## Connection-drop pattern (important for clients)
 
@@ -226,6 +245,17 @@ a userspace `hwclock --hctosys` under a non-systemd init, or a kernel without
 `CONFIG_RTC_HCTOSYS`. `rtc` is a new value on a published field, so an older
 client that switches on `ClockSource` should treat any unknown value as
 "not NTP".
+
+## Related: build info
+
+- `GET /management/v1/buildinfo` (3.6.0) — `Value` carries `Version` plus the
+  git state captured when the binary was configured: `GitBranch`,
+  `GitCommit`, `GitDirty`, `GitIsRelease` and `GitRemoteUrl`. Read-only, same
+  envelope and trusted-LAN model as the calls above. It is kept out of
+  `description`, whose payload the ASCOM spec fixes; the web UI reads it to
+  badge a build that did not come from a release tag. A detached checkout
+  reports `GitBranch` as the literal `HEAD`, which says nothing about whether
+  the build is a release — `GitIsRelease` is the only field that does.
 
 ## Feature detection
 

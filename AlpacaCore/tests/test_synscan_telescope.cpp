@@ -251,3 +251,40 @@ TEST_CASE("SynScan Telescope Driver - ASCOM Error Codes", "[synscan][telescope][
     require_alpaca_error([&]() { driver->set_target_declination(-90.1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
 }
+
+// open-astro#346, the shape #304 fixed on the Sky-Watcher driver: ASCOM treats
+// TargetRightAscension and TargetDeclination as independent properties, each
+// throwing ValueNotSet until that property itself has been written. One shared
+// flag let a write to either unlock both, so a client reading the target it
+// did not set got a default 0 rather than an error -- which ConformU reports as
+// "Read before write should generate an error and didn't".
+TEST_CASE("SynScan Telescope Driver - the two target properties are independent", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    // Neither written yet: both refuse.
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // RA alone unlocks RA alone. This is the assertion that fails on one
+    // shared flag: Dec used to read back 0.0 here.
+    driver->set_target_right_ascension(7.25);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // SlewToTarget, SlewToTargetAsync and SyncToTarget still need BOTH halves:
+    // a half-set pair must refuse rather than slew to a default Dec. These
+    // guards run before the connection check, so they hold on a disconnected
+    // driver.
+    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // Once Dec is written too, both read back.
+    driver->set_target_declination(-30.25);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    CHECK(driver->get_target_declination() == -30.25);
+}
