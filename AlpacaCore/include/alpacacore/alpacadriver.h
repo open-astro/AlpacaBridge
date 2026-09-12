@@ -134,6 +134,24 @@ public:
     virtual bool get_connecting() const { return false; }
 
     /**
+     * @brief Why the most recent connect attempt failed, or "" if none stands.
+     *
+     * Same web-UI / error-message contract as get_device_firmware(): cheap,
+     * non-blocking, and never part of an ASCOM property. A driver that mixes in
+     * AsyncConnectable forwards this to AsyncConnectable::last_connect_error()
+     * with the ALPACA_EXPOSE_CONNECT_ERROR() macro; everything else keeps the
+     * default and the router falls back to its generic "Connection failed".
+     *
+     * This is a virtual on AlpacaDriver rather than something the router
+     * reaches by dynamic_cast to AsyncConnectable, because every driver mixes
+     * that base in as @c protected (the documented style, which keeps
+     * start_connection_task() out of the public API) and a cross-cast only
+     * succeeds through a PUBLIC base path -- so the cast would compile,
+     * always return nullptr, and silently drop every reason.
+     */
+    virtual std::string get_last_connect_error() const { return {}; }
+
+    /**
      * @brief Get the device state snapshot.
      */
     virtual std::vector<DeviceState> get_device_state() const { return {}; }

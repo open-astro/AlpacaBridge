@@ -110,6 +110,9 @@ constexpr std::array<BoxSwitchInfo, kBoxSwitchCount> kSwitches{{
 // seeded from the live frame at connect. Sensor switches always report live.
 class WandererBoxSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     WandererBoxSwitchDriver(int device_number, BoxConnectionConfig config)
         : AsyncConnectable("WandererAstro"),
           device_number_(device_number),

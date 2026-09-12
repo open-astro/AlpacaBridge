@@ -28,6 +28,9 @@ namespace alpacacore::vendor::gemini {
 
 class GeminiFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     GeminiFocuserDriver(int device_number, ConnectionConfig config)
         : AsyncConnectable("Gemini"),
           device_number_(device_number),

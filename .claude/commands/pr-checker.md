@@ -258,7 +258,9 @@ For **every** Defect, in this order:
    - docs / skill / CHANGELOG (and every branch, since CI runs these on every PR regardless of
      what changed): `python3 scripts/check_docs_drift.py`, `python3 .github/scripts/check-unicode.py`,
      `python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py`
-     (the self-test first, as `ci_preflight.sh` and CI both run it), and on a PR also
+     (the self-test first, as `ci_preflight.sh` and CI both run it),
+     `python3 scripts/check_connect_error_hook.py --self-test && python3 scripts/check_connect_error_hook.py`
+     (the self-test first, same as the stress-registration gate), and on a PR also
      `python3 scripts/check_conformu_reports.py origin/main` (CI passes `origin/$GITHUB_BASE_REF`;
      the pre-flight passes the merge base, which differs only when `origin/main` has moved
      ahead). The exit code is the signal
@@ -291,7 +293,7 @@ git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 # Gates then push then poll as ONE background chain (see "Keep looping").
 # run_gates is the step 5 gate set for the files this round touched, written
 # out as a function so a multi-command set chains like a single one. The
-# branch type picks the body, so the block runs as pasted: the four Python
+# branch type picks the body, so the block runs as pasted: the five Python
 # gates on a docs/skill-only branch, the full pre-flight when runtime C++
 # changed across vendors. Narrow the C++ body to step 5's per-file gates
 # when only one vendor or one script changed.
@@ -300,6 +302,8 @@ if git diff origin/main...HEAD --name-only | grep -qE '\.(c|cc|cpp|cxx|h|hh|hpp|
 else
   run_gates() { python3 scripts/check_docs_drift.py && python3 .github/scripts/check-unicode.py \
     && python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py \
+    && python3 scripts/check_connect_error_hook.py --self-test \
+    && python3 scripts/check_connect_error_hook.py \
     && python3 scripts/check_conformu_reports.py origin/main; }
 fi
 run_gates > "$LOG" 2>&1 \
@@ -412,7 +416,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/workflow changes; check with
   `git diff main...HEAD --name-only`) does NOT run `ci_preflight.sh` at all: there is nothing
   for the build and test gates to check, and CI runs them on the PR anyway. Its step 5 gates
-  are the four Python checks (docs drift, unicode, stress registration, ConformU reports).
+  are the five Python checks (docs drift, unicode, stress registration, connect-error
+  hook, ConformU reports).
   Run those, commit, push, poll.
 - **A bot round with new findings** is the normal case, not a reason to report back. Fix,
   run the step 5 gates, push, poll, repeat. Report only in the wrap-up, or when a hard stop is hit.

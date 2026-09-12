@@ -55,8 +55,9 @@ external/                       # Vendor SDK folders or vendored SDK assets (pol
 ├─ ZWO/
 │   └─ ASI_Camera_SDK/          # ZWO SDK subset (vendored)
 │       └─ SDK files...
-├─ qhy_sdk/                     # Another vendor SDK
-│   └─ SDK files...
+├─ QHY/
+│   └─ sdk_linux_arm64_26.06.04/  # QHY SDK, unpacked as shipped (usr/local/...)
+│       └─ SDK files...
 
 include/alpacacore/
 ├─ <device>_driver.h            # Pure virtual interface
@@ -107,7 +108,7 @@ external/
    └─ README.md
 ```
 
-**Important**: Use the SDK structure exactly as provided by the vendor. The folder name will vary (e.g., `ASI_Camera_SDK/`, `qhy_sdk/`). Your CMake configuration will locate files within whatever folder name the vendor uses.
+**Important**: Use the SDK structure exactly as provided by the vendor, and do not rename or flatten it — folder layouts differ per vendor (`ZWO/ASI_Camera_SDK/`, `QHY/sdk_linux_arm64_26.06.04/usr/local/`). Nothing searches for it: each vendor's `src/vendors/<vendor>/CMakeLists.txt` sets its SDK root as a literal path and fails at configure time when the header is not there. Adding a vendor, or bumping an SDK to a new versioned folder, means editing that path.
 
 **Vendoring option**: If the vendor license allows, you may commit the **minimal required SDK files**
 (headers + platform libraries) into `external/` to remove manual SDK downloads. Document exactly
@@ -129,10 +130,11 @@ For each SDK, identify **only the files you need**:
 
 ### Step 3: Document SDK Structure in CMake
 
-In your driver's CMakeLists.txt, document the SDK folder name and which files are used. You'll need to search for the SDK folder since the name varies:
+In your driver's CMakeLists.txt, set the SDK root as a literal path and record the layout in a
+comment, so the next reader can see which files are used without opening the SDK:
 
 ```cmake
-# ZWO SDK Structure (example - actual folder name may vary):
+# ZWO SDK structure (the path is fixed; each vendor's differs):
 # - external/ZWO/ASI_Camera_SDK/include/ASICamera2.h (header)
 # - external/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.a (Linux arm64 static lib)
 ```
@@ -330,10 +332,11 @@ See [CMake Configuration](#cmake-configuration) section below.
 
 ## CMake Configuration
 
-### Finding the SDK Folder
+### Pointing CMake at the SDK
 
-For ZWO, the SDK subset is vendored in `external/ZWO/ASI_Camera_SDK`, so use the
-fixed path. For other vendors, you can still search for a known header file.
+Every vendor's SDK is vendored at a fixed path and named literally — none of them are
+searched for. The ZWO block below is the shape to copy: set the root, then hard-fail
+with that same path in the message so a missing SDK says where it was expected.
 
 ```cmake
 set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ZWO/ASI_Camera_SDK")
@@ -607,18 +610,32 @@ The testing guide covers:
 
 ### QHY Camera Driver
 
-**SDK Location**: `external/qhy_sdk/` (or similar - folder name varies)
+**SDK Location**: `external/QHY/sdk_linux_arm64_26.06.04/` — a fixed, versioned path, not a folder name that varies.
 
 **Required Files** (within the SDK folder):
-- `include/qhyccd.h`
-- `lib/<platform>/libqhyccd.*`
+- `usr/local/include/qhyccd.h`
+- `usr/local/lib/libqhyccd.so`
 
-**Wrapper API**:
-- `QHYSDKWrapper::enumerate_cameras()`
-- `QHYSDKWrapper::open_camera(int id)`
-- `QHYSDKWrapper::start_exposure(...)`
+**Wrapper API**: read it from `include/alpacacore/vendor/qhy/qhy_sdk_wrapper.h`, which is the only
+copy. Two things this guide previously got wrong and that are easy to assume from the ZWO block
+above: a QHY camera is identified by a **string** id, never an integer index (the
+`create_qhy_*_by_index()` factories take an enumeration index only as a convenience and resolve it
+to an id before the wrapper sees it), and there is no single
+`start_exposure` on the wrapper — an exposure runs as `start_single_frame()`, then
+`get_single_frame()`, with `cancel_exposure()` to abort.
 
-**CMake**: Use `file(GLOB_RECURSE ...)` to find `qhyccd.h` and locate the SDK folder.
+**Test seam**: the drivers reach the SDK through the abstract `QHYSDK` interface in that same header,
+so they are testable without hardware. `QHYSDKWrapper` is the production implementation; every
+`create_qhy_*` factory has an overload taking a `QHYSDK&`, which the tests use to inject the scripted
+fake in `tests/fake_qhy_sdk.h`. Wrap the fake in the mutex-taking decorator from `tests/locked_qhy_sdk.h`
+whenever it is injected into a driver, which is what the driver-injection tests do throughout — the fake
+is deliberately unhardened, so a concurrent unlocked call produces a ThreadSanitizer report naming the
+fake rather than the driver. The decorator is scoped to concurrent access (see the header's own comment
+on #101): the single-threaded cases in `tests/test_qhy_fake_sdk.cpp` drive a bare `FakeQHYSDK` directly
+and do not need it.
+
+**CMake**: no discovery. `src/vendors/qhy/CMakeLists.txt` sets the SDK root explicitly and fails at
+configure time when `qhyccd.h` is not there.
 
 ### iOptron Mount Driver
 
@@ -627,10 +644,10 @@ The testing guide covers:
 **Required Files**:
 - No vendor SDK libraries are required; the driver implements the RS-232 protocol directly.
 
-**Wrapper API**:
-- `iOptronProtocolWrapper::connect(...)`
-- `iOptronProtocolWrapper::get_position()`
-- `iOptronProtocolWrapper::slew_to_coordinates(...)`
+**Wrapper API**: read it from `include/alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h`.
+`connect()` and `get_position()` are as you would expect, but there is no method that takes
+coordinates: a goto sets the target first (`set_target_ra()`, `set_target_dec()`) and then starts the
+slew with a no-argument `slew_to_ra_dec()`, mirroring the mount's own RS-232 command order.
 
 **CMake**: No SDK discovery needed; just build the wrapper + driver sources.
 
@@ -640,13 +657,21 @@ The testing guide covers:
 
 ### SDK Not Found
 
-**Error**: `FATAL_ERROR: ZWO SDK not found`
+**Error**: `ZWO SDK header not found at <path>/ASICamera2.h`, or the equivalent for another
+vendor (`QHY SDK header not found at <path>/qhyccd.h`).
 
-**Solution**: 
-1. Verify SDK folder is in `external/` (extracted directly, not in a subdirectory)
-2. Check that the SDK folder contains the expected header file (e.g., `ASICamera2.h`)
-3. Verify the CMake `file(GLOB_RECURSE ...)` pattern matches your SDK's folder structure
-4. The SDK folder name doesn't matter - CMake searches for the header file
+**Solution**: the path in the message is the literal one that vendor's CMake sets, so the message
+tells you exactly where it looked.
+1. Unpack the SDK at that path, keeping the vendor's own internal layout (QHY's ships its headers
+   under `usr/local/include/`, ZWO's directly under `include/`)
+2. If the vendor shipped a newer versioned folder, update the SDK root in
+   `src/vendors/<vendor>/CMakeLists.txt` — nothing globs for it, so a new folder name is invisible
+   until that path is edited
+3. Check the architecture if the failure is not about a header at all: the build is arm64-only and
+   every SDK vendor's CMake hard-fails on anything else -- zwo, qhy, playerone, svbony and touptek
+   check `CMAKE_SYSTEM_PROCESSOR`; the ten protocol-only vendors ship no SDK and check nothing.
+   QHY checks the architecture before its
+   headers, ZWO after, so which failure you see first depends on the vendor
 
 ### Linker Errors
 

@@ -33,6 +33,9 @@ constexpr const char* kLogTag = "ToupTek";
 
 class ToupTekFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     ToupTekFocuserDriver(int device_number, std::optional<int> focuser_index, std::optional<std::string> focuser_id,
                          ToupTekSDK& sdk)
         : AsyncConnectable(kLogTag),

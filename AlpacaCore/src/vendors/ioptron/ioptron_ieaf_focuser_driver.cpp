@@ -34,6 +34,9 @@ constexpr int IEAF_MAX_STEP = 99999;
 
 class IeafFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     IeafFocuserDriver(int device_number, IeafConnectionConfig config)
         : AsyncConnectable("iOptron"),
           device_number_(device_number),

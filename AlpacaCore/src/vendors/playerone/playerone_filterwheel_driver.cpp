@@ -26,6 +26,9 @@ namespace alpacacore::vendor::playerone {
 
 class PlayerOnePWFilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     PlayerOnePWFilterWheelDriver(int device_number, int wheel_index)
         : AsyncConnectable("PlayerOne"),
           device_number_(device_number),

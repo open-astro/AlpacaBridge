@@ -29,6 +29,9 @@ namespace alpacacore::vendor::wandererastro {
 
 class WandererFilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     WandererFilterWheelDriver(int device_number, FilterWheelConnectionConfig config)
         : AsyncConnectable("WandererAstro"),
           device_number_(device_number),

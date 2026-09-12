@@ -34,6 +34,12 @@ Checks:
   7. Every relative path referenced in AGENTS.md's inline code spans
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
      that looks like a real repo path actually exists.
+  8. The TSan job's filtered runs are identical between ci.yml and
+     ci_preflight.sh: the same set of `alpacacore_tests "<tag>"` invocations,
+     and the same zero-test grep pattern guarding each one (issue #341). The
+     pre-flight script only has value while it runs what CI runs, and this
+     pair is written out twice with nothing comparing it -- the same shape as
+     checks 2 and 3.
 """
 
 import glob
@@ -695,6 +701,98 @@ def check_agents_md_paths_exist():
     return failures
 
 
+# --- check 8: TSan filtered-run sync (ci.yml vs ci_preflight.sh) ------------
+
+# Both files spell out the same filtered TSan runs -- today `[stress]` for the
+# vendor registrations and `[stress-guard]` for the harness self-tests -- and
+# each run carries its own zero-test grep, because a tag filter matching no
+# tests exits 0 and Catch2 reports that as success. Nothing compared the two
+# files, so editing one filtered run (retagging it, tightening the grep,
+# adding a third invocation) could silently leave the other behind and the
+# pre-flight would stop being a faithful mirror of CI. Issue #341.
+#
+# Matches both spellings of the invocation: bare in ci.yml
+# (`alpacacore_tests "[stress]"`) and quoted-path in ci_preflight.sh
+# (`"${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]"`). The trailing
+# quoted tag is what distinguishes a real run from the `test -x` / `[ -x ... ]`
+# existence probes on the same binary in both files.
+TSAN_RUN_RE = re.compile(r'alpacacore_tests"?\s+"(\[[^"]+\])"')
+TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'")
+
+# A floor, not a count: it exists only so a regex that stops matching fails
+# loudly instead of comparing two empty sets and passing. Deliberately NOT set
+# to today's two runs -- the number of filtered runs is the check's subject,
+# not a second place to state it (see check 5 on counts as a second source of
+# truth).
+MIN_TSAN_FILTERED_RUNS = 1
+
+
+def check_tsan_filtered_runs_sync():
+    failures = []
+    ci_full = read(".github/workflows/ci.yml")
+    preflight_full = read("scripts/ci_preflight.sh")
+
+    ci = _scoped_block(ci_full, "  sanitizers-tsan:", ("\n  format:",))
+    preflight = _scoped_block(
+        preflight_full,
+        'section "ThreadSanitizer (concurrency stress, all vendors)"',
+        ("\n# --- ",),
+    )
+    if ci is None or preflight is None:
+        failures.append(
+            "could not find the sanitizers-tsan job in ci.yml or the "
+            "ThreadSanitizer gate in ci_preflight.sh -- update this check's "
+            "markers if either file's structure changed"
+        )
+        return failures
+
+    ci_tags = sorted(TSAN_RUN_RE.findall(ci))
+    pf_tags = sorted(TSAN_RUN_RE.findall(preflight))
+    ci_greps = TSAN_GREP_RE.findall(ci)
+    pf_greps = TSAN_GREP_RE.findall(preflight)
+
+    for label, tags in (("ci.yml", ci_tags), ("ci_preflight.sh", pf_tags)):
+        if len(tags) < MIN_TSAN_FILTERED_RUNS:
+            failures.append(
+                "found %d filtered TSan run(s) in %s (floor %d) -- either the "
+                "invocation matcher regressed or the TSan gate was removed"
+                % (len(tags), label, MIN_TSAN_FILTERED_RUNS)
+            )
+    if failures:
+        return failures
+
+    if ci_tags != pf_tags:
+        failures.append(
+            "TSan filtered runs differ: ci.yml runs %s, ci_preflight.sh runs "
+            "%s -- a filtered run must be added, retagged or removed in both"
+            % (ci_tags, pf_tags)
+        )
+
+    # One zero-test guard per filtered run, in each file. A run that loses its
+    # grep goes green on zero tests, which is the whole reason the grep is
+    # there; a count mismatch catches that without depending on the two
+    # appearing in any particular order.
+    for label, tags, greps in (
+        ("ci.yml", ci_tags, ci_greps),
+        ("ci_preflight.sh", pf_tags, pf_greps),
+    ):
+        if len(greps) != len(tags):
+            failures.append(
+                "%s has %d filtered TSan run(s) but %d zero-test grep(s) -- "
+                "every filtered run needs its own guard, or the run reports "
+                "success having executed nothing"
+                % (label, len(tags), len(greps))
+            )
+
+    if set(ci_greps) != set(pf_greps):
+        failures.append(
+            "TSan zero-test grep pattern differs: ci.yml has %s, "
+            "ci_preflight.sh has %s"
+            % (sorted(set(ci_greps)), sorted(set(pf_greps)))
+        )
+    return failures
+
+
 CHECKS = [
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
     ("zizmor pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
@@ -703,6 +801,7 @@ CHECKS = [
     ("Blocking get_connected() list matches the code", check_blocking_get_connected_list),
     ("AGENTS.md path references exist", check_agents_md_paths_exist),
     ("QHY SDK seam lists agree (interface / LockedQHYSDK / sweep)", check_qhy_seam_lists),
+    ("TSan filtered runs sync (ci.yml vs ci_preflight.sh)", check_tsan_filtered_runs_sync),
 ]
 
 

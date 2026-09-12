@@ -205,6 +205,27 @@ vendor-agnostic; do them in the driver from the start.
 > inherits it (issue #100); a new driver that copy-pastes its own
 > `connection_thread_` machinery is a review-blocking regression.
 
+> A driver that refuses a connect should say why in the exception it throws:
+> since #358 `AsyncConnectable` keeps that text and the router reports it to
+> the client instead of a bare "Connection failed", so the message is read by
+> an operator in NINA, not only in the log. Write it for someone standing at
+> the mount — name the setting to change, not the internal state that was
+> wrong — and **never interpolate a credential or token into it**, because it
+> is now a client-facing string on an unauthenticated LAN surface, not a log
+> line. It also reaches the web UI as `LastConnectError` on
+> `/management/v1/configureddevices`, which is the only place the Platform 7
+> `PUT /connect` path can surface a reason at all.
+>
+> Every driver that mixes in `AsyncConnectable` must carry
+> `ALPACA_EXPOSE_CONNECT_ERROR()` in a public section: it forwards the new
+> `AlpacaDriver::get_last_connect_error()` virtual to the mixin's stored
+> string. The router cannot reach the mixin by `dynamic_cast`, because the
+> base is inherited `protected` everywhere and a cross-cast only traverses
+> **public** base paths — such a cast compiles, always returns `nullptr`, and
+> silently drops every reason. A driver that omits the macro compiles and
+> tests green while reporting nothing, so `scripts/check_connect_error_hook.py`
+> gates it in CI and in `ci_preflight.sh`.
+
 Two of our worst deadlocks are documented later, not in the checklist above — read
 [`disconnect_locked()`](#reconnect-must-not-self-deadlock-disconnect_locked) and the
 narrow-`firmware_mutex_` rule (under "Device firmware / SDK version") before touching
@@ -300,6 +321,27 @@ target. Hardware-free coverage lives in `tests/test_<vendor>_async_park.cpp` ove
 `FakeMountServer`: the fake must answer the alignment/position probes the driver gates on
 (Celestron `J` → `1#`, SynScan/NexStar `e` → a parseable pair with Dec < 90°), or the park
 is refused before the GOTO is ever sent.
+
+### TargetRightAscension and TargetDeclination are independent (all telescope drivers)
+
+ASCOM treats the two target properties as separate: each getter must throw `ValueNotSet`
+until **that property itself** has been written, and ConformU reports the shared-flag
+version as "Read before write should generate an error and didn't" on both. Every driver
+therefore carries `target_ra_set_` **and** `target_dec_set_`, each set only by its own
+setter. One flag for both is a review-blocking regression — it was the original shape in
+all seven drivers and took two passes to remove (#304, then #346).
+
+The paths that legitimately define both coordinates at once set or clear both: the slew
+and sync *coordinate* forms, any target seeding from the mount's own position (SynScan's
+pulse-guide accumulator), the post-slew position-override and arrival reads, and the
+connect/disconnect resets. `SlewToTarget`, `SlewToTargetAsync` and `SyncToTarget` require
+the pair and must check it — Celestron and SynScan were both missing that check on the
+synchronous form, which one shared flag hid, since any target write made it pass.
+
+Hardware-free coverage per driver: read each property before any write, write RA alone and
+check Dec still throws while RA reads back, confirm the three `*ToTarget` calls refuse the
+half-set pair, then write Dec and expect both. A driver whose setters write to the mount
+(iOptron) needs the fake rather than a disconnected instance.
 
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
@@ -1308,6 +1350,22 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   (target-reached OR stabilized) — forcing it onto the poll-budget API would
   fake a parameter. Unify if a third instance of that extended shape appears.
 
+### pty-backed fakes: never write to the master with a blocking write
+
+A fake that answers a driver over a pseudo-terminal must open its master
+non-blocking and write through `pty_write_bounded()` from
+`AlpacaCore/tests/fake_pty_write.h`, passing its own `stop_` flag. A bare
+`write(master_fd_, ...)` on a blocking master parks the fake's worker thread as
+soon as the driver stops draining — which is normal as a concurrency test winds
+down — and the destructor's `join()` then never returns, because the thread is
+asleep in `write()` and never reaches the `stop_` check. The result is a hung
+process, not a failing test, and it is a race, so it shows up as an occasional
+CI hang rather than a reproducible red (#424, the shape #364 describes).
+
+Dropping a reply is the correct answer here: a reply the driver is not draining
+is one it was never going to read, and a fake whose destructor can hang is worse
+than one that drops a frame.
+
 ### Test CMake Integration
 
 When adding a test file for a new vendor device:
@@ -1322,7 +1380,7 @@ When adding a test file for a new vendor device:
 - **Run `scripts/ci_preflight.sh` before opening a PR** (it is the `/submit-pr` Step 4 hard gate). It reproduces the CI gates locally, auto-installing missing tools, and exits non-zero if any mandatory gate fails — catching failures before they ever reach CI.
 - **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`** — `scripts/check_docs_drift.py` (the `docs-drift` CI job / pre-flight gate) now fails if they diverge, so this can't silently drift again.
 - **Web UI JavaScript is gated by `node --check` AND `node --test`** (the `javascript` job + pre-flight gate). The web UI is hand-written static JS served as-is, with no bundler and no `package.json`, so the syntax check was the only gate for a long time — and a syntax check catches a missing brace and nothing else. That was defensible while `app.js` was DOM wiring; it stopped being defensible when the file grew pure functions with a real contract (issue #385). **Pure helpers go in `AlpacaHTTP/web/format.js`, not `app.js`**: that file touches no DOM and no `app.js` global, `index.html` loads it first, and it ends with a `typeof module !== 'undefined'` export block that browsers ignore, so `AlpacaHTTP/tests/web/*.test.js` can `require` it from Node with no browser stub. `node --test` ships with the Node CI already installs, so there is nothing to add to the toolchain. A helper that reaches for `document` belongs in `app.js` and stays untested — keep the split honest rather than growing a DOM stub. The first cases are the by-hand verification table from PR #359 made executable (several `TZ` settings, local midnight, and `Intl.DateTimeFormat` patched to throw, to return incomplete parts, and to answer in 12-hour form); each was mutation-verified against the guard it covers, and the 12-hour case is the one that matters most, because it renders a plausible-looking WRONG time rather than an obvious failure.
-- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together; `scripts/check_docs_drift.py` fails the build if they disagree. The same script also fails if a `docs/development.md` build-options table row goes missing for a CMake `ALPACACORE_ENABLE_*` option, if `VERSION` and the README badge disagree, if AGENTS.md references a repo path that doesn't exist, if the QHYSDK seam's interface / `LockedQHYSDK` / sweep lists disagree (issue #394), or if `async_connectable.h`'s blocking-`get_connected()` lists drift from the drivers (issue #381): it classifies every `get_connected()` override under `AlpacaCore/src/vendors/` by its body and fails on a blocking driver missing from a list, a lock-free one still named in it, or a count of either list stated anywhere the globs reach.
+- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together; `scripts/check_docs_drift.py` fails the build if they disagree. The same script also fails if a `docs/development.md` build-options table row goes missing for a CMake `ALPACACORE_ENABLE_*` option, if `VERSION` and the README badge disagree, if AGENTS.md references a repo path that doesn't exist, if the QHYSDK seam's interface / `LockedQHYSDK` / sweep lists disagree (issue #394), if the `sanitizers-tsan` job's filtered runs or their zero-test greps differ from the ones `ci_preflight.sh` spells out (issue #341), or if `async_connectable.h`'s blocking-`get_connected()` lists drift from the drivers (issue #381): it classifies every `get_connected()` override under `AlpacaCore/src/vendors/` by its body and fails on a blocking driver missing from a list, a lock-free one still named in it, or a count of either list stated anywhere the globs reach.
 - **Concurrency now has automated coverage — but only where a driver is registered with the stress harness.** The `sanitizers-tsan` job (issue #101) builds all-vendors with ThreadSanitizer and runs the `[stress]` connect/disconnect/operate suite (`AlpacaCore/tests/concurrency_stress.h`): lifecycle storms from N threads, destruction racing an in-flight connect, and the racing-disconnect-never-dropped settle check. Locally: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. Registered so far: ToupTek camera / AFW / AAF focuser / thermal switch (over the fake SDK seam, wrapped in `LockedToupTekSDK`), ZWO EFW + camera + EAF focuser + CAA rotator + dew heater switch, Player One Phoenix + camera + thermal switch, SVBONY camera, Bisque, OnStep, and — over the loopback fake-mount TCP seam (`tests/fake_mount_server.h`, which drives drivers into the *connected* state so the poll/pulse/GOTO/teardown threads actually run) — the ZWO, Celestron, SynScan, and iOptron telescopes, plus the SkyWatcher telescope over its own loopback UDP simulator (`tests/fake_skywatcher_mount.h`), plus (fail-fast, no fake seam) the iOptron iEFW filter wheel, iEAF focuser, and iMate PowerBox Switch, and the Astroasis Oasis focuser (hidapi, no fake seam exists), plus the WandererAstro cover calibrator, filter wheel and box switch over the pty streamer fake (`tests/fake_serial_streamer.h`) with the request/response rotator fail-fast, plus the Gemini PDH Advanced 3 Switch and Flat Panel Pro CoverCalibrator over their pty-backed fakes (`tests/fake_gemini_pdh.h`, `tests/fake_gemini_flatpanel.h`) with the Gemini focuser fail-fast, and the WeeWX ObservingConditions driver over an unreachable URL. **When you add or substantially change a driver, add a `[stress]` TEST_CASE for it** — one factory + one operate callback (see `test_touptek_concurrency_stress.cpp` for the overall shape — but take the per-call guard from this paragraph, not from that file: every merged registration predates `StressCallGuard`, and of the 15, five — astroasis, gemini, playerone, wandererastro and weewx — define a local `call()` helper at all (four as a lambda, wandererastro as a file-scope template). Six more wrap *some* calls in inline `try`/`catch` blocks, and four — touptek included — have no per-call isolation whatsoever, so their operate callbacks stop at the first throw and exercise one call instead of all of them. Migration is tracked in issue #326). Wrap each call in the operate callback with `alpacacore::test::StressCallGuard` (`concurrency_stress.h`, issue #322) rather than a local `try/catch` — `run_lifecycle_stress` wraps the WHOLE callback in one try/catch, not each call inside it, so on a fail-fast path a single throw silently skips every call after it unless each one is guarded individually. `StressCallGuard` samples **one line per distinct failure mode with its occurrence count**, not the first N events (#377) — the old cap let one thread faulting in a tight loop fill every slot with copies of one message before another thread recorded once, which is worst in a *connected* registration where a live driver throws often and the single distinct failure that mattered is the one crowded out. It swallows the expected `NotConnected` by default and counts everything else it catches (a non-`std::exception` throw is never caught by anything here and still `std::terminate`s the binary, exactly as it would without the guard), so the case ends with `INFO(guard.report());` followed by `CHECK(guard.unexpected_count() == 0)` — **both lines, always**: only the `CHECK` turns counting into a failure, and a file that wraps every call correctly and omits it passes whatever the storm throws while *looking* like it follows the pattern (#379) — the `INFO` is what makes a failure legible, since without it the `CHECK` reports only the expansion (`3 == 0`) and names nothing it swallowed — this replaces re-deciding the guard's catch type per file, which flip-flopped across review rounds before #322. Its constructor argument **REPLACES** the default set rather than adding to it — pass `{NotConnected, PropertyNotImplemented}`, not just `{PropertyNotImplemented}`, or every racing-disconnect throw in the storm is counted as a regression and the case fails nondeterministically. **A registration that runs *connected* (over `fake_mount_server.h`, `fake_skywatcher_mount.h`, or any full-seam fake) must widen the expected set explicitly this way** — `NotConnected` alone fits a never-connected, fail-fast path, but an operate callback exercising a live driver can legitimately hit `InvalidValue`, `MethodNotImplemented`, or `InvalidWhileParked` (a slew racing a park) from ordinary calls too — remember `NotImplemented`/`PropertyNotImplemented`/`MethodNotImplemented` all share one numeric code (see the class doc), so they're not separately distinguishable inside the expected set. Drivers without a registration are still covered only by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver); do not assume green CI means thread-safe for them. **The QHY SDK seam's three parallel lists are gated** (#394): `scripts/check_docs_drift.py` compares `QHYSDK`'s pure virtuals, `LockedQHYSDK`'s overrides and the forward-sweep method list in `test_qhy_fake_sdk.cpp`, and separately fails on a forward that does not go through `locked()`. The compiler forces a forward to EXIST (an unimplemented pure virtual leaves the decorator abstract) but never that it takes the mutex, which is the only reason the decorator exists — an unlocked forward makes the fake racy under a storm and produces a TSan report naming the *fake*, the exact confusion the decorator was built to prevent. Model any future SDK decorator the same way. `scripts/check_stress_registration.py` (the `stress-registration` CI job / pre-flight gate) fails on any vendor/device-type pair that is neither registered nor explicitly allow-listed there, so the currently-unregistered drivers are tracked in one place instead of only in this paragraph. **Name a registration file `<something>_concurrency_stress.cpp` and add it inside the vendor's `if(TARGET alpacacore_<vendor>)` block in `AlpacaCore/tests/CMakeLists.txt`** — the gate enforces both halves: the file glob carries no `test_` prefix (issue #376: the prefix used to be load-bearing, so a file following the documented naming was rejected as a stray `[stress]` case), and a registration file listed in the unconditional `TEST_SOURCES` block is a failure (issue #396), because rule 3 below assumes every `[stress]` case compiles conditionally. That covers a file listed *both* ways too, since CMake de-duplicates the repeated source and the ungated mention is the one that decides, and `if(NOT TARGET ...)` does not count as gating, because it compiles the file exactly when the vendor is absent — one that does not re-satisfies the TSan zero-test grep with no vendor coverage at all, which is the exact failure that grep exists to catch, reached from the other direction. The script's C++ scans strip comments first (issue #386), so an illustrative case macro in a doc comment is documentation and not a registration — `concurrency_stress.h` carries one as the live proof — but **string literals are not stripped**, so keep examples in comments; and they cover every Catch2 registration macro (`SCENARIO`, the `TEMPLATE_*` family, the `_METHOD` fixture variants, `METHOD_AS_TEST_CASE`, `TEST_CASE_PERSISTENT_FIXTURE`, `REGISTER_TEST_CASE`) -- if Catch2 ever grows another, add it to `CATCH_TEST_MACROS`, since a macro missing from that tuple is invisible to the stray-`[stress]` rule and join adjacent tag literals the way the preprocessor does, so `"[vendor][camera]" "[stress]"` is three tags rather than two (issue #393). It separately rejects two tag mistakes per TEST_CASE, each scoped to where that mistake actually costs something: a `[stress-guard]`-without-`[stress]` case inside a `*_concurrency_stress.cpp` file (that tag is for harness self-tests only — a registration wearing it would still get TSan and still read as registered while dropping out of the vendor-coverage count), and a `[stress]` case anywhere else under `AlpacaCore/tests/` (a file outside that glob can compile unconditionally, in which case one such case alone satisfies the TSan job's vendor zero-coverage grep and makes it vacuous — this actually happened, see `test_async_connectable.cpp`). Note the first rule is deliberately limited to registration files: `[stress-guard]` is legitimate anywhere else, which is the whole point of the tag — a vendor case parked outside that glob wearing it would read as registered to a human without counting toward vendor coverage, but that is a naming problem rather than a tag one, and the gate does not try to catch it. Note also that the gate keys on vendor/device-type pairs, so a registered driver masks every other driver of the same vendor and type. Two pairs are masked today: the two ZWO ASIAIR switch drivers behind the ZWO dew-heater switch registration, and the Gemini Cover Lite class plus the Rev2 model path behind the Flat Panel Pro registration. Both are covered by code review only. **`scripts/check_stress_registration.py`'s docstring is the authoritative list** — this sentence is a pointer to it, not a second copy, because it has already gone stale once by naming only ZWO. **SDK-callback paths especially**: the TSan suppressions mute any report with a vendor-blob frame on the stack, so a race in driver code invoked from an SDK internal thread is invisible to CI unless that callback path is exercised through a fake-SDK seam (fully instrumented, no suppression applies) — when you add an SDK callback to a driver, register a fake-seam stress path for it in the same change.
 
 - **A `std::thread` member that a failure path leaves joinable is a
@@ -1575,6 +1633,13 @@ datagrams before each send so replies cannot get off-by-one.
   the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
   the entry that is at fault. That asymmetry is the rule for any new validation in
   `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`.
+  Since #380 that rule is not left to each branch to remember: `Router::reject_invalid_config()`
+  takes the source and the reason and returns whether the caller must refuse, and
+  `Router::normalize_persisted_connection_type()` does the same for an unrecognised
+  `connectionType`, which has no value to carry forward — it returns `"serial"` for a persisted
+  config, never `"auto"`, so the connect fails on the port path instead of auto-probing and
+  attaching to whatever mount answers. Use them rather than an inline `return false`; the
+  `portPath`, `host` and `connectionType` checks in every telescope branch do.
   Both coordinates are also **range-checked** (#398), inclusive of ±90/±180 since the poles and
   the antimeridian are real places, and rejecting NaN and the infinities: presence alone let a
   config carry latitude 200, which reads as northern to `hemisphere_south_locked()`, while the
@@ -1640,8 +1705,10 @@ datagrams before each send so replies cannot get off-by-one.
   keeps Slewing true via the manual flag, and a background task clears it and restores
   tracking once the axis reports stopped. This applies to every telescope driver.
 - ConformU needs a real site. Since #274 a Sky-Watcher device with no site refuses
-  `Connected` outright, so the run fails at connect; the client reports "Connection
-  failed" and the driver's message naming the two fields is in the server log (#358).
+  `Connected` outright, so the run fails at connect. Since #358 the client is told why:
+  the router reports the driver's own sentence naming the two fields as the
+  `ErrorMessage` (the error number is still `NotConnected`), rather than a bare
+  "Connection failed" with the reason left in the server log.
   Set the observing site in the web UI before validating. Before #274 the site collapsed
   to 0,0 instead and the CheckMethods slew tests aborted with "highest elevation
   available is below the horizon".

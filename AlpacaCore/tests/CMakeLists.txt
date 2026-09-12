@@ -25,6 +25,7 @@ set(TEST_SOURCES
     test_async_connectable.cpp
     test_device_registry.cpp
     test_error_handling.cpp
+    test_fake_pty_write.cpp
     test_host_clock.cpp
     test_poll_settle.cpp
     test_serial_by_id_scan.cpp

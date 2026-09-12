@@ -39,6 +39,9 @@ constexpr int kMaxBrightness = 255;
 
 class WandererCoverCalibratorDriver : public CoverCalibratorDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     enum class CoverTarget : std::uint8_t { None, Opening, Closing };
 
     WandererCoverCalibratorDriver(int device_number, ConnectionConfig config)

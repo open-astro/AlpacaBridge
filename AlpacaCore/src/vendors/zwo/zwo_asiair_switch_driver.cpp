@@ -46,6 +46,9 @@ AsiairSwitchConfig default_asiair_pro_config() {
 
 class ZWOAsiairSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     ZWOAsiairSwitchDriver(int device_number, AsiairSwitchConfig config)
         : AsyncConnectable(kLogCategory),
           device_number_(device_number),

@@ -43,6 +43,9 @@ namespace alpacacore::vendor::ioptron {
  */
 class iOptronTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     /**
      * @brief Construct iOptron telescope driver.
      *
@@ -120,6 +123,19 @@ public:
                 ALPACA_LOG_WARN("iOptron", "Error disconnecting mount during destruction");
             }
         }
+        // Unconditional, and last: both starts happen AFTER set_connected()
+        // releases mutex_, so a connect can lose the race to a concurrent
+        // disconnect and run its start_clock_sync_thread() after that
+        // disconnect's stop_clock_sync_thread() has already returned. The
+        // driver is then left with connected_ == false and a joinable thread
+        // that the `if (connected_)` branch above never reaps -- and
+        // destroying a joinable std::thread is std::terminate(), which is how
+        // this shows up: an abort in ~iOptronTelescopeDriver with no active
+        // exception, under a connect/disconnect storm. Both reapers are
+        // idempotent (each joins only a joinable thread and resets its cancel
+        // flag), so running them again here costs nothing on the normal path.
+        stop_clock_sync_thread();
+        reap_slew_dispatch();
     }
     
     // AlpacaDriver interface
@@ -264,7 +280,8 @@ public:
                 pulse_guiding_hold_dec_until_ = std::chrono::steady_clock::time_point{};
                 last_dec_read_valid_ = false;
                 last_dec_read_degrees_ = 0.0;
-                target_set_ = false;
+                target_ra_set_ = false;
+                target_dec_set_ = false;
                 target_ra_hours_ = 0.0;
                 target_dec_degrees_ = 0.0;
                 sync_offset_ra_hours_ = 0.0;
@@ -339,7 +356,8 @@ public:
             pulse_guiding_hold_dec_until_ = std::chrono::steady_clock::time_point{};
             last_dec_read_valid_ = false;
             last_dec_read_degrees_ = 0.0;
-            target_set_ = false;
+            target_ra_set_ = false;
+            target_dec_set_ = false;
             target_ra_hours_ = 0.0;
             target_dec_degrees_ = 0.0;
             slew_in_progress_ = false;
@@ -1070,7 +1088,7 @@ public:
     
     double get_target_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!target_set_) {
+        if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
         return target_dec_degrees_;
@@ -1082,14 +1100,14 @@ public:
         validate_dec(dec, "TargetDeclination");
 
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_dec_set_ = true;
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_target_dec(dec);
     }
     
     double get_target_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!target_set_) {
+        if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
         return target_ra_hours_;
@@ -1101,7 +1119,7 @@ public:
         validate_ra(ra, "TargetRightAscension");
 
         target_ra_hours_ = ra;
-        target_set_ = true;
+        target_ra_set_ = true;
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_target_ra(ra);
     }
@@ -1455,7 +1473,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
-            if (!target_set_) {
+            if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
             }
             ra = target_ra_hours_;
@@ -1470,7 +1488,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
-            if (!target_set_) {
+            if (!target_ra_set_ || !target_dec_set_) {
                 throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
             }
             ra = target_ra_hours_;
@@ -1487,7 +1505,8 @@ public:
 
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
 
         refresh_position_cache_locked(true);
         sync_offset_ra_hours_ = ra - cached_ra_hours_;
@@ -1499,7 +1518,7 @@ public:
     void sync_to_target() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (!target_set_) {
+        if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
         ensure_not_parked_locked("SyncToTarget");
@@ -1855,7 +1874,8 @@ private:
 
         target_ra_hours_ = ascom_ra;
         target_dec_degrees_ = ascom_dec;
-        target_set_ = true;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         slew_in_progress_ = true;
         slew_target_ra_hours_ = phys_ra;
         slew_target_dec_degrees_ = phys_dec;
@@ -1933,7 +1953,7 @@ private:
         // tens of degrees).  Wait for position readings to stabilize — two
         // consecutive reads within tolerance of each other — AND target
         // reached.  Uses the slew deadline, not a fixed iteration cap.
-        if (target_set_) {
+        if (target_ra_set_ && target_dec_set_) {
             static constexpr double kStableThresholdArcsec = 30.0;
             static constexpr int kRequiredStableReads = 3;
             double prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
@@ -2667,7 +2687,16 @@ private:
     int slew_settle_time_seconds_ = 0;
     double custom_tracking_rate_ = 1.0;
     bool does_refraction_ = false;
-    bool target_set_ = false;
+    // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
+    // treats the two target properties as independent, so each must throw
+    // ValueNotSet until that property itself has been written. One shared flag
+    // let a write to either unlock both, and a client reading the one it did
+    // not set got a default 0 instead of an error. The paths that legitimately
+    // define both coordinates at once -- the slew and sync coordinate forms,
+    // the position-override and arrival reads, and the connect/disconnect
+    // resets -- still set or clear both.
+    bool target_ra_set_ = false;
+    bool target_dec_set_ = false;
     mutable std::atomic<bool> pulse_guiding_active_{false};
     mutable std::atomic<int64_t> pulse_guiding_end_ns_{0};
     mutable bool pulse_guiding_hold_ra_valid_ = false;

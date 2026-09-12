@@ -575,6 +575,12 @@ async function loadDevices() {
                         <span class="info-value">${escapeHtml(device.SdkVersion)}</span>
                     </div>
                     ` : ''}
+                    ${device.LastConnectError ? `
+                    <div class="info-item info-item-wide">
+                        <span class="info-label">Last Connect Error</span>
+                        <span class="info-value info-value-error">${escapeHtml(device.LastConnectError)}</span>
+                    </div>
+                    ` : ''}
                 </div>
                 ${settingsHtml}
                 <div class="device-actions">
@@ -1323,6 +1329,7 @@ async function loadServerInfo() {
             headerVersion.textContent = manufacturerVersion !== 'N/A' ? 'v' + manufacturerVersion : '';
         }
         updateHeaderProfileName(profileName);
+        updateHeaderBuildBadge();
 
         serverInfo.innerHTML = `
             <div class="server-info-grid">
@@ -1551,6 +1558,52 @@ function updateHeaderProfileName(profileName) {
     const headerProfile = document.getElementById('header-profile');
     if (headerProfile) {
         headerProfile.textContent = profileName || '';
+    }
+}
+
+// Shows a badge next to the version number when this build isn't coming from
+// a release tag -- e.g. a PR branch or a PR head checked out for local
+// testing -- so it can't be mistaken for an official release. kVersion
+// (VERSION file) stays the same on every branch; GitBranch/GitCommit come
+// from the actual checkout. buildBadgeLabel() (format.js) holds the rule and
+// is unit-tested; everything here is DOM wiring.
+let _buildBadgeChecked = false;
+async function updateHeaderBuildBadge() {
+    if (_buildBadgeChecked) return;
+    const badge = document.getElementById('header-build-badge');
+    if (!badge) return;
+    try {
+        const response = await fetch(API_BASE + '/management/v1/buildinfo');
+        // Any COMPLETE HTTP answer settles it, including a 404 from a server
+        // too old to have the endpoint -- re-asking every poll would buy
+        // nothing. Anything that THROWS (server restarting mid-load, link
+        // dropped, a body that ends mid-JSON) is the transient case and must
+        // leave the flag clear so the next loadServerInfo() retries. The
+        // latch therefore sits after the parse, not before it: setting it
+        // first meant a truncated body hid the badge for the life of the
+        // page, which is the one outcome this feature exists to prevent.
+        if (!response.ok) {
+            _buildBadgeChecked = true;
+            return;
+        }
+        const data = await response.json();
+        _buildBadgeChecked = true;
+        if (data.ErrorNumber !== 0) return;
+        const view = buildBadgeLabel(parseResponseValue(data.Value) || {});
+        if (!view) {
+            badge.hidden = true;
+            return;
+        }
+        badge.textContent = view.label;
+        badge.title = view.title;
+        if (view.href) {
+            badge.href = view.href;
+        } else {
+            badge.removeAttribute('href');
+        }
+        badge.hidden = false;
+    } catch (e) {
+        console.error('Error loading build info:', e);
     }
 }
 

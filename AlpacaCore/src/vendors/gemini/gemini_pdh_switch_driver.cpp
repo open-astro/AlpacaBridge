@@ -131,6 +131,9 @@ PdhDewMode mode_from_value(double value) {
 // disconnect. Read-only telemetry always reports the live frame.
 class GeminiPdhSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     GeminiPdhSwitchDriver(int device_number, PdhConnectionConfig config)
         : AsyncConnectable("Gemini"), device_number_(device_number), config_(std::move(config)), connected_(false) {
         for (int i = 0; i < kPdhSwitchCount; ++i) {

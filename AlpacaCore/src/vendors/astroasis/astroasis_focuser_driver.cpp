@@ -25,6 +25,9 @@ namespace alpacacore::vendor::astroasis {
 
 class AstroasisFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     AstroasisFocuserDriver(int device_number, std::string hid_path)
         : AsyncConnectable("Astroasis"),
           device_number_(device_number),

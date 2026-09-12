@@ -112,6 +112,9 @@ PlayerOneImageFormat choose_default_format(const PlayerOneCameraInfo& info) {
 
 class PlayerOneCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     PlayerOneCameraDriver(int device_number, int camera_index)
         : AsyncConnectable("PlayerOne"), device_number_(device_number), camera_index_(camera_index) {
         preload_camera_info();

@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -131,6 +132,7 @@ private:
     Response handle_root(const Request& request, std::uint32_t server_tx_id);
     Response handle_description(const Request& request, std::uint32_t server_tx_id);
     Response handle_api_versions(const Request& request, std::uint32_t server_tx_id);
+    Response handle_build_info(const Request& request, std::uint32_t server_tx_id);
     Response handle_configured_devices(const Request& request, std::uint32_t server_tx_id);
     Response handle_configure_device(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
@@ -174,6 +176,49 @@ private:
 
     bool register_device_from_config(const nlohmann::json& config, std::string& error_message,
                                      ConfigSource source = ConfigSource::Api);
+
+    // Issue #380, generalising the rule #353 introduced for the Sky-Watcher
+    // site-coordinate check: what a validation failure inside
+    // register_device_from_config() *means* depends on where the config came
+    // from, and every branch was otherwise left to remember that on its own.
+    //
+    // From the API (/management/v1/configuredevice) a bad config is a bad
+    // request: refuse it. Nothing has been persisted, and the caller sees why.
+    //
+    // From disk the config is already saved, and the only way an operator can
+    // repair it is the web UI -- whose sole source of devices is
+    // /management/v1/configureddevices, which lists the DeviceRegistry. A
+    // persisted config the router refuses never enters that registry, so
+    // rejecting it here makes the device vanish from the UI with no way to
+    // edit the entry that is at fault; recovery means hand-editing
+    // registered_devices.json on the SBC. So it is registered anyway with a
+    // WARN, and the driver's connect fails with the real reason.
+    //
+    // Returns true when the caller must reject (API, error_message set), and
+    // false when it should carry on with the value it has (persisted, warning
+    // logged).
+    static bool reject_invalid_config(ConfigSource source, const char* reason, const std::string& vendor,
+                                      const std::string& device_type, int device_number, std::string& error_message);
+
+    // The connection-type half of the same rule. Returns conn_type unchanged
+    // when it is one of `valid`, or when the config came from the API -- there
+    // the branch's own else still rejects it. For a persisted config with an
+    // unrecognised value it warns and returns "serial", so the device
+    // registers and stays editable and the connect then fails on the port
+    // path rather than auto-probing and attaching to whatever mount answers.
+    //
+    // `valid` is per-vendor and each caller passes its OWN branch's list,
+    // empty string included where that branch reads empty as auto-detect.
+    // There is no blanket "empty is always fine" rule here, because it is not
+    // true: five branches test `conn_type == "auto" || conn_type.empty()`, but
+    // the ZWO branch tests a bare `conn_type == "auto"`, so an entry with no
+    // connectionType key falls to its else. Treating empty as universally
+    // valid would have left that one branch dropping persisted devices, which
+    // is the failure this whole change exists to remove.
+    static std::string normalize_persisted_connection_type(ConfigSource source, const std::string& conn_type,
+                                                           std::initializer_list<const char*> valid,
+                                                           const std::string& vendor, const std::string& device_type,
+                                                           int device_number);
     nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
     void add_or_replace_persisted_device(const nlohmann::json& config);
     bool remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);

@@ -1312,6 +1312,35 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
 
 namespace alpacahttp {
 
+namespace {
+// Issue #358: a driver that refuses a connect explains why, and the client
+// never saw it -- the reason reached the server log and stopped there, so
+// every "why won't it connect" question started with asking the operator for
+// the log. AsyncConnectable now keeps the reason; this reads it back for the
+// 38 drivers that derive from it, and falls back to the old constant for
+// anything that does not, or when the failure produced no text.
+//
+// The text goes out verbatim. Driver messages are written for logs and can
+// name host paths (a serial port, a config field), which is exactly what an
+// operator needs to act on and is no more than the same message already
+// visible in the log file the web UI serves.
+std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
+    std::string reason = device.get_last_connect_error();
+    return reason.empty() ? std::string("Connection failed") : reason;
+}
+
+// Defined further down with the management guards, but declared here because
+// every state-changing management handler needs it and handle_description()
+// is the first of them in file order. Also used by the one device setter with
+// a host-level side effect (open-astro#401).
+//
+// Takes the client's ClientTransactionID as well as the server's: the 403 body
+// echoes it like every other error path in these handlers (open-astro#384).
+std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t client_tx_id,
+                                                    std::uint32_t server_tx_id, const char* what);
+
+}  // namespace
+
 Router::Router() {
     set_server_info("AlpacaHTTP", "AlpacaHTTP", alpacahttp::kVersion, "", "");
     load_persisted_devices();
@@ -1440,6 +1469,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "apiversions";
         return match;
     }
+    if (path == "/management/v1/buildinfo" || path == "/management/buildinfo") {
+        match.is_management = true;
+        match.management_endpoint = "buildinfo";
+        return match;
+    }
     if (path == "/management/v1/configureddevices" || path == "/management/configureddevices") {
         match.is_management = true;
         match.management_endpoint = "configureddevices";
@@ -1530,6 +1564,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_description(request, server_tx_id);
     } else if (match.management_endpoint == "apiversions") {
         return handle_api_versions(request, server_tx_id);
+    } else if (match.management_endpoint == "buildinfo") {
+        return handle_build_info(request, server_tx_id);
     } else if (match.management_endpoint == "configureddevices") {
         return handle_configured_devices(request, server_tx_id);
     } else if (match.management_endpoint == "configuredevice") {
@@ -1664,6 +1700,21 @@ Response Router::handle_description(const Request& request, std::uint32_t server
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // PUT/POST here rewrites the server description and the
+    // SyncSystemClockFromClients opt-out, and that opt-out is what keeps a
+    // cross-origin clock step from being accepted at all -- so leaving this
+    // endpoint unguarded would have handed back the guard on synctime.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "server description")) {
+        return *rejected;
     }
 
     try {
@@ -1887,6 +1938,29 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 } catch (const std::exception& e) {
                     util::log_warning("SDK version query failed for " + cap.name + ": " + e.what());
                 }
+
+                // Issue #358, the Platform 7 half. PUT /connect returns success
+                // immediately by design and completion is observed through
+                // Connecting, so when the task fails there is no response left
+                // to carry an error: the client -- NINA 3.x prefers this path
+                // -- sees Connecting go false and Connected stay false, with
+                // no message anywhere in the protocol. The reason has nowhere
+                // to go in ASCOM, so it surfaces here instead, where the web
+                // UI can show the operator what the driver actually said.
+                // Present only while a failure stands; the next attempt clears
+                // it. Like Firmware and SdkVersion, deliberately not part of
+                // any ASCOM response.
+                // try/catch like the two hooks above it: every implementation
+                // today is the macro (a mutex and a string copy) so nothing can
+                // throw in practice, but an override that does must not take
+                // the whole device listing down with it.
+                try {
+                    if (std::string reason = driver->get_last_connect_error(); !reason.empty()) {
+                        device["LastConnectError"] = reason;
+                    }
+                } catch (const std::exception& e) {
+                    util::log_warning("Connect-error query failed for " + cap.name + ": " + e.what());
+                }
             }
             devices.push_back(device);
         }
@@ -2039,11 +2113,6 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
 }
 
 namespace {
-// Defined further down with the management guards; also used by the one
-// device setter with a host-level side effect (open-astro#401).
-std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t client_tx_id,
-                                                    std::uint32_t server_tx_id, const char* what);
-
 void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
     const auto cutoff = std::chrono::steady_clock::now() - kClientConnectionStaleAfter;
     for (auto it = clients.begin(); it != clients.end();) {
@@ -2345,9 +2414,11 @@ Response Router::dispatch_device_method(
                     if (!device->get_connecting() && !device->get_connected()) {
                         // Failed connect: this client holds no live link.
                         unregister_client_connection(device.get(), client_key);
-                        throw alpacacore::AlpacaException(
-                            "Connection failed",
-                            alpacacore::AlpacaError::NotConnected);
+                        // The driver's own words when it has them; the error
+                        // number is unchanged, so a client matching on it is
+                        // unaffected.
+                        throw alpacacore::AlpacaException(connect_failure_reason(*device),
+                                                          alpacacore::AlpacaError::NotConnected);
                     }
                     // Still connecting at the deadline: reply now, the client
                     // observes completion through Connecting/Connected. Until
@@ -5859,6 +5930,40 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
     return response;
 }
 
+Response Router::handle_build_info(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    try {
+        // Independent of the ASCOM-spec description payload's ManufacturerVersion
+        // (a static release number from VERSION) -- this reflects the actual git
+        // checkout, so a dev build on a feature branch doesn't read as a release.
+        nlohmann::json info;
+        info["Version"] = alpacahttp::kVersion;
+        info["GitBranch"] = alpacahttp::kGitBranch;
+        info["GitCommit"] = alpacahttp::kGitCommit;
+        info["GitDirty"] = alpacahttp::kGitDirty;
+        info["GitIsRelease"] = alpacahttp::kGitIsRelease;
+        info["GitRemoteUrl"] = alpacahttp::kGitRemoteUrl;
+
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = info;
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        util::log_error("Error getting build info: " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
 Response Router::handle_static_file(const Request& request) {
     Response response;
     std::string file_path = request.path();
@@ -6143,7 +6248,19 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
-    
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Rewrites persisted device configuration, which survives a restart.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device configuration")) {
+        return *rejected;
+    }
+
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
@@ -6232,7 +6349,19 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
-    
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Removes a configured device, taking its persisted entry with it.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device removal")) {
+        return *rejected;
+    }
+
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
@@ -6359,6 +6488,20 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Changing verbosity is the quiet one: it is how evidence of any of the
+    // others gets turned down after the fact. GET is exempt, so the web UI's
+    // polling of the current level is unaffected.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "log level")) {
+        return *rejected;
     }
 
     auto send_payload = [&](std::uint32_t ctx_id) {
@@ -6542,6 +6685,15 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
     }
 
     if (request.method() == HttpMethod::DELETE_) {
+        // Issue #348: the collection DELETE removes EVERY log file, which is
+        // the same evidence-removal shape as the per-file DELETE next to it
+        // and as turning the log level down. Guarding the per-file form and
+        // not this one would have been the accident the audit exists to
+        // remove. The web UI's deleteAllLogFiles() is same-origin, so this is
+        // a no-op for it; GET (the listing) stays exempt.
+        if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "log files")) {
+            return *rejected;
+        }
         const auto files = util::list_log_files();
         const std::filesystem::path log_directory = util::get_log_directory();
         std::size_t deleted = 0;
@@ -6689,6 +6841,14 @@ Response Router::handle_log_file_item(const Request& request,
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
+    // Issue #348: DELETE here destroys a log file, which is the same
+    // evidence-removal shape as turning the log level down. Placed before the
+    // filename validation so a cross-origin caller learns nothing about which
+    // names exist. GET is exempt, so the web UI's log viewer is unaffected.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "log file")) {
+        return *rejected;
+    }
+
     if (!util::is_valid_log_filename(filename)) {
         response.set_content_type("application/json");
         AlpacaResponse err = make_error_response(
@@ -6767,7 +6927,19 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
-    
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Stops the daemon. On a remote rig undoing this needs physical access.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "shutdown")) {
+        return *rejected;
+    }
+
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
@@ -7100,6 +7272,19 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Restarts the daemon, dropping every connected client mid-session --
+    // an imaging run lost to a page the operator merely had open.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "restart")) {
+        return *rejected;
+    }
+
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
@@ -7135,6 +7320,46 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
     return response;
 }
 
+namespace {
+// The subject of the WARN the two helpers below log: "Persisted skywatcher
+// telescope 1". Kept in one place so the two lines read alike in the log.
+std::string persisted_device_subject(const std::string& vendor, const std::string& device_type, int device_number) {
+    return "Persisted " + vendor + " " + device_type + " " + std::to_string(device_number);
+}
+}  // namespace
+
+bool Router::reject_invalid_config(ConfigSource source, const char* reason, const std::string& vendor,
+                                   const std::string& device_type, int device_number, std::string& error_message) {
+    if (source == ConfigSource::Api) {
+        error_message = reason;
+        return true;
+    }
+    util::log_warning(persisted_device_subject(vendor, device_type, device_number) + " will refuse to connect: " +
+                      reason + ". Registered anyway so it stays listed and editable in the web UI.");
+    return false;
+}
+
+std::string Router::normalize_persisted_connection_type(ConfigSource source, const std::string& conn_type,
+                                                        std::initializer_list<const char*> valid,
+                                                        const std::string& vendor, const std::string& device_type,
+                                                        int device_number) {
+    // The API's own else still rejects an unrecognised value, with the same
+    // message it always did.
+    if (source == ConfigSource::Api) {
+        return conn_type;
+    }
+    for (const char* candidate : valid) {
+        if (conn_type == candidate) {
+            return conn_type;
+        }
+    }
+    util::log_warning(persisted_device_subject(vendor, device_type, device_number) + " has connectionType \"" +
+                      conn_type +
+                      "\", which is not one this driver knows; treating it as \"serial\" so the device stays listed "
+                      "and editable in the web UI. Fix it there; the connect will fail until you do.");
+    return "serial";
+}
+
 bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message,
                                          ConfigSource source) {
     std::string device_type_str = config_get(config, "deviceType", "");
@@ -7151,6 +7376,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "ioptron" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_IOPTRON
         std::string conn_type = config_get(config, "connectionType", "auto");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
+                                                        device_type_str, device_number);
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -7183,8 +7415,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.port_path = config_get(config, "portPath", "");
                 conn_info.baud_rate = config_get(config, "baudRate", 115200);
 
-                if (conn_info.port_path.empty()) {
-                    error_message = "Serial port path is required";
+                if (conn_info.port_path.empty() &&
+                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
+                                          device_number, error_message)) {
                     return false;
                 }
             } else if (conn_type == "network") {
@@ -7405,6 +7638,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "synscan" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_SYNSCAN
         std::string conn_type = config_get(config, "connectionType", "auto");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
+                                                        device_type_str, device_number);
 
         std::string version_value = config_get(config, "synscanVersion", "auto");
         std::string version_normalized = to_lower_copy(version_value);
@@ -7446,8 +7686,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.port_path = config_get(config, "portPath", "");
                 conn_info.baud_rate = config_get(config, "baudRate", 9600);
 
-                if (conn_info.port_path.empty()) {
-                    error_message = "Serial port path is required";
+                if (conn_info.port_path.empty() &&
+                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
+                                          device_number, error_message)) {
                     return false;
                 }
             } else if (conn_type == "network") {
@@ -7455,8 +7696,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.host = config_get(config, "host", "");
                 conn_info.tcp_port = config_get(config, "tcpPort", conn_info.tcp_port);
 
-                if (conn_info.host.empty()) {
-                    error_message = "Host IP address is required";
+                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
+                                                                    device_type_str, device_number, error_message)) {
                     return false;
                 }
             } else {
@@ -7496,6 +7737,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "skywatcher" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
         std::string conn_type = config_get(config, "connectionType", "auto");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
+                                                        device_type_str, device_number);
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -7513,10 +7761,15 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // API independent of the web UI, and used to accept a skywatcher
         // config with no coordinates at all. The mount stores no site of its
         // own, so both would then collapse to 0.0 and a southern rig would run
-        // northern pointing math -- silently undoing #250, #253 and #261. The
-        // check goes inline here, the same way the portPath/host checks below
-        // do, because this branch is a hand-written if/else chain per vendor
-        // rather than a schema layer.
+        // northern pointing math -- silently undoing #250, #253 and #261.
+        // This check follows the SAME source rule as the
+        // portPath/host/connectionType checks below (reject the API, warn and
+        // register a persisted config), but it is spelled out inline rather
+        // than delegated to reject_invalid_config() because it needs the
+        // which-coordinate-is-missing detail in its WARN, and because
+        // normalize_persisted_connection_type()'s trick of substituting a safe
+        // value has no equivalent here: 0.0 is a real place that reads as
+        // northern, so there is nothing to carry forward.
         if (!site_latitude.has_value() || !site_longitude.has_value()) {
             static constexpr const char* kMissingSite =
                 "Site latitude and longitude are required for the Sky-Watcher direct driver: this mount stores no "
@@ -7549,8 +7802,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.port_path = config_get(config, "portPath", "");
                 conn_info.baud_rate = config_get(config, "baudRate", 9600);
 
-                if (conn_info.port_path.empty()) {
-                    error_message = "Serial port path is required";
+                if (conn_info.port_path.empty() &&
+                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
+                                          device_number, error_message)) {
                     return false;
                 }
             } else if (conn_type == "network") {
@@ -7558,8 +7812,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.host = config_get(config, "host", "");
                 conn_info.udp_port = config_get(config, "udpPort", conn_info.udp_port);
 
-                if (conn_info.host.empty()) {
-                    error_message = "Host IP address is required";
+                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
+                                                                    device_type_str, device_number, error_message)) {
                     return false;
                 }
             } else {
@@ -7596,6 +7850,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "onstep" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_ONSTEP
         std::string conn_type = config_get(config, "connectionType", "auto");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial"}, vendor,
+                                                        device_type_str, device_number);
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -7628,8 +7889,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.port_path = config_get(config, "portPath", "");
             conn_info.baud_rate = config_get(config, "baudRate", 9600);
 
-            if (conn_info.port_path.empty()) {
-                error_message = "Serial port path is required";
+            if (conn_info.port_path.empty() && reject_invalid_config(source, "Serial port path is required", vendor,
+                                                                     device_type_str, device_number, error_message)) {
                 return false;
             }
 
@@ -7668,6 +7929,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "celestron" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_CELESTRON
         std::string conn_type = config_get(config, "connectionType", "auto");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
+                                                        device_type_str, device_number);
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -7700,8 +7968,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.port_path = config_get(config, "portPath", "");
                 conn_info.baud_rate = config_get(config, "baudRate", 9600);
 
-                if (conn_info.port_path.empty()) {
-                    error_message = "Serial port path is required";
+                if (conn_info.port_path.empty() &&
+                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
+                                          device_number, error_message)) {
                     return false;
                 }
             } else if (conn_type == "network") {
@@ -7709,8 +7978,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.host = config_get(config, "host", "");
                 conn_info.tcp_port = config_get(config, "tcpPort", conn_info.tcp_port);
 
-                if (conn_info.host.empty()) {
-                    error_message = "Host IP address is required";
+                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
+                                                                    device_type_str, device_number, error_message)) {
                     return false;
                 }
             } else {
@@ -7755,8 +8024,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         conn_info.tcp_port = config_get(config, "tcpPort", 3040);
         conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
-        if (conn_info.host.empty()) {
-            error_message = "Host is required for Bisque/TheSkyX connection";
+        if (conn_info.host.empty() && reject_invalid_config(source, "Host is required for Bisque/TheSkyX connection",
+                                                            vendor, device_type_str, device_number, error_message)) {
             return false;
         }
 
@@ -7830,6 +8099,20 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #ifdef ALPACACORE_ENABLE_ZWO
         alpacacore::vendor::zwo::ConnectionInfo conn_info;
         std::string conn_type = config_get(config, "connectionType", "");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        //
+        // NOTE the valid list here, unlike the other five: this branch tests a
+        // bare `conn_type == "auto"` below, not `|| conn_type.empty()`, so an
+        // entry with no connectionType key at all falls to the else. Empty is
+        // therefore NOT valid here and normalises to serial like any other
+        // unrecognised value -- which is what keeps such an entry listed
+        // instead of vanishing from the web UI.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
+                                                        device_type_str, device_number);
 
         if (conn_type == "auto") {
             // Auto-detect the transport at connect time: probe USB serial ports
@@ -7841,8 +8124,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.port_path = config_get(config, "portPath", "");
             conn_info.baud_rate = config_get(config, "baudRate", 9600);
 
-            if (conn_info.port_path.empty()) {
-                error_message = "Serial port path is required";
+            if (conn_info.port_path.empty() && reject_invalid_config(source, "Serial port path is required", vendor,
+                                                                     device_type_str, device_number, error_message)) {
                 return false;
             }
         } else if (conn_type == "network") {
@@ -7850,8 +8133,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.host = config_get(config, "host", "");
             conn_info.tcp_port = config_get(config, "tcpPort", 4030);
 
-            if (conn_info.host.empty()) {
-                error_message = "Host IP address is required";
+            if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
+                                                                device_type_str, device_number, error_message)) {
                 return false;
             }
         } else {
