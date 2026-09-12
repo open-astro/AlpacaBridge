@@ -142,14 +142,58 @@ void Server::start_async() {
         return;
     }
 
+    // Same hazard as stop()'s !running_ path (issue #402): a previous
+    // start_async() whose run_server() failed early left a joinable thread in
+    // server_thread_, and assigning over a joinable std::thread also calls
+    // std::terminate(). An embedder retrying on another port does exactly
+    // this. The thread has already finished; the join just reaps it.
+    join_server_thread(std::this_thread::get_id());
+
     shutdown_requested_ = false;
     reset_queues_for_start();
     running_ = true;
-    server_thread_ = std::thread(&Server::run_server, this);
+    {
+        // Same guard as join_server_thread(): the assignment is the other half
+        // of server_thread_'s ownership, and assigning over a joinable thread
+        // is std::terminate() too.
+        std::unique_lock<std::mutex> guard(server_thread_mutex_);
+        // Wait out any join that started in the gap since join_server_thread()
+        // returned, so this assignment cannot land on a thread another caller
+        // is mid-join on. NOTE this does not make concurrent start_async()
+        // calls safe: two threads that both pass the `if (running_)` check
+        // above will both arrive here and the second assigns over a joinable
+        // thread, which is std::terminate(). No caller does that today --
+        // handle_restart_request() is CAS-guarded -- and serialising
+        // start_async() itself is out of this change's scope.
+        server_thread_cv_.wait(guard, [this] { return !server_thread_joining_; });
+        server_thread_ = std::thread(&Server::run_server, this);
+        // New generation: any waiter still parked on the previous one must give
+        // up rather than adopt this thread.
+        ++server_thread_generation_;
+        server_thread_cv_.notify_all();
+    }
 }
 
 void Server::stop() {
     if (!running_) {
+        // Not "nothing to do". run_server() can return early with running_
+        // already false -- an out-of-range port, a bind() that failed because
+        // the port is in use or a previous instance has not released it, or a
+        // missing reactor wake pipe -- and start_async() has by then created
+        // the thread and stored it. Returning here without joining left a
+        // joinable std::thread for ~Server() to destroy, which calls
+        // std::terminate(): a port conflict became an abort at destruction
+        // instead of a clean failure the caller could report, and the caller's
+        // own is_running() check did not help, because it correctly returned
+        // false and the crash came later (issue #402).
+        //
+        // only_if_stopped: reap a thread that already returned, never adopt a
+        // live one. Between this `!running_` read and the lock inside, a
+        // restart (handle_restart_request() stops then starts on a detached
+        // thread) can install a running server -- adopting it hangs this
+        // caller forever, which for the example embedder is the process never
+        // exiting.
+        join_server_thread(std::this_thread::get_id(), /*only_if_stopped=*/true);
         return;
     }
 
@@ -239,17 +283,105 @@ void Server::stop() {
         util::socket_close(fd);
     }
 
-    if (server_thread_.joinable()) {
-        if (server_thread_.get_id() == current_id) {
-            // Unreachable (run_server() never calls stop()); kept as an
-            // orphan rather than a detach for the same reason as above.
-            std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
-            orphaned_threads_.push_back(std::move(server_thread_));
-        } else {
-            server_thread_.join();
-        }
-    }
+    join_server_thread(current_id);
     util::log_info("HTTP server stopped");
+}
+
+void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped) {
+    // Take sole ownership of the thread under server_thread_mutex_, then act
+    // on it with the lock released. Whoever wins the move joins; every other
+    // caller finds server_thread_ empty and returns, so exactly one join()
+    // ever runs on it. stop() is re-entrant from another thread (the shutdown
+    // endpoint's detached thread runs the shutdown callback, which can make
+    // the embedder's loop call stop() as well), and concurrent join() on one
+    // std::thread is UB -- in practice the second pthread_join throws
+    // std::system_error that nothing catches, i.e. std::terminate().
+    //
+    // The join happens OUTSIDE the lock deliberately: it blocks until the
+    // accept loop unwinds, and holding a lock that any other stop() caller
+    // needs for that long is how this turns into a deadlock instead.
+    // Take sole ownership of the thread, join it with the lock released, and
+    // make every OTHER caller wait until that join has finished. Both halves
+    // matter:
+    //
+    //  - Exactly one caller may join. stop() is re-entrant from another thread
+    //    (the shutdown endpoint's detached thread runs the shutdown callback,
+    //    which can make the embedder's own loop call stop() too), and
+    //    concurrent join() on one std::thread is UB -- in practice the second
+    //    pthread_join throws std::system_error that nothing catches.
+    //
+    //  - Every caller must still return only once the thread is GONE, because
+    //    ~Server() runs straight after stop() and tears down the wake pipe,
+    //    the config and the connection maps that run_server() is still using.
+    //    Simply returning when another caller won the move loses that: the
+    //    loser's stop() returns while the accept loop is still unwinding.
+    //
+    // The join is outside the lock: it blocks until the accept loop unwinds,
+    // and the waiters need the mutex free to sit on the condition variable.
+    // No deadlock with the winner -- the caller that runs stop()'s phases
+    // closes the listener before it ever reaches this point, so the join it
+    // waits on can always complete.
+    std::thread owned;
+    {
+        std::unique_lock<std::mutex> guard(server_thread_mutex_);
+        // Wait on THIS generation, not just "no join in flight". The waiter
+        // releases the mutex, so by the time it wakes the winner may already
+        // have finished its join, returned from stop() and called
+        // start_async() again -- the restart path (handle_restart_request()
+        // stops and restarts while the embedder's loop, seeing is_running()
+        // false, calls stop() too) does exactly that. Re-reading
+        // server_thread_ blind would then adopt the NEW server's thread and
+        // join it, hanging stop() forever while the restarted server runs on.
+        const std::uint64_t generation = server_thread_generation_;
+        server_thread_cv_.wait(
+            guard, [this, generation] { return !server_thread_joining_ || server_thread_generation_ != generation; });
+        if (only_if_stopped && running_) {
+            // stop()'s !running_ path asked to reap a thread that had already
+            // returned early (a failed bind, #402). By the time it won this
+            // lock a restart may have installed a LIVE thread and set running_
+            // -- start_async() sets running_ before it takes this lock, so
+            // seeing it true here means server_thread_ is the new server's.
+            // Joining that blocks until the restarted server stops, which
+            // nothing is left to do: the embedder's stop() never returns.
+            // Reading running_ under THIS lock is what makes the answer
+            // independent of when the lock was won.
+            return;
+        }
+        if (server_thread_generation_ != generation) {
+            // A newer server thread exists, which means the one this call was
+            // about has already been joined -- start_async() only installs a
+            // new one after join_server_thread() has reaped the old. Not ours.
+            return;
+        }
+        if (!server_thread_.joinable()) {
+            // Either never started, or a join that has already COMPLETED
+            // reaped it -- the wait above is what makes that distinction safe.
+            return;
+        }
+        owned = std::move(server_thread_);
+        server_thread_joining_ = true;
+    }
+
+    if (owned.get_id() == current_id) {
+        // Unreachable from stop() (run_server() never calls stop()); kept as
+        // an orphan rather than a detach for the same reason as above.
+        std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+        orphaned_threads_.push_back(std::move(owned));
+    } else {
+        owned.join();
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(server_thread_mutex_);
+        server_thread_joining_ = false;
+        // notify_all() INSIDE the lock, deliberately. A waiter only needs the
+        // mutex to re-check the predicate, so notifying after the unlock would
+        // let it return from stop() -- and the embedder run ~Server() -- while
+        // this thread is still about to touch server_thread_cv_. This is the
+        // last `this` access after the protocol's own "the thread is gone, you
+        // may destroy me now" signal, so it is the one that has to be inside.
+        server_thread_cv_.notify_all();
+    }
 }
 
 // Destructor only, after every thread has been joined. The pipe is never
@@ -267,9 +399,9 @@ void Server::close_wake_pipe() {
 }
 
 void Server::wait() {
-    if (server_thread_.joinable()) {
-        server_thread_.join();
-    }
+    // Routed through the same ownership handshake as join_server_thread(), so
+    // a concurrent stop() and wait() cannot both join the one thread.
+    join_server_thread(std::this_thread::get_id());
 }
 
 namespace {
