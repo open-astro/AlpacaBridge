@@ -310,6 +310,8 @@ Open `http://<your-asiair-plus-ip>:11111/` in a browser:
 6. The **Power Ports** table is simpler than the Pro's — only the channel name and PWM checkbox are configurable per port. The kernel module fixes the ioctl index for each port (DC1=4, DC2=5, DC3=6, DC4=7), so there's no GPIO-line field. Tick **PWM** on any port you intend to use with a dew heater or flat panel.
 7. Submit
 
+> **All four ports come up OFF the moment AlpacaBridge starts — including after a reboot, before any client ever connects** — this is unconditional, not configurable. Before this, a port came up however the hardware or your previous session left it, which meant a dew heater or flat panel could still be live at full power after a reboot. Turn on whatever you need from your Alpaca client (e.g. NINA) once you connect.
+
 Or via the management API:
 
 ```json

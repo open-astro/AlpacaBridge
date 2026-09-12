@@ -17,6 +17,7 @@
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <string>
@@ -146,6 +147,7 @@ public:
         if (connected) {
             if (!wrapper_.is_open()) {
                 wrapper_.open();
+                apply_default_off_ports();
             }
         } else {
             if (wrapper_.is_open()) {
@@ -280,6 +282,47 @@ public:
     }
 
 private:
+    // Called exactly once, right after a fresh wrapper_.open() succeeds
+    // (never on an idempotent already-open connect). Unconditionally writes
+    // every port to OFF, individually — never the kernel's master-enable
+    // line (see the protocol wrapper's open() for why that line is never
+    // touched). This makes every connect start from a known, predictable
+    // state (issue #300: ports previously came up however the hardware/
+    // previous session left them, which meant a dew heater or panel could
+    // be silently live at 100% after a reboot). Best-effort: a failure on
+    // one port is logged and does not fail the connect or block the
+    // remaining ports. See AGENTS.md (ZWO ASIAIR Plus section) for the
+    // hardware validation behind this being safe on this device.
+    void apply_default_off_ports() {
+        bool any_pwm = false;
+        for (std::size_t i = 0; i < config_.ports.size(); ++i) {
+            try {
+                wrapper_.set_value(i, 0);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN(kLogCategory,
+                                "Failed to default port " + std::to_string(i + 1) + " off at connect: " + e.what());
+            }
+            any_pwm = any_pwm || config_.ports[i].pwm_enabled;
+        }
+        // A pwm_enabled port's set_value() above only updates an atomic that
+        // its background pwm_loop worker thread picks up on its next ~20ms
+        // poll cycle (see the protocol wrapper) — unlike a boolean port,
+        // where set_value() writes the ioctl synchronously. A caller that
+        // opens, calls this, then immediately closes again (the router's
+        // boot-safety path for a persisted device, issue #300) can tear the
+        // worker thread down via close()'s stop_pwm signal before it ever
+        // gets a cycle to actually write the OFF level — the physical port
+        // stays at whatever it was, even though the atomic (and therefore
+        // GetSwitchValue) already reads 0. Give the worker thread(s) a
+        // couple of poll cycles' margin to actually apply it before this
+        // function returns. Cheap and harmless for the normal (stays
+        // connected) case; only matters for a caller that closes right
+        // after this returns.
+        if (any_pwm) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+    }
+
     void ensure_connected() const {
         if (!wrapper_.is_open()) {
             throw AlpacaException("ASIAIR Plus switch not connected", AlpacaError::NotConnected);
