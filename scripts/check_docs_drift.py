@@ -40,6 +40,13 @@ Checks:
      pre-flight script only has value while it runs what CI runs, and this
      pair is written out twice with nothing comparing it -- the same shape as
      checks 2 and 3.
+  9. Every first-party source file carries the CURRENT AGPL-3.0-or-later
+     header: the "This file is part of <Component>." line plus the short
+     form that names the licence id and points at the LICENSE file for the
+     vendor-SDK linking exception (issue #450). The rule was prompt-only,
+     and two files added on 2026-09-09 carried the pre-#113 long-form GNU
+     boilerplate, which names neither. Vendored SDKs under external/ are
+     excluded, as everywhere else.
 """
 
 import glob
@@ -793,6 +800,74 @@ def check_tsan_filtered_runs_sync():
     return failures
 
 
+# --- check 9: AGPL header form (issue #450) ---------------------------------
+
+# First-party source trees and the extensions that must carry the header.
+# AlpacaCore/external/ is third-party and never scanned.
+LICENSE_HEADER_PREFIXES = (
+    "AlpacaCore/src/", "AlpacaCore/include/", "AlpacaCore/tests/",
+    "AlpacaCore/examples/",
+    "AlpacaHTTP/src/", "AlpacaHTTP/include/", "AlpacaHTTP/tests/",
+    "AlpacaHTTP/examples/",
+)
+LICENSE_HEADER_EXTENSIONS = (".h", ".hpp", ".c", ".cc", ".cpp")
+# The header must START within this many lines. The block itself is matched
+# against the whole file from that point, so a block that begins on line 20
+# is not cut mid-way and misreported as missing.
+LICENSE_HEADER_LINES = 25
+
+# The current form, one block per component. Matched as a whole, not by a
+# single token: grepping for `AGPL` misses nothing but reports the old form
+# as "no header", and grepping for `Affero General Public License` accepts
+# both forms and catches neither drift (issue #450).
+LICENSE_HEADER_FORM = (
+    "// {c} is licensed under the GNU Affero General Public License,\n"
+    "// version 3 or (at your option) any later version (AGPL-3.0-or-later),\n"
+    "// with an additional permission allowing combination with proprietary\n"
+    "// device-vendor SDKs. See the LICENSE file in this repository for the full\n"
+    "// license text and the vendor-SDK linking exception, or the license online at:\n"
+    "// https://www.gnu.org/licenses/agpl-3.0.html\n"
+)
+# The pre-#113 form, named in the finding so the fix is obvious.
+LICENSE_HEADER_OLD_FORM_MARK = "is free software: you can redistribute it and/or modify"
+
+# A floor, not a count (see check 5): the tree has a few hundred first-party
+# source files, so a file list that shrinks to a handful means the listing
+# or the prefixes regressed, not that the tree did.
+MIN_LICENSE_HEADER_FILES = 100
+
+
+def check_license_headers():
+    failures = []
+    tracked = _run_git(["-c", "core.quotePath=false", "ls-files"]).stdout.splitlines()
+    files = [f for f in tracked
+             if f.startswith(LICENSE_HEADER_PREFIXES) and f.endswith(LICENSE_HEADER_EXTENSIONS)]
+    if len(files) < MIN_LICENSE_HEADER_FILES:
+        return ["found only %d first-party source file(s) to check for a licence "
+                "header (floor %d) -- the file listing or LICENSE_HEADER_PREFIXES "
+                "regressed" % (len(files), MIN_LICENSE_HEADER_FILES)]
+    for f in files:
+        component = f.split("/", 1)[0]
+        text = read(f)
+        head = "".join(text.splitlines(keepends=True)[:LICENSE_HEADER_LINES])
+        if "This file is part of %s." % component not in head:
+            failures.append("%s: missing the 'This file is part of %s.' line in its "
+                            "first %d lines" % (f, component, LICENSE_HEADER_LINES))
+        block_at = text.find(LICENSE_HEADER_FORM.format(c=component))
+        if block_at >= 0 and text.count("\n", 0, block_at) < LICENSE_HEADER_LINES:
+            continue
+        if LICENSE_HEADER_OLD_FORM_MARK in head:
+            failures.append("%s: carries the pre-#113 long-form GNU header, which names "
+                            "neither AGPL-3.0-or-later nor the vendor-SDK linking "
+                            "exception -- replace it with the current six-line form "
+                            "(copy it from any sibling file)" % f)
+        else:
+            failures.append("%s: missing the current AGPL-3.0-or-later header block in its "
+                            "first %d lines (copy it from any sibling file)"
+                            % (f, LICENSE_HEADER_LINES))
+    return failures
+
+
 CHECKS = [
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
     ("zizmor pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
@@ -802,6 +877,7 @@ CHECKS = [
     ("AGENTS.md path references exist", check_agents_md_paths_exist),
     ("QHY SDK seam lists agree (interface / LockedQHYSDK / sweep)", check_qhy_seam_lists),
     ("TSan filtered runs sync (ci.yml vs ci_preflight.sh)", check_tsan_filtered_runs_sync),
+    ("AGPL header form on every first-party source file", check_license_headers),
 ]
 
 

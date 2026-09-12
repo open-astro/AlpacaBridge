@@ -3,18 +3,12 @@
 //
 // This file is part of AlpacaCore.
 //
-// AlpacaCore is free software: you can redistribute it and/or modify it under
-// the terms of the GNU Affero General Public License as published by the Free
-// Software Foundation, either version 3 of the License, or (at your option)
-// any later version.
-//
-// AlpacaCore is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
-// for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with AlpacaCore. If not, see <https://www.gnu.org/licenses/>.
+// AlpacaCore is licensed under the GNU Affero General Public License,
+// version 3 or (at your option) any later version (AGPL-3.0-or-later),
+// with an additional permission allowing combination with proprietary
+// device-vendor SDKs. See the LICENSE file in this repository for the full
+// license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
 
 // Serial-transport tests for the Sky-Watcher protocol wrapper, over a
 // pty-backed fake motor controller (fake_skywatcher_serial_board.h). These
