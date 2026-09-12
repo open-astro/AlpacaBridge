@@ -2385,8 +2385,14 @@ int main() {
                 w.find("Host IP address is required") != std::string::npos) {
                 warned_host = true;
             }
+            // The fallback VALUE is the judgement this whole change rests on:
+            // "serial" makes the connect fail on the port path, while "auto"
+            // would auto-probe and attach to whatever mount answers. Nothing
+            // pinned it, so flipping the helper to "auto" kept the suite
+            // green -- assert the fragment, not just that a WARN happened.
             if (w.find("telescope 9642") != std::string::npos &&
-                w.find("has connectionType \"carrier-pigeon\"") != std::string::npos) {
+                w.find("has connectionType \"carrier-pigeon\"") != std::string::npos &&
+                w.find("treating it as \"serial\"") != std::string::npos) {
                 warned_conn_type = true;
             }
         }

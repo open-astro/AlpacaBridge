@@ -301,6 +301,27 @@ target. Hardware-free coverage lives in `tests/test_<vendor>_async_park.cpp` ove
 (Celestron `J` → `1#`, SynScan/NexStar `e` → a parseable pair with Dec < 90°), or the park
 is refused before the GOTO is ever sent.
 
+### TargetRightAscension and TargetDeclination are independent (all telescope drivers)
+
+ASCOM treats the two target properties as separate: each getter must throw `ValueNotSet`
+until **that property itself** has been written, and ConformU reports the shared-flag
+version as "Read before write should generate an error and didn't" on both. Every driver
+therefore carries `target_ra_set_` **and** `target_dec_set_`, each set only by its own
+setter. One flag for both is a review-blocking regression — it was the original shape in
+all seven drivers and took two passes to remove (#304, then #346).
+
+The paths that legitimately define both coordinates at once set or clear both: the slew
+and sync *coordinate* forms, any target seeding from the mount's own position (SynScan's
+pulse-guide accumulator), the post-slew position-override and arrival reads, and the
+connect/disconnect resets. `SlewToTarget`, `SlewToTargetAsync` and `SyncToTarget` require
+the pair and must check it — Celestron and SynScan were both missing that check on the
+synchronous form, which one shared flag hid, since any target write made it pass.
+
+Hardware-free coverage per driver: read each property before any write, write RA alone and
+check Dec still throws while RA reads back, confirm the three `*ToTarget` calls refuse the
+half-set pair, then write Dec and expect both. A driver whose setters write to the mount
+(iOptron) needs the fake rather than a disconnected instance.
+
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
 | Throw | When |
