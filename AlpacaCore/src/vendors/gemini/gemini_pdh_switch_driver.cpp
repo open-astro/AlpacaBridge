@@ -147,8 +147,8 @@ public:
         shutdown_connection();
         if (connected_.load()) {
             try {
+                connected_.store(false);  // driver state first, then the close (issue #387)
                 protocol_.disconnect();
-                connected_.store(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini", "Error during power hub destruction: " + std::string(e.what()));
             }
@@ -239,8 +239,12 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Power & Data Hubs Advanced 3 connected");
         } else {
-            protocol_.disconnect();  // joins the reader, clears cached firmware
+            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // throwing close must not leave the driver reporting connected on
+            // a closed port. disconnect() cannot throw today; the order is
+            // the contract, not the current wrapper's behaviour.
             connected_.store(false);
+            protocol_.disconnect();  // joins the reader, clears cached firmware
             ALPACA_LOG_INFO("Gemini", "Power & Data Hubs Advanced 3 disconnected");
         }
     }

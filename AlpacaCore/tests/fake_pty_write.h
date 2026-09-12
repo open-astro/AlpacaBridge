@@ -48,11 +48,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdlib.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 
 namespace alpacacore::test {
@@ -63,6 +66,74 @@ inline bool make_pty_nonblocking(int fd) {
     const int flags = fcntl(fd, F_GETFL, 0);
     return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
+
+// A pseudo-terminal pair for a serial-device fake: the non-blocking master
+// this fake reads and writes, the slave path the driver opens, and a
+// keep-alive slave handle so the master never sees EIO between the driver's
+// disconnect (close) and reconnect (open). Owns both descriptors, so a
+// constructor that throws after opening the master no longer leaks it for
+// the life of the test binary (issue #387: no destructor runs for a
+// partially constructed fake, so the fake's own destructor could not close
+// what its constructor had opened). A keep-alive open that fails throws
+// too, rather than surfacing later as a confusing EIO on the first read.
+class PtyPair {
+public:
+    explicit PtyPair(const char* who) {
+        master_fd_ = posix_openpt(O_RDWR | O_NOCTTY);
+        // Issue #424: the master goes non-blocking here, so a reply to a
+        // driver that has stopped draining can never park a fake's worker
+        // inside write() and hang the destructor's join. Folded into the
+        // same throw as the other setup failures: a silent fallback to a
+        // blocking master would look exactly like the hang this removes.
+        if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0 ||
+            !make_pty_nonblocking(master_fd_)) {
+            close_all();
+            throw std::runtime_error(std::string(who) + ": cannot open pty");
+        }
+        const char* name = ptsname(master_fd_);
+        if (name == nullptr) {
+            close_all();
+            throw std::runtime_error(std::string(who) + ": ptsname failed");
+        }
+        slave_path_ = name;
+        keepalive_fd_ = ::open(slave_path_.c_str(), O_RDWR | O_NOCTTY);
+        if (keepalive_fd_ < 0) {
+            close_all();
+            throw std::runtime_error(std::string(who) + ": cannot open the keep-alive slave");
+        }
+        struct termios tty {};
+        if (tcgetattr(keepalive_fd_, &tty) == 0) {
+            cfmakeraw(&tty);
+            tcsetattr(keepalive_fd_, TCSANOW, &tty);
+        }
+    }
+    ~PtyPair() { close_all(); }
+    PtyPair(const PtyPair&) = delete;
+    PtyPair& operator=(const PtyPair&) = delete;
+
+    int master_fd() const { return master_fd_; }
+    const std::string& slave_path() const { return slave_path_; }
+
+    /// Close both ends now: the driver's reads and writes on the slave fail
+    /// with EIO from here on, which is what a USB unplug looks like
+    /// (issue #237). Not reversible.
+    void sever() { close_all(); }
+
+private:
+    void close_all() {
+        if (keepalive_fd_ >= 0) {
+            ::close(keepalive_fd_);
+            keepalive_fd_ = -1;
+        }
+        if (master_fd_ >= 0) {
+            ::close(master_fd_);
+            master_fd_ = -1;
+        }
+    }
+    int master_fd_ = -1;
+    int keepalive_fd_ = -1;
+    std::string slave_path_;
+};
 
 /// Write `data` to a non-blocking pty master, giving up after `budget` or as
 /// soon as `stop` is set. Returns the number of bytes actually written; the

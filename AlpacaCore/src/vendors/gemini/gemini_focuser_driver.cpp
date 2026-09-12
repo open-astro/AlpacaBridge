@@ -162,14 +162,18 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
-            protocol_.disconnect();
+            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // throwing close must not leave the driver reporting connected on
+            // a closed port. disconnect() cannot throw today; the order is
+            // the contract, not the current wrapper's behaviour.
+            connected_.store(false);
             // Clear the cached firmware so get_device_firmware() reports nothing
             // once disconnected.
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
-            connected_.store(false);
+            protocol_.disconnect();
             ALPACA_LOG_INFO("Gemini", "Focuser disconnected");
         }
     }

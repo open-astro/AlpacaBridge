@@ -170,12 +170,16 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Flat panel connected");
         } else {
-            protocol_.disconnect();
+            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // throwing close must not leave the driver reporting connected on
+            // a closed port. disconnect() cannot throw today; the order is
+            // the contract, not the current wrapper's behaviour.
+            connected_.store(false);
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
-            connected_.store(false);
+            protocol_.disconnect();
             ALPACA_LOG_INFO("Gemini", "Flat panel disconnected");
         }
     }
@@ -510,12 +514,16 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Flat panel v2 connected");
         } else {
-            protocol_.disconnect();
+            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // throwing close must not leave the driver reporting connected on
+            // a closed port. disconnect() cannot throw today; the order is
+            // the contract, not the current wrapper's behaviour.
+            connected_.store(false);
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
-            connected_.store(false);
+            protocol_.disconnect();
             ALPACA_LOG_INFO("Gemini", "Flat panel v2 disconnected");
         }
     }

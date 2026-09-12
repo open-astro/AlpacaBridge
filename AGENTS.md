@@ -1366,7 +1366,11 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
 
 A fake that answers a driver over a pseudo-terminal must open its master
 non-blocking and write through `pty_write_bounded()` from
-`AlpacaCore/tests/fake_pty_write.h`, passing its own `stop_` flag. A bare
+`AlpacaCore/tests/fake_pty_write.h`, passing its own `stop_` flag. Open the
+pair through `PtyPair` in that same header rather than a hand-rolled
+`posix_openpt()` block: the hand-rolled shape leaked the master on every
+setup-failure path and ignored a failed keep-alive open, and it had been
+copied six times before #387 replaced the three Gemini copies. A bare
 `write(master_fd_, ...)` on a blocking master parks the fake's worker thread as
 soon as the driver stops draining — which is normal as a concurrency test winds
 down — and the destructor's `join()` then never returns, because the thread is

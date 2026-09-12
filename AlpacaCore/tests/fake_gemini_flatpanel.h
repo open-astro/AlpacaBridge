@@ -42,31 +42,10 @@ namespace alpacacore::test {
 
 class FakeGeminiFlatPanel {
 public:
-    FakeGeminiFlatPanel() {
-        master_fd_ = posix_openpt(O_RDWR | O_NOCTTY);
-        // Issue #424: the master goes non-blocking here, so a reply to a
-        // driver that has stopped draining can never park this fake's
-        // worker inside write() and hang the destructor's join. Folded
-        // into the same throw as the other setup failures: a silent
-        // fallback to a blocking master would look exactly like the hang
-        // this exists to remove. See fake_pty_write.h.
-        if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0 ||
-            !make_pty_nonblocking(master_fd_)) {
-            throw std::runtime_error("FakeGeminiFlatPanel: cannot open pty");
-        }
-        const char* name = ptsname(master_fd_);
-        if (name == nullptr) {
-            throw std::runtime_error("FakeGeminiFlatPanel: ptsname failed");
-        }
-        slave_path_ = name;
-        // Keep a slave handle open so the master never sees EIO between the
-        // driver's disconnect (close) and reconnect (open).
-        keepalive_fd_ = open(slave_path_.c_str(), O_RDWR | O_NOCTTY);
-        struct termios tty {};
-        if (keepalive_fd_ >= 0 && tcgetattr(keepalive_fd_, &tty) == 0) {
-            cfmakeraw(&tty);
-            tcsetattr(keepalive_fd_, TCSANOW, &tty);
-        }
+    FakeGeminiFlatPanel() : pty_("FakeGeminiFlatPanel") {
+        // The pty pair is owned by pty_ (fake_pty_write.h), constructed
+        // before this body runs; a setup failure throws from there with
+        // nothing left open (issue #387).
         reader_ = std::thread([this] { run(); });
     }
 
@@ -75,18 +54,12 @@ public:
         if (reader_.joinable()) {
             reader_.join();
         }
-        if (keepalive_fd_ >= 0) {
-            close(keepalive_fd_);
-        }
-        if (master_fd_ >= 0) {
-            close(master_fd_);
-        }
     }
 
     FakeGeminiFlatPanel(const FakeGeminiFlatPanel&) = delete;
     FakeGeminiFlatPanel& operator=(const FakeGeminiFlatPanel&) = delete;
 
-    const std::string& slave_path() const { return slave_path_; }
+    const std::string& slave_path() const { return pty_.slave_path(); }
 
     /// Every command received so far, in wire order (e.g. ">L#", ">B128#").
     std::vector<std::string> commands() const {
@@ -135,13 +108,13 @@ private:
         char buf[64];
         while (!stop_.load()) {
             struct pollfd pfd {};
-            pfd.fd = master_fd_;
+            pfd.fd = pty_.master_fd();
             pfd.events = POLLIN;
             const int r = poll(&pfd, 1, 20);
             if (r <= 0) {
                 continue;
             }
-            const ssize_t n = read(master_fd_, buf, sizeof(buf));
+            const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
             if (n <= 0) {
                 continue;
             }
@@ -207,12 +180,10 @@ private:
         } else if (cmd == ">C#") {
             cover_.store(1);
         }
-        pty_write_bounded(master_fd_, reply, stop_);
+        pty_write_bounded(pty_.master_fd(), reply, stop_);
     }
 
-    int master_fd_ = -1;
-    int keepalive_fd_ = -1;
-    std::string slave_path_;
+    PtyPair pty_;
     std::thread reader_;
     std::atomic<bool> stop_{false};
 
