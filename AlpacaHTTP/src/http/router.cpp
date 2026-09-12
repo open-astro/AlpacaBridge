@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/alpaca_defs.h>
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/device_registry.h>
 #include <alpacacore/filterwheel_driver.h>
@@ -1312,6 +1313,29 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
 
 namespace alpacahttp {
 
+namespace {
+// Issue #358: a driver that refuses a connect explains why, and the client
+// never saw it -- the reason reached the server log and stopped there, so
+// every "why won't it connect" question started with asking the operator for
+// the log. AsyncConnectable now keeps the reason; this reads it back for the
+// 38 drivers that derive from it, and falls back to the old constant for
+// anything that does not, or when the failure produced no text.
+//
+// The text goes out verbatim. Driver messages are written for logs and can
+// name host paths (a serial port, a config field), which is exactly what an
+// operator needs to act on and is no more than the same message already
+// visible in the log file the web UI serves.
+std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
+    if (const auto* async = dynamic_cast<const alpacacore::AsyncConnectable*>(&device)) {
+        std::string reason = async->get_last_connect_error();
+        if (!reason.empty()) {
+            return reason;
+        }
+    }
+    return "Connection failed";
+}
+}  // namespace
+
 Router::Router() {
     set_server_info("AlpacaHTTP", "AlpacaHTTP", alpacahttp::kVersion, "", "");
     load_persisted_devices();
@@ -1887,6 +1911,23 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 } catch (const std::exception& e) {
                     util::log_warning("SDK version query failed for " + cap.name + ": " + e.what());
                 }
+
+                // Issue #358, the Platform 7 half. PUT /connect returns success
+                // immediately by design and completion is observed through
+                // Connecting, so when the task fails there is no response left
+                // to carry an error: the client -- NINA 3.x prefers this path
+                // -- sees Connecting go false and Connected stay false, with
+                // no message anywhere in the protocol. The reason has nowhere
+                // to go in ASCOM, so it surfaces here instead, where the web
+                // UI can show the operator what the driver actually said.
+                // Present only while a failure stands; the next attempt clears
+                // it. Like Firmware and SdkVersion, deliberately not part of
+                // any ASCOM response.
+                if (const auto* async = dynamic_cast<const alpacacore::AsyncConnectable*>(driver.get())) {
+                    if (std::string reason = async->get_last_connect_error(); !reason.empty()) {
+                        device["LastConnectError"] = reason;
+                    }
+                }
             }
             devices.push_back(device);
         }
@@ -2344,9 +2385,11 @@ Response Router::dispatch_device_method(
                     if (!device->get_connecting() && !device->get_connected()) {
                         // Failed connect: this client holds no live link.
                         unregister_client_connection(device.get(), client_key);
-                        throw alpacacore::AlpacaException(
-                            "Connection failed",
-                            alpacacore::AlpacaError::NotConnected);
+                        // The driver's own words when it has them; the error
+                        // number is unchanged, so a client matching on it is
+                        // unaffected.
+                        throw alpacacore::AlpacaException(connect_failure_reason(*device),
+                                                          alpacacore::AlpacaError::NotConnected);
                     }
                     // Still connecting at the deadline: reply now, the client
                     // observes completion through Connecting/Connected. Until

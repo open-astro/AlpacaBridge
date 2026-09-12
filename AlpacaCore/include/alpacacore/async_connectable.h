@@ -97,6 +97,28 @@ public:
     /// True while a connect or disconnect task is in flight (get_connecting()).
     bool connection_task_active() const { return conn_task_.load() != kConnIdle; }
 
+public:
+    /// The reason the most recent connect attempt failed, or "" when the last
+    /// attempt succeeded, none has been made, or the failure has since been
+    /// cleared by a new attempt (issue #358).
+    ///
+    /// run_connection_task() runs as a std::thread entry point, where an
+    /// escaping exception calls std::terminate, so the catch blocks there are
+    /// deliberate and must stay. What they used to do was record only *that*
+    /// the connect failed, never *why* -- the driver's explanation went to the
+    /// log and stopped, and the client was told "Connection failed" and
+    /// nothing else. Every driver deriving from this base lost its
+    /// connect-failure reason the same way, so every "why won't it connect"
+    /// question started with asking the operator for the log.
+    ///
+    /// Published under its own leaf mutex rather than connection_mutex_: the
+    /// task tail holds that one across deferred set_connected() calls, and a
+    /// client polling for the reason must not be parked behind a handshake.
+    std::string get_last_connect_error() const {
+        std::lock_guard<std::mutex> lock(connect_error_mutex_);
+        return last_connect_error_;
+    }
+
 protected:
     explicit AsyncConnectable(std::string log_tag) : log_tag_(std::move(log_tag)) {}
 
@@ -270,10 +292,16 @@ private:
     void run_connection_task(bool connect) {
         ALPACA_LOG_TRACE(log_tag_, std::string("run_connection_task: entry connect=") + (connect ? "true" : "false"));
         bool last_failed = false;
+        // Cleared at the start of the attempt, not at the end of the previous
+        // one: a client reading the reason has to see it belong to the attempt
+        // it just made, and a successful connect must not leave the last
+        // failure's text behind for the next one to report.
+        clear_last_connect_error(connect);
         try {
             set_connected(connect);
         } catch (const std::exception& e) {
             last_failed = true;
+            record_connect_error(connect, e.what());
             ALPACA_LOG_ERROR(log_tag_, std::string("Connection task failed: ") + e.what());
         } catch (...) {
             last_failed = true;
@@ -281,6 +309,7 @@ private:
             // std::terminate. Every driver throws std:: exceptions today, but
             // this base is now the single chokepoint for 38 drivers' connect
             // paths — swallow-and-log rather than bet on that forever.
+            record_connect_error(connect, "the driver threw a non-std exception");
             ALPACA_LOG_ERROR(log_tag_, "Connection task failed: non-std exception");
         }
         // Tail under connection_mutex_: see the class comment for why the
@@ -358,19 +387,42 @@ private:
                 return;
             }
             last_failed = false;
+            clear_last_connect_error(need_connect);
             try {
                 set_connected(need_connect);
             } catch (const std::exception& e) {
                 last_failed = true;
+                record_connect_error(need_connect, e.what());
                 ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") + (need_connect ? "connect" : "disconnect") +
                                                " failed: " + e.what());
             } catch (...) {
                 last_failed = true;
+                record_connect_error(need_connect, "the driver threw a non-std exception");
                 ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") + (need_connect ? "connect" : "disconnect") +
                                                " failed: non-std exception");
             }
             last_was_connect = need_connect;
         }
+    }
+
+    // Only a CONNECT attempt owns last_connect_error_. A disconnect failure is
+    // reported on its own path and has no client waiting on a reason here;
+    // letting it overwrite the string would replace the connect reason a
+    // client is about to read with an unrelated teardown message.
+    void record_connect_error(bool connect, const std::string& reason) {
+        if (!connect) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(connect_error_mutex_);
+        last_connect_error_ = reason;
+    }
+
+    void clear_last_connect_error(bool connect) {
+        if (!connect) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(connect_error_mutex_);
+        last_connect_error_.clear();
     }
 
     enum ConnTaskState : std::uint8_t { kConnIdle = 0, kConnConnect = 1, kConnDisconnect = 2 };
@@ -382,6 +434,10 @@ private:
     bool pending_disconnect_ = false;
     bool pending_connect_ = false;  // under pending_mutex_, mirror of the above
     bool shutting_down_ = false;    // under connection_mutex_
+    // Leaf lock, taken by nothing else and never held across a driver call.
+    // mutable so the accessor can stay const.
+    mutable std::mutex connect_error_mutex_;
+    std::string last_connect_error_;  // under connect_error_mutex_
     std::thread connection_thread_;
 };
 

@@ -205,6 +205,15 @@ vendor-agnostic; do them in the driver from the start.
 > inherits it (issue #100); a new driver that copy-pastes its own
 > `connection_thread_` machinery is a review-blocking regression.
 
+> A driver that refuses a connect should say why in the exception it throws:
+> since #358 `AsyncConnectable` keeps that text and the router reports it to
+> the client instead of a bare "Connection failed", so the message is read by
+> an operator in NINA, not only in the log. Write it for someone standing at
+> the mount — name the setting to change, not the internal state that was
+> wrong. It also reaches the web UI as `LastConnectError` on
+> `/management/v1/configureddevices`, which is the only place the Platform 7
+> `PUT /connect` path can surface a reason at all.
+
 Two of our worst deadlocks are documented later, not in the checklist above — read
 [`disconnect_locked()`](#reconnect-must-not-self-deadlock-disconnect_locked) and the
 narrow-`firmware_mutex_` rule (under "Device firmware / SDK version") before touching

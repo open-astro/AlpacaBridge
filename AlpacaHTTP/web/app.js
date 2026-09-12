@@ -575,6 +575,12 @@ async function loadDevices() {
                         <span class="info-value">${escapeHtml(device.SdkVersion)}</span>
                     </div>
                     ` : ''}
+                    ${device.LastConnectError ? `
+                    <div class="info-item info-item-wide">
+                        <span class="info-label">Last Connect Error</span>
+                        <span class="info-value info-value-error">${escapeHtml(device.LastConnectError)}</span>
+                    </div>
+                    ` : ''}
                 </div>
                 ${settingsHtml}
                 <div class="device-actions">

@@ -81,6 +81,11 @@ public:
             return;
         }
         std::this_thread::sleep_for(op_delay_);
+        if (fail_connect_.load()) {
+            // A driver that refuses a connect and says why -- the shape every
+            // real driver's guard has (issue #358).
+            throw std::runtime_error("site latitude and longitude must be set before connecting");
+        }
         connected_.store(true);  // set LAST, after the "slow" connect work
         ++connect_completions_;
     }
@@ -90,6 +95,7 @@ public:
 
     std::chrono::milliseconds op_delay_{50};
     std::atomic<bool> fail_disconnect_{false};
+    std::atomic<bool> fail_connect_{false};
     std::atomic<int> connect_completions_{0};
     std::atomic<int> disconnect_completions_{0};
 
@@ -272,4 +278,50 @@ TEST_CASE("AsyncConnectable - lifecycle stress with chained pending flags", "[as
     wait_until_idle(d);
     CHECK_FALSE(d.get_connected());
     CHECK_FALSE(d.get_connecting());
+}
+
+// Issue #358: the reason a connect failed is kept, not just the fact.
+TEST_CASE("AsyncConnectable - a failed connect keeps the driver's reason", "[async_connectable][unit]") {
+    TestConnectable d;
+
+    // Nothing has happened yet, so there is no reason to report. The router
+    // falls back to its old constant on an empty string, so "" has to mean
+    // "no failure stands" and never "failed for reasons unknown".
+    CHECK(d.get_last_connect_error().empty());
+
+    d.fail_connect_.store(true);
+    d.connect();
+    wait_until_idle(d);
+    CHECK(!d.get_connected());
+    // Verbatim, not a category: the whole point is that the sentence telling
+    // the operator what to fix reaches them instead of stopping at the log.
+    CHECK(d.get_last_connect_error() == "site latitude and longitude must be set before connecting");
+
+    // A later successful connect clears it. Cleared at the START of the
+    // attempt, so a client polling during a retry cannot read the previous
+    // failure's text and attribute it to the attempt in flight.
+    d.fail_connect_.store(false);
+    d.connect();
+    wait_until_idle(d);
+    CHECK(d.get_connected());
+    CHECK(d.get_last_connect_error().empty());
+}
+
+TEST_CASE("AsyncConnectable - a failed disconnect does not write the connect reason", "[async_connectable][unit]") {
+    TestConnectable d;
+
+    d.connect();
+    wait_until_idle(d);
+    REQUIRE(d.get_connected());
+    REQUIRE(d.get_last_connect_error().empty());
+
+    // A teardown failure is reported on its own path and has no client waiting
+    // on a reason here. Were it allowed to write this string, the next thing a
+    // client read would be an unrelated teardown message presented as the
+    // reason its connect failed -- worse than the constant it replaces.
+    d.fail_disconnect_.store(true);
+    d.disconnect();
+    wait_until_idle(d);
+    CHECK(!d.get_connected());
+    CHECK(d.get_last_connect_error().empty());
 }

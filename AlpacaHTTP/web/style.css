@@ -293,6 +293,19 @@ h2 {
     font-size: 13px;
 }
 
+/* A connect-failure reason is a sentence, not a field value: it spans the
+   grid rather than being clipped into one column. */
+.info-item-wide {
+    grid-column: 1 / -1;
+}
+
+.info-value-error {
+    color: #f08a7a;
+    font-family: inherit;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 .device-actions {
     margin-top: 12px;
     padding-top: 12px;

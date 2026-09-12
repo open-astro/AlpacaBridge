@@ -153,7 +153,7 @@ private:
 // disconnect() or get_connecting() would imply coverage of the async
 // initiator that this block does not have. LockedSlowConnectStubDriver
 // below is the stub that does exercise it.
-class TelescopeClockStubDriver final : public alpacacore::TelescopeDriver {
+class TelescopeClockStubDriver : public alpacacore::TelescopeDriver {
 public:
     explicit TelescopeClockStubDriver(int number) : number_(number) {}
 
@@ -379,6 +379,49 @@ private:
     std::chrono::milliseconds connect_delay_;
     mutable std::mutex mutex_;
     bool connected_ = false;
+};
+
+// Issue #358: a driver that refuses a connect and explains why, wired through
+// AsyncConnectable the way all 38 real drivers are, so the router path under
+// test is the real one.
+class RefusingConnectStubDriver final : public alpacacore::AlpacaDriver, public alpacacore::AsyncConnectable {
+public:
+    // Deliberately the multi-clause shape a real driver's guard produces: the
+    // sentence that tells the operator what to fix is the whole point, so a
+    // test that pinned a one-word message would not show it survives.
+    static constexpr const char* kReason =
+        "Site latitude and longitude must be set before connecting: this mount stores no site of its own, "
+        "and pointing math is hemisphere-dependent";
+
+    explicit RefusingConnectStubDriver(int number) : AsyncConnectable("RefusingStub"), number_(number) {}
+    ~RefusingConnectStubDriver() override { shutdown_connection(); }
+
+    int get_device_number() const override { return number_; }
+    std::string get_name() const override { return "Refusing Connect Stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::CoverCalibrator; }
+    std::string get_unique_id() const override { return "refusing-connect-stub-" + std::to_string(number_); }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 1; }
+    bool get_connected() const override { return false; }
+    bool get_connecting() const override { return connection_task_active(); }
+    void connect() override { start_connection_task(true); }
+    void disconnect() override { start_connection_task(false); }
+    void set_connected(bool connected) override {
+        if (connected) {
+            throw std::runtime_error(kReason);
+        }
+    }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return ""; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return ""; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return ""; }
+
+private:
+    int number_;
 };
 
 // GET .../connected for a given ClientID (no ClientID when client_id is empty)
@@ -3202,6 +3245,52 @@ int main() {
         EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) != 0);
         EXPECT(clock_router.sync_system_clock_from_clients());
         ::unlink(config_path.c_str());
+    }
+
+    // Issue #358: a connect failure carries the driver's reason, not a constant.
+    {
+        alpacahttp::Router router;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto refusing = std::make_shared<RefusingConnectStubDriver>(9650);
+        EXPECT(registry.register_device(refusing));
+
+        // The ASCOM path. Before this, the driver's explanation reached the
+        // server log and stopped there: the client was told "Connection
+        // failed" and nothing else, so every "why won't it connect" question
+        // started with asking the operator for the log.
+        const auto response = route_request(router, "PUT", "/api/v1/covercalibrator/9650/connected", "Connected=true");
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded());
+        // Error NUMBER unchanged -- a client matching on it is unaffected.
+        EXPECT(json.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::NotConnected));
+        EXPECT(json.value("ErrorMessage", "") == std::string(RefusingConnectStubDriver::kReason));
+
+        // The Platform 7 path has no slot for this: PUT /connect returns
+        // success immediately by design and completion is observed through
+        // Connecting, so a failed task leaves no response to carry an error.
+        // The reason surfaces on the management side instead, where the web UI
+        // shows it -- the only place an operator on that path can see it.
+        const auto connect_response = route_request(router, "PUT", "/api/v1/covercalibrator/9650/connect", "");
+        const auto connect_json = nlohmann::json::parse(connect_response.body(), nullptr, false);
+        EXPECT(!connect_json.is_discarded() && connect_json.value("ErrorNumber", -1) == 0);
+        for (int i = 0; i < 100 && refusing->get_connecting(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        EXPECT(!refusing->get_connecting());
+        EXPECT(!refusing->get_connected());
+
+        const auto listed = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        EXPECT(!listed.is_discarded() && listed.contains("Value"));
+        bool found_reason = false;
+        for (const auto& entry : listed["Value"]) {
+            if (entry.value("DeviceType", "") == "CoverCalibrator" && entry.value("DeviceNumber", -1) == 9650) {
+                found_reason = entry.value("LastConnectError", "") == std::string(RefusingConnectStubDriver::kReason);
+            }
+        }
+        EXPECT(found_reason);
+
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9650);
     }
 
     std::cout << "All routing tests passed!\n";
