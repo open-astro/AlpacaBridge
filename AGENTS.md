@@ -1681,7 +1681,15 @@ datagrams before each send so replies cannot get off-by-one.
   disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write; the
   30 s re-sample above covers discipline gained without a step. Tests pin both branches through
   the probe seam (`ProbeGuard` in `test_skywatcher_async.cpp`) rather than the build host's own
-  clock state (#395).
+  clock state (#395). **This split is Sky-Watcher-only.** A mount with its own clock (OnStep,
+  Celestron, SynScan, iOptron, ZWO AM) has the ASCOM `UTCDate` setter write the MOUNT's time,
+  and its goto and sidereal logic then run on that clock, so those drivers keep aiming by the
+  client's instant on purpose; what they share with #301 is the once-per-connection WARN when
+  an NTP-disciplined host disagrees with the client by more than
+  `HostClock::kClientDisagreementWarn`, through `alpacacore/util/client_utc_warning.h`
+  (`ClientUtcWarning::warn_once()` after the write, flag re-armed on connect, probe seam
+  `set_host_synchronized_probe()` for tests; #409). A new driver that caches a client-set time
+  the same way calls it too.
 - Pointing convention (#432): home = counterweight down, tube parallel to the polar axis
   pointing at the visible pole, counts offset `0x800000`, axis angles `a1`/`a2` in degrees
   from home in the increasing-count direction. **`HA = s * (a1/15) + (a2 >= 0 ? +6 h : -6 h)`

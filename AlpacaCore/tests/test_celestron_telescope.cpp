@@ -11,13 +11,24 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <string>
+#include <string_view>
 
 #include "catch2_compat.h"
+
+#ifndef _WIN32
+#include "concurrency_stress.h"
+#include "fake_mount_server.h"
+#endif
 
 using alpacacore::DeviceType;
 
@@ -309,3 +320,67 @@ TEST_CASE("Celestron Telescope Driver - the two target properties are independen
     CHECK(driver->get_target_right_ascension() == 7.25);
     CHECK(driver->get_target_declination() == -30.25);
 }
+
+#ifndef _WIN32
+
+// ── The client-clock disagreement warning (#409) ─────────────────────────────
+
+TEST_CASE("Celestron Telescope Driver - a far-off client UTCDate is logged once per connection on a disciplined host",
+          "[celestron][telescope][unit]") {
+    // Same contract as the OnStep case: the mount keeps its own clock and
+    // UTCDate writes it, so the driver keeps aiming by the client's instant;
+    // what it adds is the shared once-per-connection WARN on an
+    // NTP-disciplined host. Without this case, deleting this driver's
+    // warn_once() call left the suite green (review finding on #471).
+    struct ProbeGuard {
+        ProbeGuard() {
+            alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
+        }
+        ~ProbeGuard() { alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
+    } probe_guard;
+    std::atomic<int> warns{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn && component == "Celestron" &&
+                message.find("Client UTCDate disagrees") != std::string::npos) {
+                ++warns;
+            }
+        });
+
+    // NexStar "H" (set time) ignores the reply; a position-pair sized reply
+    // with the trailing '#' keeps every fixed-length connect read from
+    // waiting out its timeout (see test_celestron_concurrency_stress.cpp).
+    alpacacore::test::FakeMountServer server([](const std::string&) { return std::string("00000000,00000000#"); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    // 500 ms, not the stress files' 50 ms: the "H" reply is read one byte at
+    // a time against the whole-response budget, and 50 ms is not enough for
+    // the 18-byte canned reply even on loopback (timed out every run).
+    conn.response_timeout_ms = 500;
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    const auto far = std::chrono::system_clock::now() + std::chrono::minutes(30);
+    driver->set_utc_date(std::chrono::system_clock::now());  // agrees: no line, budget untouched
+    CHECK(warns.load() == 0);
+    driver->set_utc_date(far);
+    CHECK(warns.load() == 1);
+    driver->set_utc_date(far + std::chrono::seconds(1));
+    CHECK(warns.load() == 1);
+
+    // A reconnect re-arms it.
+    driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    driver->set_utc_date(far);
+    CHECK(warns.load() == 2);
+    driver->set_connected(false);
+}
+
+#endif  // _WIN32

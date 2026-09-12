@@ -12,6 +12,7 @@
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
@@ -481,6 +482,11 @@ public:
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
             if (!keep_telemetry_caches) {
+                // open-astro#409: once per REAL connection. The
+                // keep_telemetry_caches=true caller is the "Connected=true
+                // while already connected" no-op, and re-arming there would
+                // log a line per poll for a client that re-sends both.
+                client_disagreement_warned_ = false;
                 cached_equatorial_.reset();
                 cached_horizontal_.reset();
                 cached_status_.reset();
@@ -1701,6 +1707,7 @@ public:
         // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
         const int offset_minutes = 0;
         TimeInfo info = from_utc_time_point(utc, offset_minutes);
+        const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
 
         if (connected_.load()) {
             ZWOMountProtocolWrapper::instance().set_time_info(info);
@@ -1712,6 +1719,11 @@ public:
         last_utc_valid_ = true;
         timezone_offset_minutes_ = offset_minutes;
         timezone_valid_ = true;
+        if (connected_.load()) {
+            // The mount now runs on the client's clock and so does the cached
+            // pointing time; on a disciplined host say so once (open-astro#409).
+            alpacacore::util::ClientUtcWarning::warn_once("ZWO", client_minus_host, client_disagreement_warned_);
+        }
     }
 
     void find_home() override {
@@ -2890,6 +2902,7 @@ private:
     std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
+    bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     std::string mount_info_;
 

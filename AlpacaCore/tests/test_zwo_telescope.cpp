@@ -10,7 +10,20 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/client_utc_warning.h>
+#include <alpacacore/util/logging.h>
+
+#include <atomic>
+#include <chrono>
+#include <string>
+#include <string_view>
+
 #include "catch2_compat.h"
+
+#ifndef _WIN32
+#include "concurrency_stress.h"
+#include "fake_mount_server.h"
+#endif
 
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -233,3 +246,86 @@ TEST_CASE("ZWO Mount Telescope Driver - Auto connect on missing hardware", "[zwo
     // The driver must remain in a well-defined (disconnected) state afterwards.
     CHECK(driver->get_connecting() == false);
 }
+
+#ifndef _WIN32
+
+// ── The client-clock disagreement warning (#409) ─────────────────────────────
+
+TEST_CASE("ZWO Telescope Driver - a far-off client UTCDate is logged once per connection on a disciplined host",
+          "[zwo][telescope][unit]") {
+    // Same contract as the OnStep case: the mount keeps its own clock and
+    // UTCDate writes it, so the driver keeps aiming by the client's instant;
+    // what it adds is the shared once-per-connection WARN on an
+    // NTP-disciplined host. Without this case, deleting this driver's
+    // warn_once() call left the suite green (review finding on #471).
+    struct ProbeGuard {
+        ProbeGuard() {
+            alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
+        }
+        ~ProbeGuard() { alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
+    } probe_guard;
+    std::atomic<int> warns{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn && component == "ZWO" &&
+                message.find("Client UTCDate disagrees") != std::string::npos) {
+                ++warns;
+            }
+        });
+
+    // :SMTI (set date/time) must be acked with "1" or the wrapper throws
+    // before the driver caches the instant; :GAT "1#" reports tracking on,
+    // and "0#" is a validly terminated reply for everything else.
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (chunk.find(":SMTI") != std::string::npos) {
+            return "1";
+        }
+        if (chunk.find(":GAT") != std::string::npos) {
+            return "1#";
+        }
+        return "0#";
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 250;
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+
+    // ZWO's set_utc_date() caches the instant even while disconnected (it
+    // has no connection check, unlike the other four); the warning must not
+    // fire on that path, since nothing was written to any mount.
+    const auto far = std::chrono::system_clock::now() + std::chrono::minutes(30);
+    driver->set_utc_date(far);
+    CHECK(warns.load() == 0);
+
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->set_utc_date(std::chrono::system_clock::now());  // agrees: no line, budget untouched
+    CHECK(warns.load() == 0);
+    driver->set_utc_date(far);
+    CHECK(warns.load() == 1);
+    driver->set_utc_date(far + std::chrono::seconds(1));
+    CHECK(warns.load() == 1);
+
+    // A no-op reconnect (Connected=true while already connected, the
+    // Platform 7 handshake path) must NOT re-arm the line: a client that
+    // re-sends both on every poll would otherwise get a line per poll.
+    driver->set_connected(true);
+    driver->set_utc_date(far);
+    CHECK(warns.load() == 1);
+
+    // A reconnect re-arms it.
+    driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    driver->set_utc_date(far);
+    CHECK(warns.load() == 2);
+    driver->set_connected(false);
+}
+
+#endif  // _WIN32

@@ -70,10 +70,14 @@ public:
     static constexpr std::chrono::milliseconds kMinStep{1000};
     // How far a client's time may disagree with a *disciplined* host clock
     // before either side says so out loud. The router logs it when it refuses
-    // to step (open-astro#289) and the Sky-Watcher driver logs it when it
-    // decides to point by the host clock instead (open-astro#301); the two
-    // describe the same event, so they share one threshold rather than two
-    // literals that can drift apart.
+    // to step (open-astro#289); the Sky-Watcher driver logs it when it
+    // decides to point by the host clock instead (open-astro#301); and the
+    // five mounts with their own clock (OnStep, Celestron, SynScan, iOptron,
+    // ZWO AM) log it through ClientUtcWarning when they resolve the same
+    // event the OTHER way, pointing by the client because the write set the
+    // mount's clock (open-astro#409). One event, one threshold, shared by
+    // seven users through three sites (router, Sky-Watcher, ClientUtcWarning)
+    // rather than literals that can drift apart.
     static constexpr std::chrono::milliseconds kClientDisagreementWarn{2000};
 
     HostClock()

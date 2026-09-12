@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
+#include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
@@ -333,6 +334,7 @@ public:
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             position_override_until_ = std::chrono::steady_clock::time_point::min();
             last_utc_valid_ = false;
+            client_disagreement_warned_ = false;
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
@@ -916,6 +918,7 @@ private:
         info.timezone_offset_minutes = tz_info.offset_minutes;
         info.dst_enabled = tz_info.dst;
 
+        const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         SynScanProtocolWrapper::instance().set_time(info);
         timezone_offset_minutes_ = tz_info.offset_minutes;
         timezone_offset_valid_ = true;
@@ -923,6 +926,9 @@ private:
         last_utc_set_ = utc;
         last_utc_set_monotonic_ = std::chrono::steady_clock::now();
         last_utc_valid_ = true;
+        // The mount now runs on the client's clock and so does the cached
+        // pointing time; on a disciplined host say so once (open-astro#409).
+        alpacacore::util::ClientUtcWarning::warn_once("SynScan", client_minus_host, client_disagreement_warned_);
     }
 
 public:
@@ -1842,6 +1848,7 @@ private:
     ConnectionInfo connection_info_;
     SynScanVersion version_;
     mutable std::mutex mutex_;
+    bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
     std::atomic<bool> connected_;  // written under mutex_, read lock-free by get_connected()
 
     double target_ra_hours_;

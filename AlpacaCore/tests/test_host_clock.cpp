@@ -10,7 +10,9 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/logging.h>
 
 #include <atomic>
 #include <chrono>
@@ -410,4 +412,108 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
     prober.join();
     CHECK_FALSE(expired());
     CHECK(reads.load() > 0);
+}
+
+// ── The client-clock disagreement warning for mounts with their own clock (#409) ──
+
+TEST_CASE("ClientUtcWarning - the pure rule reports only a disciplined host and only past the threshold",
+          "[util][hostclock][unit]") {
+    using alpacacore::util::ClientUtcWarning;
+    const auto over = HostClock::kClientDisagreementWarn + milliseconds(1);
+    const auto under = HostClock::kClientDisagreementWarn - milliseconds(1);
+
+    // Undisciplined host: the client's time is the best the host will see
+    // (#289), whatever the delta. Never a warning.
+    CHECK_FALSE(ClientUtcWarning::disagreement(minutes(30), false).has_value());
+    CHECK_FALSE(ClientUtcWarning::disagreement(-minutes(30), false).has_value());
+
+    // Disciplined host: the shared threshold, both signs, exclusive at the
+    // boundary (the router's rule is "more than", not "at least").
+    CHECK_FALSE(ClientUtcWarning::disagreement(under, true).has_value());
+    CHECK_FALSE(ClientUtcWarning::disagreement(-under, true).has_value());
+    CHECK_FALSE(ClientUtcWarning::disagreement(HostClock::kClientDisagreementWarn, true).has_value());
+    CHECK_FALSE(ClientUtcWarning::disagreement(-HostClock::kClientDisagreementWarn, true).has_value());
+    REQUIRE(ClientUtcWarning::disagreement(over, true).has_value());
+    CHECK(*ClientUtcWarning::disagreement(over, true) == over);
+    REQUIRE(ClientUtcWarning::disagreement(-over, true).has_value());
+    CHECK(*ClientUtcWarning::disagreement(-over, true) == -over);
+    CHECK(*ClientUtcWarning::disagreement(minutes(30), true) == minutes(30));
+}
+
+namespace {
+
+struct ProbeGuard {
+    explicit ProbeGuard(bool synchronized) {
+        alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([synchronized] { return synchronized; });
+    }
+    ~ProbeGuard() { alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
+};
+
+struct WarnCounter {
+    std::atomic<int> warns{0};
+    std::string last;
+    alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+    WarnCounter() {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn &&
+                    message.find("Client UTCDate disagrees") != std::string::npos) {
+                    ++warns;
+                    last = std::string(message);
+                }
+            });
+    }
+    ~WarnCounter() { alpacacore::logging::set_log_sink(previous); }
+};
+
+}  // namespace
+
+TEST_CASE("ClientUtcWarning - warn_once logs once per flag on a disciplined host and re-arms with the flag",
+          "[util][hostclock][unit]") {
+    using alpacacore::util::ClientUtcWarning;
+    ProbeGuard probe(true);
+    WarnCounter counter;
+    bool warned = false;
+    const auto far = system_clock::now() + minutes(30);
+
+    // A write that agrees does not consume the once-per-connection budget:
+    // the flag is set only when a line is logged, so a client whose FIRST
+    // write is fine and whose later write is not is still reported.
+    CHECK_FALSE(ClientUtcWarning::warn_once("Test", system_clock::now(), warned));
+    CHECK_FALSE(warned);
+    CHECK(counter.warns.load() == 0);
+
+    CHECK(ClientUtcWarning::warn_once("Test", far, warned));
+    CHECK(warned);
+    CHECK(counter.warns.load() == 1);
+    CHECK(counter.last.find("the mount's clock and pointing now follow the client") != std::string::npos);
+    CHECK(counter.last.find(" ms;") != std::string::npos);
+
+    // Repeats within the same connection are silent.
+    CHECK_FALSE(ClientUtcWarning::warn_once("Test", far + seconds(1), warned));
+    CHECK_FALSE(ClientUtcWarning::warn_once("Test", far - hours(2), warned));
+    CHECK(counter.warns.load() == 1);
+
+    // The connect path resets the flag: the next disagreement is reported again.
+    warned = false;
+    CHECK(ClientUtcWarning::warn_once("Test", far, warned));
+    CHECK(counter.warns.load() == 2);
+}
+
+TEST_CASE("ClientUtcWarning - warn_once is silent on an undisciplined host", "[util][hostclock][unit]") {
+    using alpacacore::util::ClientUtcWarning;
+    ProbeGuard probe(false);
+    WarnCounter counter;
+    bool warned = false;
+    CHECK_FALSE(ClientUtcWarning::warn_once("Test", system_clock::now() + minutes(30), warned));
+    CHECK_FALSE(warned);
+    CHECK(counter.warns.load() == 0);
+}
+
+TEST_CASE("ClientUtcWarning - a null probe restores the kernel one", "[util][hostclock][unit]") {
+    using alpacacore::util::ClientUtcWarning;
+    ClientUtcWarning::set_host_synchronized_probe([] { return true; });
+    CHECK(ClientUtcWarning::host_synchronized());
+    ClientUtcWarning::set_host_synchronized_probe(nullptr);
+    CHECK(ClientUtcWarning::host_synchronized() == HostClock::kernel_is_synchronized());
 }

@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
+#include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/units.h>
@@ -239,6 +240,7 @@ public:
                 status_cache_valid_ = false;
                 guide_rate_valid_ = false;
                 last_utc_valid_ = false;
+                client_disagreement_warned_ = false;
                 device_faulted_ = false;
                 device_fault_count_ = 0;
                 last_device_error_.clear();
@@ -1182,10 +1184,14 @@ public:
         check_connected();
         
         auto& protocol = iOptronProtocolWrapper::instance();
+        const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         protocol.set_utc_time(utc);
         last_utc_set_ = utc;
         last_utc_set_monotonic_ = std::chrono::steady_clock::now();
         last_utc_valid_ = true;
+        // The mount now runs on the client's clock and so does the cached
+        // pointing time; on a disciplined host say so once (open-astro#409).
+        alpacacore::util::ClientUtcWarning::warn_once("iOptron", client_minus_host, client_disagreement_warned_);
     }
     
     // Telescope methods
@@ -2677,7 +2683,8 @@ private:
     std::atomic<bool> connected_{false};
     mutable MountInfo mount_info_;
     mutable std::mutex mutex_;
-    
+    bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
+
     // Target coordinates
     double target_ra_hours_;
     double target_dec_degrees_;

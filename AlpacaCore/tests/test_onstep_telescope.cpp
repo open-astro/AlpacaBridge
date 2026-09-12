@@ -11,13 +11,24 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <string>
+#include <string_view>
+#include <thread>
 
 #include "catch2_compat.h"
+#ifndef _WIN32
+#include "concurrency_stress.h"
+#include "fake_mount_server.h"
+#endif
 
 using alpacacore::DeviceType;
 
@@ -215,3 +226,132 @@ TEST_CASE("OnStep Telescope Driver - the two target properties are independent",
     CHECK(driver->get_target_right_ascension() == 7.25);
     CHECK(driver->get_target_declination() == -30.25);
 }
+
+#ifndef _WIN32
+
+// ── The client-clock disagreement warning (#409) ─────────────────────────────
+
+TEST_CASE("OnStep Telescope Driver - a far-off client UTCDate is logged once per connection on a disciplined host",
+          "[onstep][telescope][unit]") {
+    // OnStep keeps its own clock and UTCDate writes it, so the driver keeps
+    // aiming by the client's instant (the mount does too); what it adds is
+    // the shared once-per-connection WARN when the host is NTP-disciplined
+    // and the client disagrees by more than the router's threshold. The
+    // discipline probe is forced so the case is deterministic on a CI
+    // runner with no NTP, and the sink is restored by the guard.
+    struct ProbeGuard {
+        ProbeGuard() {
+            alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
+        }
+        ~ProbeGuard() { alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
+    } probe_guard;
+    std::atomic<int> warns{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn && component == "OnStep" &&
+                message.find("Client UTCDate disagrees") != std::string::npos) {
+                ++warns;
+            }
+        });
+
+    // :SL, :SC and :SG are the three writes set_time() makes; the wrapper
+    // wants a bare "1" for the time and the offset and anything non-empty
+    // for the date. The canned "0#" default would make the mount reject the
+    // time and the driver throw before it ever cached the instant.
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) {
+        if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
+            return std::string("1");
+        }
+        if (chunk.size() >= 2 && chunk[0] == 'K') {
+            return std::string(1, chunk[1]) + "#";
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    const auto far = std::chrono::system_clock::now() + std::chrono::minutes(30);
+    driver->set_utc_date(std::chrono::system_clock::now());  // agrees: no line, budget untouched
+    CHECK(warns.load() == 0);
+    driver->set_utc_date(far);
+    CHECK(warns.load() == 1);
+    driver->set_utc_date(far + std::chrono::seconds(1));
+    driver->set_utc_date(far + std::chrono::seconds(2));
+    CHECK(warns.load() == 1);
+
+    // The readback still honours the client: it is the client's property.
+    const auto readback = driver->get_utc_date();
+    const auto delta = std::chrono::duration_cast<std::chrono::seconds>(readback - far);
+    CHECK(delta >= std::chrono::seconds(0));
+    CHECK(delta < std::chrono::seconds(5));
+
+    // A reconnect re-arms it.
+    driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    driver->set_utc_date(far);
+    CHECK(warns.load() == 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE("OnStep Telescope Driver - a slow mount ack does not turn an accurate client clock into a warning",
+          "[onstep][telescope][unit]") {
+    // The offset is sampled BEFORE the mount write (review round 2 on #471):
+    // set_time() is three serial round trips (:SL, :SC, :SG) against a 2 s
+    // threshold, so a mount that takes 750 ms to ack each one (2.25 s in
+    // all, each under the wrapper's 1 s per-ack timeout) would otherwise
+    // make a perfectly set client clock read as seconds out. With the offset
+    // sampled after the write, this case logs a line; sampled before, nothing.
+    struct ProbeGuard {
+        ProbeGuard() {
+            alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
+        }
+        ~ProbeGuard() { alpacacore::util::ClientUtcWarning::set_host_synchronized_probe(nullptr); }
+    } probe_guard;
+    std::atomic<int> warns{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn && component == "OnStep" &&
+                message.find("Client UTCDate disagrees") != std::string::npos) {
+                ++warns;
+            }
+        });
+
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) {
+        if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(750));  // the slow ack, x3
+            return std::string("1");
+        }
+        if (chunk.size() >= 2 && chunk[0] == 'K') {
+            return std::string(1, chunk[1]) + "#";
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    driver->set_utc_date(std::chrono::system_clock::now());  // accurate client, slow mount
+    CHECK(warns.load() == 0);
+    driver->set_connected(false);
+}
+
+#endif  // _WIN32
