@@ -217,8 +217,10 @@ TEST_CASE("FakeQHYSDK - get_single_frame fills the buffer and returns immediatel
 }
 
 TEST_CASE("FakeQHYSDK - default camera reports no cooler", "[qhy][fake][unit]") {
-    // has_cooler starts the driver's telemetry thread, whose 1s poll makes
-    // every disconnect block on the join. The cooled variant is opt-in.
+    // has_cooler starts the driver's telemetry thread, a second thread
+    // calling into the fake for the life of the connection. The cooled
+    // variant is opt-in so single-threaded cases stay single-threaded (the
+    // disconnect itself is fast since open-astro#323).
     CHECK_FALSE(FakeQHYSDK::default_camera("id", "m").has_cooler);
     CHECK(FakeQHYSDK::default_cooled_camera("id", "m").has_cooler);
 }

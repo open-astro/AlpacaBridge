@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -269,6 +270,7 @@ private:
             std::thread temp_to_join;
             std::thread telemetry_to_join;
             std::shared_ptr<std::atomic<bool>> temp_running_to_join;
+            std::shared_ptr<std::atomic<bool>> telemetry_running_to_join;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 // Base gate (obligation 4) BEFORE the idempotency check: a sync
@@ -282,10 +284,11 @@ private:
                 if (!connected_.load()) {
                     return; // already disconnected
                 }
-                temp_thread_stop_->store(true);
+                temp_thread_stop_->request_stop();
                 temp_running_to_join = temp_thread_running_;
                 temp_to_join = std::move(temp_thread_);
-                telemetry_thread_stop_.store(true);
+                telemetry_thread_stop_->request_stop();
+                telemetry_running_to_join = telemetry_thread_running_;
                 telemetry_to_join = std::move(telemetry_thread_);
             }
             try {
@@ -293,13 +296,13 @@ private:
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Temp thread join failed during disconnect: " + std::string(e.what()));
             }
-            if (telemetry_to_join.joinable()) {
-                try {
-                    telemetry_to_join.join();
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("QHY", "Telemetry thread join failed during disconnect: " +
-                        std::string(e.what()));
-                }
+            try {
+                // open-astro#323: bounded and may detach, like the temp
+                // worker's. This join used to be unbounded, so a telemetry
+                // poll wedged inside an SDK call hung the disconnect forever.
+                join_worker_thread(telemetry_to_join, telemetry_running_to_join, "telemetry");
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("QHY", "Telemetry thread join failed during disconnect: " + std::string(e.what()));
             }
 
             std::lock_guard<std::mutex> lock(mutex_);
@@ -717,7 +720,7 @@ public:
                 if (!connected_.load()) {
                     return;
                 }
-                temp_thread_stop_->store(true);
+                temp_thread_stop_->request_stop();
                 temp_running_to_join = temp_thread_running_;
                 temp_to_join = std::move(temp_thread_);
                 cam_id_for_pwm = camera_id_.value_or(""); // mutex_ already held; don't call camera_id_value()
@@ -1829,6 +1832,46 @@ private:
     mutable std::chrono::steady_clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 
+    // open-astro#323: a stop flag a worker can WAIT on, so setting it wakes the
+    // worker immediately instead of at the end of its current 1 s sleep.
+    //
+    // Both polling workers used a bare sleep_for, which is not interruptible,
+    // so every Connected=false on a cooled camera blocked up to ~1 s (~0.5 s
+    // average) waiting out a sleep the driver had already decided to abandon.
+    // Connected=false is on ConformU's 1.0 s STANDARD budget, so that was most
+    // of the budget spent on nothing, leaving none for the SDK close on a slow
+    // device -- and a [stress] storm that connects and disconnects hundreds of
+    // times per scenario would have been sleep-bound rather than
+    // concurrency-bound.
+    //
+    // shared_ptr-owned for the same reason the flags below are: a worker whose
+    // join timed out and was DETACHED must never touch `this` again, so it
+    // cannot wait on a condition variable that is a member of `this`. Holding
+    // the signal by shared_ptr keeps the mutex and cv alive for exactly as
+    // long as some worker might still be sleeping on them.
+    struct WorkerStopSignal {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::atomic<bool> stop{false};
+
+        void request_stop() {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                stop.store(true);
+            }
+            cv.notify_all();
+        }
+
+        bool stopped() const { return stop.load(); }
+
+        /// Sleep up to `d`, returning early the moment a stop is requested.
+        /// Returns true if it was stopped.
+        bool wait_for(std::chrono::milliseconds d) {
+            std::unique_lock<std::mutex> lock(mutex);
+            return cv.wait_for(lock, d, [this] { return stop.load(); });
+        }
+    };
+
     // Temperature control. Both flags are shared_ptr, not plain members:
     // ControlQHYCCDTemp (the per-iteration SDK call) has no timeout of its
     // own and can occasionally run well past its documented ~10s PID-loop
@@ -1839,7 +1882,7 @@ private:
     // are what make that safe. Same pattern as pulse_guiding_/
     // cooler_off_running_.
     std::thread temp_thread_;
-    std::shared_ptr<std::atomic<bool>> temp_thread_stop_{std::make_shared<std::atomic<bool>>(false)};
+    std::shared_ptr<WorkerStopSignal> temp_thread_stop_{std::make_shared<WorkerStopSignal>()};
     // True for the temp thread's entire lifetime (spawn to natural exit);
     // lets join_temp_thread() know whether a detach is actually needed.
     std::shared_ptr<std::atomic<bool>> temp_thread_running_{std::make_shared<std::atomic<bool>>(false)};
@@ -1865,7 +1908,13 @@ private:
 
     // Telemetry (non-blocking cached temperature / cooler power)
     std::thread telemetry_thread_;
-    std::atomic<bool> telemetry_thread_stop_{false};
+    // open-astro#323: shared_ptr like the temp worker's, and for the same
+    // reason -- the telemetry join is now bounded and can detach, so a zombie
+    // must be able to observe its stop signal without touching `this`.
+    std::shared_ptr<WorkerStopSignal> telemetry_thread_stop_{std::make_shared<WorkerStopSignal>()};
+    // True for the telemetry thread's whole lifetime; lets the bounded join
+    // know whether a detach is actually needed. Mirrors temp_thread_running_.
+    std::shared_ptr<std::atomic<bool>> telemetry_thread_running_{std::make_shared<std::atomic<bool>>(false)};
     double telemetry_ccd_temp_c_{0.0};
     double telemetry_cooler_power_{0.0}; // percentage 0.0–100.0
     bool telemetry_temp_valid_{false};
@@ -2051,12 +2100,14 @@ private:
         std::thread temp_to_join;
         std::thread telemetry_to_join;
         std::shared_ptr<std::atomic<bool>> temp_running_to_join;
+        std::shared_ptr<std::atomic<bool>> telemetry_running_to_join;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            temp_thread_stop_->store(true);
+            temp_thread_stop_->request_stop();
             temp_running_to_join = temp_thread_running_;
             temp_to_join = std::move(temp_thread_);
-            telemetry_thread_stop_.store(true);
+            telemetry_thread_stop_->request_stop();
+            telemetry_running_to_join = telemetry_thread_running_;
             telemetry_to_join = std::move(telemetry_thread_);
         }
         try {
@@ -2064,13 +2115,10 @@ private:
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("QHY", "Temp thread join failed during shutdown: " + std::string(e.what()));
         }
-        if (telemetry_to_join.joinable()) {
-            try {
-                telemetry_to_join.join();
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("QHY", "Telemetry thread join failed during shutdown: " +
-                    std::string(e.what()));
-            }
+        try {
+            join_worker_thread(telemetry_to_join, telemetry_running_to_join, "telemetry");
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("QHY", "Telemetry thread join failed during shutdown: " + std::string(e.what()));
         }
         // Wake a worker parked in GetQHYCCDSingleFrame before joining, or the
         // join blocks for the whole remaining exposure (AGENTS.md abort rule).
@@ -2099,7 +2147,7 @@ private:
         // std::thread (std::terminate). Lock order: thread_start_mutex_ -> mutex_.
         std::lock_guard<std::mutex> start_lock(thread_start_mutex_);
         std::string id;
-        std::shared_ptr<std::atomic<bool>> stop_flag;
+        std::shared_ptr<WorkerStopSignal> stop_flag;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (temp_thread_.joinable()) {
@@ -2115,7 +2163,7 @@ private:
             // (review finding). Captured into a local under the same lock
             // that publishes it to the member, so the lambda below never
             // has to re-read the (possibly concurrently reassigned) member.
-            stop_flag = std::make_shared<std::atomic<bool>>(false);
+            stop_flag = std::make_shared<WorkerStopSignal>();
             temp_thread_stop_ = stop_flag;
             id = camera_id_.value_or("");
         }
@@ -2135,7 +2183,7 @@ private:
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
             } running_guard{running_flag};
-            while (!stop_flag->load()) {
+            while (!stop_flag->stopped()) {
                 double target = 0.0;
                 bool exposing = false;
                 {
@@ -2166,10 +2214,12 @@ private:
                 // out and detached this thread while it was inside
                 // control_temp(), `this` may already be destroyed by the
                 // time we get here.
-                if (stop_flag->load()) {
+                if (stop_flag->stopped()) {
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                // open-astro#323: interruptible. A disconnect wakes this
+                // immediately instead of waiting out the second.
+                stop_flag->wait_for(std::chrono::seconds(1));
             }
         });
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2192,7 +2242,11 @@ private:
     // new generation's flag concurrently with this call, and reading the
     // member directly would race that reassignment / silently watch the
     // wrong generation's flag (review finding).
-    void join_temp_thread(std::thread& t, const std::shared_ptr<std::atomic<bool>>& running_flag) {
+    // open-astro#323: generalised from join_temp_thread(). The telemetry
+    // worker's join was UNBOUNDED, so a poll wedged inside an SDK call would
+    // hang a disconnect forever rather than degrading -- the one worker in
+    // this file with no ceiling. `label` names the worker in the WARN.
+    void join_worker_thread(std::thread& t, const std::shared_ptr<std::atomic<bool>>& running_flag, const char* label) {
         if (!t.joinable()) {
             return;
         }
@@ -2201,11 +2255,15 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         if (running_flag->load()) {
-            ALPACA_LOG_WARN("QHY", "temp-control thread exceeded 2s timeout; detaching");
+            ALPACA_LOG_WARN("QHY", std::string(label) + " thread exceeded 2s timeout; detaching");
             t.detach();
         } else {
             t.join();  // finished — instant reap
         }
+    }
+
+    void join_temp_thread(std::thread& t, const std::shared_ptr<std::atomic<bool>>& running_flag) {
+        join_worker_thread(t, running_flag, "temp-control");
     }
 
     // Called only from set_connected_impl while holding mutex_. Starts thread
@@ -2219,20 +2277,43 @@ private:
         // Same double-start guard as start_temp_control_thread.
         std::lock_guard<std::mutex> start_lock(thread_start_mutex_);
         std::string id;
+        std::shared_ptr<WorkerStopSignal> stop_flag;
+        std::shared_ptr<std::atomic<bool>> running_flag;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (telemetry_thread_.joinable()) {
                 return;
             }
-            telemetry_thread_stop_.store(false);
+            // Fresh signal per generation, not a reset of the old one: a
+            // previous generation's timed-out-and-detached zombie keeps its
+            // own copy, and resetting in place would un-stop it (same
+            // reasoning as the temp worker's stop_flag). Both flags are
+            // captured into locals under the same lock that publishes them,
+            // exactly as start_temp_control_thread() does, so the lambda
+            // never re-reads a member that another writer could reassign,
+            // and the running flag is constructed true so a disconnect
+            // interleaving here never observes a published-but-false flag.
+            stop_flag = std::make_shared<WorkerStopSignal>();
+            running_flag = std::make_shared<std::atomic<bool>>(true);
+            telemetry_thread_stop_ = stop_flag;
+            telemetry_thread_running_ = running_flag;
             id = camera_id_.value_or("");
         }
         if (id.empty()) {
+            // No worker will run for this generation, so do not leave a
+            // published flag claiming one is in flight.
+            running_flag->store(false);
             return;
         }
-        std::thread t([this, id, sdk_ptr = &sdk_]() {
+        std::thread t([this, id, stop_flag, running_flag, sdk_ptr = &sdk_]() {
+            // Clears on every exit path, so the bounded join below can tell a
+            // finished worker from one that needs detaching.
+            struct RunningGuard {
+                std::shared_ptr<std::atomic<bool>> flag;
+                ~RunningGuard() { flag->store(false); }
+            } running_guard{running_flag};
             auto& sdk = *sdk_ptr;
-            while (!telemetry_thread_stop_.load()) {
+            while (!stop_flag->stopped()) {
                 bool connected = connected_.load();
                 {
                     std::lock_guard<std::mutex> lk(mutex_);
@@ -2243,7 +2324,11 @@ private:
                 }
 
                 if (!connected) {
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    // open-astro#323: all three of this loop's waits are
+                    // interruptible, not just the tail one -- a disconnect
+                    // arriving while the worker is parked in ANY of them must
+                    // wake it.
+                    stop_flag->wait_for(std::chrono::seconds(1));
                     continue;
                 }
 
@@ -2257,22 +2342,38 @@ private:
                     // start_temp_control_thread() -- IsQHYCCDControlAvailable
                     // and GetQHYCCDParam share the exposure worker's USB
                     // handle and can wedge its GetQHYCCDSingleFrame call.
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    stop_flag->wait_for(std::chrono::seconds(1));
                     continue;
                 }
 
+                bool have_temp = false;
+                double temp_c = 0.0;
                 try {
                     if (sdk.is_control_available(id, control::CURTEMP)) {
-                        double t = sdk.get_param(id, control::CURTEMP);
-                        std::lock_guard<std::mutex> lk(mutex_);
-                        telemetry_ccd_temp_c_ = t;
-                        telemetry_temp_valid_ = true;
+                        temp_c = sdk.get_param(id, control::CURTEMP);
+                        have_temp = true;
                     }
                 } catch (const std::exception& e) {
                     ALPACA_LOG_DEBUG("QHY", "Telemetry CURTEMP read failed: " + std::string(e.what()));
                 }
+                // Recheck the stop flag immediately after the blocking SDK
+                // calls, BEFORE touching `this` again (same rule as the temp
+                // worker above): both calls queue on the wrapper's per-handle
+                // call_mutex, which a wedged-and-detached exposure download
+                // can hold for a minute, and since open-astro#323 this
+                // worker's join is bounded too. If join_worker_thread() timed
+                // out and detached this thread while it was inside get_param,
+                // `this` may already be destroyed by the time we get here.
+                if (stop_flag->stopped()) {
+                    break;
+                }
+                if (have_temp) {
+                    std::lock_guard<std::mutex> lk(mutex_);
+                    telemetry_ccd_temp_c_ = temp_c;
+                    telemetry_temp_valid_ = true;
+                }
 
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                stop_flag->wait_for(std::chrono::seconds(1));
             }
         });
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2280,16 +2381,13 @@ private:
         telemetry_thread_ = std::move(t);
     }
 
-    void start_telemetry_thread_locked() {
-        start_telemetry_thread();
-    }
-
-    void stop_telemetry_thread_locked() {
-        telemetry_thread_stop_.store(true);
-        if (telemetry_thread_.joinable()) {
-            telemetry_thread_.join();
-        }
-    }
+    // open-astro#323: start_telemetry_thread_locked() and
+    // stop_telemetry_thread_locked() lived here with no callers anywhere in
+    // the repo -- each name appeared exactly once, at its own definition. The
+    // stop one was also a third, unbounded lifecycle path in a file that
+    // already has several, and it is superseded by the bounded
+    // join_worker_thread() the disconnect and destructor now use. Deleted
+    // rather than left to be copied.
 
     void set_bin_locked(int bin_x, int bin_y) {
         ensure_connected();

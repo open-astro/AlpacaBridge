@@ -59,9 +59,10 @@ namespace alpacacore::test {
  *
  * TWO RULES THIS FAKE MUST KEEP (they are not stylistic):
  *
- * 1. NOTHING HERE MAY BLOCK. The camera driver's exposure, temperature and
- *    cooler-off workers join with a bounded timeout and DETACH on expiry, and
- *    its pulse-guide worker is detached by design. A fake that blocks turns
+ * 1. NOTHING HERE MAY BLOCK. The camera driver's exposure, temperature,
+ *    cooler-off and telemetry workers join with a bounded timeout and DETACH
+ *    on expiry (telemetry since issue #323, so the rule is load-bearing for
+ *    it too), and its pulse-guide worker is detached by design. A fake that blocks turns
  *    those into detached threads still calling into it after the test body
  *    has moved on — i.e. a use-after-free of the fake itself.
  * 2. THE FAKE MUST OUTLIVE EVERY DRIVER BUILT ON IT, including those
@@ -74,10 +75,12 @@ namespace alpacacore::test {
  *    fake's scope.
  *
  * default_camera() reports NO cooler. That is deliberate: has_cooler starts
- * the driver's telemetry thread, whose loop sleeps 1s between polls, so every
- * disconnect then blocks up to ~1s in the join. Use default_cooled_camera()
- * when the thermal paths are what's under test, and keep it out of anything
- * that connects in a loop.
+ * the driver's telemetry thread, which is a second thread calling into this
+ * fake for the life of the connection (its disconnect is fast since issue
+ * #323, when the poll's sleep became an interruptible wait, so the old
+ * "blocks up to ~1 s per disconnect" reason is gone). Use
+ * default_cooled_camera() when the thermal paths are what's under test, so
+ * the cases that don't need them keep to one thread.
  *
  * KNOWN PARITY GAPS — places this fake is deliberately WEAKER than the real
  * wrapper, so a test passing here would not have caught a regression in the
@@ -199,27 +202,34 @@ public:
     // worker is running concurrently with that read.
     //
     // Sound for every case in these files today, though the reason is not
-    // simply "no cooled cameras" -- test_qhy_fake_sdk.cpp now has one, the
+    // simply "no cooled cameras" -- test_qhy_fake_sdk.cpp has one, the
     // control_temp convergence case, which reads last_temp_target straight
-    // from the test body. What makes all of them safe is that NO SECOND THREAD
-    // ever runs: that file builds no driver at all, and the camera and wheel
-    // files build drivers but never drive one into starting a background
-    // worker -- their two start_exposure() calls only assert a throw, and
-    // neither file uses a cooled camera, so no telemetry or temperature thread
-    // is ever spawned.
+    // from the test body, and since open-astro#323 test_qhy_camera.cpp has
+    // cooled cases (the two disconnect-timing cases) that connect a cooled
+    // camera, which spawns BOTH the telemetry and the temperature worker.
+    // What keeps every read safe is that NO OTHER THREAD is touching the
+    // fake at the moment the test body reads: the fake-only file builds no
+    // driver; the wheel file and the uncooled camera cases build drivers but
+    // never start a background worker (their two start_exposure() calls only
+    // assert a throw); and the RULE for a cooled case, which every one of
+    // them follows, is that its body reads no fake field at all and its
+    // workers are joined by the disconnect it measures before the driver is
+    // destroyed. A new cooled case that wants to read a counter afterwards
+    // must disconnect first, or route the read through the lock.
     //
-    // THE FIRST case that lets a driver worker actually run breaks that -- a
-    // connected cooled camera, a real exposure, a pulse guide -- and these
-    // reads become TSan findings in test code, exactly the noise LockedQHYSDK
+    // THE FIRST case that reads one of these fields while a driver worker is
+    // still running breaks that -- a connected cooled camera whose body then
+    // reads a counter, a real exposure in flight, a pulse guide -- and the
+    // read becomes a TSan finding in test code, exactly the noise LockedQHYSDK
     // exists to keep out of the [stress] suite. Route them through the same
     // lock before adding such a case. Tracked in issue #331.
     //
     // The same issue covers the mirror-image race on the input side: hit()
     // bumps `calls` under calls_mutex but then reads `throw_from` outside it,
     // so a test body that arms or clears fault injection mid-storm races the
-    // call path reading it. Sound today for the same reason (no driver, no
-    // second thread) and unsound from the same first case, so fix both
-    // together rather than one at a time.
+    // call path reading it. Sound today for the same reason (nothing else is
+    // calling into the fake while the body writes it) and unsound from the
+    // same first case, so fix both together rather than one at a time.
     std::map<std::string, int> calls;
     int physical_opens = 0;
     int physical_closes = 0;
