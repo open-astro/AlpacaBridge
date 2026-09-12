@@ -6476,6 +6476,15 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
     }
 
     if (request.method() == HttpMethod::DELETE_) {
+        // Issue #348: the collection DELETE removes EVERY log file, which is
+        // the same evidence-removal shape as the per-file DELETE next to it
+        // and as turning the log level down. Guarding the per-file form and
+        // not this one would have been the accident the audit exists to
+        // remove. The web UI's deleteAllLogFiles() is same-origin, so this is
+        // a no-op for it; GET (the listing) stays exempt.
+        if (auto rejected = reject_cross_origin_request(request, server_tx_id, "log files")) {
+            return *rejected;
+        }
         const auto files = util::list_log_files();
         const std::filesystem::path log_directory = util::get_log_directory();
         std::size_t deleted = 0;

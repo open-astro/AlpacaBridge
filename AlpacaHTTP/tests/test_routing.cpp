@@ -3246,6 +3246,10 @@ int main() {
             {"POST", "/management/v1/shutdown", "{}"},
             {"POST", "/management/v1/restart", "{}"},
             {"DELETE", "/management/v1/logfiles/alpaca.log", ""},
+            // The collection form deletes EVERY log file. Guarding the
+            // per-file DELETE and not this one would have been exactly the
+            // accidental difference the audit exists to remove.
+            {"DELETE", "/management/v1/logfiles", ""},
         };
 
         for (const auto& ep : endpoints) {

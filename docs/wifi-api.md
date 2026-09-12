@@ -162,9 +162,9 @@ other device setter is unguarded.
 Since issue #348 this is not specific to the WiFi endpoints: every
 state-changing management endpoint carries the same guard — `synctime`,
 `restart`, `shutdown`, `configuredevice`, `removedevice`, `loglevel`, the
-`description` PUT and `DELETE /management/v1/logfiles/<name>`. The rejection
-message names the endpoint, and the 403 body echoes the `ClientTransactionID`
-the request sent.
+`description` PUT, and both `DELETE /management/v1/logfiles` (all files) and
+`DELETE /management/v1/logfiles/<name>` (one file). The rejection message names
+the endpoint.
 
 The guard compares the request's `Origin` against the request's own `Host`,
 which stops a page served from an attacker-controlled origin. It does not
