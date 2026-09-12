@@ -92,9 +92,15 @@ struct StressOptions {
  * A registration ends with
  *     INFO(guard.report());
  *     CHECK(guard.unexpected_count() == 0);
+ *     CHECK(guard.total_calls() > 0);
  * (CHECK has no message argument in Catch2 v2 or v3 -- INFO attaches
  * guard.report() to the next assertion's failure output instead, so a
- * failure names what it saw).
+ * failure names what it saw). All three lines are required, and
+ * scripts/check_stress_registration.py enforces that: the zero-check alone
+ * passes VACUOUSLY when the operate callback never ran (issue #334), so a
+ * storm that silently stopped exercising the driver -- a renamed method, a
+ * guard clause that now short-circuits, a device target that quietly stopped
+ * building -- would still report a passing run.
  * The constructor's expected_codes REPLACES the default {NotConnected}, it
  * does not add to it — pass {NotConnected, PropertyNotImplemented} (not just
  * {PropertyNotImplemented}) where the driver's contract needs a wider set
@@ -122,8 +128,10 @@ struct StressOptions {
  *
  * What IS true: a read taken while the storm is still running is a torn
  * snapshot, not a hang -- count_ and samples_ are consistent with each other
- * at that instant but say nothing about calls still in flight. Read them
- * after the threads join, which is the only point they mean anything.
+ * at that instant, total_calls_ and expected_calls_ are relaxed atomics read
+ * outside the lock entirely, and none of the four says anything about calls
+ * still in flight. Read them after the threads join, which is the only point
+ * they mean anything.
  *
  * The constructor is explicit, so brace-init needs its own parens:
  *     StressCallGuard guard({AlpacaError::NotConnected, AlpacaError::InvalidValue});
@@ -136,10 +144,17 @@ public:
 
     template <typename Fn>
     void operator()(Fn&& fn) {
+        // open-astro#334: counted BEFORE fn() runs, so a callback that throws
+        // something the guard does not catch (or that never returns) still
+        // shows up as an invocation. total_calls() answers "did the storm
+        // actually do anything", and an invocation that got as far as starting
+        // is the honest answer to that.
+        total_calls_.fetch_add(1, std::memory_order_relaxed);
         try {
             std::forward<Fn>(fn)();
         } catch (const AlpacaException& ex) {
             if (is_expected(ex.error_code())) {
+                expected_calls_.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
             record_alpaca(ex.error_code(), ex.what());
@@ -156,6 +171,26 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return count_;
     }
+
+    /// Every invocation, throwing or not (open-astro#334).
+    ///
+    /// `unexpected_count() == 0` passes VACUOUSLY when the operate callback
+    /// never ran: a guard that was never invoked reports zero unexpected
+    /// throws, exactly like a guard that saw a hundred clean calls. A
+    /// registration whose storm silently stopped exercising the driver -- a
+    /// renamed method, a guard clause that now short-circuits, a device target
+    /// that quietly stopped building -- would still report a passing run.
+    /// Pairing the zero-check with `total_calls() > 0` closes that.
+    ///
+    /// Relaxed atomics, not mutex_: these are counters nothing branches on
+    /// mid-storm, and taking the lock on the NON-throwing path would put a
+    /// mutex in the hot path of every guarded call purely for bookkeeping.
+    long long total_calls() const { return total_calls_.load(std::memory_order_relaxed); }
+
+    /// The swallowed-but-EXPECTED hits. On a fail-fast registration this is
+    /// the number that says the disconnect race really was exercised, rather
+    /// than every call happening to land on a connected driver.
+    long long expected_count() const { return expected_calls_.load(std::memory_order_relaxed); }
 
     /// One line per DISTINCT failure mode recorded, with its occurrence
     /// count, newline-joined — meant for `INFO(guard.report());` immediately
@@ -193,6 +228,9 @@ public:
     }
 
 private:
+    std::atomic<long long> total_calls_{0};
+    std::atomic<long long> expected_calls_{0};
+
     /// Eight DISTINCT failure modes, not eight events.
     static constexpr std::size_t kMaxSamples = 8;
     /// How many unsampled modes are tracked by key so the tail can count them.

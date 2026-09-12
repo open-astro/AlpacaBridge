@@ -104,6 +104,9 @@ TEST_CASE("StressCallGuard - a non-std::exception throw is not intercepted", "[u
     StressCallGuard guard;
     CHECK_THROWS_AS(guard([] { throw 42; }), int);
     CHECK(guard.unexpected_count() == 0);
+    // total_calls_ is incremented BEFORE fn() runs, so even a throw the guard
+    // does not intercept is counted as a call.
+    CHECK(guard.total_calls() == 1);
 }
 
 TEST_CASE("StressCallGuard - report() caps the number of DISTINCT failure modes", "[unit]") {
@@ -260,4 +263,59 @@ TEST_CASE("StressCallGuard - a non-Alpaca throw is labelled with the raw typeid 
     INFO(report);
     CHECK(report.find("out_of_range") != std::string::npos);
     CHECK(report.find(typeid(std::out_of_range).name()) != std::string::npos);
+}
+
+TEST_CASE("StressCallGuard - total_calls() stops unexpected_count() passing vacuously", "[unit]") {
+    // open-astro#334. `unexpected_count() == 0` cannot tell a guard that saw a
+    // hundred clean calls from one that was never invoked at all. A
+    // registration whose storm silently stopped exercising the driver would
+    // report a passing run on the strength of that zero.
+    alpacacore::test::StressCallGuard never_used;
+    CHECK(never_used.unexpected_count() == 0);  // the vacuous pass...
+    CHECK(never_used.total_calls() == 0);       // ...and what exposes it
+
+    alpacacore::test::StressCallGuard guard;
+    guard([] {});
+    guard([] {});
+    CHECK(guard.total_calls() == 2);
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.expected_count() == 0);
+
+    // An EXPECTED throw is still a call, and is counted separately: on a
+    // fail-fast registration that count is what says the disconnect race was
+    // actually exercised rather than every call landing on a live driver.
+    guard([] { throw alpacacore::AlpacaException("nope", alpacacore::AlpacaError::NotConnected); });
+    CHECK(guard.total_calls() == 3);
+    CHECK(guard.expected_count() == 1);
+    CHECK(guard.unexpected_count() == 0);
+
+    // An UNEXPECTED throw counts in both.
+    guard([] { throw alpacacore::AlpacaException("bad", alpacacore::AlpacaError::InvalidValue); });
+    CHECK(guard.total_calls() == 4);
+    CHECK(guard.expected_count() == 1);
+    CHECK(guard.unexpected_count() == 1);
+}
+
+TEST_CASE("StressCallGuard - total_calls() counts across threads", "[stress-guard][unit]") {
+    // Relaxed atomics rather than mutex_, so pin that they still total
+    // correctly under the concurrency a real storm applies.
+    alpacacore::test::StressCallGuard guard;
+    constexpr int kThreads = 8;
+    constexpr int kPerThread = 200;
+
+    std::vector<std::thread> workers;
+    workers.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        workers.emplace_back([&guard] {
+            for (int n = 0; n < kPerThread; ++n) {
+                guard([] {});
+            }
+        });
+    }
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    CHECK(guard.total_calls() == static_cast<long long>(kThreads) * kPerThread);
+    CHECK(guard.unexpected_count() == 0);
 }

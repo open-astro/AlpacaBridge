@@ -561,9 +561,10 @@ jobs:
       - name: Self-test the check's own regexes and tag wiring
         # Regression guard for DEVICE_TYPE_OVERRIDE_RE / TEST_CASE_TAGS_RE
         # against synthetic snippets, independent of repo state. It also runs
-        # the script's main() over temp files, so the two tag predicates and
-        # the CMake gating rule are all wired-up and covered -- deleting a
-        # `failures.extend(...)` line fails here rather than passing silently.
+        # the script's main() over temp files, so the two tag predicates, the
+        # CMake gating rule and the StressCallGuard idiom rules are all
+        # wired-up and covered -- deleting a `failures.extend(...)` line fails
+        # here rather than passing silently.
         run: python3 scripts/check_stress_registration.py --self-test
 
       - name: Check [stress] coverage, and that neither stress tag is misplaced
