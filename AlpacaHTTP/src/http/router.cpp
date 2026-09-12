@@ -6051,7 +6051,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
     if (auto rejected = reject_cross_origin_request(request, server_tx_id, "device configuration")) {
         return *rejected;
     }
-    
+
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
@@ -6152,7 +6152,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
     if (auto rejected = reject_cross_origin_request(request, server_tx_id, "device removal")) {
         return *rejected;
     }
-    
+
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
@@ -6721,7 +6721,7 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     if (auto rejected = reject_cross_origin_request(request, server_tx_id, "shutdown")) {
         return *rejected;
     }
-    
+
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
