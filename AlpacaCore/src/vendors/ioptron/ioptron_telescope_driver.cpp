@@ -123,6 +123,19 @@ public:
                 ALPACA_LOG_WARN("iOptron", "Error disconnecting mount during destruction");
             }
         }
+        // Unconditional, and last: both starts happen AFTER set_connected()
+        // releases mutex_, so a connect can lose the race to a concurrent
+        // disconnect and run its start_clock_sync_thread() after that
+        // disconnect's stop_clock_sync_thread() has already returned. The
+        // driver is then left with connected_ == false and a joinable thread
+        // that the `if (connected_)` branch above never reaps -- and
+        // destroying a joinable std::thread is std::terminate(), which is how
+        // this shows up: an abort in ~iOptronTelescopeDriver with no active
+        // exception, under a connect/disconnect storm. Both reapers are
+        // idempotent (each joins only a joinable thread and resets its cancel
+        // flag), so running them again here costs nothing on the normal path.
+        stop_clock_sync_thread();
+        reap_slew_dispatch();
     }
     
     // AlpacaDriver interface
