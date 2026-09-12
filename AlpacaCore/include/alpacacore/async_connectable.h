@@ -312,8 +312,8 @@ private:
             last_failed = true;
             // A non-std exception escaping a std::thread entry point calls
             // std::terminate. Every driver throws std:: exceptions today, but
-            // this base is now the single chokepoint for 38 drivers' connect
-            // paths — swallow-and-log rather than bet on that forever.
+            // this base is now the single chokepoint for EVERY driver's
+            // connect path — swallow-and-log rather than bet on that forever.
             record_connect_error(connect, "the driver threw a non-std exception");
             ALPACA_LOG_ERROR(log_tag_, "Connection task failed: non-std exception");
         }
@@ -350,6 +350,14 @@ private:
             // The ordering above is still required for the drivers that nest
             // the two locks, so this is a list of who makes it necessary, not
             // an inventory of every get_connected() that takes a mutex.
+            //
+            // Both lists above are GATED, not hand-maintained
+            // (open-astro#381): scripts/check_docs_drift.py classifies every
+            // get_connected() override under AlpacaCore/src/vendors by its
+            // body and fails the build if a blocking driver is missing here,
+            // if a lock-free one is still named here, or if one cannot be
+            // classified at all. Edit the driver and this comment in the same
+            // change; do not add a count, which is what drifted before.
             const bool connected_now = last_was_connect && get_connected();
             // Consume a pending flag and publish the next conn_task_ state in
             // the SAME pending_mutex_ critical section. Paired with the

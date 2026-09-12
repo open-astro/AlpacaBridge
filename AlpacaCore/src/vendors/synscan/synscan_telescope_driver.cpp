@@ -258,8 +258,11 @@ public:
     // entire connect (25 s measured against a silent hand controller: five
     // 5 s timeouts), so the router's 8 s deadline never fired and clients
     // reported "Dynamic client timeout for method Connected" (issue #130).
-    // Same atomic-flag pattern as the other 28 lock-free drivers (29 of the
-    // 38 AsyncConnectable getters are lock-free, this one included).
+    // Same atomic-flag pattern as every other AsyncConnectable driver except
+    // the telescopes and the wrapper-backed switches named in
+    // async_connectable.h. Stated as the rule rather than as a count: a bare
+    // number in a comment has nothing tying it to the code it describes, and
+    // every new driver invalidates it silently (open-astro#381).
     bool get_connected() const override { return connected_.load(); }
 
     void connect() override {

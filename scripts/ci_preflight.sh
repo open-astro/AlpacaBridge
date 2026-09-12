@@ -165,9 +165,9 @@ mapfile -t SH_FILES < <(
   } | sort -u
 )
 
-# Hand-written web UI JavaScript (served static, no build step).
+# Hand-written web UI JavaScript (served static, no build step) and its tests.
 mapfile -t JS_FILES < <(
-  printf '%s\n' "${CHANGED[@]}" | grep -E '^AlpacaHTTP/web/.*\.js$' || true
+  printf '%s\n' "${CHANGED[@]}" | grep -E '^(AlpacaHTTP/web/.*\.js|AlpacaHTTP/tests/web/.*\.js)$' || true
 )
 
 have_workflow_changes() {
@@ -356,7 +356,7 @@ fi
 
 # --- gate 8: javascript syntax (only if web JS changed) --------------------
 
-section "JavaScript syntax (node --check)"
+section "JavaScript syntax (node --check) + unit tests (node --test)"
 if [ "${#JS_FILES[@]}" -eq 0 ]; then
   echo "No web JavaScript changed -- skipping."
   record SKIP "javascript (no JS changes)"
@@ -368,8 +368,28 @@ elif ensure_tool node nodejs; then
       js_ok=0
     fi
   done
+  # node --check parses; it does not execute. The pure formatting helpers in
+  # web/format.js have a real contract with three fallback guards, one of which
+  # renders a plausible-looking WRONG time rather than an obvious failure, so
+  # they get unit tests too (open-astro#385). Kept in sync with the javascript
+  # job in .github/workflows/ci.yml.
+  # Explicit file list, not `node --test <dir>`: the directory form works on
+  # Node 20 but Node 22 resolves the path as a module and dies with
+  # MODULE_NOT_FOUND. Kept identical to the CI step for that reason.
+  mapfile -t JS_TEST_FILES < <(git ls-files 'AlpacaHTTP/tests/web/*.test.js')
+  if [ "${js_ok}" -eq 1 ] && [ "${#JS_TEST_FILES[@]}" -eq 0 ]; then
+    # FAIL, not skip: CI's step exits 1 on an empty list, so skipping here
+    # would let a branch that renames the tests out of the glob pass locally
+    # and fail in CI -- the divergence both files' "kept in sync" comments
+    # exist to prevent.
+    echo "No web UI JavaScript tests matched AlpacaHTTP/tests/web/*.test.js."
+    js_ok=0
+  elif [ "${js_ok}" -eq 1 ] && ! node --test "${JS_TEST_FILES[@]}"; then
+    echo "Web UI JavaScript unit tests failed."
+    js_ok=0
+  fi
   if [ "${js_ok}" -eq 1 ]; then
-    echo "JavaScript syntax OK."
+    echo "JavaScript syntax and unit tests OK."
     record PASS "javascript"
   else
     record FAIL "javascript"
