@@ -1550,7 +1550,14 @@ datagrams before each send so replies cannot get off-by-one.
   and left for the connect-time guard to refuse: a device dropped at startup never enters
   the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
   the entry that is at fault. That asymmetry is the rule for any new validation in
-  `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`. `0.0` is a real coordinate, so the driver tracks whether each
+  `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`.
+  Since #380 that rule is not left to each branch to remember: `Router::reject_invalid_config()`
+  takes the source and the reason and returns whether the caller must refuse, and
+  `Router::normalize_persisted_connection_type()` does the same for an unrecognised
+  `connectionType`, which has no value to carry forward — it returns `"serial"` for a persisted
+  config, never `"auto"`, so the connect fails on the port path instead of auto-probing and
+  attaching to whatever mount answers. Use them rather than an inline `return false`; the
+  `portPath`, `host` and `connectionType` checks in all six telescope branches do. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
   run northern pointing math and undo #250, #253 and #261. Time comes from two functions: `utc_now_locked()`
   feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the

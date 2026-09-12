@@ -2180,6 +2180,151 @@ int main() {
         EXPECT(lat_only);
         EXPECT(lon_only);
     }
+    {
+        // Issue #380: the portPath / host / connectionType checks follow the
+        // same source rule as the site-coordinate check above. All three used
+        // to `return false` regardless of source, so a persisted entry with an
+        // empty portPath vanished from the web UI at startup -- the exact
+        // failure the rule exists to prevent, and the one an operator is most
+        // likely to hit, since the port path is what goes wrong after a USB
+        // device is renamed.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+
+        // One entry per check. Site coordinates are present throughout so a
+        // failure here cannot be the #274 rule firing instead.
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9640},
+                           {"connectionType", "serial"},
+                           {"portPath", ""},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 39.7392},
+                           {"siteLongitude", -104.9903}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9641},
+                           {"connectionType", "network"},
+                           {"host", ""},
+                           {"siteLatitude", 39.7392},
+                           {"siteLongitude", -104.9903}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9642},
+                           {"connectionType", "carrier-pigeon"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 39.7392},
+                           {"siteLongitude", -104.9903}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+
+        std::vector<std::string> warnings;
+        std::mutex warnings_mutex;
+        auto previous_sink = alpacacore::logging::get_log_sink();
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn) {
+                    std::lock_guard<std::mutex> lock(warnings_mutex);
+                    warnings.emplace_back(message);
+                }
+            });
+        alpacahttp::Router startup_router;
+        const auto listed_json = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        alpacacore::logging::set_log_sink(previous_sink);
+
+        // Restore before anything that can abort, and not from a destructor:
+        // EXPECT is abort(), which neither unwinds nor runs a scope guard.
+        const auto restore_original = [&] {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        };
+        restore_original();
+        remove_device(startup_router, "skywatcher", "telescope", 9640);
+        remove_device(startup_router, "skywatcher", "telescope", 9641);
+        remove_device(startup_router, "skywatcher", "telescope", 9642);
+        restore_original();
+
+        EXPECT(!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array());
+        for (int device_number : {9640, 9641, 9642}) {
+            bool found = false;
+            for (const auto& entry : listed_json["Value"]) {
+                if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == device_number) {
+                    found = true;
+                }
+            }
+            EXPECT(found);
+        }
+
+        // Each registration is accompanied by a WARN that names the reason, so
+        // "registered anyway" never means "registered silently". The
+        // connection-type line is distinct: that entry is not merely warned
+        // about, it is normalised to serial, and the log has to say so or the
+        // operator cannot explain the connect error they then get.
+        bool warned_port = false;
+        bool warned_host = false;
+        bool warned_conn_type = false;
+        for (const auto& w : warnings) {
+            if (w.find("telescope 9640") != std::string::npos &&
+                w.find("Serial port path is required") != std::string::npos) {
+                warned_port = true;
+            }
+            if (w.find("telescope 9641") != std::string::npos &&
+                w.find("Host IP address is required") != std::string::npos) {
+                warned_host = true;
+            }
+            if (w.find("telescope 9642") != std::string::npos && w.find("carrier-pigeon") != std::string::npos &&
+                w.find("serial") != std::string::npos) {
+                warned_conn_type = true;
+            }
+        }
+        EXPECT(warned_port);
+        EXPECT(warned_host);
+        EXPECT(warned_conn_type);
+    }
+    {
+        // The other half of the rule, unchanged: the same three configs are
+        // still rejected outright when they arrive through the API, where the
+        // caller can fix them and nothing has been written to disk yet.
+        alpacahttp::Router router;
+        const nlohmann::json base = {{"vendor", "skywatcher"},
+                                     {"deviceType", "telescope"},
+                                     {"deviceNumber", 9643},
+                                     {"siteLatitude", 39.7392},
+                                     {"siteLongitude", -104.9903}};
+        const auto reject = [&router](nlohmann::json body, const std::string& expected) {
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", body.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            EXPECT(json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find(expected) != std::string::npos);
+        };
+
+        nlohmann::json no_port = base;
+        no_port["connectionType"] = "serial";
+        no_port["portPath"] = "";
+        reject(no_port, "Serial port path is required");
+
+        nlohmann::json no_host = base;
+        no_host["connectionType"] = "network";
+        no_host["host"] = "";
+        reject(no_host, "Host IP address is required");
+
+        nlohmann::json bad_type = base;
+        bad_type["connectionType"] = "carrier-pigeon";
+        bad_type["portPath"] = "/dev/ttyUSB8";
+        reject(bad_type, "Invalid connection type");
+    }
+
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP

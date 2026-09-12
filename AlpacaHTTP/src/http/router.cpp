@@ -7006,6 +7006,46 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
     return response;
 }
 
+namespace {
+// The subject of the WARN the two helpers below log: "Persisted skywatcher
+// telescope 1". Kept in one place so the two lines read alike in the log.
+std::string persisted_device_subject(const std::string& vendor, const std::string& device_type, int device_number) {
+    return "Persisted " + vendor + " " + device_type + " " + std::to_string(device_number);
+}
+}  // namespace
+
+bool Router::reject_invalid_config(ConfigSource source, const char* reason, const std::string& vendor,
+                                   const std::string& device_type, int device_number, std::string& error_message) {
+    if (source == ConfigSource::Api) {
+        error_message = reason;
+        return true;
+    }
+    util::log_warning(persisted_device_subject(vendor, device_type, device_number) + " will refuse to connect: " +
+                      reason + ". Registered anyway so it stays listed and editable in the web UI.");
+    return false;
+}
+
+std::string Router::normalize_persisted_connection_type(ConfigSource source, std::string conn_type,
+                                                        std::initializer_list<const char*> valid,
+                                                        const std::string& vendor, const std::string& device_type,
+                                                        int device_number) {
+    // Empty means auto-detect everywhere this is called from, and is what an
+    // entry written before the field existed looks like.
+    if (conn_type.empty() || source == ConfigSource::Api) {
+        return conn_type;
+    }
+    for (const char* candidate : valid) {
+        if (conn_type == candidate) {
+            return conn_type;
+        }
+    }
+    util::log_warning(persisted_device_subject(vendor, device_type, device_number) + " has connectionType \"" +
+                      conn_type +
+                      "\", which is not one this driver knows; treating it as \"serial\" so the device stays listed "
+                      "and editable in the web UI. Fix it there; the connect will fail until you do.");
+    return "serial";
+}
+
 bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message,
                                          [[maybe_unused]] ConfigSource source) {
     std::string device_type_str = config.value("deviceType", "");
@@ -7022,6 +7062,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "ioptron" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_IOPTRON
         std::string conn_type = config.value("connectionType", "auto");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
+                                                        device_type_str, device_number);
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -7056,8 +7103,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.port_path = config.value("portPath", "");
                 conn_info.baud_rate = config.value("baudRate", 115200);
 
-                if (conn_info.port_path.empty()) {
-                    error_message = "Serial port path is required";
+                if (conn_info.port_path.empty() &&
+                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
+                                          device_number, error_message)) {
                     return false;
                 }
             } else if (conn_type == "network") {
@@ -7278,6 +7326,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "synscan" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_SYNSCAN
         std::string conn_type = config.value("connectionType", "auto");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
+                                                        device_type_str, device_number);
 
         std::string version_value = config.value("synscanVersion", "auto");
         std::string version_normalized = to_lower_copy(version_value);
@@ -7321,8 +7376,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.port_path = config.value("portPath", "");
                 conn_info.baud_rate = config.value("baudRate", 9600);
 
-                if (conn_info.port_path.empty()) {
-                    error_message = "Serial port path is required";
+                if (conn_info.port_path.empty() &&
+                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
+                                          device_number, error_message)) {
                     return false;
                 }
             } else if (conn_type == "network") {
@@ -7330,8 +7386,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.host = config.value("host", "");
                 conn_info.tcp_port = config.value("tcpPort", conn_info.tcp_port);
 
-                if (conn_info.host.empty()) {
-                    error_message = "Host IP address is required";
+                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
+                                                                    device_type_str, device_number, error_message)) {
                     return false;
                 }
             } else {
@@ -7371,6 +7427,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "skywatcher" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
         std::string conn_type = config.value("connectionType", "auto");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
+                                                        device_type_str, device_number);
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -7426,8 +7489,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.port_path = config.value("portPath", "");
                 conn_info.baud_rate = config.value("baudRate", 9600);
 
-                if (conn_info.port_path.empty()) {
-                    error_message = "Serial port path is required";
+                if (conn_info.port_path.empty() &&
+                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
+                                          device_number, error_message)) {
                     return false;
                 }
             } else if (conn_type == "network") {
@@ -7435,8 +7499,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.host = config.value("host", "");
                 conn_info.udp_port = config.value("udpPort", conn_info.udp_port);
 
-                if (conn_info.host.empty()) {
-                    error_message = "Host IP address is required";
+                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
+                                                                    device_type_str, device_number, error_message)) {
                     return false;
                 }
             } else {
@@ -7473,6 +7537,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "onstep" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_ONSTEP
         std::string conn_type = config.value("connectionType", "auto");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial"}, vendor, device_type_str,
+                                                        device_number);
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -7507,8 +7578,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.port_path = config.value("portPath", "");
             conn_info.baud_rate = config.value("baudRate", 9600);
 
-            if (conn_info.port_path.empty()) {
-                error_message = "Serial port path is required";
+            if (conn_info.port_path.empty() && reject_invalid_config(source, "Serial port path is required", vendor,
+                                                                     device_type_str, device_number, error_message)) {
                 return false;
             }
 
@@ -7547,6 +7618,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (vendor == "celestron" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_CELESTRON
         std::string conn_type = config.value("connectionType", "auto");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
+                                                        device_type_str, device_number);
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -7581,8 +7659,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.port_path = config.value("portPath", "");
                 conn_info.baud_rate = config.value("baudRate", 9600);
 
-                if (conn_info.port_path.empty()) {
-                    error_message = "Serial port path is required";
+                if (conn_info.port_path.empty() &&
+                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
+                                          device_number, error_message)) {
                     return false;
                 }
             } else if (conn_type == "network") {
@@ -7590,8 +7669,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 conn_info.host = config.value("host", "");
                 conn_info.tcp_port = config.value("tcpPort", conn_info.tcp_port);
 
-                if (conn_info.host.empty()) {
-                    error_message = "Host IP address is required";
+                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
+                                                                    device_type_str, device_number, error_message)) {
                     return false;
                 }
             } else {
@@ -7713,6 +7792,13 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #ifdef ALPACACORE_ENABLE_ZWO
         alpacacore::vendor::zwo::ConnectionInfo conn_info;
         std::string conn_type = config.value("connectionType", "");
+        // Issue #380: an unrecognised connectionType on a persisted config is
+        // normalised to "serial" rather than dropping the device, so it stays
+        // listed and editable in the web UI and its connect fails on the port
+        // path instead of auto-probing and attaching to whatever answers. The
+        // else below still rejects the value when it came from the API.
+        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
+                                                        device_type_str, device_number);
 
         if (conn_type == "auto") {
             // Auto-detect the transport at connect time: probe USB serial ports
@@ -7724,8 +7810,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.port_path = config.value("portPath", "");
             conn_info.baud_rate = config.value("baudRate", 9600);
 
-            if (conn_info.port_path.empty()) {
-                error_message = "Serial port path is required";
+            if (conn_info.port_path.empty() && reject_invalid_config(source, "Serial port path is required", vendor,
+                                                                     device_type_str, device_number, error_message)) {
                 return false;
             }
         } else if (conn_type == "network") {
@@ -7733,8 +7819,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.host = config.value("host", "");
             conn_info.tcp_port = config.value("tcpPort", 4030);
 
-            if (conn_info.host.empty()) {
-                error_message = "Host IP address is required";
+            if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
+                                                                device_type_str, device_number, error_message)) {
                 return false;
             }
         } else {
