@@ -231,7 +231,7 @@ Group by component using bold tags:
 ## Test plan
 - [ ] Local CI pre-flight green: `run_all_tests.sh` (vendors OFF + ON), clang-format, unicode scan, and (when installed) clang-tidy/cppcheck
 - [ ] Unit tests pass (`cd build && ctest`)
-- [ ] ConformU (latest release — see `/conformu`) passes on Linux arm64
+- [ ] ConformU (latest release, but NOT arm64 4.5.0 — see `/conformu` step 2g) passes on Linux arm64
 - [ ] Web UI configuration works in browser
 - [ ] Device connects and operates correctly
 (Include only items relevant to this PR)

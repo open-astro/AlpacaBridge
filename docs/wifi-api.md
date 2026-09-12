@@ -154,7 +154,10 @@ anything unrecognised, which the server treats as an unknown method and the
 guard refuses before the endpoint's own method check runs. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
 not affect native clients (no `Origin` header is sent — Ara over HTTP is
-unaffected) or the same-origin web portal.
+unaffected) or the same-origin web portal. One device endpoint takes the same
+guard: `PUT`/`POST /api/v1/telescope/{n}/utcdate`, because on an NTP-less host
+a UTCDate write steps the system clock (see the Clock section above). Every
+other device setter is unguarded.
 
 ## Connection-drop pattern (important for clients)
 
@@ -206,10 +209,10 @@ opt out (persisted as `sync_system_clock_from_clients` under `server:` in the
 config file). A telescope connecting while the clock is `none` always logs a
 WARN. On an `rtc` host the line is an INFO only while something can still
 correct the clock: it goes back to a WARN if `SyncSystemClockFromClients` is
-off, and also if a client's `UTCDate` write or a Sync Time press (`PUT
+off, and also if a client's `UTCDate` write or a Sync Time press (`POST
 /management/v1/synctime`) has already been refused (no `CAP_SYS_TIME`), because
 then nothing in the service can set the clock at all
-and the message says to set it from outside instead. A Sync Time press (`PUT /management/v1/synctime`)
+and the message says to set it from outside instead. A Sync Time press (`POST /management/v1/synctime`)
 counts as a client step: `ClockSource` reads `client` afterwards.
 
 `rtc` means the kernel loaded system time from a hardware RTC at boot: the

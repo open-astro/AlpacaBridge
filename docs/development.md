@@ -59,7 +59,7 @@ For a test SBC reachable only through a Raspberry Pi Connect browser shell (no L
 
 Runs ConformU against a connected AlpacaBridge device and processes the results:
 
-- Checks the installed ConformU against the [latest upstream release](https://github.com/ASCOMInitiative/ConformU/tags) and offers to update before running
+- Checks the installed ConformU against the [latest upstream release](https://github.com/ASCOMInitiative/ConformU/tags) and offers to update before running. On arm64 an installed 4.5.0 is always treated as outdated (the [ConformU 4.5.0 arm64 timing bug](../SUPPORTED-DRIVERS.md)), and until 4.5.1 ships as a GitHub release the replacement comes from the upstream beta URL rather than the release asset
 - Validates the full pass criteria: 0 errors, 0 issues, **and** 0 timing issues (the Timing Summary is a separate pass criterion)
 - Saves the logs under `AlpacaCore/conformu/<vendor>/<model>/`
 - Updates [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) with the validated entry

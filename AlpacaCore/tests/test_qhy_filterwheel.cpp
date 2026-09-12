@@ -40,11 +40,11 @@ using alpacacore::test::LockedQHYSDK;
 // Connect coverage runs over the SDK seam (issue #321) -- the real SDK cannot
 // initialise on a test runner, so nothing here reached set_connected(true)
 // before the seam existed.
-FakeQHYSDK make_fake(const std::string& id = "fake-qhy-0") {
-    FakeQHYSDK fake;
-    fake.cameras.push_back(FakeQHYSDK::default_camera(id, "FakeQHY600"));
-    return fake;
-}
+// One-camera fake, shared with the other QHY seam test files (issue #342):
+// this was three verbatim copies, so a change to what a default test fake
+// looks like had to be made in three places with nothing failing if it was
+// made in two.
+FakeQHYSDK make_fake(const std::string& id = "fake-qhy-0") { return FakeQHYSDK::with_one_camera(id); }
 
 }  // namespace
 

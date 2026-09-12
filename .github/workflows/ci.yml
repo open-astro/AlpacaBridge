@@ -57,6 +57,7 @@ jobs:
   build-test:
     name: Build + test (arm64)
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
@@ -92,6 +93,7 @@ jobs:
   build-vendors:
     name: Build + test (all vendors, arm64)
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -177,6 +179,7 @@ jobs:
   sanitizers:
     name: Sanitizers (ASan + UBSan, arm64)
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -215,6 +218,7 @@ jobs:
   sanitizers-tsan:
     name: Sanitizers (TSan concurrency stress, arm64)
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -345,6 +349,7 @@ jobs:
     name: clang-format (changed lines)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04-arm   # text-only check; kept on arm64 for a single-arch fleet
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -382,6 +387,7 @@ jobs:
     name: clang-tidy (changed lines)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04-arm   # needs a real configure/build, which is arm64-only
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -487,6 +493,7 @@ jobs:
   unicode:
     name: Unicode scan
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -502,6 +509,7 @@ jobs:
   docs-drift:
     name: Docs drift check
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -518,6 +526,7 @@ jobs:
   stress-registration:
     name: Stress-test registration
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -528,7 +537,7 @@ jobs:
         # Regression guard for DEVICE_TYPE_OVERRIDE_RE / TEST_CASE_TAGS_RE
         # against synthetic snippets, independent of repo state. It also runs
         # the script's main() over temp files, so the two tag predicates and
-        # their wiring into main() are both covered -- deleting a
+        # the CMake gating rule are all wired-up and covered -- deleting a
         # `failures.extend(...)` line fails here rather than passing silently.
         run: python3 scripts/check_stress_registration.py --self-test
 
@@ -542,6 +551,7 @@ jobs:
     name: ConformU report validation
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04-arm   # pure text/JSON scan; arch-independent
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -563,6 +573,7 @@ jobs:
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-24.04-arm   # static text analysis; arch-independent
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -595,6 +606,7 @@ jobs:
   javascript:
     name: JavaScript syntax
     runs-on: ubuntu-24.04-arm   # syntax-only check; arch-independent
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -628,6 +640,7 @@ jobs:
     name: cppcheck (changed files)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -704,6 +717,7 @@ jobs:
   zizmor:
     name: zizmor (workflow audit)
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

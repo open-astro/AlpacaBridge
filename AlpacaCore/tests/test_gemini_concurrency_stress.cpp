@@ -211,9 +211,10 @@ TEST_CASE("Gemini PDH Advanced 3 switch - destruction races an in-flight connect
     // 25 iterations, not the harness default of 100: unlike a fail-fast
     // case, every iteration here reaches a real handshake, whose first
     // attempt alone sleeps 100 ms before its read. 100 iterations would put
-    // ~10 s on the clock for this case on its own, and the sanitizers-tsan
-    // job it runs in has no timeout-minutes at all. Do not "restore" the
-    // default without re-checking both.
+    // ~10 s on the clock for this case on its own, against the 30-minute
+    // timeout-minutes bound on the sanitizers-tsan job it runs in, which
+    // the whole [stress] suite shares. Do not "restore" the default
+    // without re-checking both.
     alpacacore::test::run_destruction_during_connect_stress(
         [&port]() { return alpacacore::vendor::gemini::create_gemini_pdh_switch(0, port, 19200); }, 25);
 }

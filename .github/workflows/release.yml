@@ -22,6 +22,7 @@ jobs:
   release:
     name: Create GitHub Release from CHANGELOG
     runs-on: ubuntu-24.04-arm   # text-only; kept on arm64 for a single-arch fleet
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)

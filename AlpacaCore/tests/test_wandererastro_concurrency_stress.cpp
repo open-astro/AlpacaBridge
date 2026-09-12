@@ -143,10 +143,11 @@ TEST_CASE("WandererAstro cover calibrator - destruction races an in-flight conne
     // 50 ms, not the unit tests' 300/500 ms: each destruction-race iteration
     // pays a full successful connect on the fake, i.e. waits out one frame
     // interval, and the harness default of 100 iterations at 300 ms would add
-    // ~30 s to sanitizers-tsan before the TSan slowdown, with no step timeout
-    // to bound it. The frame CONTENT is what the driver keys on, not the
-    // cadence, so a faster interval deepens the storm for free and makes the
-    // harness default affordable.
+    // ~30 s to sanitizers-tsan before the TSan slowdown, eating into the
+    // 30-minute timeout-minutes bound the whole [stress] suite shares (there
+    // is no step-level bound under it). The frame CONTENT is what the driver
+    // keys on, not the cadence, so a faster interval deepens the storm for
+    // free and makes the harness default affordable.
     FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(50));
     const std::string port = cover.slave_path();
     alpacacore::test::run_destruction_during_connect_stress(

@@ -222,16 +222,25 @@ private:
     std::vector<std::string> samples_;
 };
 
-// NOTE for anyone documenting this pattern in THIS header: scripts/
-// check_stress_registration.py reads AlpacaCore/tests/*.h as plain text, with
-// no comment awareness. Writing a complete Catch2 case macro into a comment
-// here -- the macro name, then a description and a bracketed tag string
-// carrying the vendor tag -- reads to that gate as a real stray registration
-// and fails CI over a case that does not exist at runtime. Describe the tags
-// in prose instead, as this paragraph does.
+// Documenting this pattern in THIS header is now safe: scripts/
+// check_stress_registration.py reads AlpacaCore/tests/*.h as plain text, but
+// it strips C and C++ comments first (issue #386), so an illustrative Catch2
+// case macro written into a comment here is documentation rather than a stray
+// registration. That was not true when this header was written -- the first
+// draft of this comment spelled the macro out as an example and failed CI for
+// a case that does not exist at runtime. String literals are NOT stripped, so
+// an example built out of a real string constant still counts; keep examples
+// in comments. The shape of a vendor registration, spelled out here now that
+// it can be:
 //
-// That is not hypothetical: the first draft of this very comment spelled the
-// macro out as an example and failed the gate. Tracked in issue #386.
+//     TEST_CASE("MyVendor camera lifecycle", "[myvendor][camera][stress]") {
+//         alpacacore::test::StressCallGuard guard;
+//         ...
+//     }
+//
+// That example is also this repo's live proof that the comment filter works:
+// it carries a real vendor-shaped tag string in a file the stray-[stress] rule
+// scans, so the gate would fail on it if the filter were ever removed.
 
 /// Hammer one driver instance from many threads: async connect/disconnect,
 /// sync set_connected (the ASCOM Connected setter path — it bypasses the

@@ -147,29 +147,59 @@ ssh astro@<host> 'timedatectl | grep synchronized; echo astro | sudo -S timedate
 
 Require `synchronized: yes` and an offset in the low-millisecond range. Skip for non-telescope devices.
 
+**The ConformU host's clock too.** Since #301 the Sky-Watcher direct driver ignores a client-supplied `UTCDate` for pointing whenever the SBC's kernel reports its clock NTP-disciplined, so ConformU can no longer make the driver agree with a wrong clock of its own by writing `UTCDate`. If a run flags `SiderealTime`, check the clock on the machine running ConformU before suspecting the driver (issue #412): a ConformU host more than a few minutes off produces exactly that finding against a correct driver.
+
 (Note: the earlier PR #221 "clock slew" diagnosis was wrong — the RightAscensionRate +0.0033 s/s failure was the driver re-anchoring on hardware counts inside the rate setter, fixed in the driver. Keep this check anyway; it is cheap.)
 
 ### 2g. ConformU is installed ON THE SBC and is the CURRENT release
 
-ConformU lives at `/home/astro/conformu/conformu` on the SBC. Validation logs advertise the ConformU version they were produced with, so always test with the latest release. Get the installed and newest upstream versions:
+ConformU lives at `/home/astro/conformu/conformu` on the SBC. Validation logs advertise the ConformU version they were produced with, so always test with the latest release, **except that the linux-arm64 4.5.0 release is unusable for timing** (see the arm64 exception below). Get the installed and newest upstream versions:
 
 ```bash
 ssh astro@<host> '~/conformu/conformu --version 2>/dev/null | tail -1 || echo MISSING'
 gh api repos/ASCOMInitiative/ConformU/releases/latest --jq .tag_name
 ```
 
-(If `gh` is unavailable, `curl -sS https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest | jq -r .tag_name`; if that fails too, warn and proceed with the installed version.)
+(If `gh` is unavailable, `curl -sS https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest | jq -r .tag_name`; if that fails too, warn and proceed with the installed version -- but never with an installed arm64 4.5.0, which step 2g replaces regardless of whether the upstream lookup succeeded.)
 
 Compare **numerically per dot-segment, never lexicographically** (`4.9.0` vs `4.10.0`): strip any `v` prefix, then `printf '%s\n%s\n' "<installed>" "<latest>" | sort -V | tail -1` — installed is current only if it equals that maximum.
 
-If MISSING or outdated, install/update it on the SBC (no confirmation needed — this is part of the standard rig setup). The linux-arm64 asset is a `.tar.xz`:
+**Read this before running any install command.** On arm64 -- which is every rig this project
+supports (AGENTS.md "Target Architecture") -- an installed **4.5.0 counts as outdated no matter what
+`releases/latest` says**, and `releases/latest` itself is *not* the place to install from today.
+
+The official `conformu.linux-arm64.tar.xz` 4.5.0 asset was published without `PublishReadyToRun`, so
+.NET JIT-compiles each generic-over-value-type instantiation on first use and the *first* member
+returning each distinct response type is charged ~0.13-0.22 s "OUTSIDE FAST RESPONSE TIME TARGET" no
+matter whose driver answers (Camera: `CameraState`, `CameraXSize`, `SensorType`; Telescope:
+`AlignmentMode`, `EquatorialSystem`, `SideOfPier`). That is a ConformU bug, not a driver regression
+([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)), and a warm re-run only hides
+it. 4.5.1 fixes it but is not a GitHub release yet, so `releases/latest` still resolves to the broken
+4.5.0.
+
+So, while that remains true, if the installed version is MISSING, outdated, **or 4.5.0**, install the
+maintainer's fixed 4.5.1 beta (no confirmation needed -- this is part of the standard rig setup):
+
+```bash
+ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz 'https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz' && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
+```
+
+That URL is unpinned and unsigned: the same name can serve a different build later. Check the version
+line it prints against the build the current reports were produced with, `4.5.1.54507, Build time:
+Thu 27 August 2026 11:40:17` -- a different build is not automatically wrong, but note it in the log
+and say so in the PR rather than labelling the run "4.5.1" and moving on.
+
+**Once 4.5.1 or later is a real GitHub release, delete everything above from "Read this before" and
+go back to the ordinary release asset**, which is the only correct path at that point:
 
 ```bash
 URL=$(gh api repos/ASCOMInitiative/ConformU/releases/latest --jq '.assets[]|select(.name|test("linux-arm64"))|.browser_download_url' | head -1)
 ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz '$URL' && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
 ```
 
-(If the SBC has no internet, download on the dev machine and `scp -r` the extracted `conformu/` directory to `astro@<host>:~/`.) Re-check `--version` before continuing, and never label a log with a version that wasn't used.
+(If the SBC has no internet, download on the dev machine and `scp -r` the extracted `conformu/`
+directory to `astro@<host>:~/`.) Re-check `--version` before continuing, and never label a log with a
+version that wasn't used.
 
 ## Step 3 — Run ConformU (on the SBC, detached)
 

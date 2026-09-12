@@ -1706,9 +1706,25 @@ async function refreshServerClockOffset() {
         const t0 = Date.now();
         const response = await fetch(API_BASE + '/management/v1/synctime');
         const result = await response.json();
-        if (result && result.ErrorNumber === 0) {
+        if (result && result.ErrorNumber === 0 && Number.isFinite(result.Value)) {
             // Value is whole seconds; assume the server read its clock halfway
             // through the round trip.
+            //
+            // The type check is not paranoia about our own server (open-astro#389):
+            // without it a non-numeric Value makes serverClockOffsetMs NaN, which
+            // passes the `=== null` guard in updateServerClock(). From
+            // there new Date(NaN) is an Invalid Date, Intl throws, and the catch
+            // arm's own toISOString() throws RangeError in turn, so the whole tick
+            // throws once a second and the drift class is never applied. Leaving
+            // the previous offset in place instead is what the fetch-failure
+            // comment below already promises for every other bad answer.
+            //
+            // Number.isFinite alone is the whole check: it is false for every
+            // non-number, so a `typeof` test in front of it would be redundant.
+            // It does NOT cover a finite but out-of-range Value (e.g. 1e15
+            // seconds), which is still an Invalid Date downstream; that input
+            // was broken before this change too and clamping it to the server's
+            // own 2000-2100 window belongs with that endpoint, not here.
             const midpoint = t0 + (Date.now() - t0) / 2;
             serverClockOffsetMs = (result.Value * 1000) - midpoint;
         }

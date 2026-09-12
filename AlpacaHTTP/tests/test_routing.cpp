@@ -2091,15 +2091,19 @@ int main() {
         // itself an EXPECT -- and it is exactly the call that fails in the
         // regression this block guards against, since a device that was never
         // registered cannot be removed.
-        {
+        const auto restore_original = [&] {
             std::ofstream restore(persisted, std::ios::trunc);
             restore << (original.empty() ? std::string("[]") : original);
-        }
+        };
+        restore_original();
 
         // Unregister from the process-wide DeviceRegistry so later blocks do
-        // not see 9630. The file is already restored, so this rewrites it
-        // from an entry list that no longer contains the synthetic device.
+        // not see 9630. remove_device() saves from THIS router's in-memory
+        // list, which was loaded from the synthetic one-entry file, so it
+        // writes "[]" over the restore above; restore once more afterwards so
+        // the file really is the original when this block ends (#408).
         remove_device(startup_router, "skywatcher", "telescope", 9630);
+        restore_original();
 
         EXPECT(!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array());
         bool found = false;
@@ -2109,6 +2113,72 @@ int main() {
             }
         }
         EXPECT(found);
+    }
+    {
+        // issue #408 (second item): the startup WARN for a half-configured
+        // persisted entry names the half that is missing. Two entries, one
+        // with only a latitude and one with only a longitude, loaded by a
+        // fresh Router while the log sink is captured; the text is pinned so
+        // swapping the two arms cannot pass.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9631},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 39.7392}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9632},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB9"},
+                           {"baudRate", 9600},
+                           {"siteLongitude", -104.9903}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+        std::vector<std::string> warnings;
+        std::mutex warnings_mutex;
+        auto previous_sink = alpacacore::logging::get_log_sink();
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn) {
+                    std::lock_guard<std::mutex> lock(warnings_mutex);
+                    warnings.emplace_back(message);
+                }
+            });
+        alpacahttp::Router half_router;
+        static_cast<void>(route_request(half_router, "GET", "/management/v1/configureddevices"));
+        alpacacore::logging::set_log_sink(previous_sink);
+        const auto restore_original = [&] {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        };
+        restore_original();
+        remove_device(half_router, "skywatcher", "telescope", 9631);
+        remove_device(half_router, "skywatcher", "telescope", 9632);
+        restore_original();
+        bool lat_only = false;
+        bool lon_only = false;
+        for (const auto& w : warnings) {
+            if (w.find("telescope 9631 has no site longitude and will refuse to connect") != std::string::npos) {
+                lat_only = true;
+            }
+            if (w.find("telescope 9632 has no site latitude and will refuse to connect") != std::string::npos) {
+                lon_only = true;
+            }
+        }
+        EXPECT(lat_only);
+        EXPECT(lon_only);
     }
 #endif
 
@@ -2500,6 +2570,47 @@ int main() {
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
             EXPECT(clock_field(desc, "ClockSource") == "none");
             EXPECT(clock_field(desc, "SyncSystemClockFromClients") == false);
+        }
+
+        // open-astro#401: the UTCDate write has the same host-level effect as
+        // the synctime endpoint (it can step the clock and latch ClockSource),
+        // so it takes the same cross-origin guard. A foreign Origin is refused
+        // with 403 before the clock or the driver is touched; a same-origin
+        // write and one with no Origin (native clients) still go through.
+        {
+            int set_calls = 0;
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [&](std::chrono::system_clock::time_point, std::string&) {
+                                                  ++set_calls;
+                                                  return true;
+                                              });
+            fresh_counts();
+            const auto send = [&](const std::string& method, const std::string& origin) {
+                std::ostringstream raw;
+                raw << method << " " << base << "/utcdate HTTP/1.1\r\n"
+                    << "Host: localhost\r\n";
+                if (!origin.empty()) {
+                    raw << "Origin: " << origin << "\r\n";
+                }
+                raw << "Content-Type: text/plain\r\n"
+                    << "Content-Length: " << client_utc_body.size() << "\r\n\r\n"
+                    << client_utc_body;
+                alpacahttp::Request request;
+                EXPECT(request.parse(raw.str()));
+                return clock_router.route(request, 1);
+            };
+            EXPECT(send("PUT", "http://evil.example").status_code() == 403);
+            EXPECT(send("POST", "http://evil.example").status_code() == 403);
+            EXPECT(set_calls == 0);
+            EXPECT(scope->utc_writes == 0);
+
+            EXPECT(send("PUT", "http://localhost").status_code() != 403);
+            EXPECT(set_calls == 1);
+            EXPECT(scope->utc_writes == 1);
+
+            EXPECT(send("PUT", "").status_code() != 403);
+            EXPECT(scope->utc_writes == 2);
         }
 
         // A host with no CAP_SYS_TIME: the refusal latches, so a later reader

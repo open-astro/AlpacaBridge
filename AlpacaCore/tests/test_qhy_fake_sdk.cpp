@@ -36,11 +36,11 @@ namespace control = alpacacore::vendor::qhy::control;
 
 namespace {
 
-FakeQHYSDK make_fake() {
-    FakeQHYSDK fake;
-    fake.cameras.push_back(FakeQHYSDK::default_camera("fake-qhy-0", "FakeQHY600"));
-    return fake;
-}
+// One-camera fake, shared with the other QHY seam test files (issue #342):
+// this was three verbatim copies, so a change to what a default test fake
+// looks like had to be made in three places with nothing failing if it was
+// made in two.
+FakeQHYSDK make_fake(const std::string& id = "fake-qhy-0") { return FakeQHYSDK::with_one_camera(id); }
 
 }  // namespace
 
@@ -405,4 +405,170 @@ TEST_CASE("FakeQHYSDK - an empty readout-mode list still accepts index 0", "[qhy
     CHECK_THROWS_AS(fake.set_readout_mode("fake-qhy-0", 1), AlpacaException);
     // The synthesized name is unchanged by the floor.
     CHECK(fake.get_readout_mode_name("fake-qhy-0", 0) == "Mode 0");
+}
+
+TEST_CASE("FakeQHYSDK - get_param answers the QHYCCD_ERROR sentinel for an unsupported control", "[qhy][fake][unit]") {
+    // Parity with the real wrapper, which returns GetQHYCCDParam() raw
+    // (issue #373). The fake used to answer 0.0, and 0.0 is the more dangerous
+    // of the two: modelling "this camera does not support that control" by
+    // dropping it from `params` handed the driver a plausible reading where
+    // hardware hands it a sentinel it must reject. The two answers differ by
+    // about four billion on the same input.
+    auto fake = make_fake();
+    fake.open_camera("fake-qhy-0");
+
+    fake.params[control::GAIN] = 42.0;
+    CHECK(fake.get_param("fake-qhy-0", control::GAIN) == 42.0);
+
+    // A control nobody seeded. The constant is exposed so a case can say what
+    // it means rather than spelling 0xFFFFFFFF out.
+    const int unsupported = 9999;
+    REQUIRE(fake.params.count(unsupported) == 0);
+    CHECK(fake.get_param("fake-qhy-0", unsupported) == FakeQHYSDK::kUnsupportedControl);
+    CHECK(FakeQHYSDK::kUnsupportedControl > 4.0e9);
+
+    // Seeding it explicitly with 0.0 is how a case says "supported, reads
+    // zero" -- which is what the old behaviour could not distinguish.
+    fake.params[unsupported] = 0.0;
+    CHECK(fake.get_param("fake-qhy-0", unsupported) == 0.0);
+}
+
+TEST_CASE("FakeQHYSDK - get_mem_length tracks the ROI, which the driver binds", "[qhy][fake][unit]") {
+    // GetQHYCCDMemLength() shrinks when the frame does (issue #365), and the
+    // fake stored wbin_/hbin_ without reading them. The fix is NOT to divide
+    // here: roi_ is already in BINNED pixels, because that is what the driver
+    // passes. NOTE the set_bin_mode() calls below are no-ops by construction --
+    // nothing reads wbin_/hbin_ (the re-scoped #365 residual) -- so this case
+    // covers the ROI path, not the binning path; it is written the way the
+    // driver drives the fake, and it would fail if get_mem_length() ever
+    // started dividing by the binning as well. The driver -- set_bin_locked() calls set_resolution(0, 0, max_width /
+    // bin_x, max_height / bin_y), and start_exposure() passes num_x_/num_y_, which are ASCOM NumX/NumY. Dividing again
+    // would report a quarter of the bytes the SDK owes for the frame it is about to deliver.
+    auto fake = make_fake();
+    fake.open_camera("fake-qhy-0");
+    fake.set_bits_mode("fake-qhy-0", 16);
+
+    // Unbinned: the driver would pass the full sensor size.
+    fake.set_resolution("fake-qhy-0", 0, 0, 64, 48);
+    fake.set_bin_mode("fake-qhy-0", 1, 1);
+    const uint32_t unbinned = fake.get_mem_length("fake-qhy-0");
+    CHECK(unbinned == 64U * 48U * 2U);
+
+    // 2x2: the driver passes the halved ROI, so the length quarters.
+    fake.set_resolution("fake-qhy-0", 0, 0, 32, 24);
+    fake.set_bin_mode("fake-qhy-0", 2, 2);
+    CHECK(fake.get_mem_length("fake-qhy-0") == unbinned / 4);
+
+    // Asymmetric binning halves one axis only.
+    fake.set_resolution("fake-qhy-0", 0, 0, 32, 48);
+    fake.set_bin_mode("fake-qhy-0", 2, 1);
+    CHECK(fake.get_mem_length("fake-qhy-0") == unbinned / 2);
+
+    // 8-bit readout halves it again, independently of the binning.
+    fake.set_bits_mode("fake-qhy-0", 8);
+    fake.set_resolution("fake-qhy-0", 0, 0, 32, 24);
+    fake.set_bin_mode("fake-qhy-0", 2, 2);
+    CHECK(fake.get_mem_length("fake-qhy-0") == 32U * 24U);
+}
+
+TEST_CASE("FakeQHYSDK - the two capability sources agree in the default seeding", "[qhy][fake][unit]") {
+    // Since get_param() answers the QHYCCD_ERROR sentinel for anything missing
+    // from `params` (issue #373), membership there reads as "supported" -- so a
+    // control seeded in `params` but absent from `controls_available` makes the
+    // fake's two capability sources contradict each other in the DEFAULT
+    // scaffolding every QHY case builds on, which is the trap the
+    // get_chip_info() parity gap warns about. CURTEMP and CURPWM were exactly
+    // that. This case fails if either list drops one of them.
+    auto fake = make_fake();
+    fake.open_camera("fake-qhy-0");
+
+    for (const int ctrl : {alpacacore::vendor::qhy::control::CURTEMP, alpacacore::vendor::qhy::control::CURPWM}) {
+        INFO("control " << ctrl);
+        CHECK(fake.is_control_available("fake-qhy-0", ctrl));
+        CHECK(fake.get_param("fake-qhy-0", ctrl) != alpacacore::test::FakeQHYSDK::kUnsupportedControl);
+    }
+}
+
+TEST_CASE("FakeQHYSDK - get_single_frame never exceeds get_mem_length", "[qhy][fake][unit]") {
+    // The driver sizes its frame buffer from get_mem_length() and hands that
+    // exact buffer to get_single_frame() (qhy_camera_driver.cpp: mem_length ->
+    // local_buf(mem_length) -> get_single_frame). Hardware cannot deliver an
+    // image larger than GetQHYCCDMemLength(), so the fake must not either.
+    // When get_mem_length() divided by the binning and get_single_frame() did
+    // not, this pairing was a heap-buffer-overflow inside the fake (ASan: a
+    // 384-byte buffer memset with 1536 bytes) -- a crash in test scaffolding
+    // that would have read as a driver bug.
+    for (const auto bin : {1U, 2U, 4U}) {
+        auto fake = make_fake();
+        fake.open_camera("fake-qhy-0");
+        fake.set_bits_mode("fake-qhy-0", 16);
+        fake.set_resolution("fake-qhy-0", 0, 0, 64U / bin, 48U / bin);
+        fake.set_bin_mode("fake-qhy-0", bin, bin);
+
+        const uint32_t mem_length = fake.get_mem_length("fake-qhy-0");
+        std::vector<uint8_t> buffer(mem_length, 0);
+        uint32_t width = 0, height = 0, bpp = 0, channels = 0;
+        REQUIRE(fake.get_single_frame("fake-qhy-0", buffer.data(), width, height, bpp, channels));
+
+        const uint32_t delivered = width * height * ((bpp > 8) ? 2U : 1U);
+        INFO("bin " << bin << ": mem_length " << mem_length << ", frame " << width << "x" << height);
+        CHECK(delivered == mem_length);
+    }
+}
+
+TEST_CASE("FakeQHYSDK - control_temp converges over calls instead of settling instantly", "[qhy][fake][unit]") {
+    // ControlQHYCCDTemp is a PID that converges over many calls, which is why
+    // the driver polls it about once a second (issue #390). The fake wrote the
+    // target straight into CURTEMP, so a thermal test could assert an instant
+    // settle that hardware can never produce -- and a driver that only ever
+    // read back its own setpoint would have looked correct.
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    fake.open_camera("fake-qhy-0");
+    fake.params[control::CURTEMP] = 20.0;
+    fake.temp_settle_step_c = 5.0;
+
+    fake.control_temp("fake-qhy-0", 0.0);
+    CHECK(fake.last_temp_target == 0.0);
+    CHECK(fake.get_param("fake-qhy-0", control::CURTEMP) == 15.0);
+
+    fake.control_temp("fake-qhy-0", 0.0);
+    CHECK(fake.get_param("fake-qhy-0", control::CURTEMP) == 10.0);
+
+    // It never overshoots: the last step lands exactly on the target and
+    // further calls are no-ops.
+    for (int i = 0; i < 10; ++i) {
+        fake.control_temp("fake-qhy-0", 0.0);
+    }
+    CHECK(fake.get_param("fake-qhy-0", control::CURTEMP) == 0.0);
+
+    // Warming works the same way in the other direction.
+    fake.control_temp("fake-qhy-0", 20.0);
+    CHECK(fake.get_param("fake-qhy-0", control::CURTEMP) == 5.0);
+
+    // A case that wants the old instant settle opts out explicitly.
+    fake.temp_settle_step_c = 0.0;
+    fake.control_temp("fake-qhy-0", -30.0);
+    CHECK(fake.get_param("fake-qhy-0", control::CURTEMP) == -30.0);
+}
+
+TEST_CASE("FakeQHYSDK - with_one_camera is the shared one-camera setup", "[qhy][fake][unit]") {
+    // The helper the three QHY seam test files now share (issue #342). Pinned
+    // here so a change to what a default test fake looks like is visible in
+    // one place instead of drifting between three verbatim copies.
+    auto fake = FakeQHYSDK::with_one_camera();
+    REQUIRE(fake.cameras.size() == 1);
+    CHECK(fake.cameras[0].camera_id == "fake-qhy-0");
+    CHECK(fake.cameras[0].model == "FakeQHY600");
+    CHECK_FALSE(fake.cameras[0].has_cooler);
+
+    auto named = FakeQHYSDK::with_one_camera("other-id", "FakeQHY268");
+    REQUIRE(named.cameras.size() == 1);
+    CHECK(named.cameras[0].camera_id == "other-id");
+    CHECK(named.cameras[0].model == "FakeQHY268");
+
+    // The cooled variant differs in exactly one field.
+    auto cooled = FakeQHYSDK::with_one_cooled_camera();
+    REQUIRE(cooled.cameras.size() == 1);
+    CHECK(cooled.cameras[0].has_cooler);
+    CHECK(cooled.cameras[0].max_width == fake.cameras[0].max_width);
 }

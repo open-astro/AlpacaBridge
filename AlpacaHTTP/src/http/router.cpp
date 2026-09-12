@@ -2039,6 +2039,10 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
 }
 
 namespace {
+// Defined further down with the management guards; also used by the one
+// device setter with a host-level side effect (open-astro#401).
+std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t server_tx_id,
+                                                    const char* what);
 
 void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
     const auto cutoff = std::chrono::steady_clock::now() - kClientConnectionStaleAfter;
@@ -3231,6 +3235,13 @@ Response Router::dispatch_telescope_method(
             }
         }
         else if (method_name == "utcdate") {
+            // open-astro#401: a UTCDate write can step the host clock (#289)
+            // and latch ClockSource, the same host-level effect the synctime
+            // endpoint guards. A browser page on another origin must not be
+            // able to fire it; native Alpaca clients send no Origin and pass.
+            if (auto rejected = reject_cross_origin_request(request, server_tx_id, "UTCDate")) {
+                return *rejected;
+            }
             if (request.method() == HttpMethod::GET) {
                 auto utc = telescope->get_utc_date();
                 auto time_t = std::chrono::system_clock::to_time_t(utc);
@@ -7394,8 +7405,11 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             // Already on disk from before this rule existed. Register it so it
             // keeps appearing in configureddevices and stays editable in the
             // web UI; the driver refuses the connect until it is fixed.
-            util::log_warning("Persisted Sky-Watcher telescope " + std::to_string(device_number) +
-                              " has no site coordinates and will refuse to connect. " + kMissingSite);
+            const char* missing = (!site_latitude.has_value() && !site_longitude.has_value()) ? "site coordinates"
+                                  : !site_latitude.has_value()                                ? "site latitude"
+                                                                                              : "site longitude";
+            util::log_warning("Persisted Sky-Watcher telescope " + std::to_string(device_number) + " has no " +
+                              missing + " and will refuse to connect. " + kMissingSite);
         }
 
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
