@@ -95,15 +95,21 @@ TEST_CASE("iOptron iEAF Focuser Driver - Static capabilities", "[ioptron][focuse
     require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::NotConnected);
 }
 
-TEST_CASE("iOptron iEAF Focuser Driver - Unsupported methods", "[ioptron][focuser][unit]") {
+TEST_CASE("iOptron iEAF Focuser Driver - unsupported methods refuse while disconnected", "[ioptron][focuser][unit]") {
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
 
     // No temperature compensation in hardware. Disconnected, all three are
-    // NotConnected: open-astro#309: the connection check precedes the
+    // NotConnected (open-astro#309): the connection check precedes the
     // not-implemented answer, so the driver never reports a capability -- or
     // refuses a write on capability grounds -- for hardware it has not opened.
-    // The NotImplemented answer on a CONNECTED focuser is unchanged and is
-    // covered by the fake-backed cases.
+    //
+    // The NotImplemented answer a CONNECTED iEAF gives is unchanged but is NOT
+    // asserted anywhere: there is no fake for this focuser (fake_ioptron_mount.h
+    // fakes the mount, and every create_ieaf_focuser() in the suite points at a
+    // /dev path that never opens), so deleting either throw would leave the
+    // suite green. The ToupTek and Gemini focusers, which do have fakes, carry
+    // connected cases for exactly this; the iEAF needs a serial fake of its own
+    // before it can have one.
     require_alpaca_error([&]() { (void)driver->get_temp_comp_available(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_temp_comp(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotConnected);

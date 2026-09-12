@@ -246,3 +246,20 @@ TEST_CASE("Gemini Focuser Driver - connect/disconnect cycles reuse the port clea
 }
 
 #endif  // _WIN32
+
+// open-astro#309 follow-up: with the connection check answering first, nothing
+// else asserts this focuser's CONNECTED capability answers. Gemini is the one
+// of the five that really supports temperature compensation, so
+// TempCompAvailable == true is a claim worth pinning rather than losing.
+TEST_CASE("Gemini Focuser Driver - connected, TempCompAvailable is true", "[gemini][focuser][unit][fake]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_temp_comp_available() == true);
+    // The fake answers ":24#" with "10#", i.e. temp comp off.
+    CHECK(driver->get_temp_comp() == false);
+
+    driver->set_connected(false);
+}
