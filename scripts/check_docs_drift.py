@@ -17,11 +17,26 @@ Checks:
      ci_preflight.sh (AGENTS.md: "Keep the cppcheck --suppress list
      identical between ci.yml and ci_preflight.sh").
   4. VERSION matches the version in the README's changelog badge line.
-  5. Every relative path referenced in AGENTS.md's inline code spans
+  5. The drivers whose `get_connected()` blocks are exactly the ones
+     `async_connectable.h` names as blocking. Measured from the code, not
+     restated: the router rule ("never call get_connected() while
+     get_connecting() is true") depends on knowing which drivers have that
+     shape, and the list has drifted repeatedly in both directions
+     (issues #315, #355, #381, #407). The same check also fails on a COUNT
+     of either list ("the five telescopes", "four wrapper-backed switches")
+     stated anywhere the globs below reach: a number is a second source of
+     truth for a list that is already gated by name, and it is what went
+     stale before. CHANGELOG.md is exempt -- its entries describe what was
+     true when they were written.
+  6. The QHYSDK seam's three parallel lists agree: every pure virtual on the
+     interface has a LockedQHYSDK override, every override actually takes the
+     mutex, and the forward sweep in test_qhy_fake_sdk.cpp drives all of them.
+  7. Every relative path referenced in AGENTS.md's inline code spans
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
      that looks like a real repo path actually exists.
 """
 
+import glob
 import re
 import subprocess
 import sys
@@ -184,7 +199,396 @@ def check_version_matches_readme():
     return failures
 
 
-# --- check 5: AGENTS.md path references exist -------------------------------
+# --- check 5: the blocking-get_connected() list vs the code -----------------
+#
+# issue #381. Four comments and prose passages used to hand-maintain COUNTS of
+# this split; nothing checked them and they drifted repeatedly, including a
+# stale count introduced by the PR that was correcting the others. The counts
+# are gone (the rule is stated instead), but the NAMED lists remain
+# load-bearing: `async_connectable.h`'s connection-task tail must read
+# get_connected() before taking pending_mutex_ precisely because these drivers
+# nest the driver mutex outside it, and the router must never read
+# get_connected() mid-task because these drivers block on it. A reader who
+# trusts a stale list is misled in the direction that matters -- believing a
+# driver is safe to read mid-task when it blocks.
+#
+# So the code is the source of truth here and the comment must follow it: every
+# get_connected() override under AlpacaCore/src/vendors is classified by its
+# body, and the two blocking classes must be named in that header. A driver
+# whose file is not in DRIVER_PROSE_NAMES fails loudly rather than being
+# bucketed silently -- add it there AND to the header's list in the same
+# change.
+
+GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+override\s*\{")
+
+# Driver file basename -> the name the async_connectable.h comment uses for it.
+# Only the drivers that CAN be classified as blocking need an entry; the
+# lock-free majority is not named anywhere, by design.
+# The value is (prose name, which list it belongs to). The list matters: the
+# header names these in TWO sentences, and one name is a prefix of another
+# across them -- "iOptron" (telescope) inside "iOptron iMate PowerBox"
+# (switch). A plain `name in header` test therefore answered wrongly in both
+# directions: dropping iOptron from the telescope list still "found" it via the
+# switch entry (the exact drift this check exists to catch, passing green), and
+# a correctly-removed iOptron reported a STALE entry that could not be resolved
+# without editing an unrelated sentence. Each name is now looked for only in
+# its own list.
+DRIVER_PROSE_NAMES = {
+    "bisque_telescope_driver.cpp": ("Bisque", "telescopes"),
+    "celestron_telescope_driver.cpp": ("Celestron", "telescopes"),
+    "ioptron_telescope_driver.cpp": ("iOptron", "telescopes"),
+    "onstep_telescope_driver.cpp": ("OnStep", "telescopes"),
+    "skywatcher_telescope_driver.cpp": ("Sky-Watcher", "telescopes"),
+    "ioptron_switch_driver.cpp": ("iOptron iMate PowerBox", "switches"),
+    "touptek_switch_driver.cpp": ("ToupTek StellaVita", "switches"),
+    "zwo_asiair_switch_driver.cpp": ("ZWO ASIAIR", "switches"),
+    "zwo_asiair_plus_switch_driver.cpp": ("ASIAIR Plus", "switches"),
+}
+
+# Where each list lives in async_connectable.h, as (start marker, end marker).
+# Both must be found or the check fails loudly: a header rewrite that moves
+# them must not silently turn this gate into a no-op.
+BLOCKING_LIST_SPANS = {
+    "telescopes": ("create that hazard are the", "telescopes."),
+    "switches": ("The wrapper-backed switch drivers (", ")"),
+}
+
+
+def _blocking_list_spans(header):
+    """{list name: text} for each blocking list, or ({}, [failure])."""
+    # Strip `//` comment markers and collapse the wrapping so a name split
+    # across two comment lines still matches.
+    flat = " ".join(line.strip().lstrip("/").strip() for line in header.splitlines())
+    flat = re.sub(r"\s+", " ", flat)
+    spans = {}
+    failures = []
+    for name, (start, end) in BLOCKING_LIST_SPANS.items():
+        i = flat.find(start)
+        j = flat.find(end, i + len(start)) if i >= 0 else -1
+        if i < 0 or j < 0:
+            failures.append(
+                "BLOCKING-LIST SPAN NOT FOUND: could not locate the '%s' list in "
+                "async_connectable.h (looked for %r ... %r). The list was moved or reworded -- "
+                "update BLOCKING_LIST_SPANS in %s, or this check silently stops checking."
+                % (name, start, end, Path(__file__).name))
+            continue
+        spans[name] = flat[i:j + len(end)]
+    return spans, failures
+
+
+def _names_in_span(which, span):
+    """The driver names a blocking-list sentence actually lists."""
+    if which == "telescopes":
+        body = span.split("create that hazard are the", 1)[1]
+        body = body.rsplit("telescopes.", 1)[0]
+    else:
+        body = span.split("(", 1)[1].rsplit(")", 1)[0]
+    # "A, B, C and D" -> [A, B, C, D]
+    parts = []
+    for chunk in body.split(","):
+        parts.extend(re.split(r"\band\b", chunk))
+    return [p.strip() for p in parts if p.strip()]
+
+QHY_INTERFACE_HEADER = "AlpacaCore/include/alpacacore/vendor/qhy/qhy_sdk_wrapper.h"
+QHY_LOCKED_HEADER = "AlpacaCore/tests/locked_qhy_sdk.h"
+QHY_SWEEP_TEST = "AlpacaCore/tests/test_qhy_fake_sdk.cpp"
+
+# The cv/exception qualifiers between the closing paren and `= 0` / `override`
+# are optional but must be TOLERATED: without them a `const` method is invisible
+# to both patterns, so a 27th pure virtual that happens to be const would be
+# omitted from every set, all three differences would come out empty, and the
+# gate would pass on exactly the drift it exists to catch. (A developer who did
+# add the sweep entry got the opposite: a STALE SWEEP ENTRY naming the wrong
+# cause.) Nothing on this seam is const today, so the hole was only reachable
+# by the next method added -- which is the whole population this gate is for.
+_QUALIFIERS = r"(?:\s*(?:const|noexcept|final|override))*"
+PURE_VIRTUAL_RE = re.compile(
+    r"\bvirtual\b[^;{}]*?(\w+)\s*\([^;{}]*\)" + _QUALIFIERS + r"\s*=\s*0\s*;", re.S)
+OVERRIDE_RE = re.compile(
+    r"(\w+)\s*\([^;{}]*\)(?:\s*(?:const|noexcept|final))*\s*override\s*\{", re.S)
+BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+
+
+def _strip_comments(text):
+    """Comments blanked (newlines kept). These headers carry long doc comments
+    whose prose contains parentheses and identifiers, and both patterns above
+    scan across whitespace -- without this a sentence in a comment is matched
+    as a method signature. No raw string literals exist in either header."""
+    text = BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    return LINE_COMMENT_RE.sub("", text)
+
+
+def _matching_brace(text, open_index):
+    """Index just past the `}` closing the `{` at open_index."""
+    depth = 0
+    for i in range(open_index, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def classify_get_connected_bodies():
+    """({basename: kind}, [findings]) for every vendor get_connected() override.
+
+    kind is "driver-mutex" (takes a lock_guard/unique_lock, so it blocks behind
+    the connect sequence that holds the same mutex), "wrapper" (reaches the
+    vendor wrapper's is_open(), which takes the wrapper mutex that open() holds
+    throughout), or "lock-free".
+    """
+    kinds = {}
+    failures = []
+    vendors = ROOT / "AlpacaCore" / "src" / "vendors"
+    for path in sorted(vendors.rglob("*")):
+        if path.suffix not in (".cpp", ".h", ".hpp"):
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in GET_CONNECTED_RE.finditer(text):
+            open_index = match.end() - 1
+            body = text[open_index:_matching_brace(text, open_index)]
+            if re.search(r"\b(lock_guard|unique_lock|scoped_lock)\b", body):
+                kind = "driver-mutex"
+            elif re.search(r"(\.|->)is_open\s*\(\s*\)", body):
+                kind = "wrapper"
+            elif re.search(r"\bload\s*\(|\breturn\s+connected_\s*;", body):
+                kind = "lock-free"
+            else:
+                failures.append(
+                    "UNCLASSIFIABLE get_connected(): %s -- it neither takes a lock, nor reaches a "
+                    "wrapper's is_open(), nor reads an atomic. Classify it by hand: if it can block, "
+                    "add it to DRIVER_PROSE_NAMES in %s and to the list in async_connectable.h; if it "
+                    "cannot, make that visible in the body (an atomic load or a plain return)."
+                    % (path.relative_to(ROOT), Path(__file__).name))
+                continue
+            # A file with two driver classes (gemini_flatpanel_driver.cpp) is
+            # only interesting if they disagree, which would mean the file
+            # cannot be named as one thing in the prose list.
+            if kinds.get(path.name, kind) != kind:
+                failures.append(
+                    "MIXED get_connected() kinds in %s: %s and %s. The prose list names files, not "
+                    "classes, so split the drivers or name them individually."
+                    % (path.relative_to(ROOT), kinds[path.name], kind))
+            kinds[path.name] = kind
+    return kinds, failures
+
+
+def check_blocking_get_connected_list():
+    kinds, failures = classify_get_connected_bodies()
+    if not kinds:
+        return ["No get_connected() overrides found under AlpacaCore/src/vendors -- the scan is broken."]
+
+    header = read("AlpacaCore/include/alpacacore/async_connectable.h")
+    spans, span_failures = _blocking_list_spans(header)
+    failures.extend(span_failures)
+    if span_failures:
+        return failures
+
+    listed_names = {which: set(_names_in_span(which, span)) for which, span in spans.items()}
+
+    def named(entry):
+        # Whole parsed names, not a substring of the sentence: substring
+        # matching is only safe here because no name is a prefix of another
+        # WITHIN one list today, and that is not a property worth depending on
+        # (it already failed across the two lists -- "iOptron" inside "iOptron
+        # iMate PowerBox").
+        prose, which = entry
+        return prose in listed_names[which]
+
+    # Parse the names OUT of each list, so a name that should not be there is
+    # caught even when no driver file maps to it. Probing only for the names in
+    # DRIVER_PROSE_NAMES could never see that: the dict holds only the drivers
+    # that ARE blocking, so a lock-free driver named in the header (SynScan
+    # after #130 -- the drift this whole check exists for) matched nothing and
+    # passed.
+    expected = {which: set() for which in BLOCKING_LIST_SPANS}
+    for basename, kind in kinds.items():
+        entry = DRIVER_PROSE_NAMES.get(basename)
+        if entry is not None and kind != "lock-free":
+            expected[entry[1]].add(entry[0])
+    for which, span in spans.items():
+        for listed in _names_in_span(which, span):
+            if listed not in expected[which]:
+                failures.append(
+                    "STALE BLOCKING-LIST ENTRY: async_connectable.h's %s list names '%s', but no "
+                    "driver with that name has a blocking get_connected(). Either it was made "
+                    "lock-free and the name must come out, or the name does not match "
+                    "DRIVER_PROSE_NAMES." % (which, listed))
+
+    # The counts this PR removed must not creep back. A number in front of
+    # "telescopes"/"wrapper-backed switch(es)" is exactly the thing nothing
+    # checks and that went stale repeatedly -- the lists themselves are gated
+    # above, so a count adds nothing but a second source of truth.
+    count_re = re.compile(
+        r"\b(two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+        r"(?:named\s+|more\s+)?(?:telescopes?|wrapper-backed\s+switch(?:es)?)\b",
+        re.IGNORECASE)
+    # Anchored on the noun deliberately. A rule that also caught a bare "the
+    # five" (noun implied) was tried and dropped: "the two locked phases", "the
+    # two ZWO drivers" and similar ordinary prose light it up, so it fails on
+    # correct text. A count with the noun left implied has to be caught by
+    # review -- which is how the one at AGENTS.md:777 was.
+    # Globbed, not a hand-written file list: the first version of this loop
+    # named four files and missed synscan_telescope_driver.cpp, which carried
+    # the counts -- a gate against drift that itself drifts is worth very
+    # little. CHANGELOG.md is deliberately out of scope: its historical entries
+    # describe what was true when they were written.
+    # ROOT.glob, not glob.glob: the latter is cwd-relative, so running this
+    # from anywhere but the repo root would return nothing and turn the rule
+    # into a silent no-op -- the same failure shape as the hand-written file
+    # list it replaced. Headers and tests are in scope too; a count is just as
+    # stale in test_async_connectable.cpp as in a driver.
+    counted_paths = sorted(
+        str(p.relative_to(ROOT))
+        for pattern in ("AGENTS.md", "README.md", "docs/**/*.md",
+                        "AlpacaCore/include/**/*.h", "AlpacaCore/src/**/*.h",
+                        "AlpacaCore/src/**/*.cpp", "AlpacaCore/tests/**/*.h",
+                        "AlpacaCore/tests/**/*.cpp",
+                        "AlpacaHTTP/include/**/*.h", "AlpacaHTTP/src/**/*.cpp",
+                        "AlpacaHTTP/tests/**/*.cpp")
+        for p in ROOT.glob(pattern))
+    for path in counted_paths:
+        for match in count_re.finditer(read(path)):
+            failures.append(
+                "COUNTED BLOCKING DRIVERS: %s says %r. These lists are gated by name; a count is a "
+                "second source of truth that nothing checks and that has gone stale before "
+                "(issue #381). Refer to the named list instead." % (path, match.group(0)))
+
+    for basename, kind in sorted(kinds.items()):
+        if kind == "lock-free":
+            # The lock-free majority is deliberately unnamed. What matters is
+            # that it is not named as blocking: a driver made lock-free (as
+            # SynScan was by #130) must come OUT of the list.
+            entry = DRIVER_PROSE_NAMES.get(basename)
+            if entry and named(entry):
+                failures.append(
+                    "STALE BLOCKING-LIST ENTRY: %s's get_connected() is lock-free, but "
+                    "async_connectable.h still names '%s' among the drivers that block. Remove it there "
+                    "and from DRIVER_PROSE_NAMES." % (basename, entry[0]))
+            continue
+        entry = DRIVER_PROSE_NAMES.get(basename)
+        if entry is None:
+            failures.append(
+                "UNNAMED BLOCKING DRIVER: %s's get_connected() is %s, so it blocks behind its connect "
+                "sequence, but no prose name is registered for it. Add it to DRIVER_PROSE_NAMES in %s "
+                "and to the list in async_connectable.h -- the router rule and the pending_mutex_ "
+                "ordering both depend on that list being complete." % (basename, kind, Path(__file__).name))
+            continue
+        if not named(entry):
+            failures.append(
+                "MISSING FROM THE BLOCKING LIST: %s's get_connected() is %s, but async_connectable.h's "
+                "%s list does not name '%s'." % (basename, kind, entry[1], entry[0]))
+    return failures
+
+
+# --- check 6: the QHYSDK seam's three parallel lists ------------------------
+#
+# issue #394. The forward sweep in test_qhy_fake_sdk.cpp drives every QHYSDK
+# method through LockedQHYSDK and asserts each landed on its own counterpart
+# exactly once, which is a genuine (mutation-verified) guard against a
+# TRANSPOSED forward. It is not a guard against an ABSENT one: the method list
+# is hand-written in the test and closed with `methods.size() == N`, a literal
+# compared to a literal. Add a pure virtual to QHYSDK and the compiler forces a
+# LockedQHYSDK override -- the class would otherwise be abstract -- but nothing
+# forces a test entry, so the sweep passes having exercised N of N+1 forwards.
+#
+# And the compiler only guarantees the forward EXISTS. Nothing guarantees it
+# takes the mutex, which is the only reason the decorator exists: its job is to
+# keep ThreadSanitizer findings pointing at driver code rather than at the
+# deliberately unhardened fake, and one unlocked forward makes the fake racy
+# under a storm and produces a TSan report naming the fake -- the exact
+# confusion the decorator was built to prevent, arriving silently.
+
+
+def _class_body(text, class_name):
+    """The text between `class <name> ... {` and its matching brace, or None."""
+    match = re.search(r"\bclass\s+%s\b[^{;]*\{" % re.escape(class_name), text)
+    if not match:
+        return None
+    return text[match.end():_matching_brace(text, match.end() - 1) - 1]
+
+
+def check_qhy_seam_lists():
+    failures = []
+    interface_body = _class_body(_strip_comments(read(QHY_INTERFACE_HEADER)), "QHYSDK")
+    locked_body = _class_body(_strip_comments(read(QHY_LOCKED_HEADER)), "LockedQHYSDK")
+    if interface_body is None or locked_body is None:
+        return ["Could not locate class QHYSDK and/or class LockedQHYSDK -- this check's parser is broken."]
+
+    interface_methods = set(PURE_VIRTUAL_RE.findall(interface_body))
+    if not interface_methods:
+        return ["No pure virtuals found on QHYSDK -- this check's parser is broken."]
+
+    # Cross-check the count against the literal the sweep test already asserts
+    # (CHECK(methods.size() == N)). Everything else here is set differences, so
+    # a method the regex fails to see drops out of ALL of them and the gate goes
+    # quietly green -- which is exactly what a const method did until round 2.
+    # Comparing against a number maintained elsewhere turns the next such miss
+    # into a loud failure, and pins that literal at the same time.
+    sweep_text = read(QHY_SWEEP_TEST)
+    size_match = re.search(r"\bmethods\.size\(\)\s*==\s*(\d+)", sweep_text)
+    if size_match is None:
+        failures.append(
+            "Could not find the `CHECK(methods.size() == N)` literal in %s -- this check uses it to "
+            "detect a method its regexes silently missed, so losing it would make that failure "
+            "invisible again." % QHY_SWEEP_TEST)
+    elif int(size_match.group(1)) != len(interface_methods):
+        failures.append(
+            "QHY SEAM COUNT MISMATCH: %s asserts methods.size() == %s, but %d pure virtuals were "
+            "parsed off QHYSDK. Either the sweep literal is stale, or a method's declaration has a "
+            "shape the parser in %s does not match (a const or noexcept qualifier did exactly that "
+            "once) -- in which case the set comparisons below would pass while missing it."
+            % (QHY_SWEEP_TEST, size_match.group(1), len(interface_methods), Path(__file__).name))
+
+    # Each override, with its body, so the lock can be checked too.
+    locked_methods = {}
+    for match in OVERRIDE_RE.finditer(locked_body):
+        open_index = match.end() - 1
+        locked_methods[match.group(1)] = locked_body[open_index:_matching_brace(locked_body, open_index)]
+
+    for name in sorted(interface_methods - set(locked_methods)):
+        failures.append(
+            "QHYSDK::%s() has no LockedQHYSDK override. (If this fires, the parser in %s is wrong: an "
+            "unimplemented pure virtual would make LockedQHYSDK abstract and fail the build.)"
+            % (name, Path(__file__).name))
+    for name in sorted(set(locked_methods) - interface_methods):
+        failures.append(
+            "LockedQHYSDK::%s() overrides nothing on QHYSDK -- stale forward, or the interface lost a "
+            "method." % name)
+
+    for name in sorted(set(locked_methods) & interface_methods):
+        if "locked(" not in locked_methods[name]:
+            failures.append(
+                "UNLOCKED FORWARD: LockedQHYSDK::%s() does not go through locked(). The decorator exists "
+                "only to take the mutex -- an unlocked forward makes the fake racy under a [stress] storm "
+                "and produces a ThreadSanitizer report naming the FAKE, which is the confusion the "
+                "decorator was built to prevent." % name)
+
+    # The hand-written sweep list in the test.
+    sweep = read(QHY_SWEEP_TEST)
+    list_match = re.search(r"const std::vector<std::string> methods\{(.*?)\};", sweep, re.S)
+    if not list_match:
+        failures.append(
+            "Could not find the `const std::vector<std::string> methods{...}` sweep list in %s."
+            % QHY_SWEEP_TEST)
+        return failures
+    swept = set(re.findall(r'"([^"]+)"', list_match.group(1)))
+    for name in sorted(interface_methods - swept):
+        failures.append(
+            "NOT SWEPT: QHYSDK::%s() is not in the forward sweep's method list in %s. The sweep is what "
+            "checks the forward reaches its own counterpart; a method missing from the list is verified "
+            "by inspection only." % (name, QHY_SWEEP_TEST))
+    for name in sorted(swept - interface_methods):
+        failures.append(
+            "STALE SWEEP ENTRY: %s is in the sweep list in %s but is not a QHYSDK method."
+            % (name, QHY_SWEEP_TEST))
+    return failures
+
+
+# --- check 7: AGENTS.md path references exist -------------------------------
 
 # Backtick-quoted spans that look like a repo-relative path: start with one of
 # these top-level dirs/files (spaces allowed only for a verbatim tracked path), and are not a bare CLI flag
@@ -296,7 +700,9 @@ CHECKS = [
     ("zizmor pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
     ("cppcheck --suppress sync (ci.yml vs ci_preflight.sh)", check_cppcheck_suppress_sync),
     ("VERSION matches README badge", check_version_matches_readme),
+    ("Blocking get_connected() list matches the code", check_blocking_get_connected_list),
     ("AGENTS.md path references exist", check_agents_md_paths_exist),
+    ("QHY SDK seam lists agree (interface / LockedQHYSDK / sweep)", check_qhy_seam_lists),
 ]
 
 
