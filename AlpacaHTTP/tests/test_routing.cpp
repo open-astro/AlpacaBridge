@@ -2385,8 +2385,8 @@ int main() {
                 w.find("Host IP address is required") != std::string::npos) {
                 warned_host = true;
             }
-            if (w.find("telescope 9642") != std::string::npos && w.find("carrier-pigeon") != std::string::npos &&
-                w.find("serial") != std::string::npos) {
+            if (w.find("telescope 9642") != std::string::npos &&
+                w.find("has connectionType \"carrier-pigeon\"") != std::string::npos) {
                 warned_conn_type = true;
             }
         }
@@ -2411,13 +2411,17 @@ int main() {
             }
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-            if (w.find("telescope 9644") != std::string::npos && w.find("serial") != std::string::npos) {
+            // Match the normalisation line's own distinctive wording, not a
+            // bare "serial": the sibling port-path WARN only fails to match
+            // that because it capitalises "Serial", which is a coincidence of
+            // wording rather than something this case should rest on.
+            if (w.find("telescope 9644") != std::string::npos && w.find("has connectionType") != std::string::npos) {
                 warned_zwo_empty = true;
             }
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-            if (w.find("telescope 9645") != std::string::npos && w.find("network") != std::string::npos &&
-                w.find("serial") != std::string::npos) {
+            if (w.find("telescope 9645") != std::string::npos &&
+                w.find("has connectionType \"network\"") != std::string::npos) {
                 warned_onstep_network = true;
             }
 #endif
