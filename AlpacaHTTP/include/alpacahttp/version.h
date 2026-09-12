@@ -19,8 +19,37 @@
 #error "ALPACAHTTP_VERSION must be defined by CMake. Ensure you're building through CMake."
 #endif
 
+#ifndef ALPACAHTTP_GIT_BRANCH
+#define ALPACAHTTP_GIT_BRANCH "unknown"
+#endif
+#ifndef ALPACAHTTP_GIT_COMMIT
+#define ALPACAHTTP_GIT_COMMIT "unknown"
+#endif
+#ifndef ALPACAHTTP_GIT_DIRTY
+#define ALPACAHTTP_GIT_DIRTY 0
+#endif
+#ifndef ALPACAHTTP_GIT_IS_RELEASE
+#define ALPACAHTTP_GIT_IS_RELEASE 0
+#endif
+#ifndef ALPACAHTTP_GIT_REMOTE_URL
+#define ALPACAHTTP_GIT_REMOTE_URL ""
+#endif
+
 namespace alpacahttp {
 
 inline constexpr const char* kVersion = ALPACAHTTP_VERSION;
+
+// Identifies the actual checkout a build came from, independent of kVersion
+// (which is a static release number from the VERSION file and does not
+// change on a feature branch). Surfaced via /management/v1/buildinfo and
+// shown in the web UI header so a dev build never reads as an official
+// release.
+inline constexpr const char* kGitBranch = ALPACAHTTP_GIT_BRANCH;
+inline constexpr const char* kGitCommit = ALPACAHTTP_GIT_COMMIT;
+inline constexpr bool kGitDirty = (ALPACAHTTP_GIT_DIRTY) != 0;
+// True when HEAD sits exactly on a vX.Y.Z release tag -- the correct release
+// check, since packaging checks out the tag (detached HEAD, not "main").
+inline constexpr bool kGitIsRelease = (ALPACAHTTP_GIT_IS_RELEASE) != 0;
+inline constexpr const char* kGitRemoteUrl = ALPACAHTTP_GIT_REMOTE_URL;
 
 } // namespace alpacahttp

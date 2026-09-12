@@ -266,7 +266,8 @@ public:
             site_info_valid_ = false;
             timezone_offset_valid_ = false;
             tracking_mode_valid_ = false;
-            target_set_ = false;
+            target_ra_set_ = false;
+            target_dec_set_ = false;
             parked_ = false;
             parking_ = false;
             at_home_ = false;
@@ -410,7 +411,8 @@ public:
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 firmware_cache_.clear();
             }
-            target_set_ = false;
+            target_ra_set_ = false;
+            target_dec_set_ = false;
             parked_ = false;
             parking_ = false;
             at_home_ = false;
@@ -607,7 +609,8 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
+        if (target_ra_set_ && target_dec_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
+            !get_slewing_locked()) {
             return std::clamp(target_dec_degrees_, -90.0, 90.0);
         }
         const auto now = std::chrono::steady_clock::now();
@@ -691,7 +694,8 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_set_ && std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
+        if (target_ra_set_ && target_dec_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
+            !get_slewing_locked()) {
             return target_ra_hours_;
         }
         const auto now = std::chrono::steady_clock::now();
@@ -857,7 +861,7 @@ public:
     }
 
     double get_target_declination() const override {
-        if (!target_set_) {
+        if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
         return target_dec_degrees_;
@@ -869,11 +873,11 @@ public:
                                   AlpacaError::InvalidValue);
         }
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_dec_set_ = true;
     }
 
     double get_target_right_ascension() const override {
-        if (!target_set_) {
+        if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
         return target_ra_hours_;
@@ -885,7 +889,7 @@ public:
                                   AlpacaError::InvalidValue);
         }
         target_ra_hours_ = ra;
-        target_set_ = true;
+        target_ra_set_ = true;
     }
 
     int get_tracking_rate() const override {
@@ -1372,7 +1376,8 @@ public:
             flip_in_progress_ = do_flip;
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
-            target_set_ = true;
+            target_ra_set_ = true;
+            target_dec_set_ = true;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             parked_ = false;
@@ -1490,11 +1495,19 @@ public:
     }
 
     void slew_to_target() override {
+        // Its async sibling below has always required the pair; this one did
+        // not, so SlewToTarget with nothing set slewed to whatever was in the
+        // members -- 0h/0deg on a fresh connect. Found while splitting the
+        // flag for open-astro#346: with one flag the omission was invisible,
+        // since any target write at all made the check pass.
+        if (!target_ra_set_ || !target_dec_set_) {
+            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        }
         slew_to_coordinates(target_ra_hours_, target_dec_degrees_);
     }
 
     void slew_to_target_async() override {
-        if (!target_set_) {
+        if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
         slew_to_coordinates_async(target_ra_hours_, target_dec_degrees_);
@@ -1519,7 +1532,8 @@ public:
         }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
         sync_completed_this_session_ = true;
@@ -1530,7 +1544,7 @@ public:
     }
 
     void sync_to_target() override {
-        if (!target_set_) {
+        if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
         sync_to_coordinates(target_ra_hours_, target_dec_degrees_);
@@ -2067,7 +2081,8 @@ private:
         }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         parked_ = false;
@@ -2203,7 +2218,16 @@ private:
     mutable bool last_utc_valid_;
     mutable int tracking_mode_cached_;
     mutable bool tracking_mode_valid_;
-    mutable bool target_set_ = false;
+    // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
+    // treats the two target properties as independent, so each must throw
+    // ValueNotSet until that property itself has been written. One shared flag
+    // let a write to either unlock both, and a client reading the one it did
+    // not set got a default 0 instead of an error. The paths that legitimately
+    // define both coordinates at once -- the slew and sync coordinate forms,
+    // the position-override and arrival reads, and the connect/disconnect
+    // resets -- still set or clear both.
+    mutable bool target_ra_set_ = false;
+    mutable bool target_dec_set_ = false;
     mutable bool parked_;
     mutable bool at_home_;
     mutable bool homing_ = false;

@@ -301,6 +301,27 @@ target. Hardware-free coverage lives in `tests/test_<vendor>_async_park.cpp` ove
 (Celestron `J` → `1#`, SynScan/NexStar `e` → a parseable pair with Dec < 90°), or the park
 is refused before the GOTO is ever sent.
 
+### TargetRightAscension and TargetDeclination are independent (all telescope drivers)
+
+ASCOM treats the two target properties as separate: each getter must throw `ValueNotSet`
+until **that property itself** has been written, and ConformU reports the shared-flag
+version as "Read before write should generate an error and didn't" on both. Every driver
+therefore carries `target_ra_set_` **and** `target_dec_set_`, each set only by its own
+setter. One flag for both is a review-blocking regression — it was the original shape in
+all seven drivers and took two passes to remove (#304, then #346).
+
+The paths that legitimately define both coordinates at once set or clear both: the slew
+and sync *coordinate* forms, any target seeding from the mount's own position (SynScan's
+pulse-guide accumulator), the post-slew position-override and arrival reads, and the
+connect/disconnect resets. `SlewToTarget`, `SlewToTargetAsync` and `SyncToTarget` require
+the pair and must check it — Celestron and SynScan were both missing that check on the
+synchronous form, which one shared flag hid, since any target write made it pass.
+
+Hardware-free coverage per driver: read each property before any write, write RA alone and
+check Dec still throws while RA reads back, confirm the three `*ToTarget` calls refuse the
+half-set pair, then write Dec and expect both. A driver whose setters write to the mount
+(iOptron) needs the fake rather than a disconnected instance.
+
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
 | Throw | When |
@@ -1591,6 +1612,13 @@ datagrams before each send so replies cannot get off-by-one.
   the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
   the entry that is at fault. That asymmetry is the rule for any new validation in
   `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`.
+  Since #380 that rule is not left to each branch to remember: `Router::reject_invalid_config()`
+  takes the source and the reason and returns whether the caller must refuse, and
+  `Router::normalize_persisted_connection_type()` does the same for an unrecognised
+  `connectionType`, which has no value to carry forward — it returns `"serial"` for a persisted
+  config, never `"auto"`, so the connect fails on the port path instead of auto-probing and
+  attaching to whatever mount answers. Use them rather than an inline `return false`; the
+  `portPath`, `host` and `connectionType` checks in every telescope branch do.
   Both coordinates are also **range-checked** (#398), inclusive of ±90/±180 since the poles and
   the antimeridian are real places, and rejecting NaN and the infinities: presence alone let a
   config carry latitude 200, which reads as northern to `hemisphere_south_locked()`, while the

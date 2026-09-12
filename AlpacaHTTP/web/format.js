@@ -110,8 +110,57 @@ function formatServerClock(date) {
     }
 }
 
+// Decides what the header build badge shows for a /management/v1/buildinfo
+// payload: null to hide it, else {label, title, href} (href '' when there is
+// nowhere to link). Pure, and here rather than in app.js because this is the
+// one rule in the feature that has already been wrong once in review --
+// updateHeaderBuildBadge() now does nothing but apply the result, and
+// AlpacaHTTP/tests/web/buildbadge.test.js pins it.
+//
+// isRelease -- HEAD sits exactly on a vX.Y.Z tag -- is the ONLY release
+// signal. The first cut also hid the badge when the branch name read "HEAD",
+// as a proxy for the detached checkout that packaging does, but
+// `git rev-parse --abbrev-ref HEAD` answers "HEAD" for EVERY detached
+// checkout: a PR head fetched with `git fetch origin pull/N/head && git
+// checkout FETCH_HEAD`, a `git checkout <sha>` to test an older commit, any
+// actions/checkout build. Those are dev builds, and hiding the badge made
+// them read as official releases -- the exact failure the badge exists to
+// prevent. A detached non-release build is labelled by its commit instead,
+// since "HEAD" names nothing to a reader.
+function buildBadgeLabel(info) {
+    const source = info || {};
+    const branch = source.GitBranch || source.gitBranch || '';
+    const commit = source.GitCommit || source.gitCommit || '';
+    const dirty = !!(source.GitDirty !== undefined ? source.GitDirty : source.gitDirty);
+    const isRelease = !!(source.GitIsRelease !== undefined ? source.GitIsRelease : source.gitIsRelease);
+    const remoteUrl = source.GitRemoteUrl || source.gitRemoteUrl || '';
+
+    if (isRelease || !branch || branch === 'unknown') {
+        return null;
+    }
+
+    const detached = branch === 'HEAD';
+    const haveCommit = !!commit && commit !== 'unknown';
+    // Link to the commit, not the branch: a local checkout's branch name
+    // (e.g. a PR head fetched under an arbitrary local name) often has no
+    // matching ref on the remote, but the commit itself is always valid
+    // there since it's the same object fetched from origin. A detached
+    // checkout has no branch ref to link to at all.
+    const href = (remoteUrl && haveCommit) ? remoteUrl + '/commit/' + encodeURIComponent(commit) : '';
+    return {
+        label: (detached ? 'detached' : branch) + (haveCommit ? '@' + commit : '') + (dirty ? '*' : ''),
+        title: 'Running from a non-release checkout: ' +
+            (detached ? 'detached HEAD' : 'branch ' + branch) +
+            (haveCommit ? ', commit ' + commit : '') +
+            (dirty ? ' (uncommitted changes present)' : '') +
+            // Only promise a click when there is somewhere to go.
+            (href ? ' -- click to open this commit on GitHub' : ''),
+        href: href
+    };
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { localZoneLabel, formatServerClock };
+    module.exports = { localZoneLabel, formatServerClock, buildBadgeLabel };
 }

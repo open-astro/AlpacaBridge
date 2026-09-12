@@ -31,6 +31,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -70,6 +71,9 @@ public:
 
     bool ok() const { return master_fd_ >= 0 && slave_fd_ >= 0; }
     int master() const { return master_fd_; }
+    // The drained case below reads from the slave; the undrained cases simply
+    // never touch it, which is what leaves the buffer full.
+    int slave() const { return slave_fd_; }
 
 private:
     int master_fd_ = -1;
@@ -151,19 +155,12 @@ TEST_CASE("fake pty write - a set stop flag short-circuits the wait", "[fakes][p
 TEST_CASE("fake pty write - a drained pty still receives the whole reply", "[fakes][pty][unit]") {
     // The fix must not cost the fakes their normal behaviour: when the driver
     // side is reading, every byte still arrives.
-    int master = posix_openpt(O_RDWR | O_NOCTTY);
-    REQUIRE(master >= 0);
-    REQUIRE(grantpt(master) == 0);
-    REQUIRE(unlockpt(master) == 0);
-    const char* name = ptsname(master);
-    REQUIRE(name != nullptr);
-    const int slave = open(name, O_RDWR | O_NOCTTY);
-    REQUIRE(slave >= 0);
-    struct termios tty {};
-    if (tcgetattr(slave, &tty) == 0) {
-        cfmakeraw(&tty);
-        tcsetattr(slave, TCSANOW, &tty);
-    }
+    // Uses the same RAII helper as the cases above: opening the pair inline
+    // leaked both descriptors whenever one of these REQUIREs fired.
+    UndrainedPty pty;
+    REQUIRE(pty.ok());
+    const int master = pty.master();
+    const int slave = pty.slave();
     REQUIRE(make_pty_nonblocking(master));
 
     const std::atomic<bool> stop{false};
@@ -180,9 +177,6 @@ TEST_CASE("fake pty write - a drained pty still receives the whole reply", "[fak
     }
     CHECK(got == reply.size());
     CHECK(received == reply);
-
-    close(slave);
-    close(master);
 }
 
 // The end-to-end shape #424 actually reported: a real fake, nothing draining
@@ -202,11 +196,18 @@ TEST_CASE("fake pty write - a fake whose pty is never drained still destructs", 
     // The destruction runs on its own thread so a hang is a FAILED assertion
     // rather than a hung test process -- which is the whole problem with this
     // bug: the old code gave no assertion to fail, it just stopped.
-    std::promise<void> destroyed;
-    auto done = destroyed.get_future();
-    std::thread destroyer([&] {
+    // The promise is owned by a shared_ptr captured BY VALUE, and the
+    // streamer pointer is captured by value too: on the failure path this
+    // thread is detached and can outlive the TEST_CASE, so anything it
+    // touches after that point must not live on this stack. Capturing the
+    // promise by reference would turn a clean FAILED into a write to a
+    // destroyed std::promise -- a crash, or a corrupted later case, in the
+    // run we are trying to report on.
+    auto destroyed = std::make_shared<std::promise<void>>();
+    auto done = destroyed->get_future();
+    std::thread destroyer([streamer, destroyed] {
         delete streamer;
-        destroyed.set_value();
+        destroyed->set_value();
     });
 
     const bool finished = done.wait_for(10s) == std::future_status::ready;
@@ -214,7 +215,8 @@ TEST_CASE("fake pty write - a fake whose pty is never drained still destructs", 
         destroyer.join();
     } else {
         // Deliberately leaked: the thread is parked inside the destructor and
-        // joining it would hang the run we are trying to report on.
+        // joining it would hang the run we are trying to report on. It keeps
+        // the promise alive through the shared_ptr it holds.
         destroyer.detach();
     }
     CHECK(finished);
