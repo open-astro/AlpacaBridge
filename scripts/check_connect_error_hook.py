@@ -28,15 +28,28 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DRIVER_DIRS = [ROOT / "AlpacaCore" / "src"]
 
 # `class Foo : public XDriver, protected alpacacore::AsyncConnectable {`
+# Matches the mixin regardless of access specifier on purpose: a driver that
+# inherits it `public` would be invisible to a `protected`-only pattern and
+# would silently report nothing. The access specifier is reported separately,
+# since `public` is itself worth flagging -- it exposes start_connection_task()
+# and friends on the driver's public API, which the documented style forbids.
 CLASS_RE = re.compile(
-    r"^class\s+(?P<name>\w+)\b[^;{]*?\bprotected\s+(?:alpacacore::)?AsyncConnectable\b[^;{]*\{",
+    r"^class\s+(?P<name>\w+)\b[^;{]*?\b(?P<access>public|protected|private)?\s*(?:alpacacore::)?"
+    r"AsyncConnectable\b[^;{]*\{",
     re.MULTILINE,
 )
 MACRO = "ALPACA_EXPOSE_CONNECT_ERROR()"
 
 
 def class_body(text: str, open_brace_index: int) -> str:
-    """Return the text of the class body starting at its opening brace."""
+    """Return the text of the class body starting at its opening brace.
+
+    Counts braces without stripping strings, chars or comments. An unbalanced
+    brace inside a literal would truncate or overrun the scanned region; no
+    file in the tree does that today, and the failure mode of an overrun (a
+    class passing because a LATER class in the same file carries the macro) is
+    why this is worth knowing rather than silently relying on.
+    """
     depth = 0
     for i in range(open_brace_index, len(text)):
         if text[i] == "{":
@@ -60,13 +73,21 @@ def main() -> int:
             for match in CLASS_RE.finditer(text):
                 checked += 1
                 body = class_body(text, text.index("{", match.start()))
+                line = text[: match.start()].count("\n") + 1
+                access = match.group("access") or "private"
                 if MACRO not in body:
-                    line = text[: match.start()].count("\n") + 1
                     findings.append(
                         f"  {path.relative_to(ROOT)}:{line}: class {match.group('name')} inherits "
                         f"AsyncConnectable but does not use {MACRO}, so a failed connect reports "
                         f'only "Connection failed" and the driver\'s own reason is lost (issue #358). '
                         f"Add it in a public section."
+                    )
+                elif access != "protected":
+                    findings.append(
+                        f"  {path.relative_to(ROOT)}:{line}: class {match.group('name')} inherits "
+                        f"AsyncConnectable as `{access}`, not `protected`. The documented style is "
+                        f"protected, which keeps start_connection_task() and stop_connection_thread() "
+                        f"off the driver's public API."
                     )
 
     if checked == 0:

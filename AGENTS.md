@@ -1630,8 +1630,10 @@ datagrams before each send so replies cannot get off-by-one.
   keeps Slewing true via the manual flag, and a background task clears it and restores
   tracking once the axis reports stopped. This applies to every telescope driver.
 - ConformU needs a real site. Since #274 a Sky-Watcher device with no site refuses
-  `Connected` outright, so the run fails at connect; the client reports "Connection
-  failed" and the driver's message naming the two fields is in the server log (#358).
+  `Connected` outright, so the run fails at connect. Since #358 the client is told why:
+  the router reports the driver's own sentence naming the two fields as the
+  `ErrorMessage` (the error number is still `NotConnected`), rather than a bare
+  "Connection failed" with the reason left in the server log.
   Set the observing site in the web UI before validating. Before #274 the site collapsed
   to 0,0 instead and the CheckMethods slew tests aborted with "highest elevation
   available is below the horizon".

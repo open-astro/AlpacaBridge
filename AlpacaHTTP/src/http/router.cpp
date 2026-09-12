@@ -1917,8 +1917,16 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 // Present only while a failure stands; the next attempt clears
                 // it. Like Firmware and SdkVersion, deliberately not part of
                 // any ASCOM response.
-                if (std::string reason = driver->get_last_connect_error(); !reason.empty()) {
-                    device["LastConnectError"] = reason;
+                // try/catch like the two hooks above it: every implementation
+                // today is the macro (a mutex and a string copy) so nothing can
+                // throw in practice, but an override that does must not take
+                // the whole device listing down with it.
+                try {
+                    if (std::string reason = driver->get_last_connect_error(); !reason.empty()) {
+                        device["LastConnectError"] = reason;
+                    }
+                } catch (const std::exception& e) {
+                    util::log_warning("Connect-error query failed for " + cap.name + ": " + e.what());
                 }
             }
             devices.push_back(device);
