@@ -374,12 +374,18 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
         "set_readout_mode",
         "get_sdk_version",
     };
-    // A literal self-check on the list, NOT a guard against the interface
-    // growing: if QHYSDK gains a 27th method, LockedQHYSDK must gain a forward
-    // to still compile, but this list, the driven calls and fake.calls all
-    // stay at 26 and the case still passes. Adding a method means updating
-    // this list by hand. What the case DOES catch (mutation-verified) is a
-    // forward wired to the wrong inner method, or to none.
+    // A literal self-check on the list. It is NOT what catches the interface
+    // growing -- if QHYSDK gains a 27th method, LockedQHYSDK must gain a
+    // forward to still compile, but this list, the driven calls and
+    // fake.calls would all stay at 26 and the case would still pass, having
+    // exercised 26 of 27. That hole is closed OUTSIDE this file (issue #394):
+    // scripts/check_docs_drift.py compares the interface's pure virtuals,
+    // LockedQHYSDK's overrides and this very list, and separately fails on a
+    // forward that does not go through locked() -- which the compiler never
+    // checks and which is the only reason the decorator exists. Update the
+    // number here and the list above in the same change as the interface.
+    // What this CASE catches (mutation-verified) is a forward wired to the
+    // wrong inner method, or to none.
     CHECK(methods.size() == 26);
     for (const auto& name : methods) {
         INFO("method: " << name);

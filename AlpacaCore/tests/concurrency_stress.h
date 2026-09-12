@@ -157,27 +157,63 @@ public:
         return count_;
     }
 
-    /// The first few recorded "<type>: <what()>" lines, newline-joined —
-    /// meant for `INFO(guard.report());` immediately before the closing
-    /// CHECK (see the class doc: CHECK takes no message argument), not for
-    /// parsing.
+    /// One line per DISTINCT failure mode recorded, with its occurrence
+    /// count, newline-joined — meant for `INFO(guard.report());` immediately
+    /// before the closing CHECK (see the class doc: CHECK takes no message
+    /// argument), not for parsing.
+    ///
+    /// Distinct, not first-N (issue #377). The cap used to be first-N events:
+    /// one thread faulting in a tight loop could fill all eight slots before
+    /// any other thread recorded once, so the report was systematically biased
+    /// toward whichever mode fired first — in a lifecycle storm, usually the
+    /// most frequent rather than the most interesting one — and every later
+    /// DISTINCT mode was summarised into a bare "... and N more" with no label
+    /// anywhere. That bites hardest on a registration running *connected* with
+    /// a widened expected set, where a live driver legitimately throws often
+    /// and the single distinct failure that mattered is the one crowded out.
+    /// `unexpected_count()` was and remains exact, so nothing was ever hidden
+    /// from the CHECK; the loss was entirely in the text a human reads while
+    /// diagnosing a CI-only failure, which is the whole reason report() exists.
     std::string report() const {
         std::lock_guard<std::mutex> lock(mutex_);
         std::ostringstream out;
+        int sampled_occurrences = 0;
         for (std::size_t i = 0; i < samples_.size(); ++i) {
             if (i != 0) {
                 out << '\n';
             }
-            out << samples_[i];
+            out << samples_[i].line << " (x" << samples_[i].count << ")";
+            sampled_occurrences += samples_[i].count;
         }
-        if (count_ > static_cast<int>(samples_.size())) {
-            out << "\n... and " << (count_ - static_cast<int>(samples_.size())) << " more";
+        if (!unsampled_.empty()) {
+            out << "\n... and " << unsampled_.size() << (unsampled_truncated_ ? "+" : "")
+                << " more distinct failure mode(s), " << (count_ - sampled_occurrences) << " occurrence(s)";
         }
         return out.str();
     }
 
 private:
+    /// Eight DISTINCT failure modes, not eight events.
     static constexpr std::size_t kMaxSamples = 8;
+    /// How many unsampled modes are tracked by key so the tail can count them.
+    /// Only keys are held, no formatted lines; the bound is what stops a storm
+    /// with a unique message per throw from growing this without limit.
+    static constexpr std::size_t kMaxUnsampledModes = 64;
+
+    struct Sample {
+        // kNotAlpaca for a non-Alpaca throw, whose kind is its type name
+        // instead. Two AlpacaExceptions with the same code but different
+        // messages are still distinct modes: the message is what names the
+        // call that failed, and collapsing on the code alone would hide
+        // exactly the distinction a reader is looking for.
+        int code;
+        std::string type;
+        std::string what;
+        std::string line;
+        int count;
+    };
+
+    static constexpr int kNotAlpaca = -1;
 
     bool is_expected(int code) const {
         for (int expected : expected_codes_) {
@@ -188,27 +224,78 @@ private:
         return false;
     }
 
-    // Both overloads format INSIDE the lock, after the cap test, so a storm
-    // that throws long past kMaxSamples pays a counter bump and nothing else.
-    // Taking a ready-made std::string instead would move the formatting to
-    // the call site, where it happens on every throw however full the sample
-    // buffer is -- and an early return in here could not skip it, because the
-    // argument is already built by then. Under TSan that allocation is
-    // instrumented and the operate threads hit this path hard.
+    // Must be called with mutex_ held. Compares against the stored strings
+    // without building one: std::string's comparisons take a const char*
+    // directly, so a repeat of an already-sampled mode allocates nothing.
+    Sample* find_sample(int code, const char* type, const char* what) {
+        for (Sample& sample : samples_) {
+            if (sample.code == code && sample.type == type && sample.what == what) {
+                return &sample;
+            }
+        }
+        return nullptr;
+    }
+
+    // A mode past the sample cap is still counted ONCE toward the tail's mode
+    // count, however often it repeats -- otherwise a single unsampled mode
+    // firing a thousand times would read as a thousand distinct modes, which
+    // is the same misreading this whole change exists to remove, inverted.
+    // The key list is itself capped (and says so with a "+") so a storm whose
+    // messages are all unique cannot grow it without bound.
+    void note_unsampled(int code, const char* type, const char* what) {
+        for (const Sample& seen : unsampled_) {
+            if (seen.code == code && seen.type == type && seen.what == what) {
+                return;
+            }
+        }
+        if (unsampled_.size() < kMaxUnsampledModes) {
+            unsampled_.push_back(Sample{code, type, what, std::string(), 0});
+            return;
+        }
+        unsampled_truncated_ = true;
+    }
+
+    // Both overloads format INSIDE the lock, and only on the FIRST occurrence
+    // of a mode, so a storm that repeats one throw thousands of times pays a
+    // counter bump and a short scan and nothing else -- while the mode is
+    // still SAMPLED. Once more than kMaxSamples distinct modes have been seen,
+    // a repeat of an unsampled one scans the samples and then the key list too
+    // (up to kMaxSamples + kMaxUnsampledModes comparisons under mutex_). That
+    // path only exists in a case that is already failing with a lot of
+    // distinct modes, in a test helper, so it is not worth optimising -- but
+    // do not read the sentence above as covering it. Taking a ready-made
+    // std::string instead would move the formatting to the call site, where it
+    // happens on every throw however full the sample buffer is -- and an early
+    // return in here could not skip it, because the argument is already built
+    // by then. Under TSan that allocation is instrumented and the operate
+    // threads hit this path hard.
     void record(const char* type, const char* what) {
         std::lock_guard<std::mutex> lock(mutex_);
         ++count_;
-        if (samples_.size() < kMaxSamples) {
-            samples_.push_back(std::string(type) + ": " + what);
+        if (Sample* existing = find_sample(kNotAlpaca, type, what)) {
+            ++existing->count;
+            return;
         }
+        if (samples_.size() < kMaxSamples) {
+            samples_.push_back(Sample{kNotAlpaca, type, what, std::string(type) + ": " + what, 1});
+            return;
+        }
+        note_unsampled(kNotAlpaca, type, what);
     }
 
     void record_alpaca(int code, const char* what) {
         std::lock_guard<std::mutex> lock(mutex_);
         ++count_;
-        if (samples_.size() < kMaxSamples) {
-            samples_.push_back("AlpacaException(code=" + std::to_string(code) + "): " + what);
+        if (Sample* existing = find_sample(code, "", what)) {
+            ++existing->count;
+            return;
         }
+        if (samples_.size() < kMaxSamples) {
+            samples_.push_back(
+                Sample{code, "", what, "AlpacaException(code=" + std::to_string(code) + "): " + what, 1});
+            return;
+        }
+        note_unsampled(code, "", what);
     }
 
     // const, not just conventionally read-only: is_expected() reads this
@@ -219,7 +306,11 @@ private:
     const std::vector<int> expected_codes_;
     mutable std::mutex mutex_;
     int count_ = 0;
-    std::vector<std::string> samples_;
+    // Keys of the distinct modes seen after the sample cap was reached. Their
+    // occurrences are still in count_; only their labels are lost.
+    std::vector<Sample> unsampled_;
+    bool unsampled_truncated_ = false;
+    std::vector<Sample> samples_;
 };
 
 // Documenting this pattern in THIS header is now safe: scripts/

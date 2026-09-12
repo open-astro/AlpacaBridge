@@ -160,7 +160,7 @@ Before pushing, reproduce the full CI gate set locally:
 ./scripts/ci_preflight.sh
 ```
 
-This runs clang-format, the Unicode/Trojan-Source scan, both build+test configurations (vendors OFF and ON), clang-tidy, cppcheck, and — when the relevant files changed — shellcheck, JavaScript syntax, and zizmor. `/submit-pr` runs it automatically.
+This runs clang-format, the Unicode/Trojan-Source scan, both build+test configurations (vendors OFF and ON), clang-tidy, cppcheck, and — when the relevant files changed — shellcheck, the web UI JavaScript gate (`node --check` for syntax plus `node --test` for the pure formatters in `AlpacaHTTP/web/format.js`, triggered by changes under `AlpacaHTTP/web/` or `AlpacaHTTP/tests/web/`), and zizmor. `/submit-pr` runs it automatically.
 
 ## Writing tests
 

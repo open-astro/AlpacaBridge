@@ -106,7 +106,7 @@ TEST_CASE("StressCallGuard - a non-std::exception throw is not intercepted", "[u
     CHECK(guard.unexpected_count() == 0);
 }
 
-TEST_CASE("StressCallGuard - report() caps the number of stored samples", "[unit]") {
+TEST_CASE("StressCallGuard - report() caps the number of DISTINCT failure modes", "[unit]") {
     StressCallGuard guard;
     for (int i = 0; i < 20; ++i) {
         guard([i] { throw std::runtime_error("failure " + std::to_string(i)); });
@@ -116,10 +116,86 @@ TEST_CASE("StressCallGuard - report() caps the number of stored samples", "[unit
     CHECK(report.find("failure 0") != std::string::npos);
     // Assert the exact overflow line, not just the word "more": a bare
     // substring search would also be satisfied by an exception message that
-    // happened to contain it. 20 recorded, kMaxSamples kept, rest summarised.
-    CHECK(report.find("... and 12 more") != std::string::npos);
-    // The cap held: the 9th-onward samples are absent.
+    // happened to contain it. 20 distinct modes recorded, kMaxSamples kept,
+    // the remaining 12 summarised by count.
+    CHECK(report.find("... and 12 more distinct failure mode(s), 12 occurrence(s)") != std::string::npos);
+    // The cap held: the 9th-onward modes are absent.
     CHECK(report.find("failure 8") == std::string::npos);
+}
+
+TEST_CASE("StressCallGuard - a repeated failure mode is one sample with a count", "[unit]") {
+    // Issue #377: the cap used to be first-N EVENTS, so one thread faulting in
+    // a tight loop filled all eight slots with copies of the same message
+    // before any other thread recorded once, and every later distinct mode
+    // vanished into a bare "... and N more". Nothing was hidden from the CHECK
+    // -- unexpected_count() was and is exact -- but the text a human reads
+    // while diagnosing a CI-only failure showed one problem where there were
+    // several, biased toward whichever mode fired first.
+    StressCallGuard guard;
+    for (int i = 0; i < 50; ++i) {
+        guard([] { throw std::runtime_error("the noisy one"); });
+    }
+    guard([] { throw std::out_of_range("the interesting one"); });
+
+    CHECK(guard.unexpected_count() == 51);
+    const std::string report = guard.report();
+    // The repeat collapses to a single labelled line carrying its count...
+    CHECK(report.find("the noisy one (x50)") != std::string::npos);
+    // ...which leaves room for the mode that actually mattered. Under the old
+    // first-N-events cap this line was the one that got summarised away.
+    CHECK(report.find("the interesting one (x1)") != std::string::npos);
+    // Two modes, both sampled, so no overflow tail at all.
+    CHECK(report.find("... and") == std::string::npos);
+}
+
+TEST_CASE("StressCallGuard - same code with different messages are distinct modes", "[unit]") {
+    // Keyed on the message as well as the code: in a connected registration a
+    // live driver throws InvalidValue from several unrelated calls, and the
+    // message is what names which one. Collapsing on the code alone would hide
+    // exactly the distinction the reader is looking for.
+    StressCallGuard guard;
+    guard([] { throw AlpacaException("slew below the horizon", AlpacaError::InvalidValue); });
+    guard([] { throw AlpacaException("slew below the horizon", AlpacaError::InvalidValue); });
+    guard([] { throw AlpacaException("brightness out of range", AlpacaError::InvalidValue); });
+
+    CHECK(guard.unexpected_count() == 3);
+    const std::string report = guard.report();
+    CHECK(report.find("slew below the horizon (x2)") != std::string::npos);
+    CHECK(report.find("brightness out of range (x1)") != std::string::npos);
+}
+
+TEST_CASE("StressCallGuard - the overflow tail counts modes and occurrences separately", "[unit]") {
+    // Nine distinct modes, the ninth repeated: eight are sampled, and the tail
+    // has to say both how many modes it dropped and how many events they
+    // account for, or the reader cannot tell a rare unlabelled mode from a
+    // flood of one.
+    StressCallGuard guard;
+    for (int i = 0; i < 8; ++i) {
+        guard([i] { throw std::runtime_error("mode " + std::to_string(i)); });
+    }
+    for (int i = 0; i < 5; ++i) {
+        guard([] { throw std::runtime_error("the ninth"); });
+    }
+    CHECK(guard.unexpected_count() == 13);
+    const std::string report = guard.report();
+    CHECK(report.find("mode 0 (x1)") != std::string::npos);
+    CHECK(report.find("the ninth") == std::string::npos);
+    CHECK(report.find("... and 1 more distinct failure mode(s), 5 occurrence(s)") != std::string::npos);
+}
+
+TEST_CASE("StressCallGuard - the unsampled-mode key list is itself bounded", "[unit]") {
+    // The tail counts distinct unsampled modes by keeping their keys, which a
+    // storm whose every message is unique would otherwise grow without bound
+    // in a test helper that runs under TSan. Past the bound the count carries
+    // a "+" rather than silently understating.
+    StressCallGuard guard;
+    const int total = 8 + 64 + 10;
+    for (int i = 0; i < total; ++i) {
+        guard([i] { throw std::runtime_error("mode " + std::to_string(i)); });
+    }
+    CHECK(guard.unexpected_count() == total);
+    const std::string report = guard.report();
+    CHECK(report.find("... and 64+ more distinct failure mode(s), 74 occurrence(s)") != std::string::npos);
 }
 
 TEST_CASE("StressCallGuard - concurrent hits from many threads count exactly", "[stress-guard][unit]") {
