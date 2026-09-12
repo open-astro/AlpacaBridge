@@ -32,6 +32,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "fake_pty_write.h"
 
 namespace {
 
@@ -43,6 +44,9 @@ public:
 
     explicit FakeSerialHandset(Responder responder) : responder_(std::move(responder)) {
         master_fd_ = posix_openpt(O_RDWR | O_NOCTTY);
+        if (master_fd_ >= 0) {
+            alpacacore::test::make_pty_nonblocking(master_fd_);
+        }
         if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0) {
             throw std::runtime_error("FakeSerialHandset: cannot open pty");
         }
@@ -107,11 +111,12 @@ private:
             }
             const std::string reply = responder_(chunk);
             if (!reply.empty()) {
-                // Test double: a short/failed write just means the probe sees
-                // less than the full reply, which is exercised deliberately
-                // by the silent/non-echo test cases anyway.
-                const ssize_t written = write(master_fd_, reply.data(), reply.size());
-                (void)written;
+                // Issue #424: bounded, on a non-blocking master. A short or
+                // dropped write just means the probe sees less than the full
+                // reply, which the silent / non-echo cases exercise on
+                // purpose -- whereas a blocking write to a pty the probe has
+                // stopped draining parks this thread and hangs the join.
+                alpacacore::test::pty_write_bounded(master_fd_, reply, stop_);
             }
         }
     }

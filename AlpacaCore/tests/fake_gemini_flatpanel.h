@@ -36,12 +36,20 @@
 #include <thread>
 #include <vector>
 
+#include "fake_pty_write.h"
+
 namespace alpacacore::test {
 
 class FakeGeminiFlatPanel {
 public:
     FakeGeminiFlatPanel() {
         master_fd_ = posix_openpt(O_RDWR | O_NOCTTY);
+        // Issue #424: non-blocking, so a reply to a driver that has stopped
+        // draining can never park this fake's worker inside write() and
+        // hang the destructor's join. See fake_pty_write.h.
+        if (master_fd_ >= 0) {
+            make_pty_nonblocking(master_fd_);
+        }
         if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0) {
             throw std::runtime_error("FakeGeminiFlatPanel: cannot open pty");
         }
@@ -198,7 +206,7 @@ private:
         } else if (cmd == ">C#") {
             cover_.store(1);
         }
-        (void)!write(master_fd_, reply.data(), reply.size());
+        pty_write_bounded(master_fd_, reply, stop_);
     }
 
     int master_fd_ = -1;

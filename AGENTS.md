@@ -301,6 +301,22 @@ target. Hardware-free coverage lives in `tests/test_<vendor>_async_park.cpp` ove
 (Celestron `J` → `1#`, SynScan/NexStar `e` → a parseable pair with Dec < 90°), or the park
 is refused before the GOTO is ever sent.
 
+### pty-backed fakes: never write to the master with a blocking write
+
+A fake that answers a driver over a pseudo-terminal must open its master
+non-blocking and write through `pty_write_bounded()` from
+`AlpacaCore/tests/fake_pty_write.h`, passing its own `stop_` flag. A bare
+`write(master_fd_, ...)` on a blocking master parks the fake's worker thread as
+soon as the driver stops draining — which is normal as a concurrency test winds
+down — and the destructor's `join()` then never returns, because the thread is
+asleep in `write()` and never reaches the `stop_` check. The result is a hung
+process, not a failing test, and it is a race, so it shows up as an occasional
+CI hang rather than a reproducible red (#424, the shape #364 describes).
+
+Dropping a reply is the correct answer here: a reply the driver is not draining
+is one it was never going to read, and a fake whose destructor can hang is worse
+than one that drops a frame.
+
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
 | Throw | When |

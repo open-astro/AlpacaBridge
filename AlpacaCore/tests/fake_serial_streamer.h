@@ -35,6 +35,8 @@
 #include <thread>
 #include <vector>
 
+#include "fake_pty_write.h"
+
 namespace alpacacore::test {
 
 class FakeSerialStreamer {
@@ -42,6 +44,12 @@ public:
     FakeSerialStreamer(std::string frame, std::chrono::milliseconds interval)
         : interval_ms_(static_cast<int>(interval.count())), frame_(std::move(frame)) {
         master_fd_ = posix_openpt(O_RDWR | O_NOCTTY);
+        // Issue #424: non-blocking, so a reply to a driver that has stopped
+        // draining can never park this fake's worker inside write() and
+        // hang the destructor's join. See fake_pty_write.h.
+        if (master_fd_ >= 0) {
+            make_pty_nonblocking(master_fd_);
+        }
         if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0) {
             throw std::runtime_error("FakeSerialStreamer: cannot open pty");
         }
@@ -133,7 +141,7 @@ private:
                     std::lock_guard<std::mutex> lock(mutex_);
                     frame = frame_;
                 }
-                (void)!write(master_fd_, frame.data(), frame.size());
+                pty_write_bounded(master_fd_, frame, stop_);
             }
         }
     }
