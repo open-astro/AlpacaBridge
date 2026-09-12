@@ -137,6 +137,13 @@ public:
     /// between a driver's idempotency check and its connected_ store.
     void set_handshake_delay(std::chrono::milliseconds delay) { handshake_delay_ms_.store(delay.count()); }
 
+    /// What ":24#" reports for temperature compensation ("11#" on, "10#"
+    /// off). Settable so a test can pin the TRUE branch: the driver's
+    /// get_temp_comp() catches every std::exception and returns false, so an
+    /// assertion that only ever sees "off" passes whether the round trip
+    /// worked or threw.
+    void set_temp_comp_reply(bool on) { temp_comp_on_.store(on); }
+
     int position() const { return position_.load(); }
     int max_position() const { return max_position_.load(); }
 
@@ -191,7 +198,7 @@ private:
         } else if (cmd == ":13#") {
             reply = "R0#";
         } else if (cmd == ":24#") {
-            reply = "10#";
+            reply = temp_comp_on_.load() ? "11#" : "10#";
         } else if (cmd == ":26#") {
             reply = "B0#";
         } else if (cmd == ":29#") {
@@ -218,6 +225,7 @@ private:
     std::thread reader_;
     std::atomic<bool> stop_{false};
     std::atomic<long long> handshake_delay_ms_{0};
+    std::atomic<bool> temp_comp_on_{false};
 
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
