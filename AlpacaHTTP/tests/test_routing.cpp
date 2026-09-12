@@ -3204,6 +3204,85 @@ int main() {
         ::unlink(config_path.c_str());
     }
 
+    // Issue #348: every state-changing management endpoint carries the
+    // cross-origin guard, not just synctime and wifi.
+    {
+        alpacahttp::Router router;
+
+        // The management surface is unauthenticated by design under the
+        // trusted-LAN model. The guard is what stops that stance from also
+        // covering a page the operator merely has open in a browser on the
+        // same LAN: a POST with Content-Type: text/plain is not preflighted,
+        // and these handlers parse the body regardless of content type, so
+        // nothing on the browser side would have stopped a drive-by.
+        const auto request_with = [](const std::string& method, const std::string& path,
+                                     const std::string& origin, const std::string& body) {
+            std::ostringstream raw;
+            raw << method << " " << path << "?ClientTransactionID=77 HTTP/1.1\r\n"
+                << "Host: localhost\r\n";
+            if (!origin.empty()) {
+                raw << "Origin: " << origin << "\r\n";
+            }
+            // text/plain on purpose: the un-preflighted shape is the one the
+            // guard exists for, and it must reach the handler all the same.
+            raw << "Content-Type: text/plain\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            return request;
+        };
+
+        struct Endpoint {
+            const char* method;
+            const char* path;
+            const char* body;
+        };
+        const Endpoint endpoints[] = {
+            {"PUT", "/management/v1/description", R"({"Location":"moved"})"},
+            {"POST", "/management/v1/configuredevice", R"({"DeviceType":"telescope"})"},
+            {"POST", "/management/v1/removedevice", R"({"DeviceType":"telescope","DeviceNumber":0})"},
+            {"PUT", "/management/v1/loglevel", R"({"Level":"TRACE"})"},
+            {"POST", "/management/v1/shutdown", "{}"},
+            {"POST", "/management/v1/restart", "{}"},
+            {"DELETE", "/management/v1/logfiles/alpaca.log", ""},
+        };
+
+        for (const auto& ep : endpoints) {
+            // A foreign origin is refused before the handler does anything.
+            const auto blocked =
+                router.route(request_with(ep.method, ep.path, "http://evil.example", ep.body), 1);
+            EXPECT(blocked.status_code() == 403);
+            const auto blocked_json = nlohmann::json::parse(blocked.body(), nullptr, false);
+            EXPECT(!blocked_json.is_discarded());
+            EXPECT(blocked_json.value("ErrorMessage", "").find("Cross-origin") != std::string::npos);
+            // ClientTransactionID is deliberately not asserted here: the
+            // shared helper still hardcodes 0 on main, and making it echo the
+            // client's id is issue #384's change, not this one's.
+
+            // The same-origin portal is unaffected. What the handler then
+            // does with the request is its own business -- these run against a
+            // router with no shutdown/restart callback and no such device --
+            // so the assertion is only that the guard did not fire.
+            const auto same_origin =
+                router.route(request_with(ep.method, ep.path, "http://localhost", ep.body), 1);
+            EXPECT(same_origin.status_code() != 403);
+
+            // A non-browser client (curl, a native app) sends no Origin at all.
+            const auto no_origin = router.route(request_with(ep.method, ep.path, "", ep.body), 1);
+            EXPECT(no_origin.status_code() != 403);
+        }
+
+        // GET stays exempt everywhere, so the web UI's polling keeps working
+        // from any origin -- including the log viewer and the level readback,
+        // whose handlers share a function with the guarded methods.
+        for (const char* path : {"/management/v1/description", "/management/v1/loglevel",
+                                 "/management/v1/logfiles", "/management/v1/configureddevices"}) {
+            const auto response = router.route(request_with("GET", path, "http://evil.example", ""), 1);
+            EXPECT(response.status_code() != 403);
+        }
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }

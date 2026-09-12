@@ -1312,6 +1312,15 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
 
 namespace alpacahttp {
 
+namespace {
+// Defined further down with the management guards, but declared here because
+// every state-changing management handler needs it and handle_description()
+// is the first of them in file order. Also used by the one device setter with
+// a host-level side effect (open-astro#401).
+std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t server_tx_id,
+                                                    const char* what);
+}  // namespace
+
 Router::Router() {
     set_server_info("AlpacaHTTP", "AlpacaHTTP", alpacahttp::kVersion, "", "");
     load_persisted_devices();
@@ -1664,6 +1673,21 @@ Response Router::handle_description(const Request& request, std::uint32_t server
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // PUT/POST here rewrites the server description and the
+    // SyncSystemClockFromClients opt-out, and that opt-out is what keeps a
+    // cross-origin clock step from being accepted at all -- so leaving this
+    // endpoint unguarded would have handed back the guard on synctime.
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "server description")) {
+        return *rejected;
     }
 
     try {
@@ -2039,11 +2063,6 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
 }
 
 namespace {
-// Defined further down with the management guards; also used by the one
-// device setter with a host-level side effect (open-astro#401).
-std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t server_tx_id,
-                                                    const char* what);
-
 void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
     const auto cutoff = std::chrono::steady_clock::now() - kClientConnectionStaleAfter;
     for (auto it = clients.begin(); it != clients.end();) {
@@ -6020,6 +6039,18 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Rewrites persisted device configuration, which survives a restart.
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "device configuration")) {
+        return *rejected;
+    }
     
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
@@ -6108,6 +6139,18 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Removes a configured device, taking its persisted entry with it.
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "device removal")) {
+        return *rejected;
     }
     
     // Only allow POST or PUT requests
@@ -6236,6 +6279,20 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Changing verbosity is the quiet one: it is how evidence of any of the
+    // others gets turned down after the fact. GET is exempt, so the web UI's
+    // polling of the current level is unaffected.
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "log level")) {
+        return *rejected;
     }
 
     auto send_payload = [&](std::uint32_t ctx_id) {
@@ -6566,6 +6623,14 @@ Response Router::handle_log_file_item(const Request& request,
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
+    // Issue #348: DELETE here destroys a log file, which is the same
+    // evidence-removal shape as turning the log level down. Placed before the
+    // filename validation so a cross-origin caller learns nothing about which
+    // names exist. GET is exempt, so the web UI's log viewer is unaffected.
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "log file")) {
+        return *rejected;
+    }
+
     if (!util::is_valid_log_filename(filename)) {
         response.set_content_type("application/json");
         AlpacaResponse err = make_error_response(
@@ -6643,6 +6708,18 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Stops the daemon. On a remote rig undoing this needs physical access.
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "shutdown")) {
+        return *rejected;
     }
     
     // Only allow POST or PUT requests
@@ -6969,6 +7046,19 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Restarts the daemon, dropping every connected client mid-session --
+    // an imaging run lost to a page the operator merely had open.
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "restart")) {
+        return *rejected;
     }
 
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {

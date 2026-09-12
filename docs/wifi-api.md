@@ -159,6 +159,18 @@ guard: `PUT`/`POST /api/v1/telescope/{n}/utcdate`, because on an NTP-less host
 a UTCDate write steps the system clock (see the Clock section above). Every
 other device setter is unguarded.
 
+Since issue #348 this is not specific to the WiFi endpoints: every
+state-changing management endpoint carries the same guard — `synctime`,
+`restart`, `shutdown`, `configuredevice`, `removedevice`, `loglevel`, the
+`description` PUT and `DELETE /management/v1/logfiles/<name>`. The rejection
+message names the endpoint, and the 403 body echoes the `ClientTransactionID`
+the request sent.
+
+The guard compares the request's `Origin` against the request's own `Host`,
+which stops a page served from an attacker-controlled origin. It does not
+stop DNS rebinding, where the attacker's hostname resolves to the device and
+both headers agree; see issue #392.
+
 ## Connection-drop pattern (important for clients)
 
 Any operation that changes what the radio is doing (`connect`, `ap` with
