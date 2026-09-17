@@ -23,9 +23,7 @@ AlpacaHTTPbuild/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
-*.cmake
 !CMakeLists.txt
-!*.cmake.in
 
 # Compiled files
 *.o
@@ -70,6 +68,7 @@ __pycache__/
 
 # Claude Code local settings
 .claude/settings.local.json
+.claude/worktrees/
 
 # SVBONY SDK auto-generated camera config files
 U2SM*.bin
