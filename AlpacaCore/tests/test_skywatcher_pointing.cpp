@@ -32,7 +32,9 @@
 // the goto cases downstream of it pin the goto path against the model rather
 // than against the sky. They are still worth having -- they catch a goto that
 // stops commanding what the model says -- but they are not independent
-// evidence for the model. #458 tracks the vector oracle that would be.
+// evidence for the model. `sky_from_indi_eqmod()` is (open-astro#458): a
+// transcription of a different, field-proven driver, which the model has to
+// agree with for a board of the same dec-axis sense.
 //
 // If you change the pointing model, this file is what has to justify it, and
 // a new hardware row is what has to extend it. Do not "verify" a change here
@@ -104,25 +106,64 @@ struct AltAz {
 // THE REFERENCE. Where a Sky-Watcher German equatorial physically points for
 // raw axis angles measured from the counterweight-down, tube-at-the-pole home.
 //
-//   HA  = s * (a1 / 15) + (a2 >= 0 ? +6 h : -6 h)
+//   HA  = s * (a1 / 15) + s * eps * (a2 >= 0 ? +6 h : -6 h)
 //   dec = s * (90 - |a2|)                      s = +1 north, -1 south
 //
 // The 6 h term is the home position: with the counterweight hanging straight
 // down the dec axis lies in the meridian plane, so rotating the dec axis
 // alone sweeps the tube along the HA = +/-6 h circle and the meridian is
-// reached only with the counterweight bar horizontal. Its SIGN follows which
-// side of the dec axis the tube is on, and does NOT flip with hemisphere.
-// The a1 term does flip, because the mount faces the opposite pole.
+// reached only with the counterweight bar horizontal. Its sign is the side
+// of the meridian the tube swings to, which is fixed by the board's
+// dec-axis count sense `eps` (wiring, not latitude) and mirrored by the
+// hemisphere like everything else (open-astro#458): the board is never told
+// the latitude, and a mount facing the other pole is the same mount turned
+// half a turn about the vertical. `board_sense` is eps for a board whose
+// sense was measured (hardware rows below), and 0 for an unmeasured one,
+// which the driver keeps on the #432 model (s * eps = +1 everywhere).
 //
 // Caveat (open-astro#459): this oracle reads the branch from the sign of a2
 // alone. Inside the driver's two-count deadband of a2 = 0 the driver answers
 // the branch it last commanded instead, so a case landing there must judge
 // the report against the target, as the pole cases below do, never through
 // check_landing().
-SkyPoint sky_from_axes(double latitude_degrees, double a1_degrees, double a2_degrees) {
+SkyPoint sky_from_axes(double latitude_degrees, double a1_degrees, double a2_degrees, int board_sense = 0) {
     const double s = latitude_degrees < 0.0 ? -1.0 : 1.0;
-    const double ha = s * (a1_degrees / 15.0) + (a2_degrees >= 0.0 ? 6.0 : -6.0);
+    const double home_sign = board_sense == 0 ? 1.0 : s * board_sense;
+    const double ha = s * (a1_degrees / 15.0) + home_sign * (a2_degrees >= 0.0 ? 6.0 : -6.0);
     return {wrap_ha(ha), s * (90.0 - std::abs(a2_degrees))};
+}
+
+// open-astro#458: an independent second reference. indi-eqmod's
+// EncodersToRADec() (indilib/indi-3rdparty @ f2844cb52ce4,
+// indi-eqmod/eqmodbase.cpp, with EncoderToHours/EncoderToDegrees and its
+// DEStepHome = DEStepInit + steps/4 from skywatcher.cpp) transcribed onto
+// this file's a1/a2, rather than onto the driver's formula. Field-proven on
+// Synta boards in both hemispheres, and it never asks the board for a sense,
+// so it is the eps = +1 case of the reference above.
+SkyPoint sky_from_indi_eqmod(double latitude_degrees, double a1_degrees, double a2_degrees) {
+    const bool north = latitude_degrees >= 0.0;
+    // EncoderToHours(): (initstep - step) / total * 24, i.e. -a1/15 mod 24.
+    double hours = std::fmod(-a1_degrees / 15.0 + 48.0, 24.0);
+    hours = north ? std::fmod(hours + 6.0, 24.0) : std::fmod((24.0 - hours) + 6.0, 24.0);
+    // EncoderToDegrees() on the dec encoder, whose zero is a quarter turn
+    // before home: range360(a2 + 90), mirrored south of the equator.
+    double deg = std::fmod(a2_degrees + 90.0 + 720.0, 360.0);
+    if (!north) {
+        deg = std::fmod(360.0 - deg + 360.0, 360.0);
+    }
+    // EncodersToRADec(): RA = hours + LST, with the 12 h pier correction.
+    double ra_minus_lst = hours;
+    if (north ? (deg > 90.0 && deg <= 270.0) : (deg <= 90.0 || deg > 270.0)) {
+        ra_minus_lst += north ? -12.0 : 12.0;
+    }
+    // rangeDec(): fold the 0..360 dec encoder angle onto -90..+90.
+    double dec = deg;
+    if (dec > 270.0) {
+        dec -= 360.0;
+    } else if (dec > 90.0) {
+        dec = 180.0 - dec;
+    }
+    return {wrap_ha(-ra_minus_lst), dec};
 }
 
 AltAz horizon_from_sky(const SkyPoint& p, double latitude_degrees) {
@@ -168,8 +209,9 @@ LandedFrame land(alpacacore::TelescopeDriver& driver, FakeSkyWatcherMount& mount
 constexpr double kHaToleranceHours = 0.01;
 constexpr double kDecToleranceDegrees = 0.05;
 
-void check_landing(const LandedFrame& f, double latitude, double target_ra, double target_dec, int expected_side) {
-    const SkyPoint sky = sky_from_axes(latitude, f.a1, f.a2);
+void check_landing(const LandedFrame& f, double latitude, double target_ra, double target_dec, int expected_side,
+                   int board_sense = 0) {
+    const SkyPoint sky = sky_from_axes(latitude, f.a1, f.a2, board_sense);
     const double target_ha = wrap_ha(f.lst - target_ra);
     INFO("axes a1=" << f.a1 << " a2=" << f.a2 << " -> real HA " << sky.ha_hours << " h, dec " << sky.dec_degrees
                     << "; target HA " << target_ha << " h, dec " << target_dec);
@@ -192,11 +234,20 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
     // Rows 1-3: EQM-35 Pro, latitude -37.2 (rounded), 2026-09-12, shipped
     // 3.5.1 build, tube direction read off the mount by hand after each
     // goto. Row 4: the Wave 150i report that opened #432, latitude +45.45.
+    // Row 5 (open-astro#458): the same EQM-35 Pro on 2026-09-19 with the
+    // 4.0.0 build, still set up facing the south pole but with the driver's
+    // latitude at +37.2. The board is never told the latitude, and that
+    // mount is a northern one turned half a turn about the vertical, so the
+    // row is a northern reading with every azimuth shifted by 180 deg. The
+    // driver aimed at HA -3 h, dec +30 (alt 52, az 87) and the saddle ended
+    // pointing front-left and slightly down (SE, about -8 deg), which is
+    // HA +9 h: the 6 h term had to flip with the hemisphere.
     struct Row {
         const char* what;
         double latitude;
         double a1;
         double a2;
+        int board_sense;  // the board's dec-axis count sense, see sky_from_axes()
         double expect_ha;
         double expect_dec;
         double expect_alt;
@@ -204,13 +255,16 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         const char* observed;
     };
     const Row rows[] = {
-        {"counterweight down, dec axis square", -37.2, 1.6, -90.0, -6.11, 0.0, -1.3, 91.0, "level, pointing east"},
-        {"RA axis 60 deg, dec axis square", -37.2, 60.0, -90.0, -10.00, 0.0, -43.6, -1.0, "down about 45 deg"},
-        {"RA axis 45 deg, dec axis 70 deg", -37.2, 45.1, -70.0, -9.01, -20.0, -18.9, 136.0, "down, azimuth about 136"},
-        {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, 10.13, 19.05, -20.7, -1.0, "down about 20 deg"},
+        {"counterweight down, dec axis square", -37.2, 1.6, -90.0, -1, -6.11, 0.0, -1.3, 91.0, "level, pointing east"},
+        {"RA axis 60 deg, dec axis square", -37.2, 60.0, -90.0, -1, -10.00, 0.0, -43.6, -1.0, "down about 45 deg"},
+        {"RA axis 45 deg, dec axis 70 deg", -37.2, 45.1, -70.0, -1, -9.01, -20.0, -18.9, 136.0,
+         "down, azimuth about 136"},
+        {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, +1, 10.13, 19.05, -20.7, -1.0, "down about 20 deg"},
+        {"EQM-35 Pro at a northern latitude", 37.2, 45.0, -60.0, -1, 9.00, 30.0, -10.7, -1.0,
+         "front-left and slightly down on the south-facing rig, i.e. SE, about -8 deg"},
     };
     for (const Row& r : rows) {
-        const SkyPoint sky = sky_from_axes(r.latitude, r.a1, r.a2);
+        const SkyPoint sky = sky_from_axes(r.latitude, r.a1, r.a2, r.board_sense);
         const AltAz horizon = horizon_from_sky(sky, r.latitude);
         INFO(r.what << ": observed " << r.observed);
         CHECK(std::abs(wrap_ha(sky.ha_hours - r.expect_ha)) < 0.02);
@@ -707,6 +761,181 @@ TEST_CASE("SkyWatcher pointing - a reconnect forgets the commanded branch (#459)
     CHECK(driver->get_side_of_pier() == 0);
 
     driver->set_connected(false);
+}
+
+namespace {
+
+// open-astro#458: the Wave 100i capture with only the ":e" reply swapped for
+// the Wave 150i's (fw 3.59, mount code 0x45, from the TRACE log attached to
+// open-astro#230). Not a capture of the 150i: that board reports a different
+// CPR per axis (:a1 3878400, :a2 3525120), which the single-CPR fake cannot
+// model. The mount code is the only field these cases depend on.
+alpacacore::test::FakeMountProfile wave_150i_mount_code() {
+    alpacacore::test::FakeMountProfile p = alpacacore::test::FakeMountProfile::wave_100i();
+    p.version_reply = "033B45";
+    return p;
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher pointing - the hemisphere-symmetric model agrees with indi-eqmod (#458)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    // The eps = +1 case of sky_from_axes() and an independent transcription of
+    // indi-eqmod agree everywhere a goto can reach, in both hemispheres. The
+    // #432 model agrees with indi-eqmod in the north only, and is 12 h out in
+    // the south: that difference IS #458.
+    for (const double latitude : {45.0, -37.2}) {
+        for (double a1 = -90.0; a1 <= 90.0; a1 += 15.0) {
+            for (double a2 = -170.0; a2 <= 170.0; a2 += 17.0) {
+                if (std::abs(a2) < 1e-9) {
+                    // The pole: dec = 90 and the hour angle is undefined, so
+                    // the two formulas may name different branches (#459).
+                    continue;
+                }
+                const SkyPoint model = sky_from_axes(latitude, a1, a2, +1);
+                const SkyPoint indi = sky_from_indi_eqmod(latitude, a1, a2);
+                const SkyPoint old_model = sky_from_axes(latitude, a1, a2);
+                INFO("lat " << latitude << " a1 " << a1 << " a2 " << a2 << ": model HA " << model.ha_hours << " dec "
+                            << model.dec_degrees << ", indi HA " << indi.ha_hours << " dec " << indi.dec_degrees);
+                CHECK(std::abs(wrap_ha(model.ha_hours - indi.ha_hours)) < 1e-9);
+                CHECK(std::abs(model.dec_degrees - indi.dec_degrees) < 1e-9);
+                const double old_gap = std::abs(wrap_ha(old_model.ha_hours - indi.ha_hours));
+                CHECK(std::abs(old_gap - (latitude < 0.0 ? 12.0 : 0.0)) < 1e-9);
+            }
+        }
+    }
+}
+
+TEST_CASE("SkyWatcher pointing - an EQM-35 Pro goto east of the meridian lands on the sky, north (#458)",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // The hardware row 5 goto, now judged by where the EQM-35 board physically
+    // points. Before #458 the driver sent a1 = +45, a2 = -60 here, and the
+    // saddle ended at HA +9 h, below the horizon.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    const double latitude = 37.2;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 174.88, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 3.0, 24.0);  // HA -3 h
+    const double target_dec = 30.0;
+    REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 1);
+
+    const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+    check_landing(f, latitude, target_ra, target_dec, 1, -1);
+    // The RA axis turns the same way as on a board that counts the other
+    // way; only the dec axis swings to the other side of the meridian.
+    CHECK(std::abs(f.a1 - 45.0) < 1.0);
+    CHECK(std::abs(f.a2 - 60.0) < 0.2);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - an EQM-35 Pro goto west of the meridian lands on the sky, north (#458)",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    const double latitude = 37.2;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 174.88, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst - 3.0 + 24.0, 24.0);  // HA +3 h
+    const double target_dec = 30.0;
+    REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 0);
+
+    const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+    check_landing(f, latitude, target_ra, target_dec, 0, -1);
+    CHECK(std::abs(f.a1 + 45.0) < 1.0);
+    CHECK(std::abs(f.a2 + 60.0) < 0.2);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - DeclinationRate raises the physical Dec of an EQM-35 Pro, north (#458)",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // The Dec rate and guide signs read the branch and the hemisphere only:
+    // dec = s * (90 - |a2|) does not involve the board's sense. Pinned on the
+    // branch the #458 goto now lands on, judged by the physical Dec.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    const double latitude = 37.2;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 174.88, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const LandedFrame f = land(*driver, mount, std::fmod(lst + 3.0, 24.0), 30.0);  // HA -3 h
+    REQUIRE(f.a2 > 0.0);
+
+    const double dec_start =
+        sky_from_axes(latitude, mount.physical_degrees(1), mount.physical_degrees(2), -1).dec_degrees;
+    driver->set_declination_rate(10.0);  // arcsec/s, well above the ~0.26 floor
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    const double dec_end =
+        sky_from_axes(latitude, mount.physical_degrees(1), mount.physical_degrees(2), -1).dec_degrees;
+    const double moved_arcsec = (dec_end - dec_start) * 3600.0;
+    INFO("physical Dec moved " << moved_arcsec << " arcsec");
+    CHECK(moved_arcsec > 10.0);
+    CHECK(moved_arcsec < 40.0);
+
+    driver->set_declination_rate(0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - a Wave 150i goto lands on the sky, south (#458, geometry only)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    // NOT MEASURED. The Wave 150i's sense (+1) is measured in the north only
+    // (hardware row 4); this case is what geometry says the same board does
+    // south of the equator, where the #432 model would put it 12 h out.
+    FakeSkyWatcherMount mount(wave_150i_mount_code());
+    REQUIRE(mount.ok());
+    const double latitude = -35.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 3.0, 24.0);  // HA -3 h
+    const double target_dec = -30.0;
+    REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 1);
+
+    const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+    check_landing(f, latitude, target_ra, target_dec, 1, +1);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - an unmeasured board keeps the #432 model in both hemispheres (#458)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    // Mount code 0x44 (Wave 100i) has no measured sense, so the driver must
+    // not guess one: gotos land where the #432 model says, north and south.
+    for (const double latitude : {45.0, -35.0}) {
+        FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+        REQUIRE(mount.ok());
+        auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+        driver->set_connected(true);
+        driver->set_tracking(true);
+
+        const double lst = driver->get_sidereal_time();
+        const double target_ra = std::fmod(lst + 3.0, 24.0);  // HA -3 h
+        const double target_dec = latitude < 0.0 ? -30.0 : 30.0;
+        INFO("latitude " << latitude);
+        const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+        check_landing(f, latitude, target_ra, target_dec, 1);
+
+        driver->set_tracking(false);
+        driver->set_connected(false);
+    }
 }
 
 #endif  // !_WIN32

@@ -44,8 +44,26 @@ constexpr uint32_t kHomeCounts = 0x800000;
 // along the HA = +/-6 h circle (see the pointing-model comment in the driver).
 constexpr double kHomeHourAngleOffsetHours = 6.0;
 
-// The signed home term itself is `kHomeHourAngleOffsetHours * branch`, with
-// the branch read back through branch_from_axis_locked() (open-astro#459).
+// The signed home term itself is `home_term_sign_locked() *
+// kHomeHourAngleOffsetHours * branch`, with the branch read back through
+// branch_from_axis_locked() (open-astro#459, #458).
+
+// open-astro#458: the dec-axis count sense of a motor board, by its ":e" mount
+// code: +1 or -1 where it was MEASURED on hardware (the rows in the
+// pointing-model comment), 0 for every other board. The sense is wiring, not
+// latitude (the board is never told the latitude), and it decides which side
+// of the meridian the tube swings to for a positive dec-axis angle.
+constexpr int measured_dec_axis_sense(std::uint8_t mount_code) {
+    switch (mount_code) {
+        case 0x32:  // EQM-35 Pro: -37.2 on 2026-09-12, and at +37.2 on 2026-09-19
+            return -1;
+        case 0x45:  // Wave 150i: the #432 report, +45.45
+            return +1;
+        default:
+            return 0;
+    }
+}
+
 constexpr uint32_t kCountsMask = 0xFFFFFF;
 constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
@@ -379,6 +397,7 @@ public:
                 ALPACA_LOG_INFO("SkyWatcher", "Motor board: " + board.model_name + " (mount code " +
                                                   std::to_string(static_cast<int>(board.mount_code)) + "), firmware " +
                                                   board.firmware_version);
+                dec_axis_sense_ = measured_dec_axis_sense(board.mount_code);  // open-astro#458
             } catch (...) {
                 // Identity is cosmetic; a board that will not answer ":e" is
                 // still usable, so never fail the connect over it -- but do
@@ -779,15 +798,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refresh_position_cache_locked(false);
-        // ASCOM convention derived from the dec-axis branch: the branch chosen
-        // for HA >= 0 targets is pierEast (0), the mirror branch pierWest (1).
-        // The same rule in both hemispheres: the goto picks the a2 >= 0
-        // branch for a target at HA >= 0 (see ra_dec_to_axis_degrees_locked),
-        // so reading the branch back off the axis reproduces the side that
-        // get_destination_side_of_pier() computes from hour angle. At the
-        // pole the axis cannot say which branch it is on; the remembered
-        // one answers (open-astro#459).
-        return branch_from_axis_locked(cached_dec_axis_deg_) > 0 ? 0 : 1;
+        // ASCOM convention derived from the dec-axis branch: the side the goto
+        // picks for HA >= 0 targets is pierEast (0), the mirror side
+        // pierWest (1). The goto picks the branch with `k * branch` equal to
+        // the sign of the hour angle (see ra_dec_to_axis_degrees_locked), so
+        // reading `k * branch` back off the axis reproduces the side that
+        // get_destination_side_of_pier() computes from hour angle. `k` is +1
+        // on every board without a measured sense (open-astro#458). At the
+        // pole the axis cannot say which branch it is on; the remembered one
+        // answers (open-astro#459).
+        return home_term_sign_locked() * branch_from_axis_locked(cached_dec_axis_deg_) > 0 ? 0 : 1;
     }
 
     void set_side_of_pier(int side) override {
@@ -2322,6 +2342,9 @@ private:
         board_reset_fault_.clear();
         seen_recovery_epoch_ = protocol_->link_recovery_epoch();
         pointing_branch_ = 1;  // open-astro#459: the a2 >= 0 branch, the pre-#459 answer at home
+        // open-astro#458: a board that will not answer ":e" is an unmeasured
+        // one; never carry the previous connection's sense into this one.
+        dec_axis_sense_ = 0;
         // Both are MEASURED off the mount that was connected, so they must not
         // survive into the next one: a driver instance reconnected to
         // different hardware would otherwise aim a goto ahead by the previous
@@ -2347,6 +2370,19 @@ private:
     // comment). Mechanical motion -- MoveAxis, goto deltas, AutoHome -- never
     // applies this: a signed axis rate means the same thing everywhere.
     double ra_axis_sign_locked() const { return hemisphere_south_locked() ? -1.0 : 1.0; }
+
+    // open-astro#458: the sign `k` of the 6 h home term, `s * eps` for a board
+    // whose dec-axis sense was measured, and +1 for any other board, which
+    // keeps the #432 model it was validated on. Every reader of the dec-axis
+    // branch that means a SIDE OF THE MERIDIAN (the home term, the goto's
+    // branch choice, SideOfPier) goes through `k * branch`; the Dec rate and
+    // guide signs do not, because dec = s * (90 - |a2|) holds on every board.
+    double home_term_sign_locked() const {
+        if (dec_axis_sense_ == 0) {
+            return 1.0;
+        }
+        return ra_axis_sign_locked() * static_cast<double>(dec_axis_sense_);
+    }
 
     // Drops a client offset the host clock has moved out from under. The
     // offset is a snapshot delta against the host clock at the time of the
@@ -2451,23 +2487,27 @@ private:
     // south of it the two differ by 12 h, see the SKY frame note below.
     //
     // SKY frame: the mount faces the visible pole, so south of the equator
-    // the same RA-axis rotation runs the sky's hour angle the other way,
-    // while the 6 h home term does NOT flip -- it is fixed by which side of
-    // the dec axis the OTA is on, not by which pole the mount faces:
-    //   HA = s * (a1/15) + (a2 >= 0 ? +6 : -6),  dec = s * (90 - |a2|),
-    //   with s = +1 north, -1 south. Tracking therefore DEcreases a1 south of
-    //   the equator, which ra_axis_sign_locked() applies to the drive rate.
+    // the same RA-axis rotation runs the sky's hour angle the other way, and
+    // so does the 6 h home term, because a mount facing the other pole is
+    // the same mount turned half a turn about the vertical:
+    //   HA = s * (a1/15) + k * (a2 >= 0 ? +6 : -6),  dec = s * (90 - |a2|),
+    //   with s = +1 north, -1 south, and k = s * eps (home_term_sign_locked()).
+    //   eps is the board's dec-axis count sense, which is wiring, not
+    //   latitude: the board is never told the latitude. Tracking DEcreases a1
+    //   south of the equator, which ra_axis_sign_locked() applies to the
+    //   drive rate. With eps = +1, k = s is exactly indi-eqmod in both
+    //   hemispheres.
     //
-    // KNOWN LIMIT (#458): the 6 h term not flipping with s holds for the two
-    // configurations this was measured on -- an EQM-35 Pro in the south and
-    // the Wave 150i in the north -- and those two cannot tell a hemisphere
-    // effect apart from a per-board dec-axis count sense. Rigid-body geometry
-    // says the term must flip, which makes the general form
-    // `s * eps_board * 6 * branch`. A Synta board in the north or a Wave in
-    // the south is 12 h out until that is settled with a reading per board.
-    //   The ASCOM pier side stays (a2 >= 0) -> pierEast in both hemispheres:
-    //   the branch is chosen from the sky hour angle, so the two agree by
-    //   construction (open-astro#261).
+    // open-astro#458: eps is MEASURED for two boards only, -1 on the EQM-35
+    // Pro (0x32) and +1 on the Wave 150i (0x45); see
+    // measured_dec_axis_sense(). Every other board keeps k = +1, the model it
+    // shipped with, which is right wherever s * eps = +1 and 12 h out in hour
+    // angle wherever s * eps = -1; which of the two applies to an unmeasured
+    // board takes one reading on that board (drive to a1 = 0, a2 = +90 and
+    // see whether the tube ends level east or level west).
+    //   The ASCOM pier side is (k * branch > 0) -> pierEast in both
+    //   hemispheres: the goto chooses the branch from the sky hour angle, so
+    //   the two agree by construction (open-astro#261).
     //
     // History: until open-astro#432 the model read HA = a1/15 (branch A) and
     // a1/15 - 12 (branch B). That is six hours out in the north and, away
@@ -2498,6 +2538,14 @@ private:
     // altitude -20.7, and the reporter photographed the tube about 20 deg
     // below the horizon. The shipped model claims altitude +33.
     //
+    // The fifth (open-astro#458), 2026-09-19, the same EQM-35 Pro with the
+    // 4.0.0 build, still set up facing the south pole but with the driver's
+    // latitude at +37.2, which is a northern mount turned half a turn about
+    // the vertical. For HA -3 h, dec +30 the driver sent a1 = +45, a2 = -60
+    // and reported alt 52, az 87; the saddle ended front-left and slightly
+    // down (SE, about -8 deg), which is HA +9 h, alt -10.7: 12 h out, the k
+    // this build now applies to 0x32 in the north.
+    //
     // Note for anyone tempted to re-derive this from indi-eqmod: its
     // EncoderToHours() is written against its own encoder zero and step
     // direction, and transcribing it cost this fix a wrong sign that only
@@ -2525,7 +2573,8 @@ private:
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec = sky_sign * dec_mech;
         const double ha_hours =
-            wrap_hour_angle(sky_sign * ha_mech_hours + kHomeHourAngleOffsetHours * branch_from_axis_locked(a2));
+            wrap_hour_angle(sky_sign * ha_mech_hours +
+                            home_term_sign_locked() * kHomeHourAngleOffsetHours * branch_from_axis_locked(a2));
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ra = wrap_hours(lst - ha_hours);
         return {ra, std::clamp(dec, -90.0, 90.0)};
@@ -2537,17 +2586,22 @@ private:
         double ha = wrap_hour_angle(lst - ra);
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec_mech = sky_sign * dec;
-        // The branch is chosen from the SKY hour angle in both hemispheres:
+        // The side is chosen from the SKY hour angle in both hemispheres:
         // HA >= 0 (target west of the meridian) puts the OTA on the east side
-        // of the pier, which is the a2 >= 0 branch. get_side_of_pier() reads
-        // the same rule back off the axis, and get_destination_side_of_pier()
-        // states it directly, so all three agree by construction.
-        const double branch = ha >= 0.0 ? 1.0 : -1.0;
+        // of the pier, which is the branch with k * branch > 0 (the a2 >= 0
+        // branch on a board with k = +1, open-astro#458). get_side_of_pier()
+        // reads the same rule back off the axis, and
+        // get_destination_side_of_pier() states it directly, so all three
+        // agree by construction.
+        const double k = home_term_sign_locked();
+        const double side = ha >= 0.0 ? 1.0 : -1.0;
+        const double branch = k * side;
         const double a2 = branch * (90.0 - dec_mech);
-        // HA = sky_sign * a1/15 + 6 * branch, inverted. |a1| <= 90 for every
-        // reachable target, which is the counterweight-never-above-horizontal
-        // rule falling out of the geometry rather than being enforced.
-        const double a1 = sky_sign * (ha - kHomeHourAngleOffsetHours * branch) * kHoursToDegrees;
+        // HA = sky_sign * a1/15 + k * 6 * branch, inverted. k * branch is the
+        // side, so a1 does not depend on k. |a1| <= 90 for every reachable
+        // target, which is the counterweight-never-above-horizontal rule
+        // falling out of the geometry rather than being enforced.
+        const double a1 = sky_sign * (ha - kHomeHourAngleOffsetHours * side) * kHoursToDegrees;
         return {a1, a2};
     }
 
@@ -4270,6 +4324,9 @@ private:
     // command path last committed; the readback's answer inside the pole
     // deadband where the encoder cannot say. See branch_from_axis_locked().
     int pointing_branch_ = 1;
+    // open-astro#458: measured_dec_axis_sense() of the connected board, 0 when
+    // unmeasured or unknown. See home_term_sign_locked().
+    int dec_axis_sense_ = 0;
     mutable bool position_cache_valid_ = false;
     // open-astro#505: set when a recovered link turned out to belong to a
     // board that had restarted (init_done cleared, position registers reset).
