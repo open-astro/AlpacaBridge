@@ -369,6 +369,8 @@ grep -oE "^  '/[^']+'" docs/AlpacaDeviceAPI_v1.yaml | grep -E "^  '/(\{device_ty
 
 For each endpoint, open the relevant section of `docs/AlpacaDeviceAPI_v1.yaml` and read the HTTP verb, parameters, value ranges, response schema, and the documented error behavior. Implement against exactly what the YAML says — parameter names, casing, ranges, and the NotImplemented/NotConnected/InvalidValue semantics are all part of the contract.
 
+For device behavior the YAML does not capture (capability gates, units, completion properties, error selection, ImageBytes, discovery), use the `ascom-alpaca-protocol` skill in `.claude/skills/ascom-alpaca-protocol/`, starting with its `references/alpacabridge-integration.md`.
+
 The device-type API surfaces are:
 
 - Camera: common methods + `Camera`-specific endpoints
@@ -385,20 +387,22 @@ The device-type API surfaces are:
 Key compliance rules:
 - **Every property and method** listed in the API for the device type must be implemented. If the hardware doesn't support a capability, the method must still exist and throw the appropriate ASCOM error (e.g., `PropertyNotImplemented`, `NotConnected`, `InvalidValue`).
 - **Return types and value ranges** must match the spec exactly. RA is in hours (0-24), Dec in degrees (-90 to +90), angles in degrees, exposure in seconds, etc.
-- **Error codes** must use the correct ASCOM error numbers: `0x400` NotImplemented, `0x407` NotConnected, `0x401` InvalidValue, `0x408` InvalidOperation, etc.
+- **Error codes** must use the correct ASCOM error numbers: NotImplemented `0x400`, InvalidValue `0x401`, NotConnected `0x407`, InvalidWhileParked `0x408`, InvalidOperation `0x40B`, etc. (see `AlpacaCore/include/alpacacore/alpaca_errors.h`).
 - **`CanXxx` properties** must accurately reflect hardware capabilities. If `CanPulseGuide` returns true, `PulseGuide` must work. If the hardware doesn't support it, `CanPulseGuide` must return false and `PulseGuide` must throw `MethodNotImplemented`.
-- **Interface version** must match the current ASCOM spec version for the device type (e.g., ICameraV3, ITelescopeV3, IFocuserV3).
+- **Interface version** must match the current ASCOM spec version for the device type — AlpacaBridge advertises Platform 7 versions: Camera 4, Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, ObservingConditions 2 (see `AGENTS.md`).
 - **Common methods** (`Action`, `CommandBlind`, `CommandBool`, `CommandString`, `SupportedActions`) must be implemented on every device.
 - **DeviceState** must return a well-formed property bag with device-type-appropriate operational telemetry.
 
-When in doubt about a behavior, check the spec first, then check how existing drivers in this project handle it, then check INDI/INDIGO for reference.
+When in doubt about a public behavior, the official spec decides. Existing drivers in this project show local structure, and INDI/INDIGO can inform undocumented vendor wire protocols, but neither defines ASCOM behavior.
 
-### Use an existing driver as a template (cross-driver consistency)
+### Match existing driver structure (cross-driver consistency)
 
 Always study the existing drivers of the **same device type** before writing a new one, and
-match their structure, naming, and behavior so every driver of a given type behaves the same
-way. The ASCOM spec defines *what* the contract is; the existing drivers define *how this
-project* satisfies it. New drivers must not invent a divergent shape.
+match their structure, naming, shared infrastructure, and test patterns so every driver of a
+given type is built the same way. Derive public ASCOM behavior (capabilities, error codes,
+units, value ranges, and state transitions) from the official spec, not from another driver.
+If an existing driver disagrees with the spec, follow the spec and flag the driver. New
+drivers must not invent a divergent shape.
 
 Find the closest matching existing driver for the same device type:
 
@@ -749,16 +753,16 @@ Read the entire file; vendor sections are no longer in `AGENTS.md`.
 
 Apply any vendor-specific quirks, workarounds, or conventions documented there.
 
-## Step 10 — ConformU validation (MANDATORY — both platforms)
+## Step 10 — ConformU validation (MANDATORY — Linux arm64)
 
 **SAFETY: never run the telescope ConformU suite with an OTA mounted.** The suite slews at
 maximum rate to targets halfway to the horizon, aborts mid-slew, and forces meridian flips;
 mid-slew arcs can dip to ~5 degrees altitude. Validate on a bare mount. See /conformu for the
 full hard rule.
 
-After the driver builds and unit tests pass, the user MUST run ConformU against the driver with real hardware on **both target platforms**. A driver is NOT complete until it has ConformU results for both architectures.
+After the driver builds and unit tests pass, the user MUST run ConformU against the driver with real hardware on **Linux arm64**, the only supported target. A driver is NOT complete until it has arm64 ConformU results.
 
-**ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Current version: 4.3.0.
+**ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Use 4.5.1+ on arm64; 4.5.0 has a known arm64 timing defect (see `AGENTS.md`).
 
 ### Required validation matrix
 

@@ -72,6 +72,7 @@ def check(root=ROOT):
     documents = canonical + [root / 'docs/agent-instructions.md']
     documents += list((root / 'docs/failures').glob('*.md'))
     documents += list((root / 'docs/decisions').glob('*.md'))
+    documents += list((root / '.claude/skills').rglob('*.md'))
     for path in documents:
         if not path.is_file():
             continue
