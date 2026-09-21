@@ -12,9 +12,11 @@ Common build and runtime issues for AlpacaBridge.
 
 ### Test framework not found
 
-**Warning**: `No test framework found. Install Catch2 or doctest to build tests.`
+**Warning**: `Catch2 not found. Install Catch2 (v2 or v3) to build AlpacaCore tests.`
 
-**Solution**: `sudo apt install catch2`, or disable tests: `cmake .. -DALPACACORE_BUILD_TESTS=OFF`
+**Solution**: `sudo apt install catch2`. A manual CMake configure can opt out instead with
+`cmake .. -DALPACACORE_BUILD_TESTS=OFF`, but `run_all_tests.sh` and `scripts/ci_preflight.sh`
+always build the tests, so Catch2 is required for those.
 
 ### Vendor SDK not found
 
