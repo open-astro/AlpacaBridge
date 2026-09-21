@@ -27,7 +27,7 @@ All contributions must be licensed under the GNU Affero General Public License v
 
 ## Testing
 
-All non-trivial code must have unit tests. Use Catch2 or doctest for testing.
+All non-trivial code must have unit tests. Use Catch2 (v2 or v3) for testing.
 
 ## Conformance Logs
 
