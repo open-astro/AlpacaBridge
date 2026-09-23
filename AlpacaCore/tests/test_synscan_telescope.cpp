@@ -381,6 +381,15 @@ TEST_CASE("SynScan Telescope Driver - SideOfPier flips with hemisphere", "[synsc
         if (!chunk.empty() && chunk[0] == 'p') {
             return std::string(1, pier_state.load()) + "#";
         }
+        // "w" (location query): set_site_latitude() below reads the current
+        // location before overwriting it, and current_location_locked()
+        // calls get_location() directly (uncaught) when nothing is cached
+        // yet, so this must answer with a well-formed 8-byte reply or the
+        // set_site_latitude() call below times out. Value is irrelevant
+        // (0N/0E): it is immediately overwritten by set_site_latitude().
+        if (chunk.size() == 1 && chunk[0] == 'w') {
+            return std::string(8, '\0') + "#";
+        }
         return std::string("0#");
     });
     REQUIRE(server.ok());
