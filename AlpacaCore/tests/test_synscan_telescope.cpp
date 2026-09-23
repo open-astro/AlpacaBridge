@@ -367,4 +367,48 @@ TEST_CASE("SynScan Telescope Driver - a far-off client UTCDate is logged once pe
     driver->set_connected(false);
 }
 
+// open-astro#243: ConformU on a southern-hemisphere EQM-35 Pro (lat -37)
+// reported pierWest on both sides of the meridian because
+// map_pointing_state_to_side() ignored site latitude. A responder that
+// answers the "p" pointing-state query with a controllable byte drives
+// get_side_of_pier() through both raw states in both hemispheres.
+TEST_CASE("SynScan Telescope Driver - SideOfPier flips with hemisphere", "[synscan][telescope][unit]") {
+    std::atomic<char> pier_state{'W'};
+    alpacacore::test::FakeMountServer server([&](const std::string& chunk) -> std::string {
+        if (chunk.size() >= 2 && chunk[0] == 'K') {
+            return std::string(1, chunk[1]) + "#";
+        }
+        if (!chunk.empty() && chunk[0] == 'p') {
+            return std::string(1, pier_state.load()) + "#";
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver =
+        alpacacore::vendor::synscan::create_synscan_telescope(0, conn, alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    // Northern hemisphere (default cached latitude 0.0, treated as north):
+    // 'W' -> pierEast (0), 'E' -> pierWest (1).
+    pier_state.store('W');
+    CHECK(driver->get_side_of_pier() == 0);
+    pier_state.store('E');
+    CHECK(driver->get_side_of_pier() == 1);
+
+    // Southern hemisphere: the mapping flips.
+    driver->set_site_latitude(-37.0);
+    pier_state.store('W');
+    CHECK(driver->get_side_of_pier() == 1);
+    pier_state.store('E');
+    CHECK(driver->get_side_of_pier() == 0);
+
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

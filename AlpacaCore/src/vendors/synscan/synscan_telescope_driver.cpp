@@ -687,6 +687,9 @@ public:
     int get_side_of_pier() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        if (!site_info_valid_) {
+            ensure_site_info_cached_locked();
+        }
         try {
             char side = SynScanProtocolWrapper::instance().get_pointing_state();
             side_of_pier_cached_ = map_pointing_state_to_side(side);
@@ -1507,15 +1510,22 @@ public:
     }
 
 private:
-    static int map_pointing_state_to_side(char side) {
-        // SynScan 'W' = pointing west → OTA east of pier (HA > 0) → ASCOM pierEast (0).
-        // SynScan 'E' = pointing east → OTA west of pier (HA < 0) → ASCOM pierWest (1).
-        // TODO: Adjust mapping for southern hemisphere per SynScan pointing-state rules.
+    // North of the equator: SynScan 'W' = pointing west → OTA east of pier
+    // (HA > 0) → ASCOM pierEast (0); 'E' = pointing east → OTA west of pier
+    // (HA < 0) → ASCOM pierWest (1). South of the equator the mount's
+    // hour-angle sense is mirrored (same rationale as SkyWatcher's
+    // hemisphere_south_locked()/ra_axis_sign_locked(), which flips HA sign
+    // for the same reason), so the two ASCOM sides swap: 'W' → pierWest (1),
+    // 'E' → pierEast (0). open-astro#243: ConformU on a southern-hemisphere
+    // EQM-35 Pro observed pierWest on both sides of the meridian because this
+    // mapping never consulted latitude.
+    int map_pointing_state_to_side(char side) const {
+        const bool south = site_latitude_cached_ < 0.0;
         if (side == 'W') {
-            return 0;
+            return south ? 1 : 0;
         }
         if (side == 'E') {
-            return 1;
+            return south ? 0 : 1;
         }
         return -1;
     }
