@@ -256,12 +256,29 @@ AlpacaBridge/
 +- debian/                            # Debian packaging
 +- docs/                              # Documentation
 +- AGENTS.md                          # AI driver development guide
++- CONTEXT.md                         # Domain glossary
 +- SUPPORTED-DRIVERS.md               # ConformU-validated driver matrix
 +- CHANGELOG.md                       # Release notes
 +- build_and_run.sh                   # Build and start server
 +- run_all_tests.sh                   # Run all test suites
 +- install_alpaca_service.sh          # Install as systemd service
 ```
+
+## Modules
+
+The HTTP → contract → vendor driver → SDK boundary above is being deepened into
+six named modules, one PR-sized slice at a time ([design review #584](https://github.com/open-astro/AlpacaBridge/issues/584)).
+Use these names in issues, PRs and records. Domain terms are defined in
+[CONTEXT.md](../CONTEXT.md).
+
+| Module | What it owns | State |
+|--------|--------------|-------|
+| Device Catalog | One descriptor per (vendor, device) declaring its config fields, roles and construction; AlpacaHTTP bridges JSON once and serves the schema | Planned; [decision 0004](decisions/0004-device-catalog.md) |
+| HTTP route bundles | The router's per-device-type routes, one bundle per Alpaca device type; the common `dispatch_device_method` stays in the router | Planned |
+| Task clock | Every driver wait and deadline, through one injectable clock with a fake for tests | Planned; [decision 0005](decisions/0005-task-clock.md) |
+| Async operation slot | One cancellable, generation-tagged background body per slot, telling cancelled from superseded; piloted on the SkyWatcher telescope | Planned; decision record written as proposed with the pilot |
+| State snapshot | Device state measured once and served to getters and DeviceState without a device transaction | Planned; decision record written as proposed with the pilot |
+| SDK seams | An abstract SDK interface per vendor library with real, fake and locked adapters, so driver paths test without hardware | In place for QHY, ToupTek and gphoto (rules in [AGENTS.md](../AGENTS.md#hardware-free-driver-tests-via-the-sdk-seam-touptek-qhy-and-gphoto--extend-to-other-vendors)) |
 
 ## Threading model
 

@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -395,6 +396,86 @@ TEST_CASE("OnStep Telescope Driver - a slow mount ack does not turn an accurate 
     // either way.
     REQUIRE(elapsed > kThreshold);
     CHECK(warns.load() == 0);
+    driver->set_connected(false);
+}
+
+// #627: `x < min || x > max` is false for NaN, so NaN passed every range check
+// and was stored (targets, elevation) or reached the mount (the site latitude
+// and longitude setters check the connection only AFTER the range, so a NaN
+// used to surface as NotConnected instead of InvalidValue).
+TEST_CASE("OnStep Telescope Driver - non-finite input is rejected", "[onstep][telescope][unit][nonfinite]") {
+    auto driver = make_driver(0);
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    SECTION("TargetDeclination") {
+        require_alpaca_error([&]() { driver->set_target_declination(nan); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    }
+    SECTION("TargetRightAscension") {
+        require_alpaca_error([&]() { driver->set_target_right_ascension(nan); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); },
+                             alpacacore::AlpacaError::ValueNotSet);
+    }
+    SECTION("SiteElevation") {
+        require_alpaca_error([&]() { driver->set_site_elevation(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SiteLatitude") {
+        require_alpaca_error([&]() { driver->set_site_latitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SiteLongitude") {
+        require_alpaca_error([&]() { driver->set_site_longitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+}
+
+// #627: `validate_ra_dec` is `ra < 0 || ra >= 24` / `dec < -90 || dec > 90`,
+// both false for NaN, so a NaN coordinate went through slew and sync to the
+// mount. Both check the connection before validating, so this needs a
+// connected driver.
+TEST_CASE("OnStep Telescope Driver - non-finite slew and sync coordinates are rejected",
+          "[onstep][telescope][unit][nonfinite]") {
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) {
+        if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
+            return std::string("1");
+        }
+        if (chunk.size() >= 2 && chunk[0] == 'K') {
+            return std::string(1, chunk[1]) + "#";
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    SECTION("SlewToCoordinatesAsync RightAscension") {
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(nan, 45.0); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SlewToCoordinatesAsync Declination") {
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, nan); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SyncToCoordinates RightAscension") {
+        require_alpaca_error([&]() { driver->sync_to_coordinates(nan, 45.0); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SyncToCoordinates Declination") {
+        require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    // The alt/az entry points convert to RA/Dec through their own range check
+    // (compute_alt_az_target_locked), which NaN also passed.
+    SECTION("SlewToAltAzAsync Altitude") {
+        require_alpaca_error([&]() { driver->slew_to_alt_az_async(nan, 90.0); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SlewToAltAzAsync Azimuth") {
+        require_alpaca_error([&]() { driver->slew_to_alt_az_async(45.0, nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+
     driver->set_connected(false);
 }
 

@@ -16,6 +16,7 @@
 #include <alpacacore/version.h>
 
 #include <functional>
+#include <limits>
 
 #include "catch2_compat.h"
 
@@ -319,4 +320,57 @@ TEST_CASE("Bisque Telescope Driver - the two target properties are independent",
     driver->set_target_declination(-30.25);
     CHECK(driver->get_target_right_ascension() == 7.25);
     CHECK(driver->get_target_declination() == -30.25);
+}
+
+// #627: `x < min || x > max` is false for NaN, so NaN passed every range check
+// below and was stored. Every setter validates before it touches the mount, so
+// a disconnected driver is enough to prove each one.
+TEST_CASE("Bisque Telescope Driver - non-finite input is rejected", "[bisque][telescope][unit][nonfinite]") {
+    alpacacore::vendor::bisque::ConnectionInfo conn;
+    conn.host = "localhost";
+    conn.tcp_port = 3040;
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+
+    SECTION("TargetDeclination") {
+        require_alpaca_error([&]() { driver->set_target_declination(nan); }, alpacacore::AlpacaError::InvalidValue);
+        // Nothing was stored: the property still reads as never written.
+        require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    }
+    SECTION("TargetRightAscension") {
+        require_alpaca_error([&]() { driver->set_target_right_ascension(nan); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); },
+                             alpacacore::AlpacaError::ValueNotSet);
+    }
+    SECTION("SiteElevation") {
+        driver->set_site_elevation(120.0);
+        require_alpaca_error([&]() { driver->set_site_elevation(nan); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_site_elevation() == 120.0);
+    }
+    SECTION("SiteLatitude") {
+        driver->set_site_latitude(35.0);
+        require_alpaca_error([&]() { driver->set_site_latitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_site_latitude() == 35.0);
+    }
+    SECTION("SiteLongitude") {
+        driver->set_site_longitude(-106.0);
+        require_alpaca_error([&]() { driver->set_site_longitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_site_longitude() == -106.0);
+    }
+    // Bisque's guide-rate setter has no range check at all, so infinity gets
+    // through as well as NaN.
+    SECTION("GuideRateRightAscension") {
+        const auto before = driver->get_guide_rate();
+        require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_guide_rate().ra == before.ra);
+    }
+    SECTION("GuideRateDeclination") {
+        const auto before = driver->get_guide_rate();
+        require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_guide_rate({0.004, -inf}); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_guide_rate().dec == before.dec);
+    }
 }

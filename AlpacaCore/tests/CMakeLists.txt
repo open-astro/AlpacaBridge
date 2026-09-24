@@ -32,6 +32,7 @@ set(TEST_SOURCES
     test_serial_by_id_scan.cpp
     test_stress_call_guard.cpp
     test_synscan_handset_probe.cpp
+    test_telescope_driver_watchdog.cpp
     test_units.cpp
     test_version_format.cpp
 )
@@ -46,6 +47,8 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_asiair_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_asiair_plus_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_telescope.cpp)
+    # Async slew failure surfaces through Slewing (issue #575).
+    list(APPEND TEST_SOURCES test_zwo_async_slew_failure.cpp)
 endif()
 
 if(TARGET alpacacore_qhy)
@@ -71,6 +74,8 @@ if(TARGET alpacacore_synscan)
     # destruction; run under the sanitizers-tsan CI job (issue #101).
     list(APPEND TEST_SOURCES test_synscan_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_synscan_async_park.cpp)
+    # Async slew failure surfaces through Slewing (issue #575).
+    list(APPEND TEST_SOURCES test_synscan_async_slew_failure.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
@@ -78,12 +83,16 @@ if(TARGET alpacacore_skywatcher)
         test_skywatcher_pointing.cpp)
     # Telescope [stress] coverage over the loopback UDP fake (issue #271).
     list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
+    # Async slew failure surfaces through Slewing (issue #575).
+    list(APPEND TEST_SOURCES test_skywatcher_async_slew_failure.cpp)
 endif()
 if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope.cpp test_ioptron_ieaf_focuser.cpp
         test_ioptron_filterwheel.cpp)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_ioptron_concurrency_stress.cpp)
+    # Async slew failure surfaces through Slewing (issue #575).
+    list(APPEND TEST_SOURCES test_ioptron_async_slew_failure.cpp)
     # The PowerBox Switch test only builds when its driver was compiled in
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_IOPTRON_POWERBOX)
@@ -136,6 +145,8 @@ if(TARGET alpacacore_celestron)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_celestron_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_celestron_async_park.cpp)
+    # Async slew failure surfaces through Slewing (issue #575).
+    list(APPEND TEST_SOURCES test_celestron_async_slew_failure.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)

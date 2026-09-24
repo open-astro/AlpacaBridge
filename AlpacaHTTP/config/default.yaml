@@ -23,6 +23,7 @@ server:
   location: ""
   profile_name: ""  # Friendly profile name shown in the web UI header and exposed via the management API. Env: ALPACAHTTP_PROFILE_NAME
   sync_system_clock_from_clients: true  # On an NTP-less host, step the system clock from a client's Telescope.UTCDate write. Never touches an NTP-disciplined clock.
+  motion_watchdog_seconds: 30  # While a goto or MoveAxis is running, stop the mount if no Alpaca request has reached the telescope for this long (client crashed, host asleep, network gone). Never fires on a tracking- or guiding-only mount. Connected stays true. 0 disables. Env: ALPACAHTTP_MOTION_WATCHDOG_SECONDS
 
 # Device enable/disable (optional)
 # devices:

@@ -104,10 +104,10 @@ void alt_az_to_ra_dec(double alt_deg, double az_deg, double lat_deg, double lst_
 }
 
 void validate_ra_dec(double ra, double dec, const char* context) {
-    if (ra < 0.0 || ra >= 24.0) {
+    if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
         throw AlpacaException(std::string(context) + ": RA out of range", AlpacaError::InvalidValue);
     }
-    if (dec < -90.0 || dec > 90.0) {
+    if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
         throw AlpacaException(std::string(context) + ": Dec out of range", AlpacaError::InvalidValue);
     }
 }
@@ -605,7 +605,7 @@ public:
     double get_site_elevation() const override { return site_elevation_m_; }
 
     void set_site_elevation(double elevation) override {
-        if (elevation < -300.0 || elevation > 10000.0) {
+        if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters", AlpacaError::InvalidValue);
         }
         // Client-side only: the LX200/OnStep protocol has no elevation command.
@@ -620,7 +620,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (latitude < -90.0 || latitude > 90.0) {
+        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -644,7 +644,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (longitude < -180.0 || longitude > 180.0) {
+        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -671,7 +671,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        if (dec < -90.0 || dec > 90.0) {
+        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
             throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
         target_dec_degrees_ = dec;
@@ -686,7 +686,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        if (ra < 0.0 || ra >= 24.0) {
+        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
             throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours", AlpacaError::InvalidValue);
         }
         target_ra_hours_ = ra;
@@ -1006,10 +1006,10 @@ private:
     }
 
     void compute_alt_az_target_locked(double altitude, double azimuth, double& ra_out, double& dec_out) const {
-        if (altitude < -90.0 || altitude > 90.0) {
+        if (!std::isfinite(altitude) || altitude < -90.0 || altitude > 90.0) {
             throw AlpacaException("Altitude out of range", AlpacaError::InvalidValue);
         }
-        if (azimuth < 0.0 || azimuth > 360.0) {
+        if (!std::isfinite(azimuth) || azimuth < 0.0 || azimuth > 360.0) {
             throw AlpacaException("Azimuth out of range", AlpacaError::InvalidValue);
         }
         ensure_site_info_cached_locked();

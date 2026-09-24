@@ -186,8 +186,18 @@ private:
     // about a second, while the reactor must never block in anything but
     // poll() (.github/instructions/alpaca-http-conformance.instructions.md) --
     // a stalled reactor delays every parked keep-alive connection's next
-    // request, which is the cost this change exists to avoid. Wakes every
-    // 31 s, or immediately when stop() sets the flag.
+    // request, which is the cost this change exists to avoid.
+    //
+    // open-astro#547 retasked this same thread to also tick the client-
+    // silence motion watchdog, for the identical reason: Router::
+    // run_motion_watchdogs()'s mount I/O (get_slewing()/abort_slew(), up to
+    // the transport timeout) belongs off the reactor too, and a second timer
+    // thread per concern would be a thread per device's worth of complexity
+    // for no benefit (issue #234's keep-alive reactor lesson). The loop now
+    // wakes every 1 s (the watchdog's cadence) rather than once per RTC
+    // period, and refreshes the RTC probe only when that longer period has
+    // separately elapsed -- see rtc_probe_loop()'s definition. Still wakes
+    // immediately when stop() sets the flag.
     std::thread rtc_probe_thread_;
     std::mutex rtc_probe_mutex_;
     std::condition_variable rtc_probe_cv_;

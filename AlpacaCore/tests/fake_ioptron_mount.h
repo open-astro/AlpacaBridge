@@ -45,6 +45,10 @@ public:
     bool ok() const { return server_.ok(); }
     int port() const { return server_.port(); }
 
+    /// open-astro#575: answer ":MS1"/":MS2" with "0" (GOTO rejected, as the
+    /// firmware does for a target below the altitude limit) instead of "1".
+    void set_reject_goto(bool reject) { reject_goto_.store(reject); }
+
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return commands_;
@@ -117,6 +121,9 @@ private:
             return "1";
         }
         if (cmd == ":MS1#" || cmd == ":MS2#") {
+            if (reject_goto_.load()) {
+                return "0";  // rejected: nothing moves
+            }
             // Land at the target plus the firmware's final-approach error.
             ra_units_.store(pending_ra_ + static_cast<long long>(landing_error_arcsec_ * 100.0));
             dec_units_.store(pending_dec_);
@@ -142,6 +149,7 @@ private:
     long long pending_dec_ = 0;
     std::atomic<long long> ra_units_{0};
     std::atomic<long long> dec_units_{0};
+    std::atomic<bool> reject_goto_{false};
     FakeMountServer server_;
 };
 

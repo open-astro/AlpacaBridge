@@ -522,6 +522,149 @@ TEST_CASE("SkyWatcher async - MoveAxis stop task clears Slewing and restores tra
     driver->set_connected(false);
 }
 
+namespace {
+// Counts ERROR-level "telescope" log lines mentioning the #547 watchdog, so
+// a case can assert it fired (or didn't) without depending on log text
+// beyond the one word that identifies it.
+struct WatchdogLogGuard {
+    alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+    std::atomic<int> count{0};
+    WatchdogLogGuard() {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Error && component == "telescope" &&
+                    message.find("watchdog") != std::string_view::npos) {
+                    ++count;
+                }
+            });
+    }
+    ~WatchdogLogGuard() { alpacacore::logging::set_log_sink(previous); }
+};
+}  // namespace
+
+// open-astro#547: the client-silence motion watchdog. Written RED FIRST
+// against unmodified code -- before TelescopeDriver grew
+// note_client_activity()/stop_motion_if_client_silent(), this case (and the
+// three below it) failed to COMPILE (no such member on TelescopeDriver),
+// which is the compile-time form of red for a seam that does not exist yet.
+TEST_CASE("SkyWatcher async - client-silence watchdog stops a moving axis after the interval",
+          "[skywatcher][async][watchdog]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    WatchdogLogGuard log_guard;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->note_client_activity(t0);
+    driver->move_axis(0, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    REQUIRE(driver->get_slewing());
+    const int stops_before = mount.stop_count(1);
+
+    REQUIRE(driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(31), std::chrono::seconds(30)));
+
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 5000));
+    CHECK(mount.stop_count(1) > stops_before);
+    REQUIRE_FALSE(driver->get_slewing());
+    CHECK(log_guard.count.load() == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - client-silence watchdog never trips while a client keeps polling",
+          "[skywatcher][async][watchdog]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    WatchdogLogGuard log_guard;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->note_client_activity(t0);
+    driver->move_axis(0, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    // A client polling every second (well inside the 30 s interval) must
+    // never see the watchdog fire, however long the slew runs.
+    for (int i = 1; i <= 45; ++i) {
+        const auto tick = t0 + std::chrono::seconds(i);
+        driver->note_client_activity(tick);
+        REQUIRE_FALSE(driver->stop_motion_if_client_silent(tick, std::chrono::seconds(30)));
+    }
+    CHECK(mount.axis_running(1));
+    CHECK(driver->get_slewing());
+    CHECK(log_guard.count.load() == 0);
+
+    driver->move_axis(0, 0.0);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - client-silence watchdog never trips a tracking-only mount",
+          "[skywatcher][async][watchdog]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    WatchdogLogGuard log_guard;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->note_client_activity(t0);
+    REQUIRE_FALSE(driver->get_slewing());
+    const int stops_before = mount.stop_count(1);
+
+    // Ten minutes of silence on a mount that is only tracking, never armed
+    // because Slewing was never true.
+    REQUIRE_FALSE(driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(600), std::chrono::seconds(30)));
+
+    CHECK(driver->get_tracking());
+    CHECK(mount.stop_count(1) == stops_before);
+    CHECK(log_guard.count.load() == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - client-silence watchdog never trips on a pulse guide", "[skywatcher][async][watchdog]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    WatchdogLogGuard log_guard;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->note_client_activity(t0);
+    driver->pulse_guide(0, 3000);  // North, 3 s
+    REQUIRE(driver->get_is_pulse_guiding());
+    REQUIRE_FALSE(driver->get_slewing());
+
+    REQUIRE_FALSE(driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(31), std::chrono::seconds(30)));
+
+    CHECK(log_guard.count.load() == 0);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - client-silence watchdog is disabled by a non-positive interval",
+          "[skywatcher][async][watchdog]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    WatchdogLogGuard log_guard;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->note_client_activity(t0);
+    driver->move_axis(0, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    REQUIRE_FALSE(driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(600), std::chrono::seconds(0)));
+    CHECK(mount.axis_running(1));
+    CHECK(log_guard.count.load() == 0);
+
+    driver->move_axis(0, 0.0);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
+    driver->set_connected(false);
+}
+
 TEST_CASE(
     "SkyWatcher async - independent MoveAxis stops on both axes do not strand Slewing "
     "or block the RA tracking restore",

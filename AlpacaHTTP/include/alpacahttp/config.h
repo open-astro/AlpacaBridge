@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/motion_policy.h>
 
 #include <cstdint>
 #include <optional>
@@ -55,6 +56,12 @@ public:
     // hardware RTC. Settable for the same reason the keep-alive cap is:
     // a test cannot wait out the default (kRtcProbeRateLimit + 1 s).
     int rtc_probe_interval_seconds() const { return rtc_probe_interval_seconds_; }
+    // open-astro#547: how long a telescope may go without any client request
+    // reaching it while it is slewing before the client-silence motion
+    // watchdog stops it. 0 disables the watchdog. Default matches
+    // AlpacaCore's kClientSilenceStopInterval (util/motion_policy.h), the
+    // shared home for this and open-astro#521's relink window.
+    int motion_watchdog_seconds() const { return motion_watchdog_seconds_; }
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
     int log_retention_days() const { return log_retention_days_; }
@@ -95,6 +102,13 @@ public:
         if (seconds < 1) seconds = 1;
         rtc_probe_interval_seconds_ = seconds;
     }
+    // open-astro#547: 0 = disabled, clamped up from any negative value; no
+    // upper clamp (unlike the RTC probe seam, an operator may legitimately
+    // want longer than the default for a slow-polling client).
+    void set_motion_watchdog_seconds(int seconds) {
+        if (seconds < 0) seconds = 0;
+        motion_watchdog_seconds_ = seconds;
+    }
     void set_log_directory(const std::string& dir) { log_directory_ = dir; }
     void set_file_logging_enabled(bool enabled) { file_logging_enabled_ = enabled; }
     void set_log_retention_days(int days) { log_retention_days_ = days; }
@@ -130,6 +144,8 @@ private:
     static constexpr int kDefaultRtcProbeIntervalSeconds =
         static_cast<int>(alpacacore::util::HostClock::kRtcProbeRateLimit.count()) + 1;
     int rtc_probe_interval_seconds_ = kDefaultRtcProbeIntervalSeconds;
+    // open-astro#547.
+    int motion_watchdog_seconds_ = static_cast<int>(alpacacore::util::kClientSilenceStopInterval.count());
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever

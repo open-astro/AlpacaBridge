@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -374,6 +375,63 @@ TEST_CASE("iOptron Telescope Driver - a far-off client UTCDate is logged once pe
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->set_utc_date(far);
     CHECK(warns.load() == 2);
+    driver->set_connected(false);
+}
+
+// #627: `x < min || x > max` is false for NaN. The elevation setter is the one
+// iOptron setter that validates without a connection, so it is the one that
+// stored NaN on a disconnected driver; the others are covered while connected.
+TEST_CASE("iOptron Telescope Driver - non-finite site elevation is rejected", "[ioptron][telescope][unit][nonfinite]") {
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
+
+    driver->set_site_elevation(120.0);
+    require_alpaca_error([&]() { driver->set_site_elevation(std::numeric_limits<double>::quiet_NaN()); },
+                         alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_site_elevation() == 120.0);
+}
+
+// #627: the guide-rate range check is `fraction < 0 || fraction > 1`, which NaN
+// passes, so a NaN rate was stored (and, for iOptron, clamped to NaN and
+// written to the mount). The finite check runs before the connection check,
+// like every other parameter validation, so a disconnected driver proves it.
+TEST_CASE("iOptron Telescope Driver - non-finite guide rate is rejected", "[ioptron][telescope][unit][nonfinite]") {
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+// #627: iOptron's site latitude and longitude setters take the mutex and check
+// the connection before validating, so unlike the other vendors their NaN
+// path needs a connected driver.
+TEST_CASE("iOptron Telescope Driver - non-finite site latitude and longitude are rejected",
+          "[ioptron][telescope][unit][nonfinite]") {
+    alpacacore::test::FakeMountServer server;
+    REQUIRE(server.ok());
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    SECTION("SiteLatitude") {
+        require_alpaca_error([&]() { driver->set_site_latitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SiteLongitude") {
+        require_alpaca_error([&]() { driver->set_site_longitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
     driver->set_connected(false);
 }
 

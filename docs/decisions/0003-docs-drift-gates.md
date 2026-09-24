@@ -1,12 +1,14 @@
 # Keep documentation drift checks beside the facts they enforce
 
+Status: accepted
+
 ## Context
 
 Several repo facts were written twice and silently diverged: build options and their table, tool pins and suppressions, blocking `get_connected()` rosters, SDK seam method lists, TSan run/guard pairs, and path references. The checker records the issue history for each rule in its docstring and beside the implementation.
 
 ## Decision
 
-`scripts/check_docs_drift.py` derives or compares each fact from its owning files and runs in CI and pre-flight. Its path-reference check covers `AGENTS.md`, scoped instruction files, agent-skills docs in `docs/agents/`, Claude skill docs in `.claude/skills/`, and the records in `docs/failures/` and `docs/decisions/`. References to decision records in first-party code comments must resolve. A vendored reference doc that is generated from a repo file pins that file's hash so the two cannot diverge: the `ascom-alpaca-protocol` skill pins the LF-normalized SHA-256 of `docs/AlpacaDeviceAPI_v1.yaml`, which `/driver-build` Step 0 refreshes from upstream. Extractor logic has literal self-test fixtures where a regex or pairing error could otherwise make a check vacuously green.
+`scripts/check_docs_drift.py` derives or compares each fact from its owning files and runs in CI and pre-flight. Its path-reference check covers `AGENTS.md`, `CONTEXT.md`, scoped instruction files, agent-skills docs in `docs/agents/`, Claude skill docs in `.claude/skills/`, and the records in `docs/failures/` and `docs/decisions/`. References to decision records in first-party code comments must resolve. A vendored reference doc that is generated from a repo file pins that file's hash so the two cannot diverge: the `ascom-alpaca-protocol` skill pins the LF-normalized SHA-256 of `docs/AlpacaDeviceAPI_v1.yaml`, which `/driver-build` Step 0 refreshes from upstream. Extractor logic has literal self-test fixtures where a regex or pairing error could otherwise make a check vacuously green.
 
 ## Alternatives rejected
 
@@ -14,7 +16,7 @@ Maintain prose-only reminders: the blocking-getter roster and TSan commands alre
 
 ## Consequences
 
-New instruction or memory files must be included in path validation; new duplicated facts need an explicit comparison or one authoritative owner. Checker changes should include a fixture that fails for the drift they claim to catch. Path-reference check 7 and the instruction-structure link check take a `root` and are fixture-driven (issue #452). Floors are still partial and the residue is deferred, not decided against: inside check 7 the `.github/instructions/` loop and the `docs/failures`/`docs/decisions` loop have no `MIN_*` of their own (only `docs/agents/` and `.claude/skills/` do), and the other docs-drift checks have neither a root seam nor a floor.
+New instruction or memory files must be included in path validation; new duplicated facts need an explicit comparison or one authoritative owner. Checker changes should include a fixture that fails for the drift they claim to catch. Path-reference check 7 and the instruction-structure link check take a `root` and are fixture-driven (issue #452). Floors are still partial and the residue is deferred, not decided against: inside check 7 the `.github/instructions/` loop, the `docs/failures`/`docs/decisions` loop and the `CONTEXT.md` scan (which passes floor 0) have no `MIN_*` of their own (only `docs/agents/` and `.claude/skills/` do), and the other docs-drift checks have neither a root seam nor a floor.
 
 ## Links
 
