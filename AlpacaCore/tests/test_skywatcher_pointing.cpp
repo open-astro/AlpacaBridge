@@ -1145,4 +1145,146 @@ TEST_CASE("SkyWatcher pointing - an unmeasured board keeps the #432 model in bot
     }
 }
 
+// A plate-solving client syncs on a target, slews away and slews back. The
+// only other sync in this file is at the exact pole (#459), so nothing here
+// pinned a sync anywhere else, or that a goto after it still lands on the
+// sky. The return trip has to put the tube back where the sync was made;
+// a1 is allowed to differ by the sidereal motion tracking adds while the test
+// runs (15 deg an hour, so 1.5 deg is six minutes).
+TEST_CASE("SkyWatcher pointing - a sync away from the pole survives a goto and the way back, south",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    const double latitude = -35.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+    driver->set_connected(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double sync_ra = std::fmod(lst - 2.0 + 24.0, 24.0);  // HA +2 h
+    const double sync_dec = -30.0;
+    driver->sync_to_coordinates(sync_ra, sync_dec);
+
+    // A sync is the controller's ":E" count re-stamp: no motor moves, so the
+    // axes stay physically at home while the driver's frame jumps to the
+    // synced target. That is why the landings below are judged by the
+    // driver's own readback and by where the axes really are relative to the
+    // sync, never through sky_from_axes()/check_landing(), which assume the
+    // physical axes and the counts share one frame.
+    CHECK(std::abs(mount.physical_degrees(1)) < 0.1);
+    CHECK(std::abs(mount.physical_degrees(2)) < 0.1);
+    CHECK(std::abs(wrap_ha(driver->get_right_ascension() - sync_ra)) < kHaToleranceHours);
+    CHECK(std::abs(driver->get_declination() - sync_dec) < kDecToleranceDegrees);
+    CHECK(driver->get_side_of_pier() == 0);
+
+    driver->set_tracking(true);
+
+    // Same side of the meridian, different HA and dec: no flip involved. The
+    // tube has to move, and the readback has to follow the new target.
+    const double other_ra = std::fmod(lst - 4.0 + 24.0, 24.0);  // HA +4 h
+    const double other_dec = -55.0;
+    const LandedFrame away = land(*driver, mount, other_ra, other_dec);
+    INFO("away: physical a1=" << away.a1 << " a2=" << away.a2);
+    CHECK(std::abs(wrap_ha(away.reported_ra - other_ra)) < kHaToleranceHours);
+    CHECK(std::abs(away.reported_dec - other_dec) < kDecToleranceDegrees);
+    CHECK(away.side_of_pier == 0);
+    CHECK(std::abs(away.a1) > 10.0);
+    CHECK(std::abs(away.a2) > 10.0);
+
+    // Back on the synced target the tube is where the sync was made, i.e.
+    // home, apart from the tracking drift.
+    const LandedFrame back = land(*driver, mount, sync_ra, sync_dec);
+    INFO("back: physical a1=" << back.a1 << " a2=" << back.a2);
+    CHECK(std::abs(wrap_ha(back.reported_ra - sync_ra)) < kHaToleranceHours);
+    CHECK(std::abs(back.reported_dec - sync_dec) < kDecToleranceDegrees);
+    CHECK(back.side_of_pier == 0);
+    CHECK(std::abs(back.a2) < 0.05);
+    CHECK(std::abs(back.a1) < 1.5);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// A west goto, an east goto (the flip), and a west goto again. The existing
+// west and east cases each start from home; the other branch changes in this
+// file all start or end at the pole (#459). None goes from one side of the
+// meridian to the other and back. The return to the first target has to reproduce the
+// first landing's axes: a2 exactly (it does not depend on time), a1 within the
+// tracking drift while the test runs.
+TEST_CASE("SkyWatcher pointing - consecutive meridian flips return to the same axes, south",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    const double latitude = -35.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double west_ra = std::fmod(lst - 2.0 + 24.0, 24.0);  // HA +2 h
+    const double west_dec = -30.0;
+    const double east_ra = std::fmod(lst + 2.5, 24.0);  // HA -2.5 h
+    const double east_dec = -50.0;
+    REQUIRE(driver->get_destination_side_of_pier(west_ra, west_dec) == 0);
+    REQUIRE(driver->get_destination_side_of_pier(east_ra, east_dec) == 1);
+
+    const LandedFrame first = land(*driver, mount, west_ra, west_dec);
+    check_landing(first, latitude, west_ra, west_dec, 0, -1);
+    CHECK(first.a2 > 0.0);
+
+    const LandedFrame flipped = land(*driver, mount, east_ra, east_dec);
+    check_landing(flipped, latitude, east_ra, east_dec, 1, -1);
+    CHECK(flipped.a2 < 0.0);
+
+    const LandedFrame back = land(*driver, mount, west_ra, west_dec);
+    check_landing(back, latitude, west_ra, west_dec, 0, -1);
+    CHECK(back.a2 > 0.0);
+    CHECK(std::abs(back.a2 - first.a2) < 0.05);
+    CHECK(std::abs(back.a1 - first.a1) < 1.5);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// The side and the dec branch are chosen from the sky hour angle, so they
+// change at HA 0 and nowhere else. The pole cases already pin that at HA
+// +/-0.1 h, but only at dec 90; every other goto away from the pole sits 2 h or
+// more from the meridian. This case pins the switch away from the pole, 0.05 h
+// either side, with the RA axis at the counterweight limit. The
+// targets sit 0.05 h either side because LST cannot be frozen: a target at
+// exactly HA 0 would land on either side depending on when the driver reads
+// the clock. At HA +/-0.05 h the RA axis is within 0.75 deg of +/-90, the
+// counterweight-horizontal limit, and the two landings are on opposite dec
+// branches.
+TEST_CASE("SkyWatcher pointing - the pier side changes at HA 0 and the axes stay inside the limit, south",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    const double latitude = -35.0;
+    for (const double ha : {+0.05, -0.05}) {
+        FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+        REQUIRE(mount.ok());
+        auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+        driver->set_connected(true);
+        driver->set_tracking(true);
+
+        const double lst = driver->get_sidereal_time();
+        const double target_ra = std::fmod(lst - ha + 24.0, 24.0);
+        const double target_dec = -30.0;
+        const int side = ha >= 0.0 ? 0 : 1;
+        INFO("target HA " << ha << " h");
+        REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == side);
+
+        const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+        check_landing(f, latitude, target_ra, target_dec, side, -1);
+        if (ha > 0.0) {
+            CHECK(f.a2 > 0.0);
+            CHECK(f.a1 > 85.0);
+        } else {
+            CHECK(f.a2 < 0.0);
+            CHECK(f.a1 < -85.0);
+        }
+
+        driver->set_tracking(false);
+        driver->set_connected(false);
+    }
+}
+
 #endif  // !_WIN32
