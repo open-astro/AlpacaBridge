@@ -405,7 +405,7 @@ public:
     std::string get_name() const override {
         const_cast<GPhotoCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
         std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.model : "gphoto2 Camera";
+        return camera_info_valid_ ? camera_info_.model : "DSLR / Mirrorless Camera (libgphoto2)";
     }
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }

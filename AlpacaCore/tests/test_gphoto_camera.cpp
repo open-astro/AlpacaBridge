@@ -40,7 +40,7 @@ TEST_CASE("GPhoto Camera Driver - Defaults", "[gphoto][camera][unit]") {
     // No physical DSLR is ever attached to a CI runner, so libgphoto2's USB
     // autodetect always comes back empty and the driver serves this literal
     // fallback name (see get_name()/preload_camera_info_locked).
-    CHECK(driver->get_name() == "gphoto2 Camera");
+    CHECK(driver->get_name() == "DSLR / Mirrorless Camera (libgphoto2)");
     CHECK(driver->get_has_shutter() == true);  // DSLRs have a real mechanical shutter
     CHECK(driver->get_can_abort_exposure() == true);
     CHECK(driver->get_can_stop_exposure() == true);
