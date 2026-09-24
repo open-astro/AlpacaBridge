@@ -405,7 +405,7 @@ public:
     std::string get_name() const override {
         const_cast<GPhotoCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
         std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.model : "DSLR / Mirrorless Camera (libgphoto2)";
+        return camera_info_valid_ ? camera_info_.model : "DSLR / Mirrorless Camera";
     }
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
@@ -424,7 +424,7 @@ public:
         return "GPHOTO_" + std::to_string(device_number_);
     }
 
-    std::string get_description() const override { return "libgphoto2 DSLR/Mirrorless Camera Driver"; }
+    std::string get_description() const override { return "DSLR / Mirrorless Camera Driver"; }
     std::string get_driver_info() const override { return "AlpacaCore GPhoto Camera Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
@@ -486,8 +486,9 @@ public:
             }
             auto cameras = sdk.enumerate_cameras();
             if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
-                throw AlpacaException("gphoto camera index not found (is it plugged in and powered on?)",
-                                      AlpacaError::NotConnected);
+                throw AlpacaException(
+                    "No DSLR / mirrorless camera found at this camera index (is it plugged in and powered on?)",
+                    AlpacaError::NotConnected);
             }
             const auto& info = cameras[static_cast<std::size_t>(camera_index_)];
             int opened_handle = sdk.open_camera(info.model, info.port);
@@ -498,7 +499,7 @@ public:
                 throw;
             } catch (const std::exception& e) {
                 sdk.close_camera(opened_handle);
-                throw AlpacaException(std::string("Failed to configure gphoto camera: ") + e.what(),
+                throw AlpacaException(std::string("Failed to configure DSLR / mirrorless camera: ") + e.what(),
                                       AlpacaError::DriverException);
             }
             handle_ = opened_handle;
@@ -901,7 +902,7 @@ public:
 
     std::string get_sensor_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.model : "libgphoto2 Sensor";
+        return camera_info_valid_ ? camera_info_.model : "DSLR / Mirrorless Sensor";
     }
 
     SensorType get_sensor_type() const override {
@@ -939,7 +940,7 @@ public:
 
     void pulse_guide(int, int) override {
         ensure_connected();
-        throw AlpacaException("Pulse guide not supported (no autoguider port on a plain libgphoto2 camera)",
+        throw AlpacaException("Pulse guide not supported (no autoguider port on a DSLR / mirrorless camera)",
                               AlpacaError::NotImplemented);
     }
 

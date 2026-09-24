@@ -40,8 +40,8 @@ TEST_CASE("GPhoto Camera Driver - Defaults", "[gphoto][camera][unit]") {
     // No physical DSLR is ever attached to a CI runner, so libgphoto2's USB
     // autodetect always comes back empty and the driver serves this literal
     // fallback name (see get_name()/preload_camera_info_locked).
-    CHECK(driver->get_name() == "DSLR / Mirrorless Camera (libgphoto2)");
-    CHECK(driver->get_sensor_name() == "libgphoto2 Sensor");
+    CHECK(driver->get_name() == "DSLR / Mirrorless Camera");
+    CHECK(driver->get_sensor_name() == "DSLR / Mirrorless Sensor");
     CHECK(driver->get_has_shutter() == true);  // DSLRs have a real mechanical shutter
     CHECK(driver->get_can_abort_exposure() == true);
     CHECK(driver->get_can_stop_exposure() == true);
@@ -54,7 +54,7 @@ TEST_CASE("GPhoto Camera Driver - Device metadata", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(3, 1);
 
     CHECK(driver->get_device_number() == 3);
-    CHECK(driver->get_description() == "libgphoto2 DSLR/Mirrorless Camera Driver");
+    CHECK(driver->get_description() == "DSLR / Mirrorless Camera Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore GPhoto Camera Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);  // ICameraV4 (Platform 7)

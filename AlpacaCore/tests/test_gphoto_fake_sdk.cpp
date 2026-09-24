@@ -90,6 +90,55 @@ TEST_CASE("GPhoto camera fake - connect populates handle and balances open/close
     CHECK(fake.close_count == 1);
 }
 
+TEST_CASE("GPhoto camera fake - connected PulseGuide is NotImplemented and names no library",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected() == true);
+
+    // The message reaches the ASCOM client, so it names the kind of camera,
+    // not the library the driver happens to be built on.
+    bool threw = false;
+    try {
+        driver->pulse_guide(0, 100);
+    } catch (const AlpacaException& e) {
+        threw = true;
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotImplemented);
+        const std::string msg = e.what();
+        CHECK(msg.find("gphoto") == std::string::npos);
+        CHECK(msg.find("DSLR / mirrorless camera") != std::string::npos);
+    }
+    CHECK(threw);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - connect with no camera at the index names no library",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;  // no cameras attached
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    bool threw = false;
+    try {
+        driver->set_connected(true);
+    } catch (const AlpacaException& e) {
+        threw = true;
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+        const std::string msg = e.what();
+        CHECK(msg.find("gphoto") == std::string::npos);
+        CHECK(msg.find("plugged in") != std::string::npos);
+    }
+    CHECK(threw);
+    CHECK(driver->get_connected() == false);
+}
+
 TEST_CASE("GPhoto camera fake - connect-path throw closes the handle and leaves disconnected",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();

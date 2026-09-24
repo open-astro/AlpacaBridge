@@ -10,15 +10,16 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// Pins the add-device page's user-visible names for the libgphoto2 vendor.
+// Pins the add-device page's user-visible names for the DSLR / mirrorless
+// vendor.
 //
 // Run: node --test AlpacaHTTP/tests/web/vendor_labels.test.js
 //
-// The vendor's library is libgphoto2. "gphoto2" also names the gPhoto
-// software suite and its command-line tool, which this server does not use,
-// so the page must not present the device as "(gphoto2)". The option's
-// value stays "gphoto": it is the key the rest of the UI and the saved
-// configuration use, and only the visible text is being pinned here.
+// The driver is built on libgphoto2, but that is an implementation detail:
+// the page names the kind of camera, as INDI's device list does ("Canon
+// DSLR", "Nikon DSLR"), and never the library or the gphoto2 command-line
+// tool. The option's value stays "gphoto": it is the key the rest of the UI
+// and the saved configuration use, and only the visible text is pinned here.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -27,20 +28,19 @@ const path = require('node:path');
 
 const html = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'index.html'), 'utf8');
 
-test('add-device option shows the libgphoto2 name and keeps the gphoto key', () => {
-    assert.ok(
-        html.includes('<option value="gphoto">DSLR / Mirrorless (libgphoto2)</option>'),
-        'the gphoto option must read "DSLR / Mirrorless (libgphoto2)"'
-    );
+const OPTION = '<option value="gphoto">DSLR / Mirrorless</option>';
+const HEADING = '<h3>DSLR / Mirrorless Configuration</h3>';
+
+test('add-device option reads "DSLR / Mirrorless" and keeps the gphoto key', () => {
+    assert.ok(html.includes(OPTION), 'the gphoto option must read "DSLR / Mirrorless"');
 });
 
 test('the gphoto configuration heading uses the same name', () => {
-    assert.ok(
-        html.includes('<h3>DSLR / Mirrorless (libgphoto2) Configuration</h3>'),
-        'the gphoto config heading must read "DSLR / Mirrorless (libgphoto2) Configuration"'
-    );
+    assert.ok(html.includes(HEADING), 'the gphoto config heading must read "DSLR / Mirrorless Configuration"');
 });
 
-test('no visible text presents the vendor as "(gphoto2)"', () => {
-    assert.ok(!html.includes('(gphoto2)'), 'index.html still shows "(gphoto2)"');
+test('no visible option or heading text names gphoto2 or libgphoto2', () => {
+    const visible = [...html.matchAll(/<(option|h[1-6]|label)[^>]*>([^<]*)</g)].map((m) => m[2]);
+    const leaks = visible.filter((t) => /gphoto/i.test(t));
+    assert.deepStrictEqual(leaks, [], `visible text names the library: ${JSON.stringify(leaks)}`);
 });
