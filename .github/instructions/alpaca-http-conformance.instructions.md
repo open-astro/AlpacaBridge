@@ -368,7 +368,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     destructor joins it. The threads this covers are the accept/server
     thread, the reactor, the worker pool and the RTC probe timer
     (`rtc_probe_thread_`, #314) -- the last spawns and joins alongside the
-    reactor and takes no lock `stop()` holds. So nothing can touch a
+    reactor and takes no lock `stop()` holds. Since #547 the same thread also
+    ticks the client-silence motion watchdog every second
+    (`Router::run_motion_watchdogs`); it rides this thread rather than the
+    reactor or a thread per device for the identical reason the RTC probe
+    does -- its mount I/O (`Slewing`/`AbortSlew`) must never block `poll()`.
+    So nothing can touch a
     `Server`'s members, the wake pipe included, after the destructor returns
     (review round 5). Destroying a `Server` from inside one of its own
     handlers is not supported.
@@ -401,6 +406,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     in `test_config.cpp`. At the bound the accept
     loop pauses and new clients wait in the listen backlog (64) rather than
     being refused; an idle connection expires within 15 s.
+  - `Config::motion_watchdog_seconds` (open-astro#547; 30 s default, matching
+    AlpacaCore's `kClientSilenceStopInterval` in `util/motion_policy.h`; 0
+    disables) is settable the same way, from the config file (`server:`
+    section) and the environment (`ALPACAHTTP_MOTION_WATCHDOG_SECONDS`),
+    routed through its clamping setter (negative -> 0); tested in
+    `test_config.cpp`.
   - Do not reintroduce a worker-side counter or reserve: the previous design
     counted busy workers as parked and pushed clients to close-per-request at
     exactly the busiest moments (review of #233).

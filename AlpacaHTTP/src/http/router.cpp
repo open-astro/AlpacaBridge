@@ -1407,6 +1407,36 @@ Router::Router() {
 }
 Router::~Router() = default;
 
+void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
+    const auto interval = motion_watchdog_interval();
+    if (interval <= std::chrono::milliseconds::zero()) {
+        return;
+    }
+    // Snapshot as shared_ptr copies: the registry never calls back into the
+    // router, and this loop must not hold any registry lock while it does
+    // mount I/O (get_slewing()/abort_slew(), up to the transport timeout) --
+    // see the header comment's lock-order note.
+    auto devices =
+        alpacacore::management::DeviceRegistry::instance().get_devices_by_type(alpacacore::DeviceType::Telescope);
+    for (const auto& device : devices) {
+        auto* telescope = dynamic_cast<alpacacore::TelescopeDriver*>(device.get());
+        if (telescope == nullptr) {
+            continue;
+        }
+        try {
+            telescope->stop_motion_if_client_silent(now, interval);
+        } catch (const std::exception& ex) {
+            // stop_motion_if_client_silent() is declared noexcept, so an
+            // exception escaping it calls std::terminate() before this
+            // handler runs: this catch cannot fire today. It is kept only so
+            // the loop stays safe if that function ever loses noexcept; the
+            // real guard is the try/catch inside the function itself.
+            util::log_error("Motion watchdog check failed for telescope #" +
+                            std::to_string(telescope->get_device_number()) + ": " + ex.what());
+        }
+    }
+}
+
 void Router::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver) {
     management_driver_ = mgmt_driver;
 }
@@ -2205,6 +2235,40 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         // registration so routine polling keeps it from expiring as stale
         // (issue #160).
         touch_client_connection(device.get(), extract_client_key(request).key);
+
+        // open-astro#547: the single device-dispatch choke point for the
+        // client-silence motion watchdog. Any request addressed to this
+        // telescope -- including the client's own Slewing polls -- counts
+        // as activity, with no per-endpoint list to keep in sync.
+        //
+        // A synchronous call (SlewToCoordinates chief among them) can block
+        // inside dispatch_device_method() below for the length of a whole
+        // goto, well past the watchdog interval, while THIS client is
+        // actively waiting on its own response -- note_client_activity()
+        // only stamps once, at intake, so on its own it does not cover that
+        // (review finding: the watchdog could abort a client's own in-flight
+        // slew). in_flight_guard keeps this request counted as activity for
+        // its whole duration via RAII, so it still decrements on an
+        // exception out of dispatch.
+        auto* telescope = dynamic_cast<alpacacore::TelescopeDriver*>(device.get());
+        if (telescope != nullptr) {
+            telescope->note_client_activity(std::chrono::steady_clock::now());
+        }
+        struct InFlightGuard {
+            alpacacore::TelescopeDriver* driver;
+            explicit InFlightGuard(alpacacore::TelescopeDriver* d) : driver(d) {
+                if (driver != nullptr) {
+                    driver->begin_client_request();
+                }
+            }
+            ~InFlightGuard() {
+                if (driver != nullptr) {
+                    driver->end_client_request();
+                }
+            }
+            InFlightGuard(const InFlightGuard&) = delete;
+            InFlightGuard& operator=(const InFlightGuard&) = delete;
+        } in_flight_guard(telescope);
 
         // Dispatch the method call
         return dispatch_device_method(device, match.method_name, request, client_tx_id, server_tx_id);

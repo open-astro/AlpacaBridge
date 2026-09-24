@@ -260,3 +260,42 @@ TEST_CASE("SkyWatcher Telescope Driver - Unsupported methods", "[skywatcher][tel
     require_alpaca_error([&] { driver->set_right_ascension_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_tracking_rate(1); }, alpacacore::AlpacaError::NotConnected);
 }
+
+// #627: `x < min || x > max` is false for NaN, so NaN was stored by all three
+// site setters. Sky-Watcher's setters validate without a connection.
+TEST_CASE("SkyWatcher Telescope Driver - non-finite site input is rejected",
+          "[skywatcher][telescope][unit][nonfinite]") {
+    auto driver = make_driver();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    SECTION("SiteElevation") {
+        driver->set_site_elevation(120.0);
+        require_alpaca_error([&] { driver->set_site_elevation(nan); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_site_elevation() == 120.0);
+    }
+    SECTION("SiteLatitude") {
+        driver->set_site_latitude(35.0);
+        require_alpaca_error([&] { driver->set_site_latitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_site_latitude() == 35.0);
+    }
+    SECTION("SiteLongitude") {
+        driver->set_site_longitude(-106.0);
+        require_alpaca_error([&] { driver->set_site_longitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_site_longitude() == -106.0);
+    }
+}
+
+// #627: the guide-rate range check is `fraction < 0 || fraction > 1`, which NaN
+// passes, so a NaN rate was stored (and, for iOptron, clamped to NaN and
+// written to the mount). The finite check runs before the connection check,
+// like every other parameter validation, so a disconnected driver proves it.
+TEST_CASE("SkyWatcher Telescope Driver - non-finite guide rate is rejected",
+          "[skywatcher][telescope][unit][nonfinite]") {
+    auto driver = make_driver();
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+}

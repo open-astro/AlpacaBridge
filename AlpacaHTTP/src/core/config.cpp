@@ -230,6 +230,16 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 if (parse_bool_value(value, enabled)) {
                     sync_system_clock_from_clients_ = enabled;
                 }
+            } else if (key == "motion_watchdog_seconds") {
+                // open-astro#547. Through the setter so the file and the
+                // environment clamp alike (negative -> 0, disabled). A
+                // signed std::stoi, not parse_size_value: 0 is a legitimate
+                // value here (unlike the unsigned http: keys above).
+                try {
+                    set_motion_watchdog_seconds(std::stoi(value));
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    // Unparseable: keep the default.
+                }
             }
         }
     }
@@ -355,6 +365,15 @@ void Config::apply_environment_overrides() {
         if (parse_size_value(lifetime_env, parsed) &&
             parsed <= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
             set_keep_alive_lifetime_seconds(static_cast<int>(parsed));
+        }
+    }
+
+    const char* watchdog_env = std::getenv("ALPACAHTTP_MOTION_WATCHDOG_SECONDS");
+    if (watchdog_env) {
+        try {
+            set_motion_watchdog_seconds(std::stoi(watchdog_env));
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
+            // Unparseable: keep whatever the file (or the default) set.
         }
     }
 

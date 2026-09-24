@@ -452,6 +452,7 @@ public:
                     target_dec_degrees_ = 0.0;
                     target_ra_set_ = false;
                     target_dec_set_ = false;
+                    clear_last_slew_error_locked();
                 }
                 stop_poll_thread();
                 stop_pulse_thread();
@@ -481,6 +482,7 @@ public:
             pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
+            clear_last_slew_error_locked();
             if (!keep_telemetry_caches) {
                 // open-astro#409: once per REAL connection. The
                 // keep_telemetry_caches=true caller is the "Connected=true
@@ -1509,6 +1511,10 @@ public:
         park_motion_seen_ = false;
         parked_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that jogs an axis after a failed GOTO must not be told the OLD
+        // goto failed.
+        clear_last_slew_error_locked();
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1534,6 +1540,14 @@ public:
         const auto now = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // open-astro#575: surface a stored async-slew failure as an error
+            // instead of a silent false, until AbortSlew or a new slew
+            // initiator clears it (see last_slew_error_). Checked before the
+            // force window below so a rejected GOTO reports the error right
+            // away instead of waiting it out.
+            if (!last_slew_error_.empty()) {
+                throw AlpacaException(last_slew_error_);
+            }
             if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
                 return true;
             }
@@ -1744,6 +1758,10 @@ public:
         park_state_cached_.reset();
         park_state_at_ = std::chrono::steady_clock::time_point{};
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that calls FindHome after a failed GOTO must not be told the OLD
+        // goto failed while it's homing.
+        clear_last_slew_error_locked();
     }
 
     void park() override {
@@ -1783,12 +1801,21 @@ public:
         park_command_started_ = std::chrono::steady_clock::now();
         park_motion_seen_ = false;
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that calls Park after a failed GOTO must not be told the OLD goto
+        // failed while it's parking.
+        clear_last_slew_error_locked();
     }
 
     void abort_slew() override {
         check_connected();
         ensure_not_parked("AbortSlew");
         reset_position_offsets();
+        // open-astro#575: cancel a GOTO setup thread still writing the target,
+        // so it neither sends ":MS" after the abort nor records its rejection
+        // as a slew failure. Flag + notify only (no join): the next initiator,
+        // disconnect and the destructor reap the thread.
+        cancel_goto_thread_request();
         ZWOMountProtocolWrapper::instance().abort_motion();
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[0] = false;
@@ -1798,6 +1825,10 @@ public:
         park_command_active_ = false;
         park_motion_seen_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point{};
+        // open-astro#575: AbortSlew is a valid clearing command for a stored
+        // slew failure -- the client acted on the error, so the next
+        // Slewing read must answer normally again.
+        clear_last_slew_error_locked();
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -2013,6 +2044,7 @@ public:
             throw;
         }
 
+        uint64_t slew_epoch = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             manual_axis_slewing_[0] = false;
@@ -2020,6 +2052,11 @@ public:
             manual_axis_tracking_restore_[0] = std::nullopt;
             manual_axis_tracking_restore_[1] = std::nullopt;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            // open-astro#575: a fresh initiator is a clean start -- a client
+            // that retries a rejected goto must not be told the OLD goto
+            // failed.
+            clear_last_slew_error_locked();
+            slew_epoch = slew_error_epoch_;
             parked_cached_ = false;
             park_command_active_ = false;
             park_motion_seen_ = false;
@@ -2048,7 +2085,7 @@ public:
             std::lock_guard<std::mutex> cancel_lock(goto_mutex_);
             goto_cancel_.store(false);
         }
-        goto_thread_ = std::thread([this, target_ra, target_dec]() {
+        goto_thread_ = std::thread([this, target_ra, target_dec, slew_epoch]() {
             auto resume_poll = [this]() { poll_pause_.store(false); };
             auto& protocol = ZWOMountProtocolWrapper::instance();
             try {
@@ -2110,12 +2147,35 @@ public:
                         } else {
                             ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
                         }
+                        // open-astro#575: a cancellation (AbortSlew, or a
+                        // reap by a newer initiator) is not a failure -- the
+                        // canceller already owns clearing/replacing
+                        // last_slew_error_. Nor is a rejection after a newer
+                        // command (Park/FindHome/MoveAxis/Unpark) cleared the
+                        // slot: the epoch says that command owns it now.
+                        if (!goto_cancel_.load()) {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            if (slew_error_epoch_ == slew_epoch) {
+                                last_slew_error_ = "SlewToTargetAsync failed: " + std::string(ex.what());
+                                // No slew landed, so there is nothing to adjust;
+                                // left set, the next RA/Dec read would throw
+                                // this error via get_slewing().
+                                pending_slew_adjust_ = false;
+                            }
+                        }
                         resume_poll();
                         return;
                     }
                 }
             } catch (const std::exception& ex) {
                 ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
+                if (!goto_cancel_.load()) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (slew_error_epoch_ == slew_epoch) {
+                        last_slew_error_ = "SlewToTargetAsync failed: " + std::string(ex.what());
+                        pending_slew_adjust_ = false;  // no slew landed (see above)
+                    }
+                }
             }
             resume_poll();
         });
@@ -2290,6 +2350,10 @@ public:
             park_state_cached_.reset();
             park_state_at_ = std::chrono::steady_clock::time_point{};
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            // open-astro#575: a fresh initiator is a clean start -- a client
+            // that unparks after a failed GOTO must not be told the OLD
+            // goto failed.
+            clear_last_slew_error_locked();
         } catch (...) {
             // protocol.unpark()/get_park_status() can throw (serial/mount error):
             // always clear the guard so the poll thread's park-state warm is not
@@ -2887,6 +2951,13 @@ private:
         }
     }
 
+    // open-astro#575: every clear of the stored slew failure (new initiator,
+    // AbortSlew, reconnect) starts a new epoch; see slew_error_epoch_.
+    void clear_last_slew_error_locked() {
+        last_slew_error_.clear();
+        ++slew_error_epoch_;
+    }
+
     // Ask a running GOTO setup thread to exit promptly (it re-checks the
     // flag between protocol calls and its retry backoff waits on goto_cv_).
     // The store happens under goto_mutex_ so a waiter cannot miss the wakeup.
@@ -2965,6 +3036,18 @@ private:
     std::array<bool, 2> manual_axis_slewing_;
     std::array<std::optional<bool>, 2> manual_axis_tracking_restore_;
     std::chrono::steady_clock::time_point slew_force_until_;
+    // open-astro#575: an async slew that fails AFTER the initiator returned
+    // (mount rejects the GOTO, logged and forgotten by the setup thread) used
+    // to leave Slewing read FALSE once slew_force_until_ expired --
+    // indistinguishable from a landed goto. Set (under mutex_) by the GOTO
+    // setup thread on a REAL failure (never on the thread's own
+    // cancellation), cleared by the next slew initiator, AbortSlew, and
+    // connect/disconnect. Consulted by get_slewing() before the force window.
+    mutable std::string last_slew_error_;
+    // Bumped by every clear_last_slew_error_locked() (under mutex_): the GOTO
+    // setup thread records a failure only if no newer command cleared the
+    // slot since its initiator did.
+    uint64_t slew_error_epoch_ = 0;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
     std::atomic<uint64_t> pulse_generation_;
     mutable std::mutex pulse_mutex_;

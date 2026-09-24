@@ -77,7 +77,8 @@ def check(root=ROOT):
         require(any(matches('AlpacaHTTP/src/main.cpp', p) for p in scopes.get(name, [])),
                 '%s: HTTP startup is not covered' % name)
     # Resolve relocated Markdown links relative to their actual owning files.
-    documents = canonical + [root / 'docs/agent-instructions.md']
+    documents = canonical + [root / 'docs/agent-instructions.md', root / 'CONTEXT.md',
+                             root / 'docs/architecture.md']
     documents += list((root / 'docs/failures').glob('*.md'))
     documents += list((root / 'docs/decisions').glob('*.md'))
     skill_documents = [path for path in (root / '.claude/skills').rglob('*.md') if path.is_file()]
@@ -112,7 +113,7 @@ def self_test():
                           'AlpacaCore/include/alpacacore/vendor', 'AlpacaCore/tests',
                           '.claude/skills'):
             shutil.copytree(ROOT / directory, root / directory)
-        for file in ('CLAUDE.md', 'AGENTS.md'):
+        for file in ('CLAUDE.md', 'AGENTS.md', 'CONTEXT.md'):
             shutil.copy(ROOT / file, root / file)
         # Link targets outside the small fixture are intentionally absent; compare
         # new diagnostics against the fixture baseline instead of hiding failures.
@@ -137,6 +138,16 @@ def self_test():
         broken.unlink()
         assert any('docs/decisions/zz-broken-link.md' in f and 'missing-target.md' in f
                    for f in new_findings), 'Broken link is not reported with its repo-relative path'
+        # The root glossary and the architecture overview carry links too, and
+        # neither sits in a scanned directory: each must be read by name.
+        for name in ('CONTEXT.md', 'docs/architecture.md'):
+            page = root / name
+            original = page.read_text(encoding="utf-8", errors="replace")
+            page.write_text(original + '\n[gone](missing-target.md)\n')
+            new_findings = set(check(root)) - baseline
+            page.write_text(original)
+            assert any(name in f and 'missing-target.md' in f for f in new_findings), \
+                'A broken link in %s escaped the link check' % name
         # A renamed skills tree loses ~10 documents, which fits inside the
         # aggregate floor's margin: only the per-source floor catches it.
         skills = root / '.claude/skills'

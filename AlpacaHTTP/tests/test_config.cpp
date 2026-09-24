@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/motion_policy.h>
 #include <alpacahttp/config.h>
 #include <unistd.h>
 
@@ -143,6 +144,77 @@ int main() {
         alpacahttp::Config bad_value;
         EXPECT(bad_value.load(path));
         EXPECT(bad_value.sync_system_clock_from_clients() == true);
+        ::unlink(path.c_str());
+    }
+
+    // open-astro#547: motion_watchdog_seconds under [server], next to
+    // sync_system_clock_from_clients. Default matches AlpacaCore's
+    // kClientSilenceStopInterval (util/motion_policy.h), which is the two
+    // constants' shared home with open-astro#521's relink window. 0 = the
+    // watchdog is disabled outright (no upper clamp: an operator with a very
+    // slow polling client may want longer than 30 s).
+    {
+        alpacahttp::Config fresh;
+        EXPECT(fresh.motion_watchdog_seconds() ==
+               static_cast<int>(alpacacore::util::kClientSilenceStopInterval.count()));
+
+        fresh.set_motion_watchdog_seconds(-3);
+        EXPECT(fresh.motion_watchdog_seconds() == 0);
+        fresh.set_motion_watchdog_seconds(0);
+        EXPECT(fresh.motion_watchdog_seconds() == 0);
+        fresh.set_motion_watchdog_seconds(45);
+        EXPECT(fresh.motion_watchdog_seconds() == 45);
+
+        char path_template[] = "/tmp/alpacahttp_test_watchdog_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  motion_watchdog_seconds: 5\n";
+        }
+        ::close(fd);
+
+        ::unsetenv("ALPACAHTTP_MOTION_WATCHDOG_SECONDS");
+        alpacahttp::Config from_file;
+        EXPECT(from_file.load(path));
+        EXPECT(from_file.motion_watchdog_seconds() == 5);
+
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  motion_watchdog_seconds: 0\n";
+        }
+        alpacahttp::Config from_file_disabled;
+        EXPECT(from_file_disabled.load(path));
+        EXPECT(from_file_disabled.motion_watchdog_seconds() == 0);
+
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  motion_watchdog_seconds: -7\n";
+        }
+        alpacahttp::Config from_file_negative;
+        EXPECT(from_file_negative.load(path));
+        EXPECT(from_file_negative.motion_watchdog_seconds() == 0);
+
+        ::setenv("ALPACAHTTP_MOTION_WATCHDOG_SECONDS", "12", 1);
+        alpacahttp::Config from_env;
+        EXPECT(from_env.load(path));
+        EXPECT(from_env.motion_watchdog_seconds() == 12);
+        ::unsetenv("ALPACAHTTP_MOTION_WATCHDOG_SECONDS");
+
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  motion_watchdog_seconds: banana\n";
+        }
+        alpacahttp::Config from_file_garbage;
+        EXPECT(from_file_garbage.load(path));
+        EXPECT(from_file_garbage.motion_watchdog_seconds() ==
+               static_cast<int>(alpacacore::util::kClientSilenceStopInterval.count()));
+
         ::unlink(path.c_str());
     }
 

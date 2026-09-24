@@ -18,6 +18,8 @@
 // #129), HTTP/1.1 persistence and its bounds, the framing gate that decides
 // whether a connection may stay open, and the graceful close path.
 
+#include <alpacacore/device_registry.h>
+#include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/logging.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/server.h>
@@ -218,6 +220,132 @@ std::string read_one_response(int fd, std::string& carry) {
     carry.erase(0, total);
     return response;
 }
+
+// open-astro#547: minimal telescope stub for the end-to-end watchdog-timer
+// wiring test below. Always connected and always "slewing" so a single
+// routed request is enough to arm the watchdog; abort_slew() counts its own
+// calls instead of touching any mount state.
+class WatchdogStubTelescope final : public alpacacore::TelescopeDriver {
+public:
+    explicit WatchdogStubTelescope(int number) : number_(number) {}
+
+    int get_device_number() const override { return number_; }
+    std::string get_name() const override { return "Watchdog Stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Telescope; }
+    std::string get_unique_id() const override { return "watchdog-stub-" + std::to_string(number_); }
+    std::string get_description() const override { return "fake telescope"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 4; }
+    bool get_connected() const override { return true; }
+    void set_connected(bool) override {}
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return ""; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return ""; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return ""; }
+    std::chrono::system_clock::time_point get_utc_date() const override { return {}; }
+    void set_utc_date(std::chrono::system_clock::time_point) override {}
+    alpacacore::AlignmentMode get_alignment_mode() const override { return alpacacore::AlignmentMode::GermanPolar; }
+    double get_altitude() const override { return 0.0; }
+    double get_aperture_diameter() const override { return 0.0; }
+    void set_aperture_diameter(double) override {}
+    double get_aperture_area() const override { return 0.0; }
+    bool get_at_home() const override { return false; }
+    bool get_at_park() const override { return false; }
+    double get_azimuth() const override { return 0.0; }
+    bool get_can_find_home() const override { return false; }
+    bool get_can_park() const override { return false; }
+    bool get_can_pulse_guide() const override { return false; }
+    bool get_is_pulse_guiding() const override { return false; }
+    bool get_can_set_declination_rate() const override { return false; }
+    bool get_can_set_guide_rates() const override { return false; }
+    bool get_can_set_park() const override { return false; }
+    bool get_can_set_pier_side() const override { return false; }
+    bool get_can_set_right_ascension_rate() const override { return false; }
+    bool get_can_set_tracking() const override { return false; }
+    bool get_can_slew_alt_az() const override { return false; }
+    bool get_can_slew_alt_az_async() const override { return false; }
+    bool get_can_sync_alt_az() const override { return false; }
+    bool get_can_slew() const override { return false; }
+    bool get_can_slew_async() const override { return false; }
+    bool get_can_sync() const override { return false; }
+    bool get_can_unpark() const override { return false; }
+    double get_declination() const override { return 0.0; }
+    double get_declination_rate() const override { return 0.0; }
+    void set_declination_rate(double) override {}
+    bool get_tracking() const override { return true; }
+    void set_tracking(bool) override {}
+    double get_focal_length() const override { return 0.0; }
+    void set_focal_length(double) override {}
+    alpacacore::GuideRate get_guide_rate() const override { return alpacacore::GuideRate{}; }
+    void set_guide_rate(const alpacacore::GuideRate&) override {}
+    double get_right_ascension() const override { return 0.0; }
+    double get_right_ascension_rate() const override { return 0.0; }
+    void set_right_ascension_rate(double) override {}
+    int get_side_of_pier() const override { return 0; }
+    void set_side_of_pier(int) override {}
+    int get_destination_side_of_pier(double, double) const override { return 0; }
+    alpacacore::EquatorialSystem get_equatorial_system() const override {
+        return alpacacore::EquatorialSystem::Topocentric;
+    }
+    bool get_does_refraction() const override { return false; }
+    void set_does_refraction(bool) override {}
+    int get_slew_settle_time() const override { return 0; }
+    void set_slew_settle_time(int) override {}
+    double get_sidereal_time() const override { return 0.0; }
+    double get_site_elevation() const override { return 0.0; }
+    void set_site_elevation(double) override {}
+    double get_site_latitude() const override { return 0.0; }
+    void set_site_latitude(double) override {}
+    double get_site_longitude() const override { return 0.0; }
+    void set_site_longitude(double) override {}
+    // Always slewing: this stub's only job is to prove the timer thread
+    // reaches stop_motion_if_client_silent() and that it can stop a
+    // telescope, not to model a real motion state machine.
+    bool get_slewing() const override { return true; }
+    double get_target_declination() const override { return 0.0; }
+    void set_target_declination(double) override {}
+    double get_target_right_ascension() const override { return 0.0; }
+    void set_target_right_ascension(double) override {}
+    int get_tracking_rate() const override { return 0; }
+    void set_tracking_rate(int) override {}
+    std::vector<int> get_tracking_rates() const override { return {}; }
+    void find_home() override {}
+    void park() override {}
+    void pulse_guide(int, int) override {}
+    void set_park() override {}
+    // open-astro#547 review finding: a synchronous SlewToCoordinates can
+    // block the HTTP worker for as long as the goto takes. slew_sleep_ms
+    // lets a test hold this call in flight past the watchdog interval, to
+    // prove the client's own request never gets aborted out from under it.
+    std::atomic<int> slew_sleep_ms{0};
+    void slew_to_coordinates(double, double) override {
+        const int ms = slew_sleep_ms.load();
+        if (ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        }
+    }
+    void slew_to_coordinates_async(double, double) override {}
+    void slew_to_target() override {}
+    void slew_to_target_async() override {}
+    void sync_to_coordinates(double, double) override {}
+    void sync_to_target() override {}
+    void unpark() override {}
+    bool get_can_move_axis(int) const override { return false; }
+    void move_axis(int, double) override {}
+    std::pair<double, double> get_axis_rate_range(int) const override { return {0.0, 0.0}; }
+    void abort_slew() override { ++aborts; }
+    void slew_to_alt_az(double, double) override {}
+    void slew_to_alt_az_async(double, double) override {}
+    void sync_to_alt_az(double, double) override {}
+
+    std::atomic<int> aborts{0};
+
+private:
+    int number_;
+};
 
 // True if the server has closed the connection (EOF within `ms`); false if it
 // is still open (the peek times out).
@@ -957,6 +1085,105 @@ int main() {
         const int after_stop = probes.load();
         std::this_thread::sleep_for(std::chrono::milliseconds(1200));
         EXPECT(probes.load() == after_stop);
+    }
+
+    // --- Client-silence motion watchdog timer wiring (open-astro#547) ------
+    // Mirrors the RTC probe case above end to end: a real Server, the same
+    // rtc_probe_thread_ (retasked by #547 to also tick the watchdog every
+    // second), and an assertion that a telescope left "slewing" with no
+    // further client activity gets stopped on its own -- no request ever
+    // asks it to.
+    {
+        alpacahttp::Config watchdog_config;
+        watchdog_config.set_http_port(0);
+        watchdog_config.set_discovery_enabled(false);
+        watchdog_config.set_server_name("TestServerMotionWatchdog");
+        watchdog_config.set_motion_watchdog_seconds(1);
+
+        auto stub = std::make_shared<WatchdogStubTelescope>(9547);
+        EXPECT(alpacacore::management::DeviceRegistry::instance().register_device(stub));
+
+        alpacahttp::Server watchdog_server(watchdog_config);
+        watchdog_server.start_async();
+        const std::uint16_t port = watchdog_server.is_running() ? wait_for_bound_port(watchdog_server, 2000) : 0;
+        EXPECT(port != 0);
+        if (port != 0) {
+            // One real routed request arms the watchdog (note_client_activity
+            // at the router's device-dispatch choke point) -- after this, NO
+            // further request is sent, so the only way `aborts` can rise is
+            // the timer thread finding the device on its own.
+            int fd = connect_local(port);
+            EXPECT(fd >= 0);
+            std::string carry;
+            send_all(fd, "GET /api/v1/telescope/9547/connected HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            const std::string resp = read_one_response(fd, carry);
+            EXPECT(resp.rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(fd);
+
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (stub->aborts.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            EXPECT(stub->aborts.load() > 0);
+        }
+        watchdog_server.stop();
+        EXPECT(!watchdog_server.is_running());
+        alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Telescope, 9547);
+    }
+
+    // --- Watchdog must not trip on the client's OWN in-flight synchronous
+    // request (open-astro#547 review finding) -------------------------------
+    // A synchronous SlewToCoordinates blocks the HTTP worker for the length
+    // of the goto. note_client_activity() only stamps once, at intake, so
+    // without begin_client_request()/end_client_request() bracketing the
+    // dispatch, the timer thread finds the interval elapsed while the
+    // client is still on the wire waiting on its own response -- and aborts
+    // the very slew that client just issued.
+    {
+        alpacahttp::Config watchdog_config;
+        watchdog_config.set_http_port(0);
+        watchdog_config.set_discovery_enabled(false);
+        watchdog_config.set_server_name("TestServerMotionWatchdogInFlight");
+        watchdog_config.set_motion_watchdog_seconds(1);
+
+        auto stub = std::make_shared<WatchdogStubTelescope>(9548);
+        stub->slew_sleep_ms.store(3000);  // 3 s in-flight, 3x the 1 s interval
+        EXPECT(alpacacore::management::DeviceRegistry::instance().register_device(stub));
+
+        alpacahttp::Server watchdog_server(watchdog_config);
+        watchdog_server.start_async();
+        const std::uint16_t port = watchdog_server.is_running() ? wait_for_bound_port(watchdog_server, 2000) : 0;
+        EXPECT(port != 0);
+        if (port != 0) {
+            std::thread client([&] {
+                int fd = connect_local(port);
+                if (fd < 0) {
+                    return;
+                }
+                std::string carry;
+                send_all(fd,
+                         "PUT /api/v1/telescope/9548/slewtocoordinates?RightAscension=5&Declination=10"
+                         " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+                const std::string resp = read_one_response(fd, carry);
+                EXPECT(resp.rfind("HTTP/1.1 200 ", 0) == 0);
+                ::close(fd);
+            });
+
+            // The request is now blocking inside slew_to_coordinates() for
+            // 3 s. Give the 1 s-interval timer thread two full ticks to find
+            // it "silent" if the in-flight guard is missing.
+            std::this_thread::sleep_for(std::chrono::milliseconds(2200));
+            EXPECT(stub->aborts.load() == 0);
+
+            // No abort check after the join: once the request ends, the stub
+            // still reports Slewing (it is a stub) and its timestamp is up to
+            // one interval old, so a tick landing right here legitimately
+            // aborts. The in-flight window above is what this case pins.
+            client.join();
+        }
+        watchdog_server.stop();
+        EXPECT(!watchdog_server.is_running());
+        alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Telescope, 9548);
     }
 
     // stop() must not wait out an ACTIVE keep-alive client. Before the

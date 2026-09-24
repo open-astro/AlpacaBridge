@@ -26,7 +26,9 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/motion_policy.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -111,6 +113,29 @@ public:
     // against the 1 s STANDARD target.
     void refresh_rtc_probe() { host_clock_.refresh_rtc(); }
 
+    // open-astro#547: the client-silence motion watchdog's configured
+    // interval. Defaults to AlpacaCore's kClientSilenceStopInterval (30 s,
+    // util/motion_policy.h); Server sets it from Config at construction. An
+    // atomic, not a mutex: read every ~1 s by the timer thread, written at
+    // most once at startup (and by tests), so a lock would buy nothing.
+    void set_motion_watchdog_interval(std::chrono::milliseconds interval) {
+        motion_watchdog_ms_.store(interval.count(), std::memory_order_relaxed);
+    }
+    std::chrono::milliseconds motion_watchdog_interval() const {
+        return std::chrono::milliseconds(motion_watchdog_ms_.load(std::memory_order_relaxed));
+    }
+
+    // open-astro#547: check every registered telescope for client silence
+    // during motion and stop any that have gone quiet past the configured
+    // interval. Called once a second from the server's existing low-
+    // frequency timer thread (open-astro#314's rtc_probe_thread_, retasked
+    // to tick this too) -- never from the reactor (get_slewing()/
+    // abort_slew() are mount I/O, up to the transport timeout) and never
+    // while holding any router lock (it takes only each driver's own
+    // mutex_, so calling it under a router lock would be a new, undocumented
+    // lock-order edge).
+    void run_motion_watchdogs(std::chrono::steady_clock::time_point now);
+
     // Set shutdown callback (called when shutdown endpoint is requested)
     void set_shutdown_callback(std::function<void()> callback);
     // Set restart callback (called when restart endpoint is requested)
@@ -123,6 +148,10 @@ private:
     std::shared_ptr<alpacacore::ManagementDriver> management_driver_;
     std::function<void()> shutdown_callback_;
     std::function<void()> restart_callback_;
+
+    // open-astro#547.
+    std::atomic<std::chrono::milliseconds::rep> motion_watchdog_ms_{
+        std::chrono::duration_cast<std::chrono::milliseconds>(alpacacore::util::kClientSilenceStopInterval).count()};
 
     // Lazily constructed on first /management/v1/wifi/* request so setups
     // without NetworkManager (or without a wifi adapter) pay no cost.

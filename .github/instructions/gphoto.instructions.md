@@ -6,7 +6,7 @@ applyTo: "AlpacaCore/src/vendors/gphoto/**,AlpacaCore/include/alpacacore/vendor/
 
 Devices: Camera.
 
-**STATUS: ConformU-validated against three real Nikon bodies (D5300, D3200, D3300).** Originally built
+**STATUS: ConformU-validated against real bodies: Nikon D5300, D3200 and D3300, and Canon EOS 4000D.** Originally built
 from libgphoto2/libraw API documentation and source reading, plus the reference indi-gphoto
 driver (`indilib/indi-3rdparty`) for protocol shape, with no physical DSLR available in the
 session that added it (issue #241). A later session with hardware access ran `/deploy-test` +
@@ -14,11 +14,12 @@ session that added it (issue #241). A later session with hardware access ran `/d
 and fixed what that surfaced: `gp_camera_autodetect()`'s return-value contract, the Gain-mode
 ASCOM contract, a `StartExposure` ROI bounds check, and the `PixelSizeX`/`PixelSizeY` lookup table
 described below; a third session validated the D3300 on the same slot with no code change.
-All three runs are clean (0 errors, 0 issues, 0 timing violations); see
+The Canon EOS 4000D report came from a user's Raspberry Pi 5, not that rig (issue #611), also with no
+code change. Every run is clean (0 errors, 0 issues, 0 timing violations); see
 `SUPPORTED-DRIVERS.md` and `AlpacaCore/conformu/GPhoto/`. Bulb-mode capture was validated on the
 D3300 in a fourth session (issue #569: 60 s and 300 s frames through the Alpaca API), which also
 found and fixed the driver's first real bulb defect -- see the bulb bullet below and
-`docs/failures/0009-gphoto-nikon-bulb-full-config-walk.md`. Coverage beyond these three specific
+`docs/failures/0009-gphoto-nikon-bulb-full-config-walk.md`. Coverage beyond these specific
 bodies (other Canon/Nikon/Sony models, the SDK's other transports) is still only as validated as
 the notes below say for each.
 
