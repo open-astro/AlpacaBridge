@@ -6,7 +6,7 @@ applyTo: "AlpacaCore/src/vendors/gphoto/**,AlpacaCore/include/alpacacore/vendor/
 
 Devices: Camera.
 
-**STATUS: ConformU-validated against real bodies: Nikon D5300, D3200 and D3300, and Canon EOS 4000D and 70D.** Originally built
+**STATUS: ConformU-validated against real bodies: Nikon D5300, D3200 and D3300, and Canon EOS 4000D, 70D and 250D.** Originally built
 from libgphoto2/libraw API documentation and source reading, plus the reference indi-gphoto
 driver (`indilib/indi-3rdparty`) for protocol shape, with no physical DSLR available in the
 session that added it (issue #241). A later session with hardware access ran `/deploy-test` +
@@ -15,11 +15,12 @@ and fixed what that surfaced: `gp_camera_autodetect()`'s return-value contract, 
 ASCOM contract, a `StartExposure` ROI bounds check, and the `PixelSizeX`/`PixelSizeY` lookup table
 described below; a third session validated the D3300 on the same slot with no code change.
 The Canon EOS 4000D report came from a user's Raspberry Pi 5, not that rig (issue #611), also with no
-code change; the Canon EOS 70D report (issue #637) came from a second Raspberry Pi 5, again with no
-code change. The 70D needs the mode dial on M (on B its shutter-speed choice list is empty and
+code change; the Canon EOS 70D report (issue #637) and the Canon EOS 250D report came from a second
+Raspberry Pi 5, again with no code change. The 70D needs the mode dial on M (on B its shutter-speed choice list is empty and
 `StartExposure` throws "No shutter speed control exposed by this camera"), and a Raspberry Pi 3 is too
 slow for it under ConformU: libraw's `unpack()` of its 20 MP CR2 takes about 4 s there, the frame stays
-`Exposing` for about 8 s, and ConformU's `StartExposure` wait gives up. Every run is clean (0 errors, 0 issues, 0 timing violations); see
+`Exposing` for about 8 s, and ConformU's `StartExposure` wait gives up. The Canon EOS 250D (the EOS 200D II in Asia) needs the
+lens on MF: with AF its priming capture and every exposure fail with "Unspecified error". Every run is clean (0 errors, 0 issues, 0 timing violations); see
 `SUPPORTED-DRIVERS.md` and `AlpacaCore/conformu/GPhoto/`. Bulb-mode capture was validated on the
 D3300 in a fourth session (issue #569: 60 s and 300 s frames through the Alpaca API), which also
 found and fixed the driver's first real bulb defect -- see the bulb bullet below and
@@ -125,7 +126,7 @@ SDK cleanup checklist does not apply here).
   since libgphoto2 reports whichever name matches the camera's actual USB product ID). A model not
   in the table — every fixed-lens compact/camcorder libgphoto2 also supports, or a body released
   after the table was last updated — still reports `0.0` (ASCOM "unknown") rather than a guess.
-  D5300 confirmed against ConformU: 3.91 microns; D3200: 3.86 microns; D3300: 3.92 microns; Canon EOS 70D: 4.1 microns.
+  D5300 confirmed against ConformU: 3.91 microns; D3200: 3.86 microns; D3300: 3.92 microns; Canon EOS 70D: 4.1 microns; Canon EOS 250D: 3.72 microns.
 - **ISO is a discrete `Gains()` list, not a continuous register** — deliberate departure from
   every other camera driver here (ZWO/QHY/SVBONY/PlayerOne/ToupTek all throw
   `PropertyNotImplemented` for `get_gains()` and treat `Gain` as a raw numeric register). A DSLR's
