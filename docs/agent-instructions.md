@@ -4,6 +4,7 @@ Read `AGENTS.md` in full for every task. It owns architecture, concurrency, test
 CI and cross-vendor rules. Then read the applicable files below in full, following
 relevant links. A shared-file change can affect a vendor even when its filename
 does not match a vendor glob: select by task and affected behavior as well as path.
+Domain terms used across these files are defined in [CONTEXT.md](../CONTEXT.md).
 For a cross-vendor audit, read all vendor files. Revisit this index as scope grows.
 
 The `applyTo` fields support GitHub clients. Claude Code uses the matching `paths`

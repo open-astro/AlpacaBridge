@@ -39,7 +39,7 @@ Checks:
      production's cancel skips the per-handle mutex so it can interrupt a
      download blocked on the same handle) -- and the forward sweep in
      test_qhy_fake_sdk.cpp drives all of them.
-  7. Every relative path referenced in AGENTS.md, scoped instructions,
+  7. Every relative path referenced in AGENTS.md, CONTEXT.md, scoped instructions,
      docs/agents/ agent-skills config, .claude/skills/ Claude skills, and
      docs/failures/ and docs/decisions/
      inline code spans (`` `AlpacaCore/...` ``, `` `scripts/...` ``,
@@ -80,6 +80,12 @@ Checks:
      built from that snapshot; /driver-build Step 0 refreshes the schema
      from ascom-standards.org, and without this pin the catalog would keep
      describing the old one.
+ 12. Every model in SUPPORTED-DRIVERS.md's GPhoto table is named in the STATUS
+     paragraph of .github/instructions/gphoto.instructions.md, the only file a
+     scoped agent reads for that vendor, which restated the validated set by
+     hand and fell behind when the Canon EOS 4000D row was added (PR #626).
+     By name, one-directional, and only for rows whose Connection cell starts
+     with USB and whose status cell is a check mark.
 """
 
 import glob
@@ -899,6 +905,8 @@ def check_agents_md_paths_exist(root=ROOT):
     `.claude/skills/` is recursive on both sides and stays a directory spec.
     """
     failures, _ = _check_doc_path_refs("AGENTS.md", MIN_AGENTS_MD_PATH_REFS, "MIN_AGENTS_MD_PATH_REFS", root=root)
+    context_failures, _ = _check_doc_path_refs("CONTEXT.md", 0, "CONTEXT.md floor", root=root)
+    failures.extend(context_failures)
     instruction_dir = root / ".github/instructions"
     files = sorted(instruction_dir.glob("*.instructions.md"))
     tracked = _run_git(["-c", "core.quotePath=false", "ls-files", ":(glob).github/instructions/*.instructions.md"], root=root).stdout.splitlines()
@@ -1346,6 +1354,59 @@ def check_skill_spec_hash(root=ROOT):
     return []
 
 
+# --- check 12: the GPhoto STATUS paragraph names every validated body -------
+#
+# SUPPORTED-DRIVERS.md's GPhoto table is where a body becomes ConformU-validated;
+# .github/instructions/gphoto.instructions.md is the only file a scoped agent
+# reads for that vendor, and its STATUS paragraph restated the set by hand
+# ("three real Nikon bodies"). Adding the Canon EOS 4000D row left it saying no
+# Canon body was validated (PR #626 review). Gated by NAME, like check 5: a
+# model in the table that the paragraph does not mention is drift.
+
+GPHOTO_TABLE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*USB[^|]*\|\s*\u2713\s*\|", re.MULTILINE)
+
+
+def _gphoto_status_findings(supported, instructions):
+    failures = []
+    start = supported.find("### GPhoto")
+    if start < 0:
+        return ["SUPPORTED-DRIVERS.md has no '### GPhoto' section"]
+    # The section ends at the next heading of either level, so reordering the
+    # file cannot make the gate demand another vendor's models here.
+    ends = [i for i in (supported.find("\n### ", start + 1), supported.find("\n## ", start + 1)) if i >= 0]
+    section = supported[start:min(ends) if ends else len(supported)]
+    models = GPHOTO_TABLE_ROW_RE.findall(section)
+    if not models:
+        return ["SUPPORTED-DRIVERS.md GPhoto table lists no validated USB models"]
+
+    m = re.search(r"\*\*STATUS:.*?(?:\n\s*\n|\Z)", instructions, re.DOTALL)
+    if not m:
+        return ["gphoto.instructions.md has no '**STATUS:' paragraph"]
+    status = m.group(0)
+    for model in models:
+        # The paragraph may write the whole model or just the body designation
+        # ("D3300"). A designation only counts as a whole token containing a
+        # digit, so "Sony A7 III" is not satisfied by an unrelated "Part III".
+        designation = model.split()[-1]
+        named = model in status or (
+            any(c.isdigit() for c in designation)
+            and re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(designation), status)
+        )
+        if not named:
+            failures.append(
+                "SUPPORTED-DRIVERS.md lists %r as ConformU-validated but the STATUS paragraph "
+                "in .github/instructions/gphoto.instructions.md does not name it" % model
+            )
+    return failures
+
+
+def check_gphoto_status_names_validated_bodies():
+    return _gphoto_status_findings(
+        read("SUPPORTED-DRIVERS.md"),
+        read(".github/instructions/gphoto.instructions.md"),
+    )
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -1359,6 +1420,7 @@ CHECKS = [
     ("AGPL header form on every first-party source file", check_license_headers),
     ("Cursor rule file path references exist", check_rule_file_paths_exist),
     ("Skill Device API snapshot matches docs/ schema", check_skill_spec_hash),
+    ("GPhoto STATUS paragraph names every validated body", check_gphoto_status_names_validated_bodies),
 ]
 
 
@@ -1611,6 +1673,7 @@ def self_test():
         root = Path(base)
         files = {
             "AGENTS.md": "".join("See `scripts/f%d.py`.\n" % (i % MIN_MEMORY_COMMENT_FILES) for i in range(MIN_AGENTS_MD_PATH_REFS + 2)),
+            "CONTEXT.md": "# Context\n",
             ".github/instructions/a.instructions.md": "# a\n",
             ".claude/skills/s/SKILL.md": "# s\n",
             ".gitignore": "scripts/gen/\n",
@@ -1665,6 +1728,20 @@ def self_test():
             check("agents md check: a drifted span in an agent doc is reported",
                   found is not None and any("docs/agents/x.md" in f and "scripts/agent_nope.py" in f for f in found))
 
+            # CONTEXT.md, the domain glossary, is scanned like AGENTS.md; a
+            # rename must not silently drop it from the check.
+            context = repo_fixture("context")
+            with open(context / "CONTEXT.md", "a", encoding="utf-8") as f:
+                f.write("See `scripts/context_nope.py`.\n")
+            found = run_check(context)
+            check("agents md check: a drifted span in CONTEXT.md is reported",
+                  found is not None and any("CONTEXT.md" in f and "scripts/context_nope.py" in f for f in found))
+            nocontext = repo_fixture("nocontext")
+            (nocontext / "CONTEXT.md").unlink()
+            found = run_check(nocontext)
+            check("agents md check: a missing CONTEXT.md is reported",
+                  found is not None and any("CONTEXT.md" in f and "does not exist" in f for f in found))
+
             gone = repo_fixture("gone")
             (gone / ".github/instructions/a.instructions.md").unlink()
             found = run_check(gone)
@@ -1706,6 +1783,21 @@ def self_test():
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+    gp_table = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n| Canon EOS 4000D | USB | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a validated model the STATUS paragraph omits is flagged",
+          len(_gphoto_status_findings(gp_table, "**STATUS: validated against the Nikon D3300.**\n\nrest\n")) == 1)
+    gp_mixed = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n| Canon EOS 4000D | USB (PTP) | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a row whose Connection cell is 'USB (PTP)' is still gated",
+          len(_gphoto_status_findings(gp_mixed, "**STATUS: validated: Nikon D3300.**\n\nrest\n")) == 1)
+    gp_roman = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Sony A7 III | USB | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a designation with no digit ('III') does not match by accident",
+          len(_gphoto_status_findings(gp_roman, "**STATUS: validated: Canon EOS 4000D, see Part III.**\n\nrest\n")) == 1)
+    gp_last = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n\n## Mounts\n\n| M | C | L | S |\n|--|--|--|--|\n| Other Mount 9000 | USB | \u2713 | x |\n"
+    check("gphoto status: the GPhoto section ends at the next '## ' heading, not only the next '### '",
+          _gphoto_status_findings(gp_last, "**STATUS: validated: Nikon D3300.**\n\nrest\n") == [])
+    check("gphoto status: every validated model named passes",
+          _gphoto_status_findings(gp_table, "**STATUS: validated: Nikon D3300, Canon EOS 4000D.**\n\nrest\n") == [])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()

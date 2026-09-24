@@ -35,7 +35,7 @@ option(ALPACACORE_ENABLE_TOUPTEK "Enable ToupTek vendor support" OFF)
 option(ALPACACORE_ENABLE_PLAYERONE "Enable Player One vendor support" OFF)
 option(ALPACACORE_ENABLE_WANDERERASTRO "Enable WandererAstro CoverCalibrator vendor support" OFF)
 option(ALPACACORE_ENABLE_ASTROASIS "Enable Astroasis Oasis Focuser vendor support" OFF)
-option(ALPACACORE_ENABLE_GPHOTO "Enable gphoto2 DSLR/mirrorless camera vendor support" OFF)
+option(ALPACACORE_ENABLE_GPHOTO "Enable libgphoto2 DSLR/mirrorless camera vendor support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)

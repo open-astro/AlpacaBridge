@@ -388,6 +388,9 @@ public:
     }
 
     void set_guide_rate(const GuideRate& rate) override {
+        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = rate;
     }
@@ -464,7 +467,7 @@ public:
     }
 
     void set_site_elevation(double elevation) override {
-        if (elevation < -300.0 || elevation > 10000.0) {
+        if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters",
                                   AlpacaError::InvalidValue);
         }
@@ -476,7 +479,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (latitude < -90.0 || latitude > 90.0) {
+        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees",
                                   AlpacaError::InvalidValue);
         }
@@ -489,7 +492,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (longitude < -180.0 || longitude > 180.0) {
+        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees",
                                   AlpacaError::InvalidValue);
         }
@@ -511,7 +514,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        if (dec < -90.0 || dec > 90.0) {
+        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
             throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees",
                                   AlpacaError::InvalidValue);
         }
@@ -527,7 +530,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        if (ra < 0.0 || ra >= 24.0) {
+        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
             throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours",
                                   AlpacaError::InvalidValue);
         }

@@ -1,5 +1,7 @@
 # HTTP server thread ownership
 
+Status: accepted
+
 ## Context
 
 `run_server()` may return before the server is running, including when `bind()` fails. `running_ == false` does not imply `server_thread_` is non-joinable. A simple join from two concurrent `stop()` callers is also unsafe.
