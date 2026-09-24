@@ -491,7 +491,7 @@ against its checklist, 2026-09-06:
   scope for this issue. The claim/release in `connect_serial()` is covered by a pty-backed
   test in `test_skywatcher_serial.cpp`; the post-`open()` re-check in `probe_skywatcher_port`
   narrows the TOCTOU window but cannot close it (in-process best-effort set, not a file lock).
-- [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open-astro#261.
+- [x] Pier side / meridian handling for GEMs in the southern hemisphere — open-astro#261.
   Audit (2026-09-09, no hardware): unlike the RA/Dec direction bugs above, the branch that
   drives `SideOfPier`/`DestinationSideOfPier` is chosen purely from the sign of hour angle
   in `ra_dec_to_axis_degrees_locked()`. Since #432 that function consults
@@ -508,11 +508,18 @@ against its checklist, 2026-09-06:
   internal contradiction to expose (whichever side the code calls pierEast, it consistently
   slews to and reports that side). Loopback regressions asserting the flip contract on the
   EQM-35 Pro and Wave profiles are in `test_skywatcher_async.cpp` ("Pier side across the
-  meridian"). The physical-side question stays open until the plate-solved goto-across-the-
-  meridian check on the rig (see the hemisphere fixes and pending bench test elsewhere in this
-  section).
-- [ ] `SyncToCoordinates` single-point offset sync model — not exercised this session
-  (no plate solve performed).
+  meridian"). **Plate-solved on the rig 2026-09-24** (EQM-35 Pro at -37, TRACE log): gotos
+  across the meridian and back, with the board's `:j` counts at every exposure. Every landing's
+  dec branch was on the side of the meridian the solved hour angle puts it: `a2 < 0` for the
+  east-side (HA < 0) targets IC 5148 and a Capricornus field, `a2 >= 0` for every west one, with
+  `SideOfPier` reading 1 after the flip. A flip and flip back returned M7 to within 82 arcsec.
+  Pinned as sky truth in `test_skywatcher_pointing.cpp` ("measured axes agree with the
+  plate-solved sky across a flip, south").
+- [x] `SyncToCoordinates` single-point offset sync model — exercised 2026-09-24 with plate
+  solves: each sync was a pair of `:E` register writes with no motion, and later gotos on the
+  sync's side of the meridian landed 0.2-0.7 deg from the sky. Across the meridian the error
+  was 1.4-2.3 deg in Dec, which a single-point offset cannot remove: the mount's own dec zero
+  and cone errors change sign with the pier side (see the absolute-pointing bullet below).
 - [ ] Park/unpark weights-down convention — not specifically re-verified on a classic
   board this session (uses the same `kHomeCounts` convention as the Wave; untested here).
 - [ ] ConformU 4.5.x on a classic mount — blocked on Pi 5 hardware availability; not the
@@ -705,8 +712,8 @@ and each time the assertion itself was the review finding.
     transform (the rate goes straight to `start_speed_motion_locked`), so this is
     also the hardware reference for which way a raw Dec-axis rate moves reported
     Dec below the equator -- the fact the DeclinationRate/PulseGuide fix below
-    rests on. Reported coordinates come from the driver's own pointing model; an
-    independent sky check (plate solve) is still on the list below. Do NOT "fix"
+    rests on. Reported coordinates come from the driver's own pointing model; the
+    independent sky check (plate solve, 2026-09-24) is below. Do NOT "fix"
     MoveAxis to follow sky Dec: the ASCOM spec says the sign of the Rate parameter
     "is purposely left undefined" and the motion is about the MECHANICAL axis, so
     the no-transform behaviour is correct in both hemispheres (checked against
@@ -748,10 +755,22 @@ and each time the assertion itself was the review finding.
     reversed),
     and `MoveAxis(Dec, +rate)` again moved reported Dec and the counts up. Mount returned
     to home, tracking off.
-  - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and
-    sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, the
+  - **Absolute pointing and the southern meridian flip: plate-solved 2026-09-24.** Same
+    EQM-35 Pro at -37, 5 s frames solved by ASTAP and precessed to date, the service at TRACE
+    so every `:S` goto target, `:j` read and `:E` sync is in the log. The driver sent exactly
+    its formula's axes on the 12 gotos that have a solve (a2 to 0.000 deg, a1 within the
+    seconds between computing and logging the frame), and the board landed on the commanded
+    count (spot-checked in the log on two gotos). Against the sky, the plain model is up to 0.43 h and 4.6 deg off; a
+    seven-term fit to 15 solved exposures over two power-ons leaves 8 arcmin rms with polar
+    1.3 deg, cone 0.8 deg, a hand-homed dec zero 0.8 and 3.3 deg off and an RA zero per
+    power-on. Those are this rig's errors; the model has no terms for them, so the practical
+    fix is a sync on each side of the meridian. A 23-minute tracking run drifted Dec
+    -11.2 and RA +9.9 arcsec/min against -8.8 and +12.1 predicted by the fitted polar error;
+    they agree within about 2.5 arcsec/min, so no separate tracking-rate error is needed. Four same-Dec gotos turning only the RA axis
+    lay on one circle to 8 arcsec. The rows are pinned in `test_skywatcher_pointing.cpp`.
+  - STILL UNVALIDATED on EQ-class hardware: the
     `":g"` high-speed ratio under fast slews, and the Dec-axis direction of
-    `DeclinationRate` / `PulseGuide` North-South below the equator (fixed in code from
+    `DeclinationRate` / `PulseGuide` North-South below the equator on the a2 < 0 branch (fixed in code from
     the pointing model -- see the KNOWN BUG below -- but not yet measured on the mount;
     a short autoguiding session is the cheapest check).
   - **PENDING BENCH TEST (not yet run): `a2 < 0` Dec-direction sign coverage.** Closes the
@@ -777,9 +796,8 @@ and each time the assertion itself was the review finding.
        (unchanged) -- the mirror image of the `a2 > 0` row already confirmed.
     This closes ONLY the sign-rule coverage gap. It does NOT validate `SideOfPier`
     reporting or automatic pier-flip behaviour during a real GOTO across the meridian --
-    that is the separate, still-open bullet directly above, and realistically waits on
-    the plate-solve work since confirming a flip landed correctly needs an independent
-    sky check.
+    that was the separate plate-solved check above (2026-09-24), which needed an
+    independent sky check to confirm a flip landed correctly.
 
 #### KNOWN BUG (FIXED): DeclinationRate and PulseGuide North/South run backwards south of the equator
 
