@@ -18,7 +18,10 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <string>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -110,7 +113,10 @@ TEST_CASE("GPhoto camera fake - connected PulseGuide is NotImplemented and names
         threw = true;
         CHECK(e.error_code() == alpacacore::AlpacaError::NotImplemented);
         const std::string msg = e.what();
-        CHECK(msg.find("gphoto") == std::string::npos);
+        std::string lowered = msg;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        CHECK(lowered.find("gphoto") == std::string::npos);
         CHECK(msg.find("DSLR / mirrorless camera") != std::string::npos);
     }
     CHECK(threw);
@@ -132,7 +138,10 @@ TEST_CASE("GPhoto camera fake - connect with no camera at the index names no lib
         threw = true;
         CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
         const std::string msg = e.what();
-        CHECK(msg.find("gphoto") == std::string::npos);
+        std::string lowered = msg;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        CHECK(lowered.find("gphoto") == std::string::npos);
         CHECK(msg.find("plugged in") != std::string::npos);
     }
     CHECK(threw);
