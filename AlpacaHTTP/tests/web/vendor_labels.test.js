@@ -29,15 +29,15 @@ const html = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'index.html
 
 test('add-device option shows the libgphoto2 name and keeps the gphoto key', () => {
     assert.ok(
-        html.includes('<option value="gphoto">DSLR / Mirrorless Camera (libgphoto2)</option>'),
-        'the gphoto option must read "DSLR / Mirrorless Camera (libgphoto2)"'
+        html.includes('<option value="gphoto">DSLR / Mirrorless (libgphoto2)</option>'),
+        'the gphoto option must read "DSLR / Mirrorless (libgphoto2)"'
     );
 });
 
 test('the gphoto configuration heading uses the same name', () => {
     assert.ok(
-        html.includes('<h3>DSLR / Mirrorless Camera (libgphoto2) Configuration</h3>'),
-        'the gphoto config heading must read "DSLR / Mirrorless Camera (libgphoto2) Configuration"'
+        html.includes('<h3>DSLR / Mirrorless (libgphoto2) Configuration</h3>'),
+        'the gphoto config heading must read "DSLR / Mirrorless (libgphoto2) Configuration"'
     );
 });
 
