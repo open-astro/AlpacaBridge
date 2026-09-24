@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -388,6 +389,98 @@ TEST_CASE("Celestron Telescope Driver - a far-off client UTCDate is logged once 
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->set_utc_date(far);
     CHECK(warns.load() == 2);
+    driver->set_connected(false);
+}
+
+// #627: `x < min || x > max` is false for NaN, so NaN passed every range check
+// and was stored (targets, elevation) or reached the mount (the site latitude
+// and longitude setters check the connection only AFTER the range, so a NaN
+// used to surface as NotConnected instead of InvalidValue).
+TEST_CASE("Celestron Telescope Driver - non-finite input is rejected", "[celestron][telescope][unit][nonfinite]") {
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    SECTION("TargetDeclination") {
+        require_alpaca_error([&]() { driver->set_target_declination(nan); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    }
+    SECTION("TargetRightAscension") {
+        require_alpaca_error([&]() { driver->set_target_right_ascension(nan); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); },
+                             alpacacore::AlpacaError::ValueNotSet);
+    }
+    SECTION("SiteElevation") {
+        require_alpaca_error([&]() { driver->set_site_elevation(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SiteLatitude") {
+        require_alpaca_error([&]() { driver->set_site_latitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SiteLongitude") {
+        require_alpaca_error([&]() { driver->set_site_longitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+}
+
+// #627: Celestron's guide-rate setter only exists when the AUX bus probe found
+// an autoguider port, so it is reachable only on a connected driver. The
+// canned reply makes every bus probe answer, which the CanSetGuideRates
+// precondition below confirms. NaN used to be converted to a percentage and
+// written to the mount.
+TEST_CASE("Celestron Telescope Driver - non-finite guide rate is rejected", "[celestron][telescope][unit][nonfinite]") {
+    alpacacore::test::FakeMountServer server([](const std::string&) { return std::string("00000000,00000000#"); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 500;
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE(driver->get_can_set_guide_rates());
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+}
+
+// #627: `validate_ra_dec` is `ra < 0 || ra >= 24` / `dec < -90 || dec > 90`,
+// both false for NaN, so a NaN coordinate went through slew and sync to the
+// mount. Both check the connection before validating, so this needs a
+// connected driver.
+TEST_CASE("Celestron Telescope Driver - non-finite slew and sync coordinates are rejected",
+          "[celestron][telescope][unit][nonfinite]") {
+    alpacacore::test::FakeMountServer server([](const std::string&) { return std::string("00000000,00000000#"); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 500;
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    SECTION("SlewToCoordinatesAsync RightAscension") {
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(nan, 45.0); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SlewToCoordinatesAsync Declination") {
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, nan); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SyncToCoordinates RightAscension") {
+        require_alpaca_error([&]() { driver->sync_to_coordinates(nan, 45.0); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SyncToCoordinates Declination") {
+        require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+
     driver->set_connected(false);
 }
 

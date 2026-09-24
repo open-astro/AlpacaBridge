@@ -4,7 +4,7 @@
 # installed via apt, same as libusb/libudev are for the other camera vendors).
 
 if(ALPACACORE_ENABLE_GPHOTO)
-    message(STATUS "Building gphoto2 DSLR/mirrorless camera driver support")
+    message(STATUS "Building libgphoto2 DSLR/mirrorless camera driver support")
 
     # Linux arm64 only (Raspberry Pi 4/5, Rockchip SBCs, OrangePi, iOptron iMate)
     if(NOT UNIX)

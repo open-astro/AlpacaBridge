@@ -656,6 +656,37 @@ int main() {
     }
 
     {
+        // open-astro#547: the router's single device-dispatch choke point
+        // stamps client activity on the telescope for ANY request addressed
+        // to it (including the client's own Slewing polls), and only for
+        // that device -- not for a request to a different device number.
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<TelescopeClockStubDriver>(9850);
+        auto other = std::make_shared<TelescopeClockStubDriver>(9851);
+        EXPECT(registry.register_device(stub));
+        EXPECT(registry.register_device(other));
+
+        EXPECT(!stub->last_client_activity().has_value());
+
+        route_request(router, "GET", "/api/v1/telescope/9850/connected");
+        EXPECT(stub->last_client_activity().has_value());
+        const auto first_stamp = *stub->last_client_activity();
+
+        // A different device's traffic must not stamp this one.
+        route_request(router, "GET", "/api/v1/telescope/9851/connected");
+        EXPECT(*stub->last_client_activity() == first_stamp);
+
+        // The client's own Slewing poll counts too (no per-endpoint list).
+        // Strict '>' (not '>=') -- steady_clock is monotonic, so '>=' would
+        // pass even if this request never re-stamped anything.
+        route_request(router, "GET", "/api/v1/telescope/9850/slewing");
+        EXPECT(*stub->last_client_activity() > first_stamp);
+
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9850);
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9851);
+    }
+
+    {
         // #574: three router-level request-validation gaps, all vendor-free
         // against a fresh TelescopeClockStubDriver (its set_target_declination
         // is a no-op, so a NaN that reached the driver would return

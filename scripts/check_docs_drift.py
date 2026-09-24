@@ -39,7 +39,7 @@ Checks:
      production's cancel skips the per-handle mutex so it can interrupt a
      download blocked on the same handle) -- and the forward sweep in
      test_qhy_fake_sdk.cpp drives all of them.
-  7. Every relative path referenced in AGENTS.md, scoped instructions,
+  7. Every relative path referenced in AGENTS.md, CONTEXT.md, scoped instructions,
      docs/agents/ agent-skills config, .claude/skills/ Claude skills, and
      docs/failures/ and docs/decisions/
      inline code spans (`` `AlpacaCore/...` ``, `` `scripts/...` ``,
@@ -905,6 +905,8 @@ def check_agents_md_paths_exist(root=ROOT):
     `.claude/skills/` is recursive on both sides and stays a directory spec.
     """
     failures, _ = _check_doc_path_refs("AGENTS.md", MIN_AGENTS_MD_PATH_REFS, "MIN_AGENTS_MD_PATH_REFS", root=root)
+    context_failures, _ = _check_doc_path_refs("CONTEXT.md", 0, "CONTEXT.md floor", root=root)
+    failures.extend(context_failures)
     instruction_dir = root / ".github/instructions"
     files = sorted(instruction_dir.glob("*.instructions.md"))
     tracked = _run_git(["-c", "core.quotePath=false", "ls-files", ":(glob).github/instructions/*.instructions.md"], root=root).stdout.splitlines()
@@ -1671,6 +1673,7 @@ def self_test():
         root = Path(base)
         files = {
             "AGENTS.md": "".join("See `scripts/f%d.py`.\n" % (i % MIN_MEMORY_COMMENT_FILES) for i in range(MIN_AGENTS_MD_PATH_REFS + 2)),
+            "CONTEXT.md": "# Context\n",
             ".github/instructions/a.instructions.md": "# a\n",
             ".claude/skills/s/SKILL.md": "# s\n",
             ".gitignore": "scripts/gen/\n",
@@ -1724,6 +1727,20 @@ def self_test():
                   found is not None and any("SKILL.md" in f and "scripts/skill_nope.py" in f for f in found))
             check("agents md check: a drifted span in an agent doc is reported",
                   found is not None and any("docs/agents/x.md" in f and "scripts/agent_nope.py" in f for f in found))
+
+            # CONTEXT.md, the domain glossary, is scanned like AGENTS.md; a
+            # rename must not silently drop it from the check.
+            context = repo_fixture("context")
+            with open(context / "CONTEXT.md", "a", encoding="utf-8") as f:
+                f.write("See `scripts/context_nope.py`.\n")
+            found = run_check(context)
+            check("agents md check: a drifted span in CONTEXT.md is reported",
+                  found is not None and any("CONTEXT.md" in f and "scripts/context_nope.py" in f for f in found))
+            nocontext = repo_fixture("nocontext")
+            (nocontext / "CONTEXT.md").unlink()
+            found = run_check(nocontext)
+            check("agents md check: a missing CONTEXT.md is reported",
+                  found is not None and any("CONTEXT.md" in f and "does not exist" in f for f in found))
 
             gone = repo_fixture("gone")
             (gone / ".github/instructions/a.instructions.md").unlink()

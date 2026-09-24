@@ -289,6 +289,7 @@ public:
                 sync_offset_ra_hours_ = 0.0;
                 sync_offset_dec_degrees_ = 0.0;
                 slew_in_progress_ = false;
+                last_slew_error_.clear();
                 prefetch_mount_state_locked();
                 try {
                     mount_info_ = protocol.get_mount_info();
@@ -363,6 +364,7 @@ public:
             target_ra_hours_ = 0.0;
             target_dec_degrees_ = 0.0;
             slew_in_progress_ = false;
+            last_slew_error_.clear();
             disconnect_protocol = true;
         }
 
@@ -675,6 +677,9 @@ public:
     }
     
     void set_guide_rate(const GuideRate& rate) override {
+        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         
@@ -843,7 +848,7 @@ public:
     
     void set_site_elevation(double elevation) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (elevation < -300.0 || elevation > 10000.0) {
+        if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException(
                 "Site elevation must be between -300 and 10000 meters",
                 AlpacaError::InvalidValue
@@ -863,7 +868,7 @@ public:
     void set_site_latitude(double latitude) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (latitude < -90.0 || latitude > 90.0) {
+        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException(
                 "Site latitude must be between -90 and 90 degrees",
                 AlpacaError::InvalidValue
@@ -889,7 +894,7 @@ public:
     void set_site_longitude(double longitude) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (longitude < -180.0 || longitude > 180.0) {
+        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException(
                 "Site longitude must be between -180 and 180 degrees",
                 AlpacaError::InvalidValue
@@ -988,8 +993,12 @@ public:
                 tracking_state_before_move_ = cached_status_.is_tracking;
             }
         }
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that jogs an axis after a failed GOTO must not be told the OLD
+        // goto failed.
+        last_slew_error_.clear();
     }
-    
+
     std::pair<double, double> get_axis_rate_range(int axis) const override {
         if (axis == 0 || axis == 1) {
             const auto& rates = axis_rate_steps_deg_per_sec();
@@ -1018,6 +1027,12 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        // open-astro#575: surface a stored async-slew failure as an error
+        // instead of a silent false, until AbortSlew or a new slew initiator
+        // clears it (see last_slew_error_).
+        if (!last_slew_error_.empty()) {
+            throw AlpacaException(last_slew_error_);
+        }
         if (axis_move_active_primary_ || axis_move_active_secondary_) {
             return true;
         }
@@ -1225,8 +1240,12 @@ public:
         slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that calls FindHome after a failed GOTO must not be told the OLD
+        // goto failed while it's homing.
+        last_slew_error_.clear();
     }
-    
+
     void park() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
@@ -1255,6 +1274,10 @@ public:
         last_status_update_ = std::chrono::steady_clock::now();
         slew_override_until_ = last_status_update_ + std::chrono::seconds(5);
         position_cache_valid_ = false;
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that calls Park after a failed GOTO must not be told the OLD goto
+        // failed while it's parking.
+        last_slew_error_.clear();
         // HAE29C firmware quirk (hardware-verified 2026-07-14): :MP1# park
         // slews complete physically but the mount keeps reporting
         // system-status 2 ("slewing") forever instead of 6 ("parked");
@@ -1277,6 +1300,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         ensure_not_parked_locked("AbortSlew");
+        // open-astro#575: AbortSlew is a valid clearing command for a stored
+        // slew failure -- the client acted on the error, so the next Slewing
+        // read must answer normally again. Clear unconditionally, before the
+        // early-return below (a soft-failed goto never set is_slewing).
+        last_slew_error_.clear();
         if (!cached_status_.is_slewing) {
             restore_altitude_limit_locked("AbortSlew");
             restore_meridian_treatment_locked("AbortSlew");
@@ -1463,10 +1491,16 @@ public:
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
                     clear_slew_override_locked();
+                    if (!slew_dispatch_cancel_.load()) {
+                        last_slew_error_ = std::string("SlewToCoordinatesAsync failed: ") + e.what();
+                    }
                     ALPACA_LOG_WARN("iOptron", std::string("Async slew failed: ") + e.what());
                 } catch (...) {
                     slew_in_progress_ = false;
                     clear_slew_override_locked();
+                    if (!slew_dispatch_cancel_.load()) {
+                        last_slew_error_ = "SlewToCoordinatesAsync failed with an unknown error";
+                    }
                     ALPACA_LOG_WARN("iOptron", "Async slew failed with unknown exception");
                 }
             });
@@ -1595,10 +1629,16 @@ public:
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
                     clear_slew_override_locked();
+                    if (!slew_dispatch_cancel_.load()) {
+                        last_slew_error_ = std::string("SlewToAltAzAsync failed: ") + e.what();
+                    }
                     ALPACA_LOG_WARN("iOptron", std::string("Async AltAz slew failed: ") + e.what());
                 } catch (...) {
                     slew_in_progress_ = false;
                     clear_slew_override_locked();
+                    if (!slew_dispatch_cancel_.load()) {
+                        last_slew_error_ = "SlewToAltAzAsync failed with an unknown error";
+                    }
                     ALPACA_LOG_WARN("iOptron", "Async AltAz slew failed with unknown exception");
                 }
             });
@@ -1883,6 +1923,9 @@ private:
                                     const char* label) {
         check_connected();
         ensure_not_parked_locked(label);
+        // open-astro#575: a fresh initiator is a clean start -- a client that
+        // retries a rejected goto must not be told the OLD goto failed.
+        last_slew_error_.clear();
 
         target_ra_hours_ = ascom_ra;
         target_dec_degrees_ = ascom_dec;
@@ -1936,6 +1979,14 @@ private:
             slew_in_progress_ = false;
             clear_slew_override_locked();
             if (allow_soft_fail) {
+                // open-astro#575: a reap by a newer initiator is not a failure -- that
+                // initiator already owns clearing/replacing last_slew_error_.
+                // AbortSlew does not set the cancel flag, so a dispatch it did not
+                // reap can still send its GOTO and record a real failure after the
+                // abort cleared the error.
+                if (!slew_dispatch_cancel_.load()) {
+                    last_slew_error_ = std::string(label) + " failed: mount rejected the target";
+                }
                 ALPACA_LOG_WARN("iOptron", "Slew rejected by mount - treating as no-op for async slew");
                 return;
             }
@@ -2783,6 +2834,13 @@ private:
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
     mutable bool slew_in_progress_ = false;
+    // open-astro#575: an async slew that fails AFTER the initiator returned
+    // (mount rejects the GOTO, soft-failed and logged as a no-op) used to
+    // leave Slewing read FALSE -- indistinguishable from a landed goto. Set
+    // (under mutex_) on a REAL failure (never on the dispatch thread's own
+    // cancellation), cleared by the next slew initiator and by AbortSlew.
+    // Consulted by get_slewing() before the cached status.
+    mutable std::string last_slew_error_;
     static constexpr int kMaxSlewRefines = 3;
     mutable int slew_refine_count_ = 0;
     mutable double slew_target_ra_hours_ = 0.0;

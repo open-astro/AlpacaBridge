@@ -1,5 +1,7 @@
 # Sky-Watcher pointing clock and UTCDate readback
 
+Status: accepted
+
 ## Context
 
 The direct motor-controller mount has no independent clock. Before #287, a client's `UTCDate` write changed the ASCOM readback but not the host-clock LST used for pointing. Applying every client offset fixed that mismatch, but #301 showed that a mis-set tablet could then move pointing by 7.5° on an NTP-disciplined rig.

@@ -4,8 +4,8 @@ Run `python3 scripts/check_docs_drift.py` and
 `python3 scripts/check_instruction_structure.py --self-test` from the repository root.
 The drift gate checks the Claude entry point, agreement between GitHub and Claude
 path metadata, vendor source/header/test coverage, the instruction index, and
-relative links in scoped guidance, memory, and the Claude skills under
-`.claude/skills/`. Its existing prose checks also scan
+relative links in scoped guidance, memory, `CONTEXT.md`, `docs/architecture.md`, and the
+Claude skills under `.claude/skills/`. Its existing prose checks also scan
 the relocated instruction files. Negative fixtures check that removing the Claude
 entry point, changing an adapter's vendor, removing metadata, or breaking the index
 is detected.

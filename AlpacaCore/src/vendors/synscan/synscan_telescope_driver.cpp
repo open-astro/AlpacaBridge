@@ -331,6 +331,7 @@ public:
             at_home_ = false;
             pulse_guiding_active_ = false;
             slewing_cached_ = false;
+            last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             position_override_until_ = std::chrono::steady_clock::time_point::min();
             last_utc_valid_ = false;
@@ -416,6 +417,7 @@ public:
             at_home_ = false;
             pulse_guiding_active_ = false;
             slewing_cached_ = false;
+            last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             position_override_until_ = std::chrono::steady_clock::time_point::min();
             manual_axis_slewing_[0] = false;
@@ -653,6 +655,9 @@ public:
     }
 
     void set_guide_rate(const GuideRate& rate) override {
+        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         double ra_percent = (rate.ra / kSiderealDegPerSec) * 100.0;
@@ -756,7 +761,7 @@ public:
     }
 
     void set_site_elevation(double elevation) override {
-        if (elevation < -300.0 || elevation > 10000.0) {
+        if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters",
                                   AlpacaError::InvalidValue);
         }
@@ -772,7 +777,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (latitude < -90.0 || latitude > 90.0) {
+        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees",
                                   AlpacaError::InvalidValue);
         }
@@ -795,7 +800,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (longitude < -180.0 || longitude > 180.0) {
+        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees",
                                   AlpacaError::InvalidValue);
         }
@@ -812,6 +817,12 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        // open-astro#575: surface a stored async-slew failure as an error
+        // instead of a silent false, until AbortSlew or a new slew initiator
+        // clears it (see last_slew_error_).
+        if (!last_slew_error_.empty()) {
+            throw AlpacaException(last_slew_error_);
+        }
         return get_slewing_locked();
     }
 
@@ -823,7 +834,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        if (dec < -90.0 || dec > 90.0) {
+        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
             throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees",
                                   AlpacaError::InvalidValue);
         }
@@ -839,7 +850,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        if (ra < 0.0 || ra >= 24.0) {
+        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
             throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours",
                                   AlpacaError::InvalidValue);
         }
@@ -987,6 +998,10 @@ public:
             manual_axis_slewing_[1] = false;
             at_home_ = false;
             parking_ = true;
+            // open-astro#575: a fresh initiator is a clean start -- a client
+            // that calls Park after a failed GOTO must not be told the OLD
+            // goto failed while it's parking.
+            last_slew_error_.clear();
         }
 
         // Join any task that raced in between the reap above and this lock,
@@ -1301,6 +1316,10 @@ public:
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
             slewing_cached_ = true;
+            // open-astro#575: a fresh initiator is a clean start -- a client
+            // that retries a rejected goto must not be told the OLD goto
+            // failed.
+            last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             position_override_until_ = std::chrono::steady_clock::time_point::min();
             target_ra_hours_ = ra;
@@ -1339,11 +1358,24 @@ public:
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
+                // open-astro#575: a reap by a newer initiator is not a failure -- that
+                // initiator already owns clearing/replacing last_slew_error_.
+                // AbortSlew does not set the cancel flag, so a dispatch it did not
+                // reap can still send its GOTO and record a real failure after the
+                // abort cleared the error. Recording it here
+                // would poison the NEXT Slewing read with an artifact of the
+                // cancel, not a real fault.
+                if (!slew_task_cancel_.load()) {
+                    last_slew_error_ = std::string("SlewToCoordinatesAsync failed: ") + ex.what();
+                }
                 ALPACA_LOG_WARN("SynScan", std::string("Async slew dispatch failed: ") + ex.what());
             } catch (...) {
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
+                if (!slew_task_cancel_.load()) {
+                    last_slew_error_ = "SlewToCoordinatesAsync failed with an unknown error";
+                }
                 ALPACA_LOG_WARN("SynScan", "Async slew dispatch failed with unknown exception");
             }
         });
@@ -1450,6 +1482,10 @@ public:
             parked_ = false;
             at_home_ = false;
         }
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that jogs an axis after a failed GOTO must not be told the OLD
+        // goto failed.
+        last_slew_error_.clear();
 
         SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0);
     }
@@ -1482,6 +1518,10 @@ public:
         protocol.move_axis_fixed_rate(1, 0);
         parking_ = false;  // an aborted park never reaches AtPark
         slewing_cached_ = false;
+        // open-astro#575: AbortSlew is a valid clearing command for a stored
+        // slew failure -- the client acted on the error, so the next Slewing
+        // read must answer normally again.
+        last_slew_error_.clear();
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
@@ -1727,6 +1767,10 @@ private:
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
         slewing_cached_ = true;
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that retries a rejected goto (even via the blocking
+        // SlewToCoordinates) must not be told the OLD goto failed.
+        last_slew_error_.clear();
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         protocol.goto_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_);
@@ -1839,10 +1883,10 @@ private:
     }
 
     static void validate_ra_dec(double ra, double dec, const char* context) {
-        if (ra < 0.0 || ra >= 24.0) {
+        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
             throw AlpacaException(std::string(context) + ": RA out of range", AlpacaError::InvalidValue);
         }
-        if (dec < -90.0 || dec > 90.0) {
+        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
             throw AlpacaException(std::string(context) + ": Dec out of range", AlpacaError::InvalidValue);
         }
     }
@@ -1894,6 +1938,13 @@ private:
     mutable bool parked_;
     mutable bool at_home_;
     mutable bool slewing_cached_ = false;
+    // open-astro#575: an async slew dispatch that fails AFTER
+    // slew_to_coordinates_async() returned used to be logged and forgotten,
+    // leaving Slewing read FALSE -- indistinguishable from a landed goto. Set
+    // (under mutex_) by the slew task's catch block on a REAL failure (never
+    // on the task's own cancellation), cleared by the next slew initiator and
+    // by AbortSlew. Consulted by get_slewing() before the cached bool.
+    mutable std::string last_slew_error_;
     mutable std::chrono::steady_clock::time_point slew_force_until_;
     mutable std::chrono::steady_clock::time_point position_override_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};

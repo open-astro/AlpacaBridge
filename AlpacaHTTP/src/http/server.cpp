@@ -52,6 +52,7 @@ Server::Server(const Config& config)
                             config_.profile_name());
     router_.set_config_path(config_.config_path());
     router_.set_sync_system_clock_from_clients(config_.sync_system_clock_from_clients());
+    router_.set_motion_watchdog_interval(std::chrono::seconds(config_.motion_watchdog_seconds()));
 
     // The reactor's wake pipe lives as long as the Server. Non-blocking on
     // both ends: a wake is one byte, and a full pipe already means a wake is
@@ -234,8 +235,13 @@ void Server::stop() {
         wake_reactor();
         // The RTC probe timer, woken out of its wait the same way. It holds
         // no connections and serves no request, so it can go first; a pass
-        // already inside the probe finishes its read before the flag is
-        // observed, which is bounded by the bus timeout (#314).
+        // already in flight finishes before the flag is observed. That pass
+        // can be an RTC read (bounded by the bus timeout, #314) or, since
+        // #547, a client-silence watchdog tick inside get_slewing()/
+        // abort_slew()/move_axis() on every registered telescope, each
+        // bounded by that mount's own transport timeouts (Sky-Watcher's stop
+        // confirm alone is kAxisStopTimeout = 5 s per axis). The join below
+        // has no deadline of its own.
         {
             std::lock_guard<std::mutex> lock(rtc_probe_mutex_);
             rtc_probe_stop_ = true;
@@ -1318,17 +1324,37 @@ void Server::wake_reactor() {
 // pass landing a few microseconds early is silently swallowed, which would
 // make the effective period 60 s). It is settable for the same reason the keep-alive
 // cap is -- a test cannot wait half a minute to see the thread do its job.
+//
+// open-astro#547: this same thread also ticks the client-silence motion
+// watchdog now (see the declaration's comment in server.h for why it rides
+// here rather than spawning a thread per device). The loop wakes every
+// kTimerTick (1 s, the watchdog's cadence) and calls
+// Router::run_motion_watchdogs() on every pass; the RTC probe keeps its own,
+// longer period via a separate deadline checked on each tick and re-armed
+// from the probe time, so consecutive probes stay a full interval apart.
 void Server::rtc_probe_loop() {
-    const auto interval = std::chrono::seconds(config_.rtc_probe_interval_seconds());
+    constexpr auto kTimerTick = std::chrono::seconds(1);
+    const auto rtc_interval = std::chrono::seconds(config_.rtc_probe_interval_seconds());
+    auto next_rtc = std::chrono::steady_clock::now() + rtc_interval;
     while (true) {
         {
             std::unique_lock<std::mutex> lock(rtc_probe_mutex_);
-            rtc_probe_cv_.wait_for(lock, interval, [this] { return rtc_probe_stop_; });
+            rtc_probe_cv_.wait_for(lock, kTimerTick, [this] { return rtc_probe_stop_; });
             if (rtc_probe_stop_) {
                 return;
             }
         }
-        router_.refresh_rtc_probe();
+        const auto now = std::chrono::steady_clock::now();
+        router_.run_motion_watchdogs(now);
+        if (now >= next_rtc) {
+            router_.refresh_rtc_probe();
+            // From now, not from the old deadline: each 1 s tick overshoots
+            // slightly, so `next_rtc += rtc_interval` lets the probe phase
+            // drift and, once per wrap, lands two probes only 30 ticks (just
+            // over 30 s) apart -- most of the +1 s margin over
+            // HostClock::kRtcProbeRateLimit gone.
+            next_rtc = now + rtc_interval;
+        }
     }
 }
 
