@@ -43,7 +43,7 @@ SDK cleanup checklist does not apply here).
   confirmed this needed a fix — the ASCOM Camera contract expects these properties readable
   before any exposure — and also confirmed the caution below was justified: the D5300's real RAW
   crop libraw decodes is **6016×4016**, not the 6000×4000 public spec (an 8px masked/calibration
-  border per edge that no gphoto2 widget or PTP `ObjectInfo` metadata reports — confirmed by
+  border per edge that no libgphoto2 widget or PTP `ObjectInfo` metadata reports — confirmed by
   probing both directly). So `set_connected` no longer waits for the caller's first exposure:
   on Connect it checks an on-disk cache (`config/gphoto_sensor_cache.tsv`, a tiny tab-separated
   flat file — AlpacaCore has no JSON, see `alpaca_json.h`) keyed by camera **model** string; a hit
@@ -176,7 +176,7 @@ SDK cleanup checklist does not apply here).
   `imgdata.makernotes.common.SensorTemperature` after each decoded exposure (populated mainly for
   Canon RAW files per LibRaw's own docs/INDI precedent); throws `PropertyNotImplemented` when
   absent. Do not expect Nikon NEF files to populate this.
-- **No pulse guiding** — a plain USB gphoto2 camera has no ST-4/autoguider port; `PulseGuide`
+- **No pulse guiding** — a plain USB libgphoto2 camera has no ST-4/autoguider port; `PulseGuide`
   throws `NotImplemented` once connected (matches `CanPulseGuide=false`).
 - **`HasShutter=true`** — the one camera vendor in this project where that's actually true (every
   CMOS SDK camera here reports `false`); a DSLR has a real mechanical shutter.

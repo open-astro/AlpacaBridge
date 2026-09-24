@@ -14,11 +14,11 @@
 //
 // Run: node --test AlpacaHTTP/tests/web/vendor_labels.test.js
 //
-// The vendor's library is libgphoto2. "gphoto2" is the older name of the
-// command-line tool, which this server does not use, so the page must not
-// present the device as "(gphoto2)". The option's value stays "gphoto": it is
-// the key the rest of the UI and the saved configuration use, and only the
-// visible text is being pinned here.
+// The vendor's library is libgphoto2. "gphoto2" also names the gPhoto
+// software suite and its command-line tool, which this server does not use,
+// so the page must not present the device as "(gphoto2)". The option's
+// value stays "gphoto": it is the key the rest of the UI and the saved
+// configuration use, and only the visible text is being pinned here.
 
 const test = require('node:test');
 const assert = require('node:assert');

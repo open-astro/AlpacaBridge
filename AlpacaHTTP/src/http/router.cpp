@@ -992,7 +992,7 @@ void append_int(std::string& out, std::int64_t value) {
 // Measured 5.2x faster overall (5.4s -> 1.0s for a 6016x4016 Int32 frame) on
 // an RK3568-class ARM SBC -- enough to clear ConformU's 10s
 // ImageArrayVariant timeout that the naive pattern was blowing through on
-// real DSLR-resolution frames from AlpacaCore's gphoto2 driver.
+// real DSLR-resolution frames from AlpacaCore's libgphoto2 driver.
 std::vector<std::int32_t> transpose_xy(const std::vector<std::int32_t>& data, std::uint32_t width, std::uint32_t height,
                                        std::uint32_t channels) {
     std::vector<std::int32_t> out(static_cast<std::size_t>(width) * height * channels, 0);
