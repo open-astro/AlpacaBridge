@@ -1287,4 +1287,78 @@ TEST_CASE("SkyWatcher pointing - the pier side changes at HA 0 and the axes stay
     }
 }
 
+// Hardware rows measured against the sky. EQM-35 Pro (0x32) at latitude -37.1
+// (rounded), 2026-09-24. Each row pairs the physical axis
+// angles at a 5 s exposure with where ASTAP plate-solved that exposure, precessed
+// to the equinox of date. The axes are the board's own :j replies from the
+// driver's TRACE log, read within 2.7 s of the exposure midpoint, with both :E
+// sync re-stamps taken out, so they are where the axes really were, not what
+// the driver was told. Two power-ons; the mount was hand-homed before each.
+//
+// The tolerances are set by the mount, not by the model. A seven-term fit to
+// these rows puts the polar axis 1.3 deg off the pole, the tube 0.8 deg off
+// square to the dec axis, the dec zero 0.8 and 3.3 deg off and the RA zero 3.3
+// and 6.2 deg off (first and second power-on), with 8 arcmin rms left over. The
+// plain model below has none of those terms, so it is up to 0.43 h and 4.6 deg
+// from the sky. The checks are sized to catch what this file exists to catch:
+// a 6 h or 12 h hour-angle error, a wrong sign, a wrong dec branch across the
+// meridian, or a wrong RA-axis scale or direction. The last is the within-
+// power-on check: the RA zero cancels there, so rows on one side of the
+// meridian must share one HA offset while a1 spans 19 to 80 deg.
+// The home row is left out: at a2 = 0 the dec branch is undefined (#459).
+TEST_CASE("SkyWatcher pointing - measured axes agree with the plate-solved sky across a flip, south",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    struct Row {
+        const char* what;
+        int power_on;
+        double a1;
+        double a2;
+        double solved_ha;   // hours, of date
+        double solved_dec;  // degrees, of date
+    };
+    const Row rows[] = {
+        {"M7 first", 1, 59.130, 55.210, 2.291, -34.630},
+        {"M7 at the sync", 1, 58.508, 55.210, 2.331, -34.639},
+        {"NGC 6752, west", 1, 80.393, 29.869, 0.897, -59.786},
+        {"Antares field, west", 1, 38.678, 63.349, 3.664, -26.796},
+        {"IC 5148 after a flip, east", 1, -60.436, -50.801, -1.791, -37.117},
+        {"Capricornus field, east", 1, -72.167, -54.151, -1.017, -33.710},
+        {"Dec -40 circle 1, west", 2, 72.073, 50.000, 1.629, -42.252},
+        {"Dec -40 circle 2, west", 2, 53.910, 50.000, 2.817, -42.549},
+        {"Dec -40 circle 3, west", 2, 35.750, 50.000, 4.024, -42.874},
+        {"Dec -40 circle 4, west", 2, 19.579, 50.000, 5.105, -43.175},
+        {"at the second sync, west", 2, 18.963, 50.000, 5.145, -43.186},
+        {"M7, west", 2, 54.214, 58.396, 2.812, -34.121},
+        {"IC 5148 after a flip, east", 2, -65.344, -47.464, -1.297, -37.956},
+        {"M7 after the flip back, west", 2, 53.241, 58.396, 2.877, -34.143},
+    };
+    constexpr double latitude = -37.1;
+    constexpr double kRowHaToleranceHours = 0.5;     // 7.5 deg; a 6 h error is twelve times this
+    constexpr double kRowDecToleranceDegrees = 5.0;  // a wrong hemisphere sign is 53 deg or more here
+    constexpr double kSameSideSpreadHours = 0.05;    // 3 min; measured spread is under 2 min
+
+    // First HA offset (model - sky) seen per power-on and side, for the spread check.
+    double first_offset[3][2] = {};
+    bool seen[3][2] = {};
+    for (const Row& r : rows) {
+        const SkyPoint sky = sky_from_axes(latitude, r.a1, r.a2, -1);
+        const double ha_offset = wrap_ha(sky.ha_hours - r.solved_ha);
+        INFO(r.what << " (power-on " << r.power_on << "): model HA " << sky.ha_hours << " h dec " << sky.dec_degrees
+                    << "; solved HA " << r.solved_ha << " h dec " << r.solved_dec);
+        CHECK(std::abs(ha_offset) < kRowHaToleranceHours);
+        CHECK(std::abs(sky.dec_degrees - r.solved_dec) < kRowDecToleranceDegrees);
+        // Data check on the recorded rows: each landing's dec branch is the side of
+        // the meridian the sky put the tube on. A wrong branch in the model is caught
+        // by the HA check above, not by this line.
+        CHECK((r.solved_ha >= 0.0) == (r.a2 >= 0.0));
+
+        const int side = r.a2 >= 0.0 ? 0 : 1;
+        if (!seen[r.power_on][side]) {
+            seen[r.power_on][side] = true;
+            first_offset[r.power_on][side] = ha_offset;
+        }
+        CHECK(std::abs(wrap_ha(ha_offset - first_offset[r.power_on][side])) < kSameSideSpreadHours);
+    }
+}
+
 #endif  // !_WIN32
