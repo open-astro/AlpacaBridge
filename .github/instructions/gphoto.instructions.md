@@ -126,7 +126,7 @@ SDK cleanup checklist does not apply here).
   since libgphoto2 reports whichever name matches the camera's actual USB product ID). A model not
   in the table — every fixed-lens compact/camcorder libgphoto2 also supports, or a body released
   after the table was last updated — still reports `0.0` (ASCOM "unknown") rather than a guess.
-  D5300 confirmed against ConformU: 3.91 microns; D3200: 3.86 microns; D3300: 3.92 microns; Canon EOS 70D: 4.1 microns; Canon EOS 250D: 3.72 microns.
+  Nikon D5300 confirmed against ConformU: 3.91 microns; Nikon D3200: 3.86 microns; Nikon D3300: 3.92 microns; Canon EOS 4000D: 4.3 microns; Canon EOS 70D: 4.1 microns; Canon EOS 250D: 3.72 microns.
 - **ISO is a discrete `Gains()` list, not a continuous register** — deliberate departure from
   every other camera driver here (ZWO/QHY/SVBONY/PlayerOne/ToupTek all throw
   `PropertyNotImplemented` for `get_gains()` and treat `Gain` as a raw numeric register). A DSLR's
