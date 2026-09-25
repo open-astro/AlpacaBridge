@@ -108,7 +108,7 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
 
 // Operational properties and methods that must throw NotConnected while
 // disconnected, with no early return that skips the check.
-std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type) {
+std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, bool at_park_defect = false) {
     std::vector<Probe> p;
     switch (type) {
         case DeviceType::Telescope: {
@@ -119,9 +119,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type) {
             p.push_back({"get_azimuth", [&] { (void)t.get_azimuth(); }});
             p.push_back({"get_tracking", [&] { (void)t.get_tracking(); }});
             p.push_back({"get_slewing", [&] { (void)t.get_slewing(); }});
-            // get_at_park is deliberately not probed: bisque, celestron, synscan and skywatcher
-            // answer it from driver-side parked state while disconnected, and no source in the
-            // repo says it must throw (recorded as an open question in the #571 PR body).
+            if (!at_park_defect) p.push_back({"get_at_park", [&] { (void)t.get_at_park(); }});
             p.push_back({"slew_to_coordinates", [&] { t.slew_to_coordinates(1.0, 1.0); }});
             p.push_back({"abort_slew", [&] { t.abort_slew(); }});
             break;
@@ -211,6 +209,13 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
             p.push_back({"get_can_find_home", [&] { (void)t.get_can_find_home(); }});
             p.push_back({"get_can_pulse_guide", [&] { (void)t.get_can_pulse_guide(); }});
             p.push_back({"get_can_set_tracking", [&] { (void)t.get_can_set_tracking(); }});
+            p.push_back({"get_can_set_declination_rate", [&] { (void)t.get_can_set_declination_rate(); }});
+            p.push_back({"get_can_set_guide_rates", [&] { (void)t.get_can_set_guide_rates(); }});
+            p.push_back({"get_can_set_park", [&] { (void)t.get_can_set_park(); }});
+            p.push_back({"get_can_set_pier_side", [&] { (void)t.get_can_set_pier_side(); }});
+            p.push_back({"get_can_set_right_ascension_rate", [&] { (void)t.get_can_set_right_ascension_rate(); }});
+            p.push_back({"get_can_slew_alt_az_async", [&] { (void)t.get_can_slew_alt_az_async(); }});
+            p.push_back({"get_can_sync_alt_az", [&] { (void)t.get_can_sync_alt_az(); }});
             break;
         }
         case DeviceType::Camera: {
@@ -218,6 +223,10 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
             p.push_back({"get_can_abort_exposure", [&] { (void)c.get_can_abort_exposure(); }});
             p.push_back({"get_can_stop_exposure", [&] { (void)c.get_can_stop_exposure(); }});
             p.push_back({"get_can_pulse_guide", [&] { (void)c.get_can_pulse_guide(); }});
+            p.push_back({"get_can_asymmetric_bin", [&] { (void)c.get_can_asymmetric_bin(); }});
+            p.push_back({"get_can_fast_readout", [&] { (void)c.get_can_fast_readout(); }});
+            p.push_back({"get_can_get_cooler_power", [&] { (void)c.get_can_get_cooler_power(); }});
+            p.push_back({"get_can_set_ccd_temperature", [&] { (void)c.get_can_set_ccd_temperature(); }});
             break;
         }
         case DeviceType::Rotator: {
@@ -259,11 +268,17 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
 [[maybe_unused]] void case_operations_throw_not_connected(const ContractEntry& e) {
     auto d = e.make(0);
     REQUIRE(d != nullptr);
-    const auto probes = not_connected_probes(*d, e.type);
+    const auto probes = not_connected_probes(*d, e.type, e.at_park_known_defect != nullptr);
     REQUIRE_FALSE(probes.empty());
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
         CHECK(thrown_code(fn) == err::NotConnected);
+    }
+    if (e.at_park_known_defect != nullptr) {
+        // Pin today's behaviour so fixing the driver fails this and removes the expectation.
+        auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*d);
+        INFO(e.id << " get_at_park: " << e.at_park_known_defect);
+        CHECK(thrown_code([&] { (void)t.get_at_park(); }) == -1);
     }
 }
 
@@ -315,7 +330,7 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     }
     CHECK_FALSE(d->can_action("no-such-action"));
     const int a = thrown_code([&] { (void)d->action("no-such-action", ""); });
-    CHECK((a == err::ActionNotImplemented || a == err::NotImplemented));
+    CHECK(a == err::ActionNotImplemented);
     // Command*: forwarded to the device (NotConnected while disconnected) or unsupported.
     const int want = e.command_passthrough ? err::NotConnected : err::NotImplemented;
     CHECK(thrown_code([&] { d->command_blind("x"); }) == want);
@@ -330,7 +345,7 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     REQUIRE(d != nullptr);
     std::vector<Probe> all;
     for (auto&& p : invalid_value_probes(*d, e.type)) all.push_back(std::move(p));
-    for (auto&& p : not_connected_probes(*d, e.type)) all.push_back(std::move(p));
+    for (auto&& p : not_connected_probes(*d, e.type, e.at_park_known_defect != nullptr)) all.push_back(std::move(p));
     all.push_back({"action", [&] { (void)d->action("no-such-action", ""); }});
     all.push_back({"command_blind", [&] { d->command_blind("x"); }});
     all.push_back({"command_bool", [&] { (void)d->command_bool("x"); }});
@@ -403,7 +418,12 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
         CHECK(ids.insert(e.id).second);
         // A second backend behind one router pair carries a suffix: "<vendor>_<devicetype>_<backend>".
         CHECK(std::string(e.id).rfind(std::string(e.vendor) + "_" + e.device_type, 0) == 0);
-        CHECK_FALSE(std::string(e.source).empty());
+        {
+            const std::string src = e.source;
+            INFO(e.id << " source must name its basis: protocol document, hardware run or assumption");
+            CHECK((src.find("protocol document") != std::string::npos ||
+                   src.find("hardware run") != std::string::npos || src.find("assumption") != std::string::npos));
+        }
     }
 #define CS_EXPECT_VENDOR(macro, name)                                                       \
     do {                                                                                    \
@@ -459,4 +479,11 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
     CS_EXPECT_VENDOR("GPHOTO", "gphoto");
 #endif
 #undef CS_EXPECT_VENDOR
+    // Entries under a second macro: the vendor check above passes without them, so pin the entry itself.
+#if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
+    CHECK(ids.count("ioptron_switch") == 1);
+#endif
+#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
+    CHECK(ids.count("touptek_switch") == 1);
+#endif
 }

@@ -124,6 +124,15 @@ namespace alpacacore::test::contract {
 
 using DriverFactory = std::function<std::unique_ptr<AlpacaDriver>(int device_number)>;
 
+// Can* getters. The Can getters case reads every no-argument Can* getter on the device interface while
+// disconnected (they must not throw): telescope (all but CanMoveAxis, which is checked per axis and against
+// can_move_axis), camera, rotator. Excluded, with the reason:
+//  - focuser, filter wheel, cover calibrator, observing conditions: the interface (AlpacaCore/include/
+//    alpacacore/*_driver.h) declares no Can* getter. The focuser's Absolute is read as one.
+//  - switch: CanWrite(id) and CanAsync(id) take an id. zwo, gemini, playerone, wandererastro and the ToupTek
+//    thermal switch throw NotConnected from them (validate the id, then ensure_connected()); ioptron and the
+//    ToupTek StellaVita and the ASIAIR drivers return static config. Which is the contract is not settled by
+//    AGENTS.md or a protocol document, so the sweep pins neither (assumption: no source says).
 struct ContractEntry {
     const char* id;           // "<vendor>_<devicetype>", the ctest case name stem
     const char* vendor;       // router vendor string
@@ -142,9 +151,13 @@ struct ContractEntry {
     // Why there is no static out-of-range probe for this device type, or empty
     // when the type has one (telescope axis, switch id, filter position, ...).
     const char* no_invalid_probe_reason;
-    // Where the expectations above come from: "protocol doc", "hardware run"
-    // or "assumption", with the reference.
+    // Where the expectations above come from: "protocol document", "hardware run"
+    // or "assumption", with the reference. The sweep requires one of those words.
     const char* source;
+    // Telescope only. Non-null: this driver answers get_at_park from driver-side parked state while
+    // disconnected instead of throwing NotConnected (AGENTS.md: every operational property does). The
+    // string names the issue and the source; the sweep pins today's behaviour until it is fixed.
+    const char* at_park_known_defect = nullptr;
 };
 
 // Platform 7 interface versions per device type.
@@ -180,6 +193,26 @@ inline const char* invalid_probe_reason_for(DeviceType t) {
     }
 }
 
+// get_at_park while disconnected: bisque, celestron, synscan and skywatcher return parked_ under the
+// state mutex with no connection check; onstep, ioptron and zwo check it (get_at_park in
+// AlpacaCore/src/vendors/<vendor>/<vendor>_telescope_driver.cpp).
+inline const char* at_park_known_defect_for(const std::string& vendor, const std::string& device_type) {
+    if (device_type != "telescope") return nullptr;
+    if (vendor == "bisque")
+        return "known defect, open-astro#656: bisque_telescope_driver.cpp get_at_park returns parked_ with no "
+               "NotConnected";
+    if (vendor == "celestron")
+        return "known defect, open-astro#656: celestron_telescope_driver.cpp get_at_park returns parked_ with no "
+               "NotConnected";
+    if (vendor == "synscan")
+        return "known defect, open-astro#656: synscan_telescope_driver.cpp get_at_park returns parked_ with no "
+               "NotConnected";
+    if (vendor == "skywatcher")
+        return "known defect, open-astro#656: skywatcher_telescope_driver.cpp get_at_park returns parked_ with no "
+               "NotConnected";
+    return nullptr;
+}
+
 inline ContractEntry make_entry(const char* id, const char* vendor, const char* device_type, DeviceType type,
                                 DriverFactory make, const char* source) {
     return ContractEntry{id,
@@ -192,7 +225,8 @@ inline ContractEntry make_entry(const char* id, const char* vendor, const char* 
                          {},
                          false,
                          invalid_probe_reason_for(type),
-                         source};
+                         source,
+                         at_park_known_defect_for(vendor, device_type)};
 }
 
 inline ContractEntry with_command_passthrough(ContractEntry e) {
@@ -204,9 +238,11 @@ inline ContractEntry with_command_passthrough(ContractEntry e) {
 
 // Source strings, kept short so every entry states one.
 inline constexpr const char* kSrcAgents =
-    "AGENTS.md ASCOM contract precedence + ASCOM Platform 7 interface docs; factory as in the vendor Defaults case";
+    "protocol document: AGENTS.md ASCOM contract precedence + ASCOM Platform 7 interface docs; "
+    "assumption: the factory arguments are placeholders copied from the vendor Defaults case, not a hardware run";
 inline constexpr const char* kSrcAgentsAxis =
-    "AGENTS.md ASCOM contract precedence + ASCOM ITelescopeV4 CanMoveAxis (axes 0/1 movable, 2 tertiary not); "
+    "protocol document: AGENTS.md ASCOM contract precedence + ASCOM ITelescopeV4 CanMoveAxis (axes 0/1 movable, 2 "
+    "tertiary not); "
     "the per-vendor disconnected unit tests this sweep replaced (fake/disconnected only, not a hardware run); "
     "Command* passthrough flag and Bisque's absence of it are assumptions read from driver source";
 
@@ -250,8 +286,8 @@ inline ContractEntry contract_entry_zwo_switch() {
     return make_entry(
         "zwo_switch", "zwo", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::zwo::create_zwo_dew_heater_switch_by_index(n, 0); },
-        "AGENTS.md + ASCOM ISwitchV3; the ASIAIR switch drivers behind the same router arm have their own "
-        "entries below");
+        "protocol document: AGENTS.md + ASCOM ISwitchV3; assumption: the ASIAIR switch drivers behind the same "
+        "router arm have their own entries below");
 }
 // Second and third backends behind the same (zwo, switch) router pair: the on-board GPIO switch of the
 // ASIAIR Pro and Plus (Pi CM4), and the ASIAIR Plus (RK3568) switch.
@@ -355,7 +391,8 @@ inline ContractEntry contract_entry_ioptron_camera() {
     return with_playerone_actions(make_entry(
         "ioptron_camera", "ioptron", "camera", DeviceType::Camera,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::playerone::create_playerone_camera(n, 0); },
-        "Router ioptron/camera arm reuses the Player One camera driver (router.cpp); AGENTS.md contract"));
+        "assumption: the router's ioptron/camera arm reuses the Player One camera driver (router.cpp); "
+        "protocol document: AGENTS.md contract"));
 }
 inline ContractEntry contract_entry_playerone_camera() {
     return with_playerone_actions(make_entry(
