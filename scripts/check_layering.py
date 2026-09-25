@@ -11,9 +11,14 @@ Rules (baselines are the constants below, lowered by the PR that deletes the
 includes, never raised):
   - AlpacaHTTP/**: at most MAX_ALPACAHTTP_VENDOR_INCLUDES vendor includes.
   - catalog files: at most MAX_CATALOG_SCHEMA_VENDOR_INCLUDES (zero).
+  - each region must scan at least one file, or the gate is vacuous and fails.
+  - catalog files are the catalog include/source directories plus
+    AlpacaCore/src/vendors/*/*_schema.cpp only; a schema header, a nested
+    vendor directory or a direct SDK include (not alpacacore/vendor/...) is
+    not seen here, and the vendors-OFF build-test job catches the last kind.
 
-Comments and `#if 0` are deliberately NOT stripped: an include inside one still
-counts, so the gate cannot be dodged by disabling a line. Do not "fix" this.
+Comments and `#if 0` are deliberately NOT stripped: an include inside one (even
+mid-line or on a ` * ` continuation line) still counts, so the gate cannot be dodged by disabling a line. Do not "fix" this.
 
 Run from the repo root: python3 scripts/check_layering.py
 Self-test: python3 scripts/check_layering.py --self-test
@@ -21,7 +26,6 @@ Self-test: python3 scripts/check_layering.py --self-test
 
 from __future__ import annotations
 
-import os
 import pathlib
 import re
 import sys
@@ -38,19 +42,18 @@ MAX_ALPACAHTTP_VENDOR_INCLUDES = 40
 # header. Never rises.
 MAX_CATALOG_SCHEMA_VENDOR_INCLUDES = 0
 
+# Matches the directive anywhere on a line, so `// #include`, ` * #include` and
+# `code(); /* #include ... */` all count.
 INCLUDE_RE = re.compile(
-    r"^[ \t]*(?://[ \t]*|/\*[ \t]*)?#[ \t]*include[ \t]*[<\"]alpacacore/vendor/(?P<vendor>[^/>\"]+)/[^\n]*",
-    re.MULTILINE,
+    r"#[ \t]*include[ \t]*[<\"]alpacacore/vendor/(?P<vendor>[^/>\"]+)/[^\n]*",
 )
 
 
 def region_files(root: pathlib.Path, region: str) -> list[pathlib.Path]:
     if region == "AlpacaHTTP":
-        dirs = [root / "AlpacaHTTP"]
         files: set[pathlib.Path] = set()
-        for d in dirs:
-            for g in SOURCE_GLOBS:
-                files.update(d.rglob(g))
+        for g in SOURCE_GLOBS:
+            files.update((root / "AlpacaHTTP").rglob(g))
         return sorted(files)
     files = set()
     for d in (
@@ -84,8 +87,12 @@ def scan_region(root: pathlib.Path, region: str):
 def main(argv: list[str], baselines: dict[str, int] | None = None) -> int:
     root = ROOT
     if "--root" in argv:
-        root = pathlib.Path(argv[argv.index("--root") + 1])
-    limits = baselines or {
+        i = argv.index("--root")
+        if i + 1 >= len(argv):
+            print("usage: check_layering.py [--self-test] [--root DIR]", file=sys.stderr)
+            return 1
+        root = pathlib.Path(argv[i + 1])
+    limits = baselines if baselines is not None else {
         "AlpacaHTTP": MAX_ALPACAHTTP_VENDOR_INCLUDES,
         "catalog": MAX_CATALOG_SCHEMA_VENDOR_INCLUDES,
     }
@@ -100,6 +107,9 @@ def main(argv: list[str], baselines: dict[str, int] | None = None) -> int:
             print(f"  {v}: {n}")
         if region == "AlpacaHTTP" and (not (root / "AlpacaHTTP").is_dir() or visited == 0):
             print("AlpacaHTTP region scanned no files -- gate is vacuous", file=sys.stderr)
+            failed = True
+        if region == "catalog" and visited == 0:
+            print("catalog region scanned no files -- gate is vacuous", file=sys.stderr)
             failed = True
         for e in errors:
             print(e, file=sys.stderr)
@@ -150,6 +160,7 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as t:
         r = pathlib.Path(t)
         _write(r, "AlpacaHTTP/src/http/router.cpp", inc * 2)
+        _write(r, "AlpacaCore/src/catalog/c.cpp", "int x;\n")
         rc, _ = _run(r, base)
         case("exactly baseline passes", rc == 0)
 
@@ -194,6 +205,50 @@ def self_test() -> int:
         _write(r, "AlpacaCore/include/alpacacore/catalog/schema.h", inc)
         rc, err = _run(r, base)
         case("catalog header include fails", rc == 1 and "schema.h:1:" in err)
+
+    with tempfile.TemporaryDirectory() as t:
+        r = pathlib.Path(t)
+        _write(r, "AlpacaHTTP/src/a.cpp", inc + inc)
+        _write(r, "AlpacaHTTP/src/b.cpp", " * #include <alpacacore/vendor/zwo/x.h>\n")
+        rc, err = _run(r, base)
+        case("block-comment continuation line counts", rc == 1 and "b.cpp:1:" in err)
+
+    with tempfile.TemporaryDirectory() as t:
+        r = pathlib.Path(t)
+        _write(r, "AlpacaHTTP/src/a.cpp", inc + inc)
+        _write(r, "AlpacaHTTP/src/b.cpp", "f(); /* #include <alpacacore/vendor/zwo/x.h> */\n")
+        rc, err = _run(r, base)
+        case("include after code on the same line counts", rc == 1 and "b.cpp:1:" in err)
+
+    with tempfile.TemporaryDirectory() as t:
+        r = pathlib.Path(t)
+        _write(r, "AlpacaHTTP/src/a.cpp", inc)
+        _write(r, "AlpacaCore/src/catalog/c.cpp", inc)
+        rc, err = _run(r, base)
+        case("AlpacaCore/src/catalog include fails", rc == 1 and "c.cpp:1:" in err)
+
+    with tempfile.TemporaryDirectory() as t:
+        r = pathlib.Path(t)
+        _write(r, "AlpacaHTTP/src/a.cpp", inc)
+        rc, err = _run(r, base)
+        case("catalog region with no files fails (vacuous)",
+             rc == 1 and "catalog region scanned no files" in err)
+
+    with tempfile.TemporaryDirectory() as t:
+        r = pathlib.Path(t)
+        (r / "AlpacaHTTP").mkdir()
+        _write(r, "AlpacaCore/src/catalog/c.cpp", "int x;\n")
+        rc, err = _run(r, base)
+        case("empty AlpacaHTTP dir fails (vacuous)",
+             rc == 1 and "AlpacaHTTP region scanned no files" in err)
+
+    with tempfile.TemporaryDirectory() as t:
+        r = pathlib.Path(t)
+        _write(r, "AlpacaHTTP/src/a.cpp", inc)
+        _write(r, "AlpacaCore/src/catalog/c.cpp", "int x;\n")
+        rc, err = _run(r, {"AlpacaHTTP": 0, "catalog": 0})
+        case("explicit zero baseline is honoured, not replaced by defaults",
+             rc == 1 and "exceeds baseline 0" in err)
 
     return 1 if failures else 0
 
