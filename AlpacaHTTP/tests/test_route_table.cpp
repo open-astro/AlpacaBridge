@@ -34,6 +34,7 @@
 #include <alpacahttp/router.h>
 
 #include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -131,7 +132,15 @@ unsigned expected_mask(const std::string& type, const std::string& method) {
     return common != 0 ? common : own;
 }
 
+// DIAGNOSTIC (#646): wall time since the previous report, to find which
+// section is slow under the CI sanitizer build.
+std::chrono::steady_clock::time_point g_last = std::chrono::steady_clock::now();
+
 void report(const char* section, const std::vector<std::string>& failures) {
+    const auto now = std::chrono::steady_clock::now();
+    std::cerr << "TIMING " << section << ": "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(now - g_last).count() << " ms\n";
+    g_last = now;
     for (const auto& line : failures) {
         std::cerr << section << ": " << line << "\n";
     }
@@ -385,5 +394,6 @@ int main() {
     }
 
     std::cout << "test_route_table: all checks passed\n";
-    return 0;
+    std::cerr << "DIAGNOSTIC: failing on purpose so ctest prints the TIMING lines\n";
+    return 1;
 }
