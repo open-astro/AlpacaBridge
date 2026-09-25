@@ -442,9 +442,9 @@ TEST_CASE("A value of the wrong type is rejected from the API and erased from a 
     CHECK(mentions(persisted.warnings[0], "pollMs"));
     CHECK_FALSE(persisted.config.has("pollMs"));  // erased, not kept with the wrong type
 
-    // The same rule applies inside a record: an int64 where the record declares a double.
+    // The same rule applies inside a record: a string where the record declares a double.
     DeviceConfig port = make_port("p1");
-    port.set("maxValue", std::int64_t{50});
+    port.set("maxValue", std::string{"50"});
     DeviceConfig with_ports = valid_config();
     with_ports.set("ports", std::vector<DeviceConfig>{port});
     auto nested = catalog.normalize(kStubKey, with_ports, Source::Api);
@@ -527,4 +527,59 @@ TEST_CASE("Sanitize drops a secret inside a record list", "[catalog]") {
     REQUIRE(clean.size() == 1);
     CHECK(clean[0].find(account_name) == std::optional<std::string>{"main"});
     CHECK_FALSE(clean[0].has("token"));
+}
+
+TEST_CASE("A factory with an empty callable is unavailable and create names the build option", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, false);
+    catalog.add(Factory{kStubKey, {}});  // registered, but nothing to call
+
+    auto v = catalog.describe();
+    REQUIRE(v.size() == 1);
+    CHECK_FALSE(v[0].available);  // describe and create must agree
+
+    try {
+        (void)catalog.create(kStubKey, valid_config(), 1);
+        FAIL("create should have thrown");
+    } catch (const std::runtime_error& e) {
+        CHECK(mentions(e.what(), "ALPACACORE_ENABLE_STUB"));
+    }
+}
+
+TEST_CASE("Sanitize drops a record-list field that holds a non-record value", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+    DeviceConfig cfg = valid_config();
+    cfg.set("ports", std::string{"not a record list"});
+
+    auto clean = catalog.sanitize(kStubKey, cfg);
+    CHECK_FALSE(clean.has("ports"));  // dropped, not copied through
+    CHECK(clean.has("portPath"));     // the rest is kept
+}
+
+TEST_CASE("An int64 in a double field is accepted and widened", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+    DeviceConfig port = make_port("p1");
+    port.set("maxValue", std::int64_t{50});  // record field declared double
+    DeviceConfig cfg = valid_config();
+    cfg.set("ports", std::vector<DeviceConfig>{port});
+
+    for (Source source : {Source::Api, Source::Persisted}) {
+        auto r = catalog.normalize(kStubKey, cfg, source);
+        CHECK_FALSE(r.rejection.has_value());
+        CHECK(r.warnings.empty());
+        auto ports = r.config.get(ports_field());
+        REQUIRE(ports.size() == 1);
+        REQUIRE(ports[0].find(kPortMax).has_value());
+        CHECK(*ports[0].find(kPortMax) == 50.0);  // now a double
+    }
+
+    // A widened value is still range-checked.
+    port.set("maxValue", std::int64_t{500});
+    cfg.set("ports", std::vector<DeviceConfig>{port});
+    auto out_of_range = catalog.normalize(kStubKey, cfg, Source::Api);
+    REQUIRE(out_of_range.rejection.has_value());
+    CHECK(mentions(*out_of_range.rejection, "ports[0].maxValue"));
+    CHECK_FALSE(mentions(*out_of_range.rejection, "wrong type"));
 }
