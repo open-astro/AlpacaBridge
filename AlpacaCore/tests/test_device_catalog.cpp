@@ -488,9 +488,8 @@ TEST_CASE("Adding a schema or factory with an existing key replaces it", "[catal
     replacement.build_option = "ALPACACORE_ENABLE_STUB";
     replacement.fields = stub_fields();
     catalog.add(std::move(replacement));
-    catalog.add(Factory{kStubKey, [](const DeviceConfig&, int n) {
-                            return std::unique_ptr<AlpacaDriver>(new StubDriver(n + 100));
-                        }});
+    catalog.add(Factory{
+        kStubKey, [](const DeviceConfig&, int n) { return std::unique_ptr<AlpacaDriver>(new StubDriver(n + 100)); }});
 
     auto v = catalog.describe();
     REQUIRE(v.size() == 1);  // one entry per key, not two

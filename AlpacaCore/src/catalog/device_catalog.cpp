@@ -87,7 +87,10 @@ DeviceConfig normalize_fields(std::span<const FieldRef> fields, const DeviceConf
                     range += std::to_string(*f.max);
                     range += ")";
                 }
-                messages.push_back(name + " is " + range);
+                std::string message = name;
+                message += " is ";
+                message += range;
+                messages.push_back(std::move(message));
                 out.erase(f.key);  // Persisted: dropped to unset
             }
         } else if (f.kind == FieldRef::Kind::RecordList) {
