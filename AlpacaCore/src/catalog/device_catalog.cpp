@@ -55,6 +55,13 @@ DeviceConfig normalize_fields(std::span<const FieldRef> fields, const DeviceConf
     for (const FieldRef& f : fields) {
         const std::string name = prefix + f.key;
         const ConfigValue* v = in.find_value(f.key);
+        ConfigValue widened;
+        if (v && f.kind == FieldRef::Kind::Double && std::holds_alternative<std::int64_t>(*v)) {
+            // JSON has one number type: an integer literal in a double field is a valid double.
+            widened = static_cast<double>(std::get<std::int64_t>(*v));
+            out.set(f.key, widened);
+            v = &widened;
+        }
         if (!v) {
             if (f.required) messages.push_back(name + " is required");
             continue;  // Persisted: stays absent
@@ -117,8 +124,8 @@ DeviceConfig sanitize_fields(std::span<const FieldRef> fields, const DeviceConfi
                 kept.reserve(records->size());
                 for (const DeviceConfig& r : *records) kept.push_back(sanitize_fields(f.record_fields, r));
                 out.set(f.key, std::move(kept));
-                continue;
             }
+            continue;  // a record list holding anything else is dropped, not copied through
         }
         out.set(f.key, *v);
     }
@@ -158,16 +165,18 @@ NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfi
             result.rejection = messages.front();
             return result;
         }
+        result.config = std::move(normalized);
     } else {
         result.warnings = std::move(messages);
         result.config = std::move(normalized);
     }
 
     if (schema->normalize) {
-        NormalizeResult cross = schema->normalize(source == Source::Api ? in : result.config, source);
+        NormalizeResult cross = schema->normalize(result.config, source);
         if (cross.rejection) {
             if (source == Source::Api) {
                 result.rejection = std::move(cross.rejection);
+                result.config = in;  // a rejection returns the config as given
                 return result;
             }
             cross.warnings.push_back(*cross.rejection);
@@ -227,7 +236,8 @@ const Schema* DeviceCatalog::find_schema(const DeviceKey& key) const {
 
 const Factory* DeviceCatalog::find_factory(const DeviceKey& key) const {
     for (const Factory& f : factories_) {
-        if (f.key == key) return &f;
+        // A factory with nothing to call is not a factory: describe().available and create() must agree.
+        if (f.key == key) return f.create ? &f : nullptr;
     }
     return nullptr;
 }

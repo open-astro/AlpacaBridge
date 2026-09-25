@@ -41,12 +41,17 @@ public:
     // Per-field rules (required, default, enum, range; record lists recurse and
     // messages carry the index, e.g. "ports[1].name is required"), then the
     // schema's cross-field normalize. Source::Api: the first failure becomes
-    // NormalizeResult::rejection and the config is returned as given.
+    // NormalizeResult::rejection and the config is returned as given; on success
+    // the normalized config is returned.
     // Source::Persisted: every failure becomes a warning and the config is
     // normalized so the device still registers (missing required stays absent,
     // out-of-enum becomes the default, out-of-range becomes unset). A wrong-type
     // value is a failure too (Api rejects, Persisted erases it). An int64 in a Double
-    // field is wrong-type, so the JSON bridge must coerce by FieldRef::Kind first.
+    // field is accepted and widened to double before the range check.
+    //
+    // Callers pass the raw input config to sanitize() and register the normalized
+    // config, so a persisted raw value that normalize changed or dropped stays
+    // visible in configureddevices.
     NormalizeResult normalize(const DeviceKey& key, const DeviceConfig& in, Source source) const;
 
     // Every declared field except Role::Secret, recursing into record lists.
