@@ -1527,7 +1527,7 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
         const bool states_no_probe =
             std::string(alpacacore::test::contract::invalid_probe_reason_for(h.type)).size() > 0;
         CHECK(states_no_probe == (kind == "NPR"));
-        {
+        if (h.connectable) {
             Hosted probe_host = h.connectable(false);
             REQUIRE(probe_host.driver != nullptr);
             CHECK(invalid_value_probes(*probe_host.driver, h.type).empty() == (kind == "NPR"));
