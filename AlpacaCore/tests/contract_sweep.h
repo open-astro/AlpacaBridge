@@ -615,7 +615,18 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 // ---------------------------------------------------------------------------
 
 #ifdef ALPACACORE_ENABLE_ZWO
-#define CS_ZWO(X) X(zwo_camera) X(zwo_telescope) X(zwo_filterwheel) X(zwo_focuser) X(zwo_rotator) X(zwo_switch) X(zwo_switch_asiair) X(zwo_switch_asiair_plus)
+// The formatter does not reach a fixed point on this continuation list.
+// clang-format off
+#define CS_ZWO(X) \
+    X(zwo_camera) \
+    X(zwo_telescope) \
+    X(zwo_filterwheel) \
+    X(zwo_focuser) \
+    X(zwo_rotator) \
+    X(zwo_switch) \
+    X(zwo_switch_asiair) \
+    X(zwo_switch_asiair_plus)
+// clang-format on
 #else
 #define CS_ZWO(X)
 #endif
@@ -670,7 +681,15 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_WEEWX(X)
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
-#define CS_GEMINI(X) X(gemini_covercalibrator) X(gemini_covercalibrator_v2) X(gemini_covercalibrator_pro) X(gemini_focuser) X(gemini_switch)
+// The formatter does not reach a fixed point on this continuation list.
+// clang-format off
+#define CS_GEMINI(X) \
+    X(gemini_covercalibrator) \
+    X(gemini_covercalibrator_v2) \
+    X(gemini_covercalibrator_pro) \
+    X(gemini_focuser) \
+    X(gemini_switch)
+// clang-format on
 #else
 #define CS_GEMINI(X)
 #endif
