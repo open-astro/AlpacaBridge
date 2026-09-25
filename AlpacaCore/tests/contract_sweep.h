@@ -48,6 +48,8 @@
 #include <vector>
 
 #ifdef ALPACACORE_ENABLE_ZWO
+#include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
+#include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
@@ -248,8 +250,26 @@ inline ContractEntry contract_entry_zwo_switch() {
     return make_entry(
         "zwo_switch", "zwo", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::zwo::create_zwo_dew_heater_switch_by_index(n, 0); },
-        "AGENTS.md + ASCOM ISwitchV3; the router's zwo/switch arm also builds the two ASIAIR "
-        "switch drivers, which the stress gate also masks behind the dew-heater one");
+        "AGENTS.md + ASCOM ISwitchV3; the ASIAIR switch drivers behind the same router arm have their own "
+        "entries below");
+}
+// Second and third backends behind the same (zwo, switch) router pair: the on-board GPIO switch of the
+// ASIAIR Pro and Plus (Pi CM4), and the ASIAIR Plus (RK3568) switch.
+inline ContractEntry contract_entry_zwo_switch_asiair() {
+    return make_entry(
+        "zwo_switch_asiair", "zwo", "switch", DeviceType::Switch,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            return vendor::zwo::create_zwo_asiair_switch(n, vendor::zwo::default_asiair_pro_config());
+        },
+        kSrcAgents);
+}
+inline ContractEntry contract_entry_zwo_switch_asiair_plus() {
+    return make_entry(
+        "zwo_switch_asiair_plus", "zwo", "switch", DeviceType::Switch,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            return vendor::zwo::create_zwo_asiair_plus_switch(n, vendor::zwo::default_asiair_plus_rk3568_config());
+        },
+        kSrcAgents);
 }
 #endif
 
@@ -450,6 +470,24 @@ inline ContractEntry contract_entry_gemini_covercalibrator() {
         },
         kSrcAgents);
 }
+// Second and third backends behind the same (gemini, covercalibrator) router pair: the Flat Panel v2 and
+// the Motorized Flat Panel V3 (Pro). The entry above is the Cover Lite (create_gemini_flatpanel).
+inline ContractEntry contract_entry_gemini_covercalibrator_v2() {
+    return make_entry(
+        "gemini_covercalibrator_v2", "gemini", "covercalibrator", DeviceType::CoverCalibrator,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            return vendor::gemini::create_gemini_flatpanel_v2(n, "/dev/ttyUSB0");
+        },
+        kSrcAgents);
+}
+inline ContractEntry contract_entry_gemini_covercalibrator_pro() {
+    return make_entry(
+        "gemini_covercalibrator_pro", "gemini", "covercalibrator", DeviceType::CoverCalibrator,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            return vendor::gemini::create_gemini_flatpanel_pro(n, "/dev/ttyUSB0");
+        },
+        kSrcAgents);
+}
 inline ContractEntry contract_entry_gemini_focuser() {
     return make_entry(
         "gemini_focuser", "gemini", "focuser", DeviceType::Focuser,
@@ -577,7 +615,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 // ---------------------------------------------------------------------------
 
 #ifdef ALPACACORE_ENABLE_ZWO
-#define CS_ZWO(X) X(zwo_camera) X(zwo_telescope) X(zwo_filterwheel) X(zwo_focuser) X(zwo_rotator) X(zwo_switch)
+#define CS_ZWO(X) X(zwo_camera) X(zwo_telescope) X(zwo_filterwheel) X(zwo_focuser) X(zwo_rotator) X(zwo_switch) X(zwo_switch_asiair) X(zwo_switch_asiair_plus)
 #else
 #define CS_ZWO(X)
 #endif
@@ -632,7 +670,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_WEEWX(X)
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
-#define CS_GEMINI(X) X(gemini_covercalibrator) X(gemini_focuser) X(gemini_switch)
+#define CS_GEMINI(X) X(gemini_covercalibrator) X(gemini_covercalibrator_v2) X(gemini_covercalibrator_pro) X(gemini_focuser) X(gemini_switch)
 #else
 #define CS_GEMINI(X)
 #endif
