@@ -415,7 +415,11 @@ def _strip_comments(text):
     """Comments blanked (newlines kept). These headers carry long doc comments
     whose prose contains parentheses and identifiers, and both patterns above
     scan across whitespace -- without this a sentence in a comment is matched
-    as a method signature. No raw string literals exist in either header."""
+    as a method signature. Written for the two QHY headers, which hold no raw
+    string literals. Check 14 also runs it over router.cpp, which does (R"(...)"
+    regexes) and holds "://" (origin.find), so LINE_COMMENT_RE blanks the rest of
+    that line; that is harmless only while no std::regex sits on such a line or
+    after a stray /* -- re-check both if the gate ever misses one."""
     text = BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     return LINE_COMMENT_RE.sub("", text)
 
@@ -1505,7 +1509,8 @@ def _static_regex_findings(text, path="AlpacaHTTP/src/http/router.cpp"):
         if not re.search(r"\bstatic\b", code[start:m.start()]):
             line = code.count("\n", 0, m.start()) + 1
             findings.append("%s:%d: std::regex %s is not static -- a per-request build costs 14x a "
-                            "management request (#646)" % (path, line, m.group(1)))
+                            "management request (#646); the gate wants the static keyword and does not model "
+                            "scope, so a namespace-scope regex needs it too" % (path, line, m.group(1)))
     if seen == 0:
         findings.append("no std::regex construction found in %s: the extractor is stale or the regexes moved" % path)
     return findings
@@ -1965,6 +1970,9 @@ def self_test():
     f = _static_regex_findings('std::regex const kY("a");\n' + rx_ok)
     check("static regex: 'std::regex const name' without static is flagged",
           len(f) == 1 and "kY is not static" in f[0])
+    f = _static_regex_findings(rx_ok.replace("static ", ""))
+    check("static regex: the not-static finding names the static keyword (scope is not modelled)",
+          len(f) == 1 and "static keyword" in f[0])
     check("static regex: 'static std::regex const name' is clean",
           _static_regex_findings('static std::regex const kY("a");\n') == [])
     f = _static_regex_findings("int x = 1;\n")
