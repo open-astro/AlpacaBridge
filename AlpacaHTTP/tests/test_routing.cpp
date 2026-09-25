@@ -113,6 +113,156 @@ void remove_device(alpacahttp::Router& router, const std::string& vendor, const 
     EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
 }
 
+// Issue open-astro/AlpacaBridge#647 helpers. roundtrip_config() above POSTs
+// /management/v1/configuredevice, which registers with ConfigSource::Api. The
+// only caller of ConfigSource::Persisted is Router::load_persisted_devices().
+// It is reached from the constructor and re-entered from a few request paths,
+// but the persisted_devices_loaded_ latch makes every later call return early,
+// so a config only reaches the persisted path when a NEW Router is constructed
+// over a file that already holds it. These helpers do exactly that.
+
+// POST a device config through the API and report what happened. On success
+// `config` is the Config object configureddevices shows for the device.
+struct ApiAttempt {
+    bool ok = false;
+    std::string message;
+    nlohmann::json config;
+};
+
+// The whole configureddevices row for a device, matched on `device_type`
+// exactly and case-sensitively ("Telescope"). A persisted entry that failed to
+// register is listed too, but with a LOWER-CASE DeviceType, so it does not match
+// here: null means "not registered", not "not listed". Use listed_failed_entry()
+// for the failed row.
+nlohmann::json listed_entry(alpacahttp::Router& router, const std::string& device_type, int device_number) {
+    const auto listed =
+        nlohmann::json::parse(route_request(router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+    if (listed.is_discarded() || !listed.contains("Value") || !listed["Value"].is_array()) {
+        return nlohmann::json();
+    }
+    for (const auto& entry : listed["Value"]) {
+        if (entry.value("DeviceType", "") == device_type && entry.value("DeviceNumber", -1) == device_number) {
+            return entry;
+        }
+    }
+    return nlohmann::json();
+}
+
+nlohmann::json listed_config(alpacahttp::Router& router, const std::string& device_type, int device_number) {
+    const auto entry = listed_entry(router, device_type, device_number);
+    return entry.is_null() ? nlohmann::json() : entry.value("Config", nlohmann::json());
+}
+
+// The "<vendor> (failed to load)" row configureddevices lists for a persisted
+// entry that did not register (LoadError true, lower-case DeviceType).
+nlohmann::json listed_failed_entry(alpacahttp::Router& router, const std::string& lower_type, int device_number) {
+    const auto entry = listed_entry(router, lower_type, device_number);
+    if (!entry.is_null() && entry.value("LoadError", false)) {
+        return entry;
+    }
+    return nlohmann::json();
+}
+
+ApiAttempt api_attempt(alpacahttp::Router& router, const nlohmann::json& posted, const std::string& device_type) {
+    ApiAttempt attempt;
+    const auto response = nlohmann::json::parse(
+        route_request(router, "POST", "/management/v1/configuredevice", posted.dump()).body(), nullptr, false);
+    if (response.is_discarded()) {
+        attempt.message = "<non-JSON response>";
+        return attempt;
+    }
+    if (response.value("ErrorNumber", -1) != 0) {
+        attempt.message = response.value("ErrorMessage", "");
+        return attempt;
+    }
+    attempt.ok = true;
+    attempt.config = listed_config(router, device_type, posted.value("deviceNumber", -1));
+    return attempt;
+}
+
+// What a fresh Router made of one entry in registered_devices.json.
+struct PersistedAttempt {
+    bool listed = false;          // REGISTERED: listed under its Alpaca type name, no LoadError
+    nlohmann::json config;        // Config of the registered device
+    bool failed_listed = false;   // not registered, but listed as "<vendor> (failed to load)"
+    nlohmann::json failed_entry;  // that row (DeviceType lower-case, LoadError true, sanitized Config)
+    std::vector<std::string> warnings;
+    std::vector<std::string> errors;  // an exception out of a driver constructor is logged at ERROR, not WARN
+};
+
+// Write [entry] as the whole registered_devices.json, construct a Router (which
+// loads it with ConfigSource::Persisted), read configureddevices, capture every
+// WARN and ERROR the load logged, then put the file back and unregister the device from
+// the process-wide DeviceRegistry. `device_type` is the listed name
+// ("Telescope"); the entry carries the lower-case one.
+PersistedAttempt persisted_attempt(const nlohmann::json& entry, const std::string& device_type) {
+    const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+    const std::string vendor = entry.value("vendor", "");
+    const std::string lower_type = entry.value("deviceType", "");
+    const int device_number = entry.value("deviceNumber", -1);
+
+    std::string original;
+    if (std::filesystem::exists(persisted)) {
+        std::ifstream in(persisted);
+        original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    // Only this entry: the Router below registers EVERY entry in the file, and
+    // some vendors touch hardware eagerly.
+    nlohmann::json entries = nlohmann::json::array();
+    entries.push_back(entry);
+    std::filesystem::create_directories(persisted.parent_path());
+    {
+        std::ofstream out(persisted, std::ios::trunc);
+        out << entries.dump();
+    }
+
+    PersistedAttempt result;
+    std::mutex warnings_mutex;
+    auto previous_sink = alpacacore::logging::get_log_sink();
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            std::lock_guard<std::mutex> lock(warnings_mutex);
+            // Only lines about THIS entry's load. Any other WARN/ERROR in the
+            // process (a vendor SDK, another thread) is not this round trip's.
+            const std::string text(message);
+            if (text.find("persisted device") == std::string::npos && text.rfind("Persisted ", 0) != 0) {
+                return;
+            }
+            if (level == alpacacore::logging::LogLevel::Warn) {
+                result.warnings.emplace_back(text);
+            } else if (level == alpacacore::logging::LogLevel::Error) {
+                result.errors.emplace_back(text);
+            }
+        });
+    alpacahttp::Router startup_router;
+    result.config = listed_config(startup_router, device_type, device_number);
+    result.listed = !result.config.is_null();
+    if (!result.listed) {
+        result.failed_entry = listed_failed_entry(startup_router, lower_type, device_number);
+        result.failed_listed = !result.failed_entry.is_null();
+    }
+    alpacacore::logging::set_log_sink(previous_sink);
+
+    // Restore before anything that can abort (EXPECT is abort(): no unwinding,
+    // no scope guards). remove_device() is itself an EXPECT, and a device the
+    // load dropped was never registered, so it is only called for a listed one.
+    const auto restore_original = [&] {
+        std::ofstream restore(persisted, std::ios::trunc);
+        restore << (original.empty() ? std::string("[]") : original);
+    };
+    restore_original();
+    if (result.listed) {
+        remove_device(startup_router, vendor, lower_type, device_number);
+        restore_original();  // remove_device() saved "[]" over the file (#408)
+    }
+    return result;
+}
+
+bool any_warning_contains(const std::vector<std::string>& warnings, const std::string& fragment) {
+    return std::any_of(warnings.begin(), warnings.end(),
+                       [&](const std::string& w) { return w.find(fragment) != std::string::npos; });
+}
+
 // Minimal driver used to verify the management configureddevices response
 // surfaces get_device_firmware() and get_device_sdk_version() (web-UI only)
 // when, and only when, the driver reports each value.
@@ -3454,6 +3604,578 @@ int main() {
         remove_device(router, "bisque", "telescope", 9617);
     }
 #endif
+
+    // =====================================================================
+    // Issue open-astro/AlpacaBridge#647: every (vendor, deviceType) pair the
+    // registration chain accepts is round-tripped from BOTH config sources.
+    //   * API:       POST configuredevice -> ConfigSource::Api (roundtrip_config
+    //                above; it never reaches the persisted path).
+    //   * Persisted: the same config written to registered_devices.json and
+    //                loaded by a new Router -> ConfigSource::Persisted.
+    // Every field configureddevices shows must equal the expected object, and
+    // no extra key may appear. Device numbers 97xx (assigned in order below).
+    //
+    // NOT round-tripped in this fake-only build (a pair listed here is not
+    // covered from either source, and why):
+    //   * astroasis / focuser by focuserIndex: the by-index constructor scans
+    //     the USB bus eagerly (see the astroasis note in the #102 block), so
+    //     only the hidPath form is round-tripped.
+    //   * Every arm whose "auto", empty-connectionType or by-index path probes
+    //     hardware or the network while the driver is constructed (the auto
+    //     paths of the ioptron, synscan, skywatcher, onstep and celestron
+    //     mounts, the ioptron network auto-scan, the by-index paths of the
+    //     ioptron, gemini and qhy focusers, and any other auto/by-index arm
+    //     that only registers with a device attached, e.g. the ioptron
+    //     filterwheel, qhy cfw3 and gemini focuser auto forms). Probing opens
+    //     serial ports and scans the LAN,
+    //     so it is not fake-only and is deliberately NOT exercised here; their
+    //     serial and network forms ARE round-tripped, and the #508 items that
+    //     ride on those probe paths (items 3 and 4, and item 1 for the mounts'
+    //     by-index arms) are left unpinned until a seam exists to fake the probe.
+    // =====================================================================
+    {
+        struct RoundtripCase {
+            std::string label;
+            std::string alpaca_type;
+            nlohmann::json posted;
+            nlohmann::json expected;
+        };
+        std::vector<RoundtripCase> cases;
+        int next_number = 9700;
+        // `posted` and `expected` hold everything except the three identity
+        // keys, which sanitize_device_config always copies (vendor, deviceType,
+        // deviceNumber) and which are added to both here.
+        const auto add = [&](const std::string& vendor, const std::string& device_type, const std::string& alpaca_type,
+                             const std::string& variant, const char* posted_json, const char* expected_json) {
+            const nlohmann::json identity = {
+                {"vendor", vendor}, {"deviceType", device_type}, {"deviceNumber", ++next_number}};
+            RoundtripCase c;
+            c.label = vendor + "/" + device_type + (variant.empty() ? "" : " " + variant);
+            c.alpaca_type = alpaca_type;
+            c.posted = nlohmann::json::parse(posted_json);
+            c.expected = nlohmann::json::parse(expected_json);
+            c.posted.update(identity);
+            c.expected.update(identity);
+            cases.push_back(std::move(c));
+        };
+        // Vendor-agnostic tail that sanitize_device_config copies for every vendor.
+        const char* const kTail =
+            R"("responseTimeoutMs":4000,"apertureDiameter":0.2,"focalLength":1.0,"siteLatitude":39.7392,)"
+            R"("siteLongitude":-104.9903,"siteElevation":1609.0,"learnSiteFromClient":true,"syncTimeOnConnect":false)";
+        const auto with_tail = [&](const std::string& base) {
+            return std::string("{") + base + (base.empty() ? "" : ",") + kTail + "}";
+        };
+
+#ifdef ALPACACORE_ENABLE_ZWO
+        add("zwo", "camera", "Camera", "", R"({"cameraIndex":1,"cameraId":7})", R"({"cameraIndex":1,"cameraId":7})");
+        add("zwo", "filterwheel", "FilterWheel", "",
+            R"({"filterwheelIndex":1,"filterwheelId":5,"filterNames":["L","R","G","B","Ha"]})",
+            R"({"filterwheelIndex":1,"filterwheelId":5,"filterNames":["L","R","G","B","Ha"]})");
+        add("zwo", "focuser", "Focuser", "", R"({"focuserIndex":1,"focuserId":3})",
+            R"({"focuserIndex":1,"focuserId":3})");
+        add("zwo", "rotator", "Rotator", "", R"({"rotatorIndex":1,"rotatorId":2})",
+            R"({"rotatorIndex":1,"rotatorId":2})");
+        add("zwo", "switch", "Switch", "dewheater", R"({"switchType":"dewheater","cameraIndex":1,"cameraId":4})",
+            R"({"switchType":"dewheater","cameraIndex":1,"cameraId":4})");
+        // ports/pwmFrequencyHz survive for the three ASIAIR variants; gpioChip
+        // only for the libgpiod two, devicePath only for the RK3568.
+        add("zwo", "switch", "Switch", "asiair",
+            R"({"switchType":"asiair","gpioChip":"/dev/gpiochip0","devicePath":"/dev/x","pwmFrequencyHz":200,)"
+            R"("ports":[{"gpio":12,"name":"Mount","pwm":false},{"gpio":13,"name":"Dew","pwm":true}]})",
+            R"({"switchType":"asiair","gpioChip":"/dev/gpiochip0","pwmFrequencyHz":200,)"
+            R"("ports":[{"gpio":12,"name":"Mount","pwm":false},{"gpio":13,"name":"Dew","pwm":true}]})");
+        add("zwo", "switch", "Switch", "asiair-plus-picm4",
+            R"({"switchType":"asiair-plus-picm4","gpioChip":"/dev/gpiochip0","devicePath":"/dev/x","pwmFrequencyHz":200,)"
+            R"("ports":[{"gpio":12,"name":"Mount","pwm":false}]})",
+            R"({"switchType":"asiair-plus-picm4","gpioChip":"/dev/gpiochip0","pwmFrequencyHz":200,)"
+            R"("ports":[{"gpio":12,"name":"Mount","pwm":false}]})");
+        add("zwo", "switch", "Switch", "asiair-plus-rk3568",
+            R"({"switchType":"asiair-plus-rk3568","gpioChip":"/dev/gpiochip0","devicePath":"/dev/pwm-gpio-misc",)"
+            R"("pwmFrequencyHz":50,"ports":[{"name":"DC1","pwm":true}]})",
+            R"({"switchType":"asiair-plus-rk3568","devicePath":"/dev/pwm-gpio-misc","pwmFrequencyHz":50,)"
+            R"("ports":[{"name":"DC1","pwm":true}]})");
+        // zwo / telescope had no round-trip case at all before #647.
+        add("zwo", "telescope", "Telescope", "serial",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":9600,"host":"h","tcpPort":1,"cameraIndex":9})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":9600,"cameraIndex":9})");
+        add("zwo", "telescope", "Telescope", "network",
+            R"({"connectionType":"network","host":"192.168.4.1","tcpPort":4030,"portPath":"/dev/x","baudRate":9600})",
+            R"({"connectionType":"network","host":"192.168.4.1","tcpPort":4030})");
+        add("zwo", "telescope", "Telescope", "auto", R"({"connectionType":"auto","portPath":"/dev/x"})",
+            R"({"connectionType":"auto"})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_QHY
+        add("qhy", "camera", "Camera", "", R"({"cameraIndex":1,"cameraId":"QHY-TEST-1","bogusKey":1})",
+            R"({"cameraIndex":1,"cameraId":"QHY-TEST-1"})");
+        add("qhy", "focuser", "Focuser", "serial",
+            R"({"connectionType":"serial","portPath":"/dev/ttyACM3","focuserIndex":1,"maxStep":30000,"reverse":true,)"
+            R"("speed":4,"holdForce":true,"holdIhold":6,"holdIrun":12,"temperatureSource":"chip","cameraIndex":7})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyACM3","focuserIndex":1,"maxStep":30000,"reverse":true,)"
+            R"("speed":4,"holdForce":true,"holdIhold":6,"holdIrun":12,"temperatureSource":"chip"})");
+        add("qhy", "filterwheel", "FilterWheel", "integrated",
+            R"({"wheelType":"integrated","cameraIndex":3,"cameraId":"QHY-CFW-1","filterNames":["L","R"],)"
+            R"("connectionType":"serial","portPath":"/dev/x","filterwheelIndex":4})",
+            R"({"wheelType":"integrated","cameraIndex":3,"cameraId":"QHY-CFW-1","filterNames":["L","R"]})");
+        add("qhy", "filterwheel", "FilterWheel", "cfw3-usb",
+            R"({"wheelType":"cfw3-usb","connectionType":"serial","portPath":"/dev/ttyUSB7","filterwheelIndex":1,)"
+            R"("filterNames":["L","R","G"],"cameraIndex":3,"cameraId":"x"})",
+            R"({"wheelType":"cfw3-usb","connectionType":"serial","portPath":"/dev/ttyUSB7","filterwheelIndex":1,)"
+            R"("filterNames":["L","R","G"]})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_SVBONY
+        add("svbony", "camera", "Camera", "", R"({"cameraIndex":2,"cameraId":"x"})", R"({"cameraIndex":2})");
+#endif
+#ifdef ALPACACORE_ENABLE_GPHOTO
+        add("gphoto", "camera", "Camera", "", R"({"cameraIndex":1,"cameraId":"x"})", R"({"cameraIndex":1})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        // touptek camera, focuser and filterwheel had no roundtrip_config() case before #647.
+        add("touptek", "camera", "Camera", "", R"({"cameraIndex":1,"focuserIndex":5,"focuserId":"z"})",
+            R"({"cameraIndex":1,"focuserIndex":5,"focuserId":"z"})");
+        add("touptek", "focuser", "Focuser", "", R"({"focuserIndex":2,"focuserId":"AAF-1","cameraIndex":3})",
+            R"({"cameraIndex":3,"focuserIndex":2,"focuserId":"AAF-1"})");
+        add("touptek", "filterwheel", "FilterWheel", "",
+            R"({"filterwheelIndex":1,"filterwheelId":"AFW-1","filterNames":["L","R","G","B","Ha"],"cameraIndex":3})",
+            R"({"filterwheelIndex":1,"filterwheelId":"AFW-1","filterNames":["L","R","G","B","Ha"]})");
+        add("touptek", "switch", "Switch", "thermal", R"({"switchType":"thermal","cameraIndex":2,"gpioChip":"/dev/x"})",
+            R"({"switchType":"thermal","cameraIndex":2})");
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+        add("touptek", "switch", "Switch", "stellavita",
+            R"({"switchType":"stellavita","gpioChip":"/dev/gpiochip0","pwmFrequencyHz":100,"cameraIndex":2,)"
+            R"("ports":[{"name":"Flat Panel","pwm":true},{"name":"Camera","pwm":false}]})",
+            R"({"switchType":"stellavita","gpioChip":"/dev/gpiochip0","pwmFrequencyHz":100,)"
+            R"("ports":[{"name":"Flat Panel","pwm":true},{"name":"Camera","pwm":false}]})");
+#endif
+#endif
+
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+        add("playerone", "camera", "Camera", "", R"({"cameraIndex":3,"filterwheelIndex":2})", R"({"cameraIndex":3})");
+        add("playerone", "filterwheel", "FilterWheel", "",
+            R"({"filterwheelIndex":1,"filterNames":["L","R","G"],"cameraIndex":3})",
+            R"({"filterwheelIndex":1,"filterNames":["L","R","G"]})");
+        // playerone switch (the thermal dew heater/fan) had no roundtrip_config() case before #647.
+        add("playerone", "switch", "Switch", "", R"({"cameraIndex":2,"switchType":"x"})", R"({"cameraIndex":2})");
+        // iOptron iCAM is a rebadged Player One camera, routed to that SDK.
+        add("ioptron", "camera", "Camera", "", R"({"cameraIndex":2,"connectionType":"serial"})",
+            R"({"cameraIndex":2})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_IOPTRON
+#ifdef ALPACACORE_IOPTRON_POWERBOX
+        // ioptron switch (iMate PowerBox) had no roundtrip_config() case before #647.
+        add("ioptron", "switch", "Switch", "",
+            R"({"gpioChip":"/dev/gpiochip0","pwmFrequencyHz":100,"ports":[{"name":"P1","pwm":true}],"cameraIndex":1})",
+            R"({"gpioChip":"/dev/gpiochip0","pwmFrequencyHz":100,"ports":[{"name":"P1","pwm":true}]})");
+#endif
+        add("ioptron", "telescope", "Telescope", "serial + tail",
+            with_tail(
+                R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":115200,"mountIndex":1,"host":"h")")
+                .c_str(),
+            with_tail(R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":115200,"mountIndex":1)")
+                .c_str());
+        add("ioptron", "telescope", "Telescope", "network",
+            R"({"connectionType":"network","host":"192.168.1.9","tcpPort":4030,"mountIndex":2,"portPath":"/dev/x"})",
+            R"({"connectionType":"network","host":"192.168.1.9","tcpPort":4030,"mountIndex":2})");
+        add("ioptron", "focuser", "Focuser", "",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","focuserIndex":2,"model":"iafs2","baudRate":9})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","focuserIndex":2,"model":"iafs2"})");
+        add("ioptron", "filterwheel", "FilterWheel", "",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","filterwheelIndex":1,"model":"iefw18",)"
+            R"("filterNames":["L","R","G","B","Ha"],"baudRate":9})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","filterwheelIndex":1,"model":"iefw18",)"
+            R"("filterNames":["L","R","G","B","Ha"]})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+        add("synscan", "telescope", "Telescope", "serial",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB5","baudRate":9600,"synscanVersion":"v4","mountIndex":2,"host":"h"})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB5","baudRate":9600,"synscanVersion":"v4","mountIndex":2})");
+        add("synscan", "telescope", "Telescope", "network",
+            R"({"connectionType":"network","host":"192.168.1.5","tcpPort":11880,"synscanVersion":"v3","portPath":"/dev/x"})",
+            R"({"connectionType":"network","host":"192.168.1.5","tcpPort":11880,"synscanVersion":"v3"})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+        // Site coordinates are mandatory for this vendor from the API (#274).
+        add("skywatcher", "telescope", "Telescope", "serial",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600,"siteLatitude":39.7392,)"
+            R"("siteLongitude":-104.9903,"siteElevation":1609.0,"mountIndex":1,"host":"h","udpPort":1})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600,"siteLatitude":39.7392,)"
+            R"("siteLongitude":-104.9903,"siteElevation":1609.0,"mountIndex":1})");
+        add("skywatcher", "telescope", "Telescope", "network",
+            R"({"connectionType":"network","host":"192.168.4.1","udpPort":11880,"siteLatitude":-33.87,)"
+            R"("siteLongitude":151.21,"portPath":"/dev/x","tcpPort":1})",
+            R"({"connectionType":"network","host":"192.168.4.1","udpPort":11880,"siteLatitude":-33.87,)"
+            R"("siteLongitude":151.21})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        add("onstep", "telescope", "Telescope", "serial",
+            R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1,"host":"h"})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_CELESTRON
+        // celestron / telescope had no roundtrip_config() case before #647.
+        add("celestron", "telescope", "Telescope", "serial",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB4","baudRate":9600,"mountIndex":1,"host":"h"})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB4","baudRate":9600,"mountIndex":1})");
+        add("celestron", "telescope", "Telescope", "network",
+            R"({"connectionType":"network","host":"192.168.1.7","tcpPort":2000,"mountIndex":2,"portPath":"/dev/x"})",
+            R"({"connectionType":"network","host":"192.168.1.7","tcpPort":2000,"mountIndex":2})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_BISQUE
+        add("bisque", "telescope", "Telescope", "", R"({"host":"skyx.test","tcpPort":3041,"connectionType":"serial"})",
+            R"({"host":"skyx.test","tcpPort":3041})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_GEMINI
+        add("gemini", "focuser", "Focuser", "serial",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","baudRate":19200,"focuserIndex":1,"panelIndex":2})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","baudRate":19200,"focuserIndex":1,"panelIndex":2})");
+        add("gemini", "covercalibrator", "CoverCalibrator", "lite",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","baudRate":19200,"panelIndex":2})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","baudRate":19200,"panelIndex":2})");
+        add("gemini", "covercalibrator", "CoverCalibrator", "v2",
+            R"({"flatPanelModel":"v2","connectionType":"serial","portPath":"/dev/ttyUSB9","baudRate":19200,"panelIndex":3})",
+            R"({"flatPanelModel":"v2","connectionType":"serial","portPath":"/dev/ttyUSB9","baudRate":19200,"panelIndex":3})");
+        add("gemini", "covercalibrator", "CoverCalibrator", "pro",
+            R"({"flatPanelModel":"pro","connectionType":"auto","panelIndex":1,"portPath":"/dev/x","baudRate":9})",
+            R"({"flatPanelModel":"pro","connectionType":"auto","panelIndex":1})");
+        add("gemini", "switch", "Switch", "pdh-adv3 auto",
+            R"({"switchType":"pdh-adv3","connectionType":"auto","hubIndex":1,"focuserIndex":4})",
+            R"({"switchType":"pdh-adv3","connectionType":"auto","hubIndex":1,"focuserIndex":4})");
+        add("gemini", "switch", "Switch", "pdh-adv3 serial",
+            R"({"switchType":"pdh-adv3","connectionType":"serial","portPath":"/dev/ttyUSB3","baudRate":19200,"hubIndex":1})",
+            R"({"switchType":"pdh-adv3","connectionType":"serial","portPath":"/dev/ttyUSB3","baudRate":19200,"hubIndex":1})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+        add("astroasis", "focuser", "Focuser", "hidPath", R"({"hidPath":"/dev/hidraw3","focuserIndex":2})",
+            R"({"hidPath":"/dev/hidraw3","focuserIndex":2})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        // wandererastro covercalibrator and filterwheel had no roundtrip_config() case before #647.
+        add("wandererastro", "covercalibrator", "CoverCalibrator", "auto",
+            R"({"connectionType":"auto","coverIndex":1,"portPath":"/dev/x"})",
+            R"({"connectionType":"auto","coverIndex":1})");
+        add("wandererastro", "covercalibrator", "CoverCalibrator", "serial",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":19200,"coverIndex":1})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":19200,"coverIndex":1})");
+        add("wandererastro", "rotator", "Rotator", "auto", R"({"connectionType":"auto","rotatorIndex":1})",
+            R"({"connectionType":"auto","rotatorIndex":1})");
+        add("wandererastro", "rotator", "Rotator", "serial",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB2","baudRate":19200,"rotatorIndex":1})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB2","baudRate":19200,"rotatorIndex":1})");
+        add("wandererastro", "filterwheel", "FilterWheel", "auto",
+            R"({"connectionType":"auto","wandererFilterwheelIndex":1,"filterNames":["L","R","G","B","Ha","OIII","SII","Dark"],"filterwheelIndex":5})",
+            R"({"connectionType":"auto","wandererFilterwheelIndex":1,"filterNames":["L","R","G","B","Ha","OIII","SII","Dark"]})");
+        add("wandererastro", "filterwheel", "FilterWheel", "serial",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB3","baudRate":19200,"filterNames":["L","R","G","B","Ha","OIII","SII","Dark"]})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB3","baudRate":19200,"filterNames":["L","R","G","B","Ha","OIII","SII","Dark"]})");
+        add("wandererastro", "switch", "Switch", "auto",
+            R"({"switchType":"wandererbox-pro-v3","connectionType":"auto","boxIndex":1})",
+            R"({"switchType":"wandererbox-pro-v3","connectionType":"auto","boxIndex":1})");
+        add("wandererastro", "switch", "Switch", "serial",
+            R"({"switchType":"wandererbox-pro-v3","connectionType":"serial","portPath":"/dev/ttyUSB4","baudRate":19200})",
+            R"({"switchType":"wandererbox-pro-v3","connectionType":"serial","portPath":"/dev/ttyUSB4","baudRate":19200})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_WEEWX
+        add("weewx", "observingconditions", "ObservingConditions", "",
+            R"({"weewxUrl":"http://weewx.test:8998/current.json","pollIntervalSeconds":300,"timeoutMs":2500,"cameraIndex":1})",
+            R"({"weewxUrl":"http://weewx.test:8998/current.json","pollIntervalSeconds":300,"timeoutMs":2500})");
+#endif
+
+        for (const auto& c : cases) {
+            const int number = c.posted.value("deviceNumber", -1);
+            const std::string vendor = c.posted.value("vendor", "");
+            const std::string device_type = c.posted.value("deviceType", "");
+
+            const auto api = api_attempt(router, c.posted, c.alpaca_type);
+            if (!api.ok || api.config != c.expected) {
+                std::cerr << "#647 API round trip differs for " << c.label << "\n  error:    " << api.message
+                          << "\n  expected: " << c.expected.dump() << "\n  actual:   " << api.config.dump() << "\n";
+            }
+            EXPECT(api.ok);
+            EXPECT(api.config == c.expected);
+            remove_device(router, vendor, device_type, number);
+
+            const auto persisted = persisted_attempt(c.posted, c.alpaca_type);
+            if (!persisted.listed || persisted.config != c.expected || !persisted.warnings.empty()) {
+                std::cerr << "#647 persisted round trip differs for " << c.label << "\n  listed:   " << persisted.listed
+                          << "\n  expected: " << c.expected.dump() << "\n  actual:   " << persisted.config.dump()
+                          << "\n";
+                for (const auto& w : persisted.warnings) {
+                    std::cerr << "  WARN: " << w << "\n";
+                }
+            }
+            EXPECT(persisted.listed);
+            EXPECT(persisted.config == c.expected);
+            // A valid saved config loads without a single WARN.
+            EXPECT(persisted.warnings.empty());
+        }
+        // -----------------------------------------------------------------
+        // Pinned behaviour: the two config sources DELIBERATELY differ on
+        // invalid input (#380, generalising #353): the API rejects, a saved
+        // config is registered anyway so it stays listed and editable in the
+        // web UI. And the current, inconsistent behaviour behind
+        // open-astro/AlpacaBridge#508, pinned AS IT IS TODAY. Each #508 case
+        // below is commented with the item it pins and is expected to flip,
+        // deliberately, when that item's fix lands.
+        // -----------------------------------------------------------------
+        struct Pin {
+            std::string label;
+            std::string alpaca_type;
+            nlohmann::json posted;
+            std::string api_error;  // empty: the API registers it
+            nlohmann::json api_config;
+            bool persisted_listed = false;
+            nlohmann::json persisted_config;
+            std::vector<std::string> warn;     // each must appear in some WARN of the load
+            std::vector<std::string> no_warn;  // none may appear in any WARN of the load
+        };
+        std::vector<Pin> pins;
+        const auto obj = [](std::initializer_list<std::string> parts) {
+            std::string body;
+            for (const auto& part : parts) {
+                if (!part.empty()) {
+                    body += (body.empty() ? "" : ",") + part;
+                }
+            }
+            return "{" + body + "}";
+        };
+        const auto pin = [&](const std::string& label, const std::string& vendor, const std::string& device_type,
+                             const std::string& alpaca_type, const std::string& posted_json,
+                             const std::string& api_error, const std::string& api_config_json, bool persisted_listed,
+                             const std::string& persisted_config_json, std::vector<std::string> warn,
+                             std::vector<std::string> no_warn) {
+            const nlohmann::json identity = {
+                {"vendor", vendor}, {"deviceType", device_type}, {"deviceNumber", ++next_number}};
+            Pin p;
+            p.label = vendor + "/" + device_type + " " + label;
+            p.alpaca_type = alpaca_type;
+            p.posted = nlohmann::json::parse(posted_json);
+            p.posted.update(identity);
+            p.api_error = api_error;
+            p.api_config = nlohmann::json::parse(api_config_json);
+            p.api_config.update(identity);
+            p.persisted_listed = persisted_listed;
+            p.persisted_config = nlohmann::json::parse(persisted_config_json);
+            p.persisted_config.update(identity);
+            p.warn = std::move(warn);
+            p.no_warn = std::move(no_warn);
+            pins.push_back(std::move(p));
+        };
+
+        struct Mount {
+            const char* vendor;
+            const char* bad_type_message;  // the arm's own literal, they differ
+            const char* site;              // mandatory from the API for this vendor (#274)
+            bool empty_type_is_auto;       // zwo is the odd one out (#508 item 3)
+        };
+        std::vector<Mount> mounts;
+        const char* const kSite = R"("siteLatitude":39.7392,"siteLongitude":-104.9903)";
+        const char* const kAutoOrSerialOrNetwork = "Invalid connection type. Use 'auto', 'serial', or 'network'";
+#ifdef ALPACACORE_ENABLE_IOPTRON
+        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true});
+#endif
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true});
+#endif
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true});
+#endif
+#ifdef ALPACACORE_ENABLE_CELESTRON
+        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true});
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true});
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", false});
+#endif
+        for (const auto& m : mounts) {
+            const std::string site = m.site;
+            const std::string vendor = m.vendor;
+            const std::string warned_serial = "treating it as \"serial\"";
+
+            // #380 / #353: an unrecognised connectionType. The API rejects with
+            // the arm's own message. A saved one is normalised to "serial" IN
+            // MEMORY (the WARN says so; connect then fails on the port path
+            // instead of auto-probing), stays listed, and configureddevices
+            // still shows the raw value: sanitize_device_config copies the file
+            // value verbatim and only the registration sees the fallback.
+            pin("connectionType \"carrier-pigeon\" (#380/#353)", vendor, "telescope", "Telescope",
+                obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site}), m.bad_type_message, "{}",
+                true, obj({R"("connectionType":"carrier-pigeon")", site}),
+                {"has connectionType \"carrier-pigeon\"", warned_serial}, {"Skipping persisted device"});
+
+            // #508 item 2: connectionType is not case-folded. "Network" is
+            // rejected by the API; a saved one is read as "serial" (WARN), the
+            // host is not kept (sanitize tests == "network"), and the entry
+            // keeps the raw "Network".
+            pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
+                obj({R"("connectionType":"Network","host":"192.168.1.60")", site}), m.bad_type_message, "{}", true,
+                obj({R"("connectionType":"Network")", site}), {"has connectionType \"Network\"", warned_serial},
+                {"Skipping persisted device"});
+
+            // #508 item 1 (the six mount arms that go through
+            // reject_invalid_config): an empty portPath on serial is rejected
+            // by the API and, from a saved config, WARNED about and registered
+            // anyway. Contrast the arms further down that drop the entry.
+            pin("serial with empty portPath (#508 item 1, mount arm)", vendor, "telescope", "Telescope",
+                obj({R"("connectionType":"serial","portPath":"")", site}), "Serial port path is required", "{}", true,
+                obj({R"("connectionType":"serial","portPath":"")", site}),
+                {"will refuse to connect: Serial port path is required"}, {"Skipping persisted device"});
+
+            // #508 item 3: an empty connectionType. zwo treats "" as
+            // unrecognised: the API rejects it, a saved one is normalised to
+            // "serial" (WARN) and stays listed. The five arms that treat ""
+            // as "auto" are pinned by the probe cases below.
+            if (!m.empty_type_is_auto) {
+                pin("empty connectionType is NOT auto (#508 item 3)", vendor, "telescope", "Telescope",
+                    obj({R"("connectionType":"")", site}), m.bad_type_message, "{}", true,
+                    obj({R"("connectionType":"")", site}), {"has connectionType \"\"", warned_serial},
+                    {"Skipping persisted device"});
+            }
+        }
+
+#ifdef ALPACACORE_ENABLE_ONSTEP
+        // #380: OnStep is serial-only, so a saved "network" is unrecognised for
+        // it (the other network-capable mounts accept it). The entry keeps
+        // "network" but not its host.
+        pin("connectionType \"network\" (#380)", "onstep", "telescope", "Telescope",
+            R"({"connectionType":"network","host":"192.168.1.60"})", "Invalid connection type. Use 'auto' or 'serial'",
+            "{}", true, R"({"connectionType":"network"})",
+            {"has connectionType \"network\"", "treating it as \"serial\""}, {"Skipping persisted device"});
+#endif
+
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+        // The contrast that makes item 4 an inconsistency: SynScan rejects the
+        // same config from the API and warns (but registers) from a saved one.
+        pin("network with empty host (#508 item 4 contrast)", "synscan", "telescope", "Telescope",
+            R"({"connectionType":"network","host":""})", "Host IP address is required", "{}", true,
+            R"({"connectionType":"network","host":""})", {"will refuse to connect: Host IP address is required"},
+            {"Skipping persisted device"});
+#endif
+
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+        // #508 item 5: an out-of-range coordinate. The API rejects it; a saved
+        // one is WARNED about and ignored by the driver (the #398 test above
+        // reads the driver back), but the file entry keeps it: configureddevices
+        // still shows 200.0, and the next save writes it back.
+        pin("siteLatitude 200 (#508 item 5)", "skywatcher", "telescope", "Telescope",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            "siteLatitude 200.000000 is out of range: must be between -90.000000 and 90.000000 degrees", "{}", true,
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            {"siteLatitude 200.000000 is out of range", "The coordinate is ignored"}, {"Skipping persisted device"});
+#endif
+
+        // #508 item 1, the arms that DROP a saved entry on an empty portPath
+        // instead of registering it with a WARN: it is rejected by the API and
+        // is NOT registered after a restart. It is still listed, as a
+        // "<vendor> (failed to load)" row (LoadError true, lower-case
+        // DeviceType), which is how the web UI can show and edit it.
+        const std::string kPortRequired = "portPath is required when connectionType is 'serial' (or use 'auto').";
+        const auto drop_pin = [&](const std::string& vendor, const std::string& device_type,
+                                  const std::string& alpaca_type, const std::string& message) {
+            pin("serial with empty portPath is DROPPED (#508 item 1)", vendor, device_type, alpaca_type,
+                R"({"connectionType":"serial","portPath":""})", message, "{}", false, "{}",
+                {"Skipping persisted device: " + message}, {});
+        };
+#ifdef ALPACACORE_ENABLE_IOPTRON
+        drop_pin("ioptron", "filterwheel", "FilterWheel", kPortRequired);
+#endif
+#ifdef ALPACACORE_ENABLE_QHY
+        pin("cfw3-usb serial with empty portPath is DROPPED (#508 item 1)", "qhy", "filterwheel", "FilterWheel",
+            R"({"wheelType":"cfw3-usb","connectionType":"serial","portPath":""})",
+            "QHY CFW3 connectionType \"serial\" requires portPath", "{}", false, "{}",
+            {"Skipping persisted device: QHY CFW3 connectionType \"serial\" requires portPath"}, {});
+#endif
+#ifdef ALPACACORE_ENABLE_GEMINI
+        drop_pin("gemini", "switch", "Switch", kPortRequired);
+#endif
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        drop_pin("wandererastro", "covercalibrator", "CoverCalibrator", kPortRequired);
+        drop_pin("wandererastro", "rotator", "Rotator", kPortRequired);
+        drop_pin("wandererastro", "filterwheel", "FilterWheel", kPortRequired);
+        drop_pin("wandererastro", "switch", "Switch", kPortRequired);
+#endif
+
+        // #508 item 1, the arms that fall through to by-index auto-detect on an
+        // empty portPath: registered from both sources, no WARN, and the entry
+        // keeps connectionType "serial" with the empty portPath. (The other
+        // three such arms probe hardware while constructing; see below.)
+        const auto silent_pin = [&](const std::string& vendor, const std::string& device_type,
+                                    const std::string& alpaca_type, const std::string& extra) {
+            const std::string body = obj({R"("connectionType":"serial","portPath":"")", extra});
+            pin("serial with empty portPath silently auto-detects (#508 item 1)", vendor, device_type, alpaca_type,
+                body, "", body, true, body, {}, {"Serial port path is required", "Skipping persisted device"});
+        };
+#ifdef ALPACACORE_ENABLE_GEMINI
+        silent_pin("gemini", "covercalibrator", "CoverCalibrator", "");
+#endif
+
+        for (const auto& p : pins) {
+            const int number = p.posted.value("deviceNumber", -1);
+            const std::string vendor = p.posted.value("vendor", "");
+            const std::string device_type = p.posted.value("deviceType", "");
+
+            const auto api = api_attempt(router, p.posted, p.alpaca_type);
+            if (api.ok != p.api_error.empty() || (api.ok && api.config != p.api_config) ||
+                (!api.ok && api.message != p.api_error)) {
+                std::cerr << "#647 API pin differs for " << p.label << "\n  expected error: " << p.api_error
+                          << "\n  actual ok/error: " << api.ok << " / " << api.message
+                          << "\n  expected config: " << p.api_config.dump()
+                          << "\n  actual config:   " << api.config.dump() << "\n";
+            }
+            EXPECT(api.ok == p.api_error.empty());
+            if (api.ok) {
+                EXPECT(api.config == p.api_config);
+                remove_device(router, vendor, device_type, number);
+            } else {
+                EXPECT(api.message == p.api_error);
+            }
+
+            const auto persisted = persisted_attempt(p.posted, p.alpaca_type);
+            bool warnings_ok = true;
+            for (const auto& fragment : p.warn) {
+                warnings_ok = warnings_ok && any_warning_contains(persisted.warnings, fragment);
+            }
+            for (const auto& fragment : p.no_warn) {
+                warnings_ok = warnings_ok && !any_warning_contains(persisted.warnings, fragment);
+            }
+            if (persisted.listed != p.persisted_listed ||
+                (persisted.listed && persisted.config != p.persisted_config) || !warnings_ok) {
+                std::cerr << "#647 persisted pin differs for " << p.label
+                          << "\n  expected listed: " << p.persisted_listed << " actual: " << persisted.listed
+                          << "\n  expected config: " << p.persisted_config.dump()
+                          << "\n  actual config:   " << persisted.config.dump() << "\n";
+                for (const auto& w : persisted.warnings) {
+                    std::cerr << "  WARN: " << w << "\n";
+                }
+            }
+            EXPECT(persisted.listed == p.persisted_listed);
+            if (!p.persisted_listed) {
+                // Not registered is not the same as not listed: the failed
+                // entry is shown with LoadError and its saved Config.
+                EXPECT(persisted.failed_listed);
+                EXPECT(persisted.failed_entry.value("LoadError", false));
+                EXPECT(persisted.failed_entry.value("DeviceName", "") == vendor + " (failed to load)");
+                EXPECT(persisted.failed_entry["Config"].value("vendor", "") == vendor);
+            }
+            if (persisted.listed) {
+                EXPECT(persisted.config == p.persisted_config);
+            }
+            EXPECT(warnings_ok);
+        }
+    }
 
     // configureddevices surfaces Firmware and SdkVersion independently, each only
     // when the live driver reports that specific value.
