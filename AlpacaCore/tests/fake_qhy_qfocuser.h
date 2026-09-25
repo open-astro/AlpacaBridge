@@ -89,8 +89,9 @@ public:
     void set_steps_per_poll(int n) { steps_per_poll_.store(n); }
     /// Supply voltage reported in c_r (tenths of a volt): 125 = 12.5 V.
     void set_voltage_tenths(int v) { voltage_tenths_.store(v); }
-    /// Hold the reply to the NEXT command for @p delay (one shot), so a connect that is waiting on it stays
-    /// open that long. Used by the contract sweep to make Connecting observable.
+    /// One shot, then spent: the reply to the next command handled, whichever it is (even an unknown id the fake then
+    /// stays silent on) is held for @p delay. A connect waiting on that reply stays open that long; used by the
+    /// contract sweep to make Connecting observable.
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
 
     /// Model the real GD32 firmware's one-reply-behind behaviour: each reply is

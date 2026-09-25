@@ -86,8 +86,9 @@ public:
     // --- Fake hardware state (readable/settable by tests) ---
 
     void set_firmware(int version) { firmware_.store(version); }
-    /// Hold the reply to the NEXT command for @p delay (one shot), so a connect that is waiting on it stays
-    /// open that long. Used by the contract sweep to make Connecting observable.
+    /// One shot, then spent: the reply to the next ">H#" identity handshake (the only command that spends it; the
+    /// driver's connect sends it first) is held for @p delay. A connect waiting on that reply stays open that long;
+    /// used by the contract sweep to make Connecting observable.
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
 
     void set_input_voltage(double v) {

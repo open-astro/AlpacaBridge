@@ -96,8 +96,9 @@ public:
 
     /// Stop answering anything (hung MCU, healthy fd).
     void set_muted(bool on) { muted_.store(on); }
-    /// Hold the reply to the NEXT command for @p delay (one shot), so a connect that is waiting on it stays
-    /// open that long. Used by the contract sweep to make Connecting observable.
+    /// One shot, then spent: the reply to the next query (VRS, MXP, NOW or RESET) is held for @p delay; a lone-hex
+    /// goto does not spend it. A connect waiting on that reply stays open that long; used by the contract sweep to
+    /// make Connecting observable.
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
 
     /// Write the post-reset boot byte (the wheel's position) now, as the real

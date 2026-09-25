@@ -59,8 +59,9 @@ public:
         frame_ = std::move(frame);
     }
     void set_muted(bool muted) { muted_.store(muted); }
-    /// Send no frame until @p delay after the fake starts, so a connect that waits for the first streamed frame
-    /// stays open that long. Set before the driver connects. Used by the contract sweep to make Connecting observable.
+    /// Not a one-shot: a start-up window. No frame is sent until @p delay after the fake's worker started, and
+    /// nothing is consumed (later frames stream as normal). A connect that waits for the first streamed frame stays
+    /// open until then. Set right after construction, before the driver connects; used by the contract sweep.
     void hold_first_frame(std::chrono::milliseconds delay) {
         first_frame_hold_ms_.store(static_cast<int>(delay.count()));
     }

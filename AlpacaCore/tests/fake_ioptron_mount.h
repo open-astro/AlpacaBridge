@@ -51,8 +51,9 @@ public:
     /// firmware does for a target below the altitude limit) instead of "1".
     void set_reject_goto(bool reject) { reject_goto_.store(reject); }
 
-    /// Hold the reply to the NEXT command for @p delay (one shot), so a connect that is waiting on it stays
-    /// open that long. Used by the contract sweep to make Connecting observable.
+    /// One shot, then spent: the reply to the next chunk received (one recv, which may carry several commands)
+    /// is held for @p delay. A connect waiting on that reply stays open that long; used by the contract sweep to
+    /// make Connecting observable.
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
 
     std::vector<std::string> commands() const {
