@@ -352,6 +352,19 @@ if(ALPACAHTTP_BUILD_TESTS)
     file(MAKE_DIRECTORY ${TEST_ROUTING_DIR})
     add_test(NAME test_routing COMMAND test_routing WORKING_DIRECTORY ${TEST_ROUTING_DIR})
 
+    # #646: route-table snapshot, dispatch reach and rejection fixture. Own
+    # working directory for the same reason as test_routing (relative
+    # config/registered_devices.json), and its own process because the
+    # DeviceRegistry is process-wide and this test claims device number 4646
+    # for one stub per device type.
+    add_executable(test_route_table tests/test_route_table.cpp)
+    target_link_libraries(test_route_table alpacahttp)
+    target_compile_definitions(test_route_table PRIVATE
+        ALPACAHTTP_ROUTER_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
+    set(TEST_ROUTE_TABLE_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_route_table_cwd)
+    file(MAKE_DIRECTORY ${TEST_ROUTE_TABLE_DIR})
+    add_test(NAME test_route_table COMMAND test_route_table WORKING_DIRECTORY ${TEST_ROUTE_TABLE_DIR})
+
     # Threaded storm over the router's persisted_devices_ store (audit 3.0.1
     # follow-up): configure/remove/configureddevices from concurrent threads,
     # mirroring the per-request server threads. Most valuable under TSan, but
