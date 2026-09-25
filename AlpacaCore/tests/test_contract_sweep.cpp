@@ -524,6 +524,10 @@ using Clock = std::chrono::steady_clock;
 // Handshake hold for fakes that have the knob, and the part of it Connected is checked inside.
 constexpr std::chrono::milliseconds kHoldDelay{300};
 constexpr std::chrono::milliseconds kHoldWindow{100};
+// Per-row holds, each longer than kHoldWindow and shorter than that row's own reply timeout.
+constexpr std::chrono::milliseconds kSerialBoardHold{150};  // Sky-Watcher serial: response_timeout_ms is 300
+constexpr std::chrono::milliseconds kFlatPanelHold{300};    // Gemini flat panel: handshake read timeout is 2 s
+constexpr std::chrono::milliseconds kQhyOpenHold{300};      // QHY: the SDK open_camera call, no reply timeout
 
 struct ConnectObservation {
     bool saw_connecting = false;
@@ -591,8 +595,8 @@ Hosted connected_host(const Tier2Host& h) {
             REQUIRE(h.connecting_unobservable != nullptr);
             REQUIRE(std::string(h.connecting_unobservable).size() > 0);
         } else {
-            INFO("the fake holds the handshake for " << kHoldDelay.count()
-                                                     << " ms: Connecting reads true and Connected false");
+            INFO("the fake holds the handshake open past the "
+                 << kHoldWindow.count() << " ms window: Connecting reads true and Connected false");
             CHECK(o.saw_connecting);
             CHECK_FALSE(o.connected_early);
         }
@@ -866,11 +870,16 @@ Tier2Host tier2_host_skywatcher_telescope_serial() {
                 DeviceType::Telescope,
                 "skywatcher_telescope",
                 {},
-                false,
+                true,
                 {},
                 ""};
-    h.connectable = [make](bool) {
-        return host_over(std::make_shared<alpacacore::test::FakeSkyWatcherSerialBoard>(),
+    // delay_next_reply(ms) with no command holds the reply to the next frame of any kind. protocol.connect()
+    // only opens the port (skywatcher_protocol_wrapper.cpp connect_serial), so the next frame is the first
+    // one the driver's set_connected sends, inside the connect task.
+    h.connectable = [make](bool hold) {
+        auto board = std::make_shared<alpacacore::test::FakeSkyWatcherSerialBoard>();
+        if (hold) board->delay_next_reply(static_cast<int>(kSerialBoardHold.count()));
+        return host_over(board,
                          [&](const alpacacore::test::FakeSkyWatcherSerialBoard& b) { return make(b.slave_path()); });
     };
     h.failing = [make]() {
@@ -878,9 +887,6 @@ Tier2Host tier2_host_skywatcher_telescope_serial() {
         hosted.driver = make(kAbsentPort);
         return hosted;
     };
-    h.connecting_unobservable =
-        "fake_skywatcher_serial_board.h has delay_next_reply(), but it is not wired to the connect handshake for this "
-        "row (which command connect sends first is unverified); the default reply is immediate";
     return h;
 }
 #endif
@@ -984,23 +990,23 @@ Tier2Host tier2_host_gemini_covercalibrator() {
                 DeviceType::CoverCalibrator,
                 "gemini_covercalibrator_pro",
                 {},
-                false,
+                true,
                 {},
                 ""};
-    h.connectable = [](bool) {
-        return host_over(std::make_shared<alpacacore::test::FakeGeminiFlatPanel>(),
-                         [](const alpacacore::test::FakeGeminiFlatPanel& f) -> std::unique_ptr<AlpacaDriver> {
-                             return alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, f.slave_path(), 9600);
-                         });
+    // The Pro connect sleeps 100 ms, sends ">H#" and reads the identity reply with a 2 s timeout
+    // (gemini_flatpanel_protocol_wrapper.cpp Impl::connect), so holding that reply holds the connect.
+    h.connectable = [](bool hold) {
+        auto panel = std::make_shared<alpacacore::test::FakeGeminiFlatPanel>();
+        if (hold) panel->set_reply_delay(">H#", kFlatPanelHold);
+        return host_over(panel, [](const alpacacore::test::FakeGeminiFlatPanel& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, f.slave_path(), 9600);
+        });
     };
     h.failing = []() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, kAbsentPort, 9600);
         return hosted;
     };
-    h.connecting_unobservable =
-        "fake_gemini_flatpanel.h has set_reply_delay(prefix, delay), but it is not wired to the connect handshake for "
-        "this row (which command connect sends first is unverified); the default reply is immediate";
     return h;
 }
 
@@ -1033,9 +1039,18 @@ struct QhySdkHold {
 };
 
 Tier2Host tier2_host_qhy_camera() {
-    Tier2Host h{"qhy_camera", "qhy", "camera", "fake_qhy_sdk.h", DeviceType::Camera, "qhy_camera", {}, false, {}, ""};
-    h.connectable = [](bool) {
-        return host_over(std::make_shared<QhySdkHold>(), [](QhySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+    Tier2Host h{"qhy_camera", "qhy", "camera", "fake_qhy_sdk.h", DeviceType::Camera, "qhy_camera", {}, true, {}, ""};
+    // The driver's connect calls sdk_.open_camera(id) (qhy_camera_driver.cpp), which the fake reports through
+    // hit("open_camera"): the sanctioned before_call hook blocks that one named call. Set before the driver
+    // exists and matched on the name only, so no other call is ever held.
+    h.connectable = [](bool hold) {
+        auto sdk_hold = std::make_shared<QhySdkHold>();
+        if (hold) {
+            sdk_hold->fake.before_call = [](const std::string& name) {
+                if (name == "open_camera") std::this_thread::sleep_for(kQhyOpenHold);
+            };
+        }
+        return host_over(sdk_hold, [](QhySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", s.sdk);
         });
     };
@@ -1046,9 +1061,6 @@ Tier2Host tier2_host_qhy_camera() {
             return alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", s.sdk);
         });
     };
-    h.connecting_unobservable =
-        "fake_qhy_sdk.h returns from open at once; its before_call hook could block a named call but is not wired to "
-        "the connect path for this row (which SDK calls connect makes is unverified)";
     return h;
 }
 
