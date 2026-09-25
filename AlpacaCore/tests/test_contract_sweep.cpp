@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <set>
 #include <string>
 #include <utility>
@@ -85,6 +86,14 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
         case DeviceType::CoverCalibrator: {
             auto& c = dynamic_cast<alpacacore::CoverCalibratorDriver&>(d);
             p.push_back({"calibrator_on(-1)", [&] { c.calibrator_on(-1); }});
+            break;
+        }
+        case DeviceType::Rotator: {
+            // NaN is a static invalid argument: InvalidValue must win over NotConnected.
+            auto& r = dynamic_cast<alpacacore::RotatorDriver&>(d);
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            p.push_back({"move_absolute(NaN)", [&] { r.move_absolute(nan); }});
+            p.push_back({"move_mechanical(NaN)", [&] { r.move_mechanical(nan); }});
             break;
         }
         default:
@@ -388,7 +397,8 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
     for (const auto& e : entries) {
         vendors.insert(e.vendor);
         CHECK(ids.insert(e.id).second);
-        CHECK(std::string(e.id) == std::string(e.vendor) + "_" + e.device_type);
+        // A second backend behind one router pair carries a suffix: "<vendor>_<devicetype>_<backend>".
+        CHECK(std::string(e.id).rfind(std::string(e.vendor) + "_" + e.device_type, 0) == 0);
         CHECK_FALSE(std::string(e.source).empty());
     }
 #define CS_EXPECT_VENDOR(macro, name)                                                       \

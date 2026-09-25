@@ -48,7 +48,6 @@
 #include <vector>
 
 #ifdef ALPACACORE_ENABLE_ZWO
-#include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
@@ -58,6 +57,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
+#include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
 #endif
@@ -168,7 +168,6 @@ inline const char* invalid_probe_reason_for(DeviceType t) {
     switch (t) {
         case DeviceType::Camera:
         case DeviceType::Focuser:
-        case DeviceType::Rotator:
             return "no argument with a static out-of-range value that is validated before the connection check "
                    "(assumption)";
         case DeviceType::ObservingConditions:
@@ -195,10 +194,9 @@ inline ContractEntry make_entry(const char* id, const char* vendor, const char* 
 }
 
 inline ContractEntry with_command_passthrough(ContractEntry e) {
+    // Command* forward to the mount protocol when connected (driver source; assumption for the
+    // disconnected NotConnected code, checked by the sweep itself). Source string is kept.
     e.command_passthrough = true;
-    e.source =
-        "driver source: Command* forward to the mount protocol when connected (ASCOM CommandBlind); "
-        "CanMoveAxis 0/1 movable, 2 not (ITelescopeV4, hardware-verified per vendor); AGENTS.md contract";
     return e;
 }
 
@@ -207,7 +205,8 @@ inline constexpr const char* kSrcAgents =
     "AGENTS.md ASCOM contract precedence + ASCOM Platform 7 interface docs; factory as in the vendor Defaults case";
 inline constexpr const char* kSrcAgentsAxis =
     "AGENTS.md ASCOM contract precedence + ASCOM ITelescopeV4 CanMoveAxis (axes 0/1 movable, 2 tertiary not); "
-    "hardware-verified per-vendor in the existing telescope tests";
+    "the per-vendor disconnected unit tests this sweep replaced (fake/disconnected only, not a hardware run); "
+    "Command* passthrough flag and Bisque's absence of it are assumptions read from driver source";
 
 #ifdef ALPACACORE_ENABLE_ZWO
 inline ContractEntry contract_entry_zwo_camera() {
@@ -267,6 +266,15 @@ inline ContractEntry contract_entry_qhy_filterwheel() {
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::qhy::create_qhy_filterwheel_by_index(n, 0); },
         kSrcAgents);
 }
+// Second backend behind the same (qhy, filterwheel) router pair: the standalone CFW3 on a serial port.
+inline ContractEntry contract_entry_qhy_filterwheel_cfw3() {
+    return make_entry(
+        "qhy_filterwheel_cfw3", "qhy", "filterwheel", DeviceType::FilterWheel,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            return vendor::qhy::create_qhy_cfw3_filterwheel(n, "/dev/qhy-cfw3-absent");
+        },
+        kSrcAgents);
+}
 inline ContractEntry contract_entry_qhy_focuser() {
     return make_entry(
         "qhy_focuser", "qhy", "focuser", DeviceType::Focuser,
@@ -318,9 +326,9 @@ inline ContractEntry contract_entry_ioptron_switch() {
 // The router builds ioptron/camera from the Player One camera driver (iCAM
 // cameras are rebadged Player One), so it is guarded by the Player One flag.
 inline ContractEntry with_playerone_actions(ContractEntry e) {
+    // Action list read from playerone_camera_driver.cpp get_supported_actions() (assumption: not
+    // checked against a hardware run). Source string is kept.
     e.actions = {"GetHeaterPower", "SetHeaterPower", "GetFanPower", "SetFanPower"};
-    e.source =
-        "driver source: playerone_camera_driver.cpp get_supported_actions() (heater/fan actions); AGENTS.md contract";
     return e;
 }
 inline ContractEntry contract_entry_ioptron_camera() {
@@ -495,6 +503,16 @@ inline ContractEntry contract_entry_touptek_focuser() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+// Second backend behind the same (touptek, switch) router pair; needs no libgpiod.
+inline ContractEntry contract_entry_touptek_switch_thermal() {
+    return make_entry(
+        "touptek_switch_thermal", "touptek", "switch", DeviceType::Switch,
+        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::touptek::create_touptek_thermal_switch(n, 0); },
+        kSrcAgents);
+}
+#endif
+
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 inline ContractEntry contract_entry_touptek_switch() {
     return make_entry(
@@ -564,7 +582,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
-#define CS_QHY(X) X(qhy_camera) X(qhy_filterwheel) X(qhy_focuser)
+#define CS_QHY(X) X(qhy_camera) X(qhy_filterwheel) X(qhy_filterwheel_cfw3) X(qhy_focuser)
 #else
 #define CS_QHY(X)
 #endif
@@ -629,7 +647,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_GPHOTO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-#define CS_TOUPTEK(X) X(touptek_camera) X(touptek_filterwheel) X(touptek_focuser)
+#define CS_TOUPTEK(X) X(touptek_camera) X(touptek_filterwheel) X(touptek_focuser) X(touptek_switch_thermal)
 #else
 #define CS_TOUPTEK(X)
 #endif

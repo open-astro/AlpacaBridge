@@ -88,9 +88,10 @@ Checks:
      with USB and whose status cell is a check mark.
  13. The fake-connectable roster in AlpacaCore/tests/contract_sweep.h agrees
      with the fake_*.h files on disk in both directions (issue #571): a fake
-     that is neither in the roster nor in HELPER_FAKES fails, so a driver that
-     gains a fake cannot skip the connected-over-a-fake contract cases, and a
-     roster row whose fake no longer exists fails. HELPER_FAKES names the
+     that is neither in the roster nor in HELPER_FAKES fails, and a roster row
+     whose fake no longer exists fails. The roster is the list the tier-2
+     (connected-over-a-fake) contract cases will iterate; those cases are a
+     follow-up PR to #571, so today this check pins the list, not any case. HELPER_FAKES names the
      fakes that are not a driver's connect path, each with a reason, and a
      helper that has since been given a roster row is itself a finding.
 """
