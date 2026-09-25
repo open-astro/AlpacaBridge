@@ -16,6 +16,7 @@
 #include <alpacacore/catalog/device_catalog.h>
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -340,4 +341,83 @@ TEST_CASE("Unset record field is distinct from an empty record list", "[catalog]
     auto p = empty.find(ports_field());
     REQUIRE(p.has_value());
     CHECK(p->empty());
+}
+
+TEST_CASE("NaN in a ranged double is out of range", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+    DeviceConfig cfg = valid_config();
+    DeviceConfig port = make_port("p");
+    port.set("maxValue", std::numeric_limits<double>::quiet_NaN());
+    cfg.set("ports", std::vector<DeviceConfig>{port});
+
+    auto api = catalog.normalize(kStubKey, cfg, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(mentions(*api.rejection, "maxValue"));
+
+    auto persisted = catalog.normalize(kStubKey, cfg, Source::Persisted);
+    REQUIRE(persisted.warnings.size() == 1);
+    CHECK(mentions(persisted.warnings[0], "maxValue"));
+}
+
+TEST_CASE("A cross-field rejection never empties a Persisted config", "[catalog]") {
+    DeviceCatalog catalog;
+    Schema schema;
+    schema.key = DeviceKey{"wipe", DeviceType::Switch};
+    schema.display_name = "Wipe";
+    schema.build_option = "ALPACACORE_ENABLE_WIPE";
+    schema.fields = stub_fields();
+    // Careless callback: rejects without copying the input config.
+    schema.normalize = [](const DeviceConfig&, Source) {
+        NormalizeResult r;
+        r.rejection = "cross-field failure";
+        return r;
+    };
+    catalog.add(std::move(schema));
+
+    auto r = catalog.normalize(DeviceKey{"wipe", DeviceType::Switch}, valid_config(), Source::Persisted);
+    CHECK_FALSE(r.rejection.has_value());
+    REQUIRE(r.warnings.size() == 1);
+    CHECK(mentions(r.warnings[0], "cross-field failure"));
+    CHECK(r.config.find(kPortPath).has_value());
+}
+
+TEST_CASE("Unset field inside a record stays unset through normalize and sanitize", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+    DeviceConfig port;
+    port.set("name", std::string{"p"});  // pwm and maxValue left unset
+    DeviceConfig cfg = valid_config();
+    cfg.set("ports", std::vector<DeviceConfig>{port});
+    DeviceConfig empty = valid_config();
+    empty.set("ports", std::vector<DeviceConfig>{});
+
+    for (Source s : {Source::Api, Source::Persisted}) {
+        auto n = catalog.normalize(kStubKey, cfg, s);
+        REQUIRE_FALSE(n.rejection.has_value());
+        auto clean = catalog.sanitize(kStubKey, n.config);
+        auto ports = clean.get(ports_field());
+        REQUIRE(ports.size() == 1);
+        CHECK_FALSE(ports[0].find(kPortPwm).has_value());
+        CHECK_FALSE(ports[0].find(kPortMax).has_value());
+
+        auto ne = catalog.sanitize(kStubKey, catalog.normalize(kStubKey, empty, s).config);
+        CHECK(ne.find_value("ports") != nullptr);
+        CHECK(ne.get(ports_field()).empty());
+    }
+}
+
+TEST_CASE("Persisted record with bad fields warns with the index and keeps the device", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+    DeviceConfig bad = make_port("", false);
+    bad.set("maxValue", 500.0);
+    DeviceConfig cfg = valid_config();
+    cfg.set("ports", std::vector<DeviceConfig>{make_port("ok"), bad});
+    auto r = catalog.normalize(kStubKey, cfg, Source::Persisted);
+    CHECK_FALSE(r.rejection.has_value());
+    REQUIRE(r.warnings.size() == 2);
+    CHECK(mentions(r.warnings[0], "ports[1].name"));
+    CHECK(mentions(r.warnings[1], "ports[1].maxValue"));
+    CHECK(r.config.get(ports_field()).size() == 2);
 }
