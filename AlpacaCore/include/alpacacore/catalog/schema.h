@@ -31,6 +31,7 @@
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/catalog/device_config.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -42,8 +43,8 @@
 
 namespace alpacacore::catalog {
 
-enum class Source { Api, Persisted };
-enum class Role { Plain, EnumerationIndex, DeviceId, PortPath, Host, Secret, Discriminator };
+enum class Source : std::uint8_t { Api, Persisted };
+enum class Role : std::uint8_t { Plain, EnumerationIndex, DeviceId, PortPath, Host, Secret, Discriminator };
 
 struct DeviceKey {
     std::string vendor;
@@ -58,7 +59,7 @@ struct AppliesWhen {
 
 // Type-erased field description.
 struct FieldRef {
-    enum class Kind { Bool, Int, Double, String, StringList, RecordList };
+    enum class Kind : std::uint8_t { Bool, Int, Double, String, StringList, RecordList };
     const char* key = "";
     Kind kind = Kind::String;
     Role role = Role::Plain;
@@ -73,8 +74,8 @@ struct FieldRef {
 
 template <class T>
 struct Field {
-    const char* key;
-    T default_value;
+    const char* key = "";
+    T default_value{};
     bool required = false;
     Role role = Role::Plain;
     std::optional<AppliesWhen> applies_when;
@@ -108,6 +109,8 @@ struct Field {
             r.kind = FieldRef::Kind::RecordList;
         }
         if constexpr (std::is_arithmetic_v<T>) {
+            // Bounds are intentionally double-valued: exact for every plausible device-config bound.
+            // An int64 bound beyond 2^53 would compare equal to its neighbours; do not widen this to int64.
             if (min) r.min = static_cast<double>(*min);
             if (max) r.max = static_cast<double>(*max);
         }

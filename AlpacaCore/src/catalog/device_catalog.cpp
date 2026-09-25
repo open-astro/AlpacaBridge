@@ -77,8 +77,16 @@ DeviceConfig normalize_fields(std::span<const FieldRef> fields, const DeviceConf
                 f.kind == FieldRef::Kind::Int ? static_cast<double>(std::get<std::int64_t>(*v)) : std::get<double>(*v);
             if ((f.min && !(d >= *f.min)) || (f.max && !(d <= *f.max))) {
                 std::string range = "out of range";
-                if (f.min) range += " (min " + std::to_string(*f.min) + ")";
-                if (f.max) range += " (max " + std::to_string(*f.max) + ")";
+                if (f.min) {
+                    range += " (min ";
+                    range += std::to_string(*f.min);
+                    range += ")";
+                }
+                if (f.max) {
+                    range += " (max ";
+                    range += std::to_string(*f.max);
+                    range += ")";
+                }
                 messages.push_back(name + " is " + range);
                 out.erase(f.key);  // Persisted: dropped to unset
             }
