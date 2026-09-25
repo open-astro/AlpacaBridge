@@ -625,6 +625,27 @@ jobs:
         # code review. See scripts/check_stress_registration.py.
         run: python3 scripts/check_stress_registration.py
 
+  contract-sweep:
+    name: Contract sweep registration
+    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Self-test the gate's parsers and rules
+        # Literal fixtures, one per rule (ADR 0003), independent of repo state.
+        run: python3 scripts/check_contract_sweep.py --self-test
+
+      - name: Check every router-constructed driver is in the contract sweep
+        # Issue #571: AlpacaCore/tests/contract_sweep.h must hold an entry for
+        # every (vendor, deviceType) pair Router::register_device_from_config()
+        # constructs, or ALLOWLIST it with a reason. Also checks the guard
+        # macros reach alpacacore_tests, so the registry cannot compile empty.
+        run: python3 scripts/check_contract_sweep.py
+
   conformu-reports:
     name: ConformU report validation
     if: github.event_name == 'pull_request'
