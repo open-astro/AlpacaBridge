@@ -39,8 +39,16 @@ namespace alpacacore::test {
 
 class FakeSerialStreamer {
 public:
-    FakeSerialStreamer(std::string frame, std::chrono::milliseconds interval)
-        : pty_("FakeSerialStreamer"), interval_ms_(static_cast<int>(interval.count())), frame_(std::move(frame)) {
+    /// @p first_frame_hold is a start-up window, not a one-shot: no frame is sent until that long after the worker
+    /// started, and nothing is consumed (later frames stream as normal). A connect that waits for the first streamed
+    /// frame stays open until then. It is a constructor argument because the worker starts streaming inside the
+    /// constructor: a setter called afterwards races the first frames. Used by the contract sweep.
+    FakeSerialStreamer(std::string frame, std::chrono::milliseconds interval,
+                       std::chrono::milliseconds first_frame_hold = std::chrono::milliseconds(0))
+        : pty_("FakeSerialStreamer"),
+          first_frame_hold_ms_(static_cast<int>(first_frame_hold.count())),
+          interval_ms_(static_cast<int>(interval.count())),
+          frame_(std::move(frame)) {
         // The pty pair is owned by pty_ (fake_pty_write.h), constructed
         // before this body runs; a setup failure throws from there with
         // nothing left open (issue #387).
@@ -59,13 +67,6 @@ public:
         frame_ = std::move(frame);
     }
     void set_muted(bool muted) { muted_.store(muted); }
-    /// Not a one-shot: a start-up window. No frame is sent until @p delay after the fake's worker started, and
-    /// nothing is consumed (later frames stream as normal). A connect that waits for the first streamed frame stays
-    /// open until then. Set right after construction, before the driver connects; used by the contract sweep.
-    void hold_first_frame(std::chrono::milliseconds delay) {
-        first_frame_hold_ms_.store(static_cast<int>(delay.count()));
-    }
-
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return commands_;
@@ -114,7 +115,7 @@ private:
                 }
             }
             const auto now = std::chrono::steady_clock::now();
-            if (!muted_.load() && now - started >= std::chrono::milliseconds(first_frame_hold_ms_.load()) &&
+            if (!muted_.load() && now - started >= std::chrono::milliseconds(first_frame_hold_ms_) &&
                 now - last_stream >= std::chrono::milliseconds(interval_ms_)) {
                 last_stream = now;
                 std::string frame;
@@ -133,7 +134,7 @@ private:
     std::thread worker_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> muted_{false};
-    std::atomic<int> first_frame_hold_ms_{0};
+    const int first_frame_hold_ms_;
     int interval_ms_;
 
     mutable std::mutex mutex_;

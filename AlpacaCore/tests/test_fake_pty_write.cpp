@@ -478,4 +478,34 @@ TEST_CASE("fake pty write - a fake whose pty is never drained still destructs", 
     CHECK(finished);
 }
 
+// The first-frame hold promises "no frame is sent until that long after the worker started". The worker starts in the
+// constructor and streams at once, so the hold has to be a constructor argument: a setter called after the
+// constructor returns races the first frames (it let 24 bytes through at 50 ms). Nothing may reach the slave.
+TEST_CASE("fake serial streamer - the first-frame hold holds every frame", "[fakes][pty][unit]") {
+    using namespace std::chrono_literals;
+
+    alpacacore::test::FakeSerialStreamer streamer("FRAME\n", 10ms, 300ms);
+    std::this_thread::sleep_for(50ms);
+
+    const int fd = ::open(streamer.slave_path().c_str(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
+    REQUIRE(fd >= 0);
+    termios tio{};
+    REQUIRE(::tcgetattr(fd, &tio) == 0);
+    ::cfmakeraw(&tio);
+    REQUIRE(::tcsetattr(fd, TCSANOW, &tio) == 0);
+
+    std::size_t received = 0;
+    const auto deadline = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < deadline) {
+        pollfd pfd{fd, POLLIN, 0};
+        if (::poll(&pfd, 1, 10) > 0) {
+            char buf[64];
+            const ssize_t n = ::read(fd, buf, sizeof(buf));
+            if (n > 0) received += static_cast<std::size_t>(n);
+        }
+    }
+    ::close(fd);
+    CHECK(received == 0);
+}
+
 #endif  // _WIN32

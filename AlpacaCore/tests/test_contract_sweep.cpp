@@ -486,7 +486,7 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
 // Tier 2 (issue #655): the connected half of the sweep, one host per
 // kFakeConnectableRoster row. contract_sweep.h keeps the roster a literal
 // three-field array because docs-drift check 13 parses it; the connect recipe and
-// the per-case expectations live here in CS2_HOSTS, and a non-vacuity case pins the
+// the per-case expectations live here in CONTRACT_SWEEP_TIER2_HOSTS, and a non-vacuity case pins the
 // two lists to each other in both directions.
 // ---------------------------------------------------------------------------
 #ifndef _WIN32
@@ -1253,9 +1253,8 @@ Tier2Host tier2_host_wandererastro_covercalibrator() {
                 {},
                 ""};
     h.connectable = [](bool hold) {
-        auto streamer =
-            std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererCoverFrame, std::chrono::milliseconds(50));
-        if (hold) streamer->hold_first_frame(kHold);
+        auto streamer = std::make_shared<alpacacore::test::FakeSerialStreamer>(
+            kWandererCoverFrame, std::chrono::milliseconds(50), hold ? kHold : std::chrono::milliseconds(0));
         return host_over(streamer, [](const alpacacore::test::FakeSerialStreamer& f) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, f.slave_path());
         });
@@ -1280,9 +1279,8 @@ Tier2Host tier2_host_wandererastro_filterwheel() {
                 {},
                 ""};
     h.connectable = [](bool hold) {
-        auto streamer =
-            std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererSfwFrame, std::chrono::milliseconds(50));
-        if (hold) streamer->hold_first_frame(kHold);
+        auto streamer = std::make_shared<alpacacore::test::FakeSerialStreamer>(
+            kWandererSfwFrame, std::chrono::milliseconds(50), hold ? kHold : std::chrono::milliseconds(0));
         return host_over(streamer, [](const alpacacore::test::FakeSerialStreamer& f) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, f.slave_path());
         });
@@ -1307,9 +1305,8 @@ Tier2Host tier2_host_wandererastro_switch() {
                 {},
                 ""};
     h.connectable = [](bool hold) {
-        auto streamer =
-            std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererBoxFrame, std::chrono::milliseconds(50));
-        if (hold) streamer->hold_first_frame(kHold);
+        auto streamer = std::make_shared<alpacacore::test::FakeSerialStreamer>(
+            kWandererBoxFrame, std::chrono::milliseconds(50), hold ? kHold : std::chrono::milliseconds(0));
         return host_over(streamer, [](const alpacacore::test::FakeSerialStreamer& f) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, f.slave_path());
         });
