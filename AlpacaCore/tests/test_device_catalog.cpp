@@ -24,6 +24,11 @@
 
 #include "catch2_compat.h"
 
+// Designated initializers of Field<T> leave most members defaulted on purpose.
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
+
 using namespace alpacacore;
 using namespace alpacacore::catalog;
 

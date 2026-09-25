@@ -77,6 +77,8 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/error_handling.cpp
     src/core/util/host_clock.cpp
     src/core/util/units.cpp
+    src/catalog/device_config.cpp
+    src/catalog/device_catalog.cpp
 )
 
 # Driver sources
