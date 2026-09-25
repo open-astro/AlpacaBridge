@@ -520,7 +520,7 @@ constexpr std::chrono::milliseconds kHoldWindow{100};
 struct ConnectObservation {
     bool saw_connecting = false;
     bool first_sample_in_flight = false;  // right after connect() returned: Connecting or already Connected
-    bool connected_early = false;  // Connected read true inside the hold window, before the handshake ended
+    bool connected_early = false;         // Connected read true inside the hold window, before the handshake ended
     bool settled = false;
 };
 
@@ -571,13 +571,15 @@ Hosted connected_host(const Tier2Host& h) {
         REQUIRE(hosted.driver != nullptr);
         CHECK_FALSE(hosted.driver->get_connected());
         const auto t0 = Clock::now();
-        const auto o = connect_and_observe(*hosted.driver, h.can_hold_connect ? kHoldWindow : std::chrono::milliseconds{});
+        const auto o =
+            connect_and_observe(*hosted.driver, h.can_hold_connect ? kHoldWindow : std::chrono::milliseconds{});
         CHECK(o.settled);
         CHECK(o.first_sample_in_flight);
         CHECK(hosted.driver->get_connected());
         CHECK_FALSE(hosted.driver->get_connecting());
         if (h.can_hold_connect) {
-            INFO("the fake holds the handshake for " << kHoldDelay.count() << " ms: Connecting reads true and Connected false");
+            INFO("the fake holds the handshake for " << kHoldDelay.count()
+                                                     << " ms: Connecting reads true and Connected false");
             CHECK(o.saw_connecting);
             CHECK_FALSE(o.connected_early);
         }
@@ -642,9 +644,8 @@ Hosted connected_host(const Tier2Host& h) {
     Hosted hosted = connected_host(h);
     const auto state = hosted.driver->get_device_state();
     CHECK_FALSE(state.empty());
-    const bool has_timestamp = std::any_of(state.begin(), state.end(), [](const alpacacore::DeviceState& s) {
-        return s.name == "TimeStamp";
-    });
+    const bool has_timestamp =
+        std::any_of(state.begin(), state.end(), [](const alpacacore::DeviceState& s) { return s.name == "TimeStamp"; });
     CHECK(has_timestamp);
 }
 
@@ -780,8 +781,16 @@ Tier2Host tier2_host_skywatcher_telescope() {
         info.response_timeout_ms = 250;
         return sw::create_skywatcher_telescope(0, info, 39.7392, -104.9903, 1609.0);
     };
-    Tier2Host h{"skywatcher_telescope", "skywatcher", "telescope", "fake_skywatcher_mount.h", DeviceType::Telescope,
-                "skywatcher_telescope", {}, false, {}, ""};
+    Tier2Host h{"skywatcher_telescope",
+                "skywatcher",
+                "telescope",
+                "fake_skywatcher_mount.h",
+                DeviceType::Telescope,
+                "skywatcher_telescope",
+                {},
+                false,
+                {},
+                ""};
     h.connectable = [make](bool) {
         return host_over(std::make_shared<alpacacore::test::FakeSkyWatcherMount>(),
                          [&](const alpacacore::test::FakeSkyWatcherMount& m) { return make(m.port()); });
@@ -809,8 +818,16 @@ Tier2Host tier2_host_skywatcher_telescope_serial() {
         info.response_timeout_ms = 300;
         return sw::create_skywatcher_telescope(0, info, -37.0, 175.0, 50.0);
     };
-    Tier2Host h{"skywatcher_telescope_serial", "skywatcher", "telescope", "fake_skywatcher_serial_board.h",
-                DeviceType::Telescope, "skywatcher_telescope", {}, false, {}, ""};
+    Tier2Host h{"skywatcher_telescope_serial",
+                "skywatcher",
+                "telescope",
+                "fake_skywatcher_serial_board.h",
+                DeviceType::Telescope,
+                "skywatcher_telescope",
+                {},
+                false,
+                {},
+                ""};
     h.connectable = [make](bool) {
         return host_over(std::make_shared<alpacacore::test::FakeSkyWatcherSerialBoard>(),
                          [&](const alpacacore::test::FakeSkyWatcherSerialBoard& b) { return make(b.slave_path()); });
@@ -835,8 +852,16 @@ Tier2Host tier2_host_ioptron_telescope() {
         info.tcp_port = port;
         return iop::create_ioptron_telescope(0, info);
     };
-    Tier2Host h{"ioptron_telescope", "ioptron", "telescope", "fake_ioptron_mount.h", DeviceType::Telescope,
-                "ioptron_telescope", {}, false, {}, ""};
+    Tier2Host h{"ioptron_telescope",
+                "ioptron",
+                "telescope",
+                "fake_ioptron_mount.h",
+                DeviceType::Telescope,
+                "ioptron_telescope",
+                {},
+                false,
+                {},
+                ""};
     h.connectable = [make](bool) {
         auto mount = std::make_shared<alpacacore::test::FakeIoptronMount>("0012", 12.0);
         REQUIRE(mount->ok());
@@ -856,8 +881,16 @@ Tier2Host tier2_host_ioptron_telescope() {
 }
 
 Tier2Host tier2_host_ioptron_focuser() {
-    Tier2Host h{"ioptron_focuser", "ioptron", "focuser", "fake_ioptron_ieaf.h", DeviceType::Focuser,
-                "ioptron_focuser", {}, false, {}, ""};
+    Tier2Host h{"ioptron_focuser",
+                "ioptron",
+                "focuser",
+                "fake_ioptron_ieaf.h",
+                DeviceType::Focuser,
+                "ioptron_focuser",
+                {},
+                false,
+                {},
+                ""};
     h.connectable = [](bool) {
         return host_over(std::make_shared<alpacacore::test::FakeIoptronIeaf>(),
                          [](const alpacacore::test::FakeIoptronIeaf& f) -> std::unique_ptr<AlpacaDriver> {
@@ -877,8 +910,16 @@ Tier2Host tier2_host_ioptron_focuser() {
 // FakeGeminiFocuser over a pty; its handshake delay is the hold knob that makes Connecting
 // deterministic (recipe of test_gemini_focuser.cpp).
 Tier2Host tier2_host_gemini_focuser() {
-    Tier2Host h{"gemini_focuser", "gemini", "focuser", "fake_gemini_focuser.h", DeviceType::Focuser,
-                "gemini_focuser", {}, true, {}, ""};
+    Tier2Host h{"gemini_focuser",
+                "gemini",
+                "focuser",
+                "fake_gemini_focuser.h",
+                DeviceType::Focuser,
+                "gemini_focuser",
+                {},
+                true,
+                {},
+                ""};
     h.connectable = [](bool hold) {
         auto fake = std::make_shared<alpacacore::test::FakeGeminiFocuser>();
         if (hold) fake->set_handshake_delay(kHoldDelay);
@@ -897,8 +938,16 @@ Tier2Host tier2_host_gemini_focuser() {
 // fake_gemini_flatpanel.h models the Pro firmware only, so this row hosts the gemini_covercalibrator_pro
 // registry entry; Cover Lite and v2 have no connected coverage (source: the fake header).
 Tier2Host tier2_host_gemini_covercalibrator() {
-    Tier2Host h{"gemini_covercalibrator", "gemini", "covercalibrator", "fake_gemini_flatpanel.h",
-                DeviceType::CoverCalibrator, "gemini_covercalibrator_pro", {}, false, {}, ""};
+    Tier2Host h{"gemini_covercalibrator",
+                "gemini",
+                "covercalibrator",
+                "fake_gemini_flatpanel.h",
+                DeviceType::CoverCalibrator,
+                "gemini_covercalibrator_pro",
+                {},
+                false,
+                {},
+                ""};
     h.connectable = [](bool) {
         return host_over(std::make_shared<alpacacore::test::FakeGeminiFlatPanel>(),
                          [](const alpacacore::test::FakeGeminiFlatPanel& f) -> std::unique_ptr<AlpacaDriver> {
@@ -914,8 +963,8 @@ Tier2Host tier2_host_gemini_covercalibrator() {
 }
 
 Tier2Host tier2_host_gemini_switch() {
-    Tier2Host h{"gemini_switch", "gemini", "switch", "fake_gemini_pdh.h", DeviceType::Switch,
-                "gemini_switch", {}, false, {}, ""};
+    Tier2Host h{"gemini_switch", "gemini", "switch", "fake_gemini_pdh.h", DeviceType::Switch, "gemini_switch", {},
+                false,           {},       ""};
     h.connectable = [](bool) {
         return host_over(std::make_shared<alpacacore::test::FakeGeminiPdh>(),
                          [](const alpacacore::test::FakeGeminiPdh& f) -> std::unique_ptr<AlpacaDriver> {
@@ -965,8 +1014,16 @@ Tier2Host tier2_host_qhy_filterwheel() {
         s.move_timeout_ms = 3000;
         return s;
     };
-    Tier2Host h{"qhy_filterwheel", "qhy", "filterwheel", "fake_qhy_cfw3.h", DeviceType::FilterWheel,
-                "qhy_filterwheel_cfw3", {}, false, {}, ""};
+    Tier2Host h{"qhy_filterwheel",
+                "qhy",
+                "filterwheel",
+                "fake_qhy_cfw3.h",
+                DeviceType::FilterWheel,
+                "qhy_filterwheel_cfw3",
+                {},
+                false,
+                {},
+                ""};
     h.connectable = [settings](bool) {
         return host_over(std::make_shared<alpacacore::test::FakeQhyCfw3>(),
                          [&](const alpacacore::test::FakeQhyCfw3& f) -> std::unique_ptr<AlpacaDriver> {
@@ -982,8 +1039,8 @@ Tier2Host tier2_host_qhy_filterwheel() {
 }
 
 Tier2Host tier2_host_qhy_focuser() {
-    Tier2Host h{"qhy_focuser", "qhy", "focuser", "fake_qhy_qfocuser.h", DeviceType::Focuser,
-                "qhy_focuser", {}, false, {}, ""};
+    Tier2Host h{"qhy_focuser", "qhy", "focuser", "fake_qhy_qfocuser.h", DeviceType::Focuser, "qhy_focuser", {},
+                false,         {},    ""};
     h.connectable = [](bool) {
         return host_over(std::make_shared<alpacacore::test::FakeQhyQFocuser>(),
                          [](const alpacacore::test::FakeQhyQFocuser& f) -> std::unique_ptr<AlpacaDriver> {
@@ -1003,13 +1060,23 @@ Tier2Host tier2_host_qhy_focuser() {
 struct ToupTekSdkHold {
     alpacacore::test::FakeToupTekSDK fake;
     alpacacore::test::LockedToupTekSDK sdk{fake};
-    ToupTekSdkHold() { fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One")); }
+    ToupTekSdkHold() {
+        fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    }
 };
 
 // Recipe of test_touptek_concurrency_stress.cpp.
 Tier2Host tier2_host_touptek_camera() {
-    Tier2Host h{"touptek_camera", "touptek", "camera", "fake_touptek_sdk.h", DeviceType::Camera,
-                "touptek_camera", {}, false, {}, ""};
+    Tier2Host h{"touptek_camera",
+                "touptek",
+                "camera",
+                "fake_touptek_sdk.h",
+                DeviceType::Camera,
+                "touptek_camera",
+                {},
+                false,
+                {},
+                ""};
     h.connectable = [](bool) {
         return host_over(std::make_shared<ToupTekSdkHold>(), [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::touptek::create_touptek_camera(0, 0, s.sdk);
@@ -1048,8 +1115,8 @@ struct GPhotoSdkHold {
 
 // Recipe of test_gphoto_concurrency_stress.cpp.
 Tier2Host tier2_host_gphoto_camera() {
-    Tier2Host h{"gphoto_camera", "gphoto", "camera", "fake_gphoto_sdk.h", DeviceType::Camera,
-                "gphoto_camera", {}, false, {}, ""};
+    Tier2Host h{"gphoto_camera", "gphoto", "camera", "fake_gphoto_sdk.h", DeviceType::Camera, "gphoto_camera", {},
+                false,           {},       ""};
     h.connectable = [](bool) {
         return host_over(std::make_shared<GPhotoSdkHold>(), [](GPhotoSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, s.sdk, s.decoder);
@@ -1073,8 +1140,16 @@ constexpr const char* kWandererBoxFrame =
     "ZXWBProV3A20250410A-127.00A-127.00A-127.00A45.20A21.30A1.50A0.20A0.30A13.10A1A1A1A1A1A1A0A0A0A1A1A120A\n";
 
 Tier2Host tier2_host_wandererastro_covercalibrator() {
-    Tier2Host h{"wandererastro_covercalibrator", "wandererastro", "covercalibrator", "fake_serial_streamer.h",
-                DeviceType::CoverCalibrator, "wandererastro_covercalibrator", {}, false, {}, ""};
+    Tier2Host h{"wandererastro_covercalibrator",
+                "wandererastro",
+                "covercalibrator",
+                "fake_serial_streamer.h",
+                DeviceType::CoverCalibrator,
+                "wandererastro_covercalibrator",
+                {},
+                false,
+                {},
+                ""};
     h.connectable = [](bool) {
         return host_over(
             std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererCoverFrame, std::chrono::milliseconds(50)),
@@ -1091,8 +1166,16 @@ Tier2Host tier2_host_wandererastro_covercalibrator() {
 }
 
 Tier2Host tier2_host_wandererastro_filterwheel() {
-    Tier2Host h{"wandererastro_filterwheel", "wandererastro", "filterwheel", "fake_serial_streamer.h",
-                DeviceType::FilterWheel, "wandererastro_filterwheel", {}, false, {}, ""};
+    Tier2Host h{"wandererastro_filterwheel",
+                "wandererastro",
+                "filterwheel",
+                "fake_serial_streamer.h",
+                DeviceType::FilterWheel,
+                "wandererastro_filterwheel",
+                {},
+                false,
+                {},
+                ""};
     h.connectable = [](bool) {
         return host_over(
             std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererSfwFrame, std::chrono::milliseconds(50)),
@@ -1109,8 +1192,16 @@ Tier2Host tier2_host_wandererastro_filterwheel() {
 }
 
 Tier2Host tier2_host_wandererastro_switch() {
-    Tier2Host h{"wandererastro_switch", "wandererastro", "switch", "fake_serial_streamer.h", DeviceType::Switch,
-                "wandererastro_switch", {}, false, {}, ""};
+    Tier2Host h{"wandererastro_switch",
+                "wandererastro",
+                "switch",
+                "fake_serial_streamer.h",
+                DeviceType::Switch,
+                "wandererastro_switch",
+                {},
+                false,
+                {},
+                ""};
     h.connectable = [](bool) {
         return host_over(
             std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererBoxFrame, std::chrono::milliseconds(50)),
@@ -1230,10 +1321,8 @@ CONTRACT_SWEEP_ENTRIES(CS_T1_ERRVOCAB)
 CONTRACT_SWEEP_ENTRIES(CS_T1_CAN)
 
 #ifndef _WIN32
-#define CS2_CASE(id, casename, body)                                                          \
-    TEST_CASE("Contract sweep tier 2 - " #id " - " casename, "[contract][tier2][" #id "]") { \
-        body(tier2_host_##id());                                                              \
-    }
+#define CS2_CASE(id, casename, body) \
+    TEST_CASE("Contract sweep tier 2 - " #id " - " casename, "[contract][tier2][" #id "]") { body(tier2_host_##id()); }
 #define CS2_CONNECTING(id) CS2_CASE(id, "Connecting semantics", case_t2_connecting)
 #define CS2_TARGETS(id) CS2_CASE(id, "target flags until set", case_t2_target_flags)
 #define CS2_INVALID(id) CS2_CASE(id, "InvalidValue wins while connected", case_t2_invalid_value_connected)
