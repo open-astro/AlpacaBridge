@@ -261,7 +261,9 @@ For **every** Defect, in this order:
      `python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py`
      (the self-test first, as `ci_preflight.sh` and CI both run it),
      `python3 scripts/check_connect_error_hook.py --self-test && python3 scripts/check_connect_error_hook.py`
-     (the self-test first, same as the stress-registration gate), and on a PR also
+     (the self-test first, same as the stress-registration gate),
+     `python3 scripts/check_layering.py --self-test && python3 scripts/check_layering.py`
+     (self-test first; vendor-include baseline for AlpacaHTTP and the catalog), and on a PR also
      `python3 scripts/check_conformu_reports.py --self-test && python3 scripts/check_conformu_reports.py origin/main`
      (CI passes `origin/$GITHUB_BASE_REF`;
      the pre-flight passes the merge base, which differs only when `origin/main` has moved
@@ -320,6 +322,8 @@ else
     && python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py \
     && python3 scripts/check_connect_error_hook.py --self-test \
     && python3 scripts/check_connect_error_hook.py \
+    && python3 scripts/check_layering.py --self-test \
+    && python3 scripts/check_layering.py \
     && python3 scripts/check_conformu_reports.py --self-test \
     && python3 scripts/check_conformu_reports.py origin/main; }
 fi

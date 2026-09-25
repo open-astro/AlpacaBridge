@@ -39,7 +39,7 @@ MAX_ALPACAHTTP_VENDOR_INCLUDES = 40
 MAX_CATALOG_SCHEMA_VENDOR_INCLUDES = 0
 
 INCLUDE_RE = re.compile(
-    r"^[ \t]*#[ \t]*include[ \t]*[<\"]alpacacore/vendor/(?P<vendor>[^/>\"]+)/",
+    r"^[ \t]*(?://[ \t]*|/\*[ \t]*)?#[ \t]*include[ \t]*[<\"]alpacacore/vendor/(?P<vendor>[^/>\"]+)/[^\n]*",
     re.MULTILINE,
 )
 
@@ -65,8 +65,20 @@ def region_files(root: pathlib.Path, region: str) -> list[pathlib.Path]:
 
 def scan_region(root: pathlib.Path, region: str):
     """Return (files_visited, [(file, line, text, vendor)], [read errors])."""
-    # STUB (red step): scanner not written yet, finds nothing.
-    return len(region_files(root, region)), [], []
+    files = region_files(root, region)
+    hits: list[tuple[str, int, str, str]] = []
+    errors: list[str] = []
+    for path in files:
+        rel = path.relative_to(root).as_posix()
+        try:
+            text = path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            errors.append(f"cannot read {rel}: {exc}")
+            continue
+        for m in INCLUDE_RE.finditer(text):
+            line = text.count("\n", 0, m.start()) + 1
+            hits.append((rel, line, m.group(0).strip(), m.group("vendor")))
+    return len(files), hits, errors
 
 
 def main(argv: list[str], baselines: dict[str, int] | None = None) -> int:
@@ -81,6 +93,11 @@ def main(argv: list[str], baselines: dict[str, int] | None = None) -> int:
     for region in ("AlpacaHTTP", "catalog"):
         visited, hits, errors = scan_region(root, region)
         print(f"{region}: {len(hits)} vendor includes (baseline {limits[region]})")
+        per: dict[str, int] = {}
+        for h in hits:
+            per[h[3]] = per.get(h[3], 0) + 1
+        for v, n in sorted(per.items(), key=lambda kv: (-kv[1], kv[0])):
+            print(f"  {v}: {n}")
         if region == "AlpacaHTTP" and (not (root / "AlpacaHTTP").is_dir() or visited == 0):
             print("AlpacaHTTP region scanned no files -- gate is vacuous", file=sys.stderr)
             failed = True

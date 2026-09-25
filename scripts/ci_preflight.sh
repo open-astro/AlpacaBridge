@@ -286,6 +286,15 @@ else
   record FAIL "connect-error hook"
 fi
 
+# --- gate 2f: layering gate ------------------------------------------------
+
+section "Layering gate"
+if python3 scripts/check_layering.py --self-test && python3 scripts/check_layering.py; then
+  record PASS "layering gate"
+else
+  record FAIL "layering gate"
+fi
+
 # --- gate 3: build + unit tests, vendor-neutral ----------------------------
 
 section "Build + tests (vendors OFF)"

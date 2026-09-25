@@ -582,6 +582,24 @@ jobs:
           python3 scripts/check_connect_error_hook.py --self-test
           python3 scripts/check_connect_error_hook.py
 
+  layering:
+    name: Layering gate
+    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Self-test the layering gate's fixtures
+        run: python3 scripts/check_layering.py --self-test
+
+      - name: AlpacaHTTP and catalog schema files include no new vendor headers
+        # ADR 0004 (device-catalog) promises the layering gate enforces it;
+        # issue #651. Counts alpacacore/vendor includes against a baseline.
+        run: python3 scripts/check_layering.py
+
   stress-registration:
     name: Stress-test registration
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
