@@ -33,7 +33,9 @@
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
 
+#include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -365,6 +367,39 @@ void check_rejections(alpacahttp::Router& router) {
     report("D rejections", failures);
 }
 
+// E. Per-request cost. A rejected device-path request does the same kind of work
+// as a management request (parse the path, build a small JSON body), so its
+// cost must stay within a small multiple of it. Router::route used to build a
+// std::regex for the device route on every call, which made every /api/v1
+// request roughly 14x a management request in a plain build (404 us against
+// 28 us) and about 30x under ASan+UBSan (184 ms against 6 ms), so the ~5,000
+// requests of check A took 1,110 s in the sanitizer CI job. A ratio, not a
+// time budget, so it holds on any machine and build type.
+long long median_route_us(alpacahttp::Router& router, const std::string& path) {
+    alpacahttp::Request request;
+    EXPECT(request.parse("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    (void)router.route(request, 1);  // warm-up: first-use initialisation is not per-request cost
+    std::vector<long long> samples;
+    for (int i = 0; i < 21; ++i) {
+        const auto start = std::chrono::steady_clock::now();
+        (void)router.route(request, 1);
+        const auto stop = std::chrono::steady_clock::now();
+        samples.push_back(std::chrono::duration_cast<std::chrono::microseconds>(stop - start).count());
+    }
+    std::sort(samples.begin(), samples.end());
+    return samples[samples.size() / 2];
+}
+
+void check_request_cost(alpacahttp::Router& router) {
+    constexpr double kMaxRatio = 6.0;
+    const long long device_us = median_route_us(router, "/api/v1/telescope/4646/notarealmethod");
+    const long long management_us = median_route_us(router, "/management/apiversions");
+    const double ratio = static_cast<double>(device_us) / static_cast<double>(std::max(management_us, 1LL));
+    std::cerr << "E request cost: device path " << device_us << " us, management path " << management_us
+              << " us, ratio " << ratio << " (limit " << kMaxRatio << ")\n";
+    EXPECT(ratio < kMaxRatio);
+}
+
 }  // namespace
 
 int main() {
@@ -380,6 +415,7 @@ int main() {
     }
     check_dispatch_reach(router);
     check_rejections(router);
+    check_request_cost(router);
     for (const auto& stub : stubs) {
         registry.unregister_device(stub->get_device_type(), kProbeDevice);
     }
