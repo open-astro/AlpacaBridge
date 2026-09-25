@@ -92,6 +92,10 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
             // NaN is a static invalid argument: InvalidValue must win over NotConnected.
             auto& r = dynamic_cast<alpacacore::RotatorDriver&>(d);
             // NaN is built inside each lambda: the probes run after this block's scope has ended.
+            p.push_back(
+                {"set_target_position(NaN)", [&] { r.set_target_position(std::numeric_limits<double>::quiet_NaN()); }});
+            p.push_back({"move(NaN)", [&] { r.move(std::numeric_limits<double>::quiet_NaN()); }});
+            p.push_back({"sync(NaN)", [&] { r.sync(std::numeric_limits<double>::quiet_NaN()); }});
             p.push_back({"move_absolute(NaN)", [&] { r.move_absolute(std::numeric_limits<double>::quiet_NaN()); }});
             p.push_back({"move_mechanical(NaN)", [&] { r.move_mechanical(std::numeric_limits<double>::quiet_NaN()); }});
             break;
