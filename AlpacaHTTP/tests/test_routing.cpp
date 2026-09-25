@@ -3626,8 +3626,8 @@ int main() {
     //     mounts, the ioptron network auto-scan, the by-index paths of the
     //     ioptron, gemini and qhy focusers, and any other auto/by-index arm
     //     that only registers with a device attached, e.g. the ioptron
-    //     filterwheel, qhy cfw3, gemini focuser and gemini lite cover
-    //     calibrator auto forms). Probing opens serial ports and scans the LAN,
+    //     filterwheel, qhy cfw3 and gemini focuser auto forms). Probing opens
+    //     serial ports and scans the LAN,
     //     so it is not fake-only and is deliberately NOT exercised here; their
     //     serial and network forms ARE round-tripped, and the #508 items that
     //     ride on those probe paths (items 3 and 4, and item 1 for the mounts'
