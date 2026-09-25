@@ -391,7 +391,7 @@ public:
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
         (void)action_parameters;  // Unused - no actions supported
-        throw AlpacaException("Action not supported: " + std::string(action_name));
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
     
     bool can_action(std::string_view action_name) const override {

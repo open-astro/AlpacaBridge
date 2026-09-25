@@ -258,7 +258,7 @@ public:
     }
 
     std::string action(std::string_view action_name, std::string_view /*action_parameters*/) override {
-        throw AlpacaException("Action not supported: " + std::string(action_name));
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
     bool can_action(std::string_view /*action_name*/) const override {
@@ -266,15 +266,16 @@ public:
     }
 
     std::string command_blind(std::string_view command, bool /*raw*/) override {
-        throw AlpacaException("CommandBlind not supported: " + std::string(command));
+        throw AlpacaException("CommandBlind not supported: " + std::string(command), AlpacaError::MethodNotImplemented);
     }
 
     bool command_bool(std::string_view command, bool /*raw*/) override {
-        throw AlpacaException("CommandBool not supported: " + std::string(command));
+        throw AlpacaException("CommandBool not supported: " + std::string(command), AlpacaError::MethodNotImplemented);
     }
 
     std::string command_string(std::string_view command, bool /*raw*/) override {
-        throw AlpacaException("CommandString not supported: " + std::string(command));
+        throw AlpacaException("CommandString not supported: " + std::string(command),
+                              AlpacaError::MethodNotImplemented);
     }
 
     // ── Telescope properties ──
