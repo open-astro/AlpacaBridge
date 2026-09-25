@@ -33,10 +33,12 @@
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
 
+#include <cctype>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -44,6 +46,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "route_table_stubs.h"
@@ -212,16 +215,28 @@ void check_source_tables() {
             const std::size_t end = text.find("\n};", begin);
             EXPECT(end != std::string::npos);
             const std::string body = text.substr(begin, end - begin);
+            // Every {"name", ...} entry must parse; an unrecognised verb spelling
+            // (e.g. kVerbPut | kVerbGet) would otherwise be skipped silently.
+            static const std::regex any_entry(R"re(\{\s*"\w+"\s*,)re");
+            const auto raw_count = static_cast<std::size_t>(
+                std::distance(std::sregex_iterator(body.begin(), body.end(), any_entry), std::sregex_iterator()));
+            std::size_t parsed_count = 0;
             for (auto e = std::sregex_iterator(body.begin(), body.end(), entry); e != std::sregex_iterator(); ++e) {
                 const std::string verbs = (*e)[2];
                 const unsigned mask = (verbs.find("Get") != std::string::npos ? kGet : 0U) |
                                       (verbs.find("Put") != std::string::npos ? kPut : 0U);
+                ++parsed_count;
                 const std::string key = type + "/" + std::string((*e)[1]);
                 std::vector<std::string> dup;
                 if (!source.emplace(key, mask).second) {
                     dup.push_back("duplicate table row " + key);
                     report("B source tables", dup);
                 }
+            }
+            if (raw_count != parsed_count) {
+                report("B source tables",
+                       {"k" + std::string((*it)[1]) + "Methods: " + std::to_string(raw_count) + " entries, only " +
+                        std::to_string(parsed_count) + " parsed (unrecognised verb spelling)"});
             }
         }
     }
