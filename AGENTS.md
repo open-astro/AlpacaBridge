@@ -382,6 +382,7 @@ half-set pair, then write Dec and expect both. A driver whose setters write to t
 | `NotConnected` | Any operational property/method called while disconnected. |
 | `PropertyNotImplemented` | A property the hardware genuinely lacks (e.g. `Offsets` list, `SubExposureDuration`). |
 | `MethodNotImplemented` | A method the hardware lacks (e.g. `PulseGuide` when `CanPulseGuide` is false). |
+| `ActionNotImplemented` | `Action()` called with a name the driver does not list in `SupportedActions` (0x40C, ASCOM's `ActionNotImplementedException`). An unsupported `CommandBlind`/`CommandBool`/`CommandString` is `MethodNotImplemented`, not this. |
 | `NotImplemented` | A generic unsupported action (e.g. `set_temp_comp(true)` with no temp-comp support) — never `DriverException` for "not supported". |
 | `InvalidOperation` | Valid call, wrong state (e.g. changing readout mode/geometry mid-exposure). |
 | `DriverException` | A genuine internal/driver failure only — not a stand-in for any of the above. |
@@ -668,7 +669,8 @@ independently broken the same way, before it was centralised:
 ### Platform 7 InterfaceVersion + DeviceState
 
 - Drivers advertise ASCOM Platform 7 interface versions: Camera 4 (ICameraV4),
-  Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, ObservingConditions 2.
+  Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, CoverCalibrator 2 (ICoverCalibratorV2),
+  ObservingConditions 2.
   Keep `get_interface_version()` and its unit-test assertion in sync when adding a driver.
 - **Do not** write a per-vendor `get_device_state()`. Each device base class
   (`CameraDriver`, `TelescopeDriver`, …) implements it once, inline, building the
