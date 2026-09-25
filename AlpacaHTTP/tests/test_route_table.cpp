@@ -345,7 +345,8 @@ void check_rejections(alpacahttp::Router& router) {
         {"inf parameter", "PUT", "/api/v1/telescope/4646/targetdeclination", "TargetDeclination=inf&ClientID=1", 200,
          kInvalidValue, "Invalid value for parameter: TargetDeclination"},
         {"-infinity parameter", "PUT", "/api/v1/telescope/4646/targetdeclination",
-         "TargetDeclination=-infinity&ClientID=1", 200, kInvalidValue, "Invalid value for parameter: TargetDeclination"},
+         "TargetDeclination=-infinity&ClientID=1", 200, kInvalidValue,
+         "Invalid value for parameter: TargetDeclination"},
         {"hex-float parameter", "PUT", "/api/v1/telescope/4646/targetdeclination", "TargetDeclination=0x1p3&ClientID=1",
          200, kInvalidValue, "Invalid value for parameter: TargetDeclination"},
     };
