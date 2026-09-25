@@ -57,8 +57,21 @@ GUARD_OVERRIDE = {
     ("ioptron", "camera"): "PLAYERONE",  # iCAM cameras are rebadged Player One (router.cpp)
 }
 
+# (vendor, device_type, factory) -> reason the router's factory has no registry entry. Empty: every
+# backend a swept pair can construct is swept. Factory names are normalised (no _by_index suffix).
+BACKEND_ALLOWLIST: dict[tuple[str, str, str], str] = {}
+
+FACTORY_RE = re.compile(r"::(?P<f>create_[a-z0-9_]+)\s*\(")
+# Constructs the text parsers cannot follow; seeing one is a failure, not a silent miss. The router
+# function is read by regex for arms and factories (raw strings would corrupt strip_comments; a digit separator opens a
+# phantom char literal there, which fails loudly as NO ROUTER ARMS FOUND); the registry header's guards are read from #if/#else/#endif only.
+REGISTRY_PARSER_LIMITS = ((re.compile(r"^\s*#\s*elif\b", re.M), "#elif"),)
+PARSER_LIMITS = (
+    (re.compile(r'\bR"[^(\s]*\('), "a raw string literal"),
+)
+
 ARM_RE = re.compile(r'vendor\s*==\s*"(?P<v>[a-z0-9]+)"\s*&&\s*device_type_str\s*==\s*"(?P<t>[a-z0-9]+)"')
-ENTRY_RE = re.compile(r"\bX\(\s*(?P<id>[a-z0-9]+_[a-z0-9]+)\s*\)")
+ENTRY_RE = re.compile(r"\bX\(\s*(?P<id>[a-z0-9]+_[a-z0-9]+(?:_[a-z0-9]+)*)\s*\)")
 GUARD_TOKEN_RE = re.compile(r"ALPACACORE_[A-Z0-9_]+")
 
 
@@ -144,6 +157,44 @@ def router_pairs(router_text: str) -> set[tuple[str, str]]:
     return {(m.group("v"), m.group("t")) for m in ARM_RE.finditer(body)}
 
 
+# Suffixes that select a construction mode of one driver (enumerated index, auto-detected port,
+# observing site), not a different driver: create_x_telescope_auto/_with_site sweep as create_x_telescope.
+FACTORY_VARIANT_SUFFIXES = ("_by_index", "_by_id", "_auto_network", "_auto", "_with_site")
+
+
+def normalise_factory(name: str) -> str:
+    for suffix in FACTORY_VARIANT_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def router_backends(router_text: str) -> dict[tuple[str, str], set[str]]:
+    """(vendor, deviceType) -> the create_* factories its router arm calls, normalised."""
+    router_text = strip_comments(router_text)
+    start = router_text.find(ROUTER_FUNCTION)
+    if start < 0:
+        return {}
+    open_idx = router_text.find("{", router_text.find(")", start))
+    close_idx = matching_brace(router_text, open_idx)
+    if open_idx < 0 or close_idx < 0:
+        return {}
+    body = router_text[open_idx:close_idx]
+    out: dict[tuple[str, str], set[str]] = {}
+    for m in ARM_RE.finditer(body):
+        arm_open = body.find("{", body.find(")", m.end()))
+        arm_close = matching_brace(body, arm_open)
+        if arm_open < 0 or arm_close < 0:
+            continue
+        found = {normalise_factory(f.group("f")) for f in FACTORY_RE.finditer(body[arm_open:arm_close])}
+        out.setdefault((m.group("v"), m.group("t")), set()).update(found)
+    return out
+
+
+def registry_factories(header_text: str) -> set[str]:
+    return {normalise_factory(f.group("f")) for f in FACTORY_RE.finditer(strip_comments(header_text))}
+
+
 def registry_entries(header_text: str) -> dict[str, set[str]]:
     """entry id -> the ALPACACORE_* guard tokens of the `#if` conditions that
     enclose its `#define CS_...(X)` list. Only the active (non-#else) branch of a
@@ -222,10 +273,11 @@ def check(root: pathlib.Path) -> list[str]:
     entries = registry_entries(header_text)
     if not entries:
         failures.append("EMPTY REGISTRY: no X(<vendor>_<type>) entries parsed from %s" % REGISTRY)
-    entry_pairs: dict[tuple[str, str], str] = {}
+    # An id is <vendor>_<devicetype>[_<backend>]: a third segment is a second backend of the same pair.
+    entry_pairs: dict[tuple[str, str], list[str]] = {}
     for eid in entries:
-        vendor, _, dtype = eid.partition("_")
-        entry_pairs[(vendor, dtype)] = eid
+        vendor, dtype = eid.split("_")[:2]
+        entry_pairs.setdefault((vendor, dtype), []).append(eid)
 
     # 1 + 2: coverage and stale allow-list.
     for pair in sorted(pairs):
@@ -245,8 +297,42 @@ def check(root: pathlib.Path) -> list[str]:
             "STALE ALLOWLIST ENTRY: %s/%s is no longer constructed by the router -- remove ('%s', '%s') from "
             "ALLOWLIST in %s" % (pair[0], pair[1], pair[0], pair[1], THIS_SCRIPT))
 
+    # 2b: every backend factory a swept pair can construct has a registry entry that calls it.
+    for pair, want in sorted(router_backends(router_text).items()):
+        if pair not in entry_pairs:
+            continue  # the pair-level check above owns this
+        have = registry_factories(header_text)
+        for fac in sorted(want):
+            key = (pair[0], pair[1], fac)
+            if fac not in have and key not in BACKEND_ALLOWLIST:
+                failures.append(
+                    "UNSWEPT BACKEND: the router's %s/%s arm constructs %s but no registry entry calls it. Add an "
+                    "entry (its id must start %s_%s) or allow-list ('%s', '%s', '%s') with a reason in %s."
+                    % (pair[0], pair[1], fac, pair[0], pair[1], pair[0], pair[1], fac, THIS_SCRIPT))
+            if fac in have and key in BACKEND_ALLOWLIST:
+                failures.append(
+                    "STALE ALLOWLIST ENTRY: %s/%s %s is now swept -- remove %r from BACKEND_ALLOWLIST in %s"
+                    % (pair[0], pair[1], fac, key, THIS_SCRIPT))
+    known = {(v, t, f) for (v, t), fs in router_backends(router_text).items() for f in fs}
+    for key in sorted(set(BACKEND_ALLOWLIST) - known):
+        failures.append(
+            "STALE ALLOWLIST ENTRY: %s/%s %s is no longer constructed by the router -- remove %r from "
+            "BACKEND_ALLOWLIST in %s" % (key[0], key[1], key[2], key, THIS_SCRIPT))
+    fn_start = router_text.find(ROUTER_FUNCTION)
+    fn_open = router_text.find("{", router_text.find(")", fn_start)) if fn_start >= 0 else -1
+    fn_close = matching_brace(router_text, fn_open) if fn_open >= 0 else -1
+    fn_body = router_text[fn_open:fn_close] if 0 <= fn_open < fn_close else ""
+    for rx, what in REGISTRY_PARSER_LIMITS:
+        if rx.search(header_text):
+            failures.append("PARSER LIMIT: %s contains %s, which registry_entries() does not follow; teach the "
+                            "parser before relying on the gate" % (REGISTRY, what))
+    for rx, what in PARSER_LIMITS:
+        if rx.search(fn_body):
+            failures.append("PARSER LIMIT: %s contains %s, which this script's text parser does not follow; "
+                            "teach the parser before relying on the gate" % (ROUTER + " " + ROUTER_FUNCTION.rstrip("("), what))
+
     # 3: orphan entries and guard/vendor mismatch.
-    for pair, eid in sorted(entry_pairs.items()):
+    for eid, pair in sorted((eid, pair) for pair, ids in entry_pairs.items() for eid in ids):
         if pairs and pair not in pairs:
             failures.append("ORPHAN ENTRY: %s is in the registry but the router does not construct %s/%s"
                             % (eid, pair[0], pair[1]))
@@ -307,10 +393,12 @@ FIX_ROUTER = '''
 bool Router::register_device_from_config(const nlohmann::json& config, std::string& error) {
     if (vendor == "bisque" && device_type_str == "telescope") {
         std::string s = "{ not a brace }";
+        auto d = alpacacore::vendor::bisque::create_bisque_telescope_with_site(1);
         return true;
     }
     if (vendor == "gemini" && device_type_str == "switch") {
         // vendor == "ghost" && device_type_str == "comment"  { unbalanced in a comment
+        auto h = alpacacore::vendor::gemini::create_gemini_pdh_switch_by_index(2, 0);
         return true;
     }
     if (vendor == "ioptron" && device_type_str == "camera") {
@@ -341,6 +429,8 @@ FIX_HEADER = '''
 #define CS_PLAYERONE(X)
 #endif
 #define CONTRACT_SWEEP_ENTRIES(X) CS_BISQUE(X) CS_GEMINI(X) CS_PLAYERONE(X)
+inline auto f1() { return vendor::bisque::create_bisque_telescope(0, conn); }
+inline auto f2() { return vendor::gemini::create_gemini_pdh_switch(0, "/dev/null"); }
 '''
 
 FIX_CMAKE = '''
@@ -375,7 +465,7 @@ def _run(router=FIX_ROUTER, header=FIX_HEADER, cmake=FIX_CMAKE, sweep=FIX_SWEEP)
 
 
 def self_test() -> int:
-    global ALLOWLIST
+    global ALLOWLIST, BACKEND_ALLOWLIST
     problems: list[str] = []
 
     def expect(name: str, failures: list[str], needle: str | None):
@@ -386,8 +476,10 @@ def self_test() -> int:
             problems.append("%s: expected a finding containing %r, got %r" % (name, needle, failures))
 
     saved = dict(ALLOWLIST)
+    saved_backends = dict(BACKEND_ALLOWLIST)
     try:
         ALLOWLIST = {}
+        BACKEND_ALLOWLIST = {}
         # Parser: comment/string braces do not end the function; the second
         # function's arm is not attributed to the first.
         got = router_pairs(FIX_ROUTER)
@@ -414,6 +506,33 @@ def self_test() -> int:
         ALLOWLIST = {("nosuch", "camera"): "reason"}
         expect("stale: no arm", _run(), "STALE ALLOWLIST ENTRY: nosuch/camera is no longer constructed")
         ALLOWLIST = {}
+        # Rule 2b: a second backend behind a swept pair, and the variant suffixes that are not one.
+        two_backends = FIX_ROUTER.replace(
+            "create_gemini_pdh_switch_by_index(2, 0);",
+            "create_gemini_pdh_switch_by_index(2, 0); auto k = alpacacore::vendor::gemini::create_gemini_hub2(2);")
+        expect("unswept backend", _run(router=two_backends),
+               "UNSWEPT BACKEND: the router's gemini/switch arm constructs create_gemini_hub2")
+        expect("variant suffix is not a backend", _run(router=FIX_ROUTER.replace(
+            "create_bisque_telescope_with_site(1);", "create_bisque_telescope_auto(1); create_bisque_telescope_by_id(1);")), None)
+        BACKEND_ALLOWLIST = {("gemini", "switch", "create_gemini_hub2"): "reason"}
+        expect("allow-listed backend", _run(router=two_backends), None)
+        expect("stale backend: no longer constructed", _run(), "STALE ALLOWLIST ENTRY: gemini/switch create_gemini_hub2 is no longer")
+        BACKEND_ALLOWLIST = {("gemini", "switch", "create_gemini_pdh_switch"): "reason"}
+        expect("stale backend: now swept", _run(), "STALE ALLOWLIST ENTRY: gemini/switch create_gemini_pdh_switch is now swept")
+        BACKEND_ALLOWLIST = {}
+        # Parser limits: constructs the text parsers would silently misread.
+        expect("registry #elif", _run(header=FIX_HEADER + "#if A\n#elif B\n#endif\n"), "PARSER LIMIT: " + REGISTRY)
+        expect("router digit separator fails loudly", _run(router=FIX_ROUTER.replace("return false;\n}", "int n = 1'000; return false;\n}", 1)),
+               "NO ROUTER ARMS FOUND")
+        expect("router raw string", _run(router=FIX_ROUTER.replace("return false;\n}", 'auto r = R"x(a)x"; return false;\n}', 1)),
+               "contains a raw string literal")
+        # Ids with a third segment (a second backend of one pair) are parsed and guard-checked too.
+        wrong_guard = FIX_HEADER + "#ifdef ALPACACORE_ENABLE_ZWO\n#define CS_B(X) X(bisque_telescope_b)\n#endif\n"
+        if "bisque_telescope_b" not in registry_entries(wrong_guard):
+            problems.append("three-segment id was not parsed by registry_entries")
+        expect("three-segment guard mismatch", _run(header=wrong_guard), "GUARD MISMATCH: bisque_telescope_b")
+        expect("three-segment orphan", _run(header=FIX_HEADER.replace(
+            "X(bisque_telescope)", "X(bisque_telescope) X(bisque_camera_b)")), "ORPHAN ENTRY: bisque_camera_b")
         # Rule 3: orphan and guard mismatch.
         expect("orphan", _run(header=FIX_HEADER.replace("X(bisque_telescope)", "X(bisque_telescope) X(bisque_camera)")),
                "ORPHAN ENTRY: bisque_camera")
@@ -440,6 +559,7 @@ def self_test() -> int:
         expect("empty registry", _run(header="// empty\n"), "EMPTY REGISTRY")
     finally:
         ALLOWLIST = saved
+        BACKEND_ALLOWLIST = saved_backends
 
     if problems:
         print("check_contract_sweep self-test FAILED:")
