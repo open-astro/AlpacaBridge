@@ -775,7 +775,12 @@ inline std::vector<ContractEntry> contract_entries() {
 // in-process fake today. Pinned to AlpacaCore/tests/fake_*.h by
 // scripts/check_docs_drift.py (check 13): a fake on disk that is neither here
 // nor a helper fake fails, and a row whose fake no longer exists fails. The
-// tier-2 cases over this roster follow in a second PR against #571.
+// tier-2 cases over this roster are in test_contract_sweep.cpp: the array stays a
+// literal three-field list because check 13 parses it, so each row's connect recipe
+// and the registry entry it hosts live in CONTRACT_SWEEP_TIER2_HOSTS there, and the
+// case "Contract sweep tier 2 - hosts match kFakeConnectableRoster" pins the two
+// together. Every row hosts every applicable case (target flags: telescopes only);
+// no row is excused. A row whose fake covers less than its registry entry says so inline.
 // ---------------------------------------------------------------------------
 
 struct FakeRosterRow {
@@ -786,7 +791,7 @@ struct FakeRosterRow {
 
 inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"skywatcher", "telescope", "fake_skywatcher_mount.h"},
-    {"skywatcher", "telescope", "fake_skywatcher_serial_board.h"},
+    {"skywatcher", "telescope", "fake_skywatcher_serial_board.h"},  // hosted as skywatcher_telescope_serial
     {"zwo", "telescope", "fake_mount_server.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
     {"synscan", "telescope", "fake_mount_server.h"},
@@ -794,10 +799,10 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
     {"gemini", "focuser", "fake_gemini_focuser.h"},
-    {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},
     {"qhy", "camera", "fake_qhy_sdk.h"},
-    {"qhy", "filterwheel", "fake_qhy_cfw3.h"},
+    {"qhy", "filterwheel", "fake_qhy_cfw3.h"},  // CFW3 serial backend: qhy_filterwheel_cfw3
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"touptek", "camera", "fake_touptek_sdk.h"},
     {"gphoto", "camera", "fake_gphoto_sdk.h"},
