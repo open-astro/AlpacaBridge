@@ -872,7 +872,10 @@ inline std::vector<ContractEntry> contract_entries() {
 // and the registry entry it hosts live in CONTRACT_SWEEP_TIER2_HOSTS there, and the
 // case "Contract sweep tier 2 - hosts match kFakeConnectableRoster" pins the two
 // together. Every row hosts every applicable case (target flags: telescopes only);
-// no row is excused. A row whose fake covers less than its registry entry says so inline.
+// the one place a row can differ is Connecting: only a fake with a handshake-hold knob can show
+// Connecting reading true (can_hold_connect), and every other row states why and the source in its
+// connecting_unobservable reason there instead of skipping the check silently. A row whose fake covers
+// less than its registry entry says so inline.
 // ---------------------------------------------------------------------------
 
 struct FakeRosterRow {

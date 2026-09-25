@@ -27,6 +27,10 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/version.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -189,9 +193,9 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
 
 // Operational properties and methods that must throw NotConnected while
 // disconnected, with no early return that skips the check.
-// `pins` (may be null) carries the camera known-defect pins: a pinned getter is left out here and asserted
+// `pins` carries the camera known-defect pins: a pinned getter is left out here and asserted
 // to still answer in case_operations_throw_not_connected.
-std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const ContractEntry* pins = nullptr) {
+std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const ContractEntry& pins) {
     std::vector<Probe> p;
     switch (type) {
         case DeviceType::Telescope: {
@@ -215,7 +219,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             // NotConnected on most switches while disconnected and used to drop the probe silently).
             // iOptron's iMate switch 0 is a read-only pass-through that throws NotImplemented before the
             // connection check (AGENTS.md), which is why the id is named per entry.
-            const int writable = pins != nullptr ? pins->switch_writable_id : 0;
+            const int writable = pins.switch_writable_id;
             p.push_back({"set_switch(writable id)", [&s, writable] { s.set_switch(writable, false); }});
             break;
         }
@@ -259,10 +263,10 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
         case DeviceType::Camera: {
             auto& c = dynamic_cast<alpacacore::CameraDriver&>(d);
             p.push_back({"get_gain", [&] { (void)c.get_gain(); }});
-            if (pins == nullptr || pins->image_ready_known_defect == nullptr) {
+            if (pins.image_ready_known_defect == nullptr) {
                 p.push_back({"get_image_ready", [&] { (void)c.get_image_ready(); }});
             }
-            if (pins == nullptr || pins->ccd_temperature_known_defect == nullptr) {
+            if (pins.ccd_temperature_known_defect == nullptr) {
                 p.push_back({"get_ccd_temperature", [&] { (void)c.get_ccd_temperature(); }});
             }
             p.push_back({"start_exposure", [&] { c.start_exposure(1.0, true); }});
@@ -348,7 +352,7 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
 [[maybe_unused]] void case_operations_throw_not_connected(const ContractEntry& e) {
     auto d = e.make(0);
     REQUIRE(d != nullptr);
-    const auto probes = not_connected_probes(*d, e.type, &e);
+    const auto probes = not_connected_probes(*d, e.type, e);
     REQUIRE_FALSE(probes.empty());
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
@@ -447,7 +451,7 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     REQUIRE(d != nullptr);
     std::vector<Probe> all;
     for (auto&& p : invalid_value_probes(*d, e.type)) all.push_back(std::move(p));
-    for (auto&& p : not_connected_probes(*d, e.type, &e)) all.push_back(std::move(p));
+    for (auto&& p : not_connected_probes(*d, e.type, e)) all.push_back(std::move(p));
     all.push_back({"action", [&] { (void)d->action("no-such-action", ""); }});
     all.push_back({"command_blind", [&] { d->command_blind("x"); }});
     all.push_back({"command_bool", [&] { (void)d->command_bool("x"); }});
@@ -509,6 +513,10 @@ struct Tier2Host {
     // A driver whose connect must fail, or empty with failing_unavailable naming why and the source.
     std::function<Hosted()> failing;
     const char* failing_unavailable;
+    // A row with can_hold_connect == false cannot show Connecting reading true (its fake completes the
+    // handshake at once), so it states why and the source here; the case then asserts only that the first
+    // sample after connect() is Connecting or Connected. Never left empty for such a row.
+    const char* connecting_unobservable = nullptr;
 };
 
 using Clock = std::chrono::steady_clock;
@@ -577,7 +585,12 @@ Hosted connected_host(const Tier2Host& h) {
         CHECK(o.first_sample_in_flight);
         CHECK(hosted.driver->get_connected());
         CHECK_FALSE(hosted.driver->get_connecting());
-        if (h.can_hold_connect) {
+        if (!h.can_hold_connect) {
+            INFO(h.id << " cannot show Connecting reading true: "
+                      << (h.connecting_unobservable != nullptr ? h.connecting_unobservable : "(no reason stated)"));
+            REQUIRE(h.connecting_unobservable != nullptr);
+            REQUIRE(std::string(h.connecting_unobservable).size() > 0);
+        } else {
             INFO("the fake holds the handshake for " << kHoldDelay.count()
                                                      << " ms: Connecting reads true and Connected false");
             CHECK(o.saw_connecting);
@@ -599,7 +612,8 @@ Hosted connected_host(const Tier2Host& h) {
     const std::string reason = hosted.driver->get_last_connect_error();
     INFO("get_last_connect_error() after a failed connect: '" << reason << "'");
     CHECK_FALSE(reason.empty());
-    // The reason stays until the next attempt clears it.
+    // A second read returns the same reason (reading does not consume it). Whether a later attempt
+    // clears it is not asserted here.
     CHECK(hosted.driver->get_last_connect_error() == reason);
 }
 
@@ -657,17 +671,59 @@ Hosted host_over(std::shared_ptr<Fake> fake, Make make) {
     return hosted;
 }
 
+// A loopback endpoint nothing else can take for the length of a failed-connect leg. The old recipe
+// destroyed a fake server and connected to its port, which another process (ctest -j) could bind in
+// between. This socket stays bound for the lifetime of the Hosted value: a TCP one never listens, so a
+// connect is refused; a UDP one never replies, so the exchange times out.
+class HeldPort {
+public:
+    explicit HeldPort(int sock_type) {
+        fd_ = ::socket(AF_INET, sock_type, 0);
+        REQUIRE(fd_ >= 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        REQUIRE(::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+        socklen_t len = sizeof(addr);
+        REQUIRE(::getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        port_ = ntohs(addr.sin_port);
+    }
+    ~HeldPort() {
+        if (fd_ >= 0) ::close(fd_);
+    }
+    HeldPort(const HeldPort&) = delete;
+    HeldPort& operator=(const HeldPort&) = delete;
+    int port() const { return port_; }
+
+private:
+    int fd_ = -1;
+    int port_ = 0;
+};
+
+template <class Make>
+Hosted host_over_held_port(int sock_type, Make make) {
+    auto held = std::make_shared<HeldPort>(sock_type);
+    Hosted hosted;
+    hosted.driver = make(held->port());
+    hosted.fake = held;
+    return hosted;
+}
+
 // A serial device path that does not exist: the connect fails at open().
 constexpr const char* kAbsentPort = "/dev/alpacacore-contract-sweep-absent";
 
 #if defined(ALPACACORE_ENABLE_ZWO) || defined(ALPACACORE_ENABLE_CELESTRON) || defined(ALPACACORE_ENABLE_SYNSCAN) || \
     defined(ALPACACORE_ENABLE_ONSTEP)
-// FakeMountServer rows share one shape: a loopback endpoint on the fake for the connect, and the port of a
-// FakeMountServer that no longer exists for the failed connect.
+// FakeMountServer rows share one shape: a loopback endpoint on the fake for the connect, and a held,
+// never-listening loopback port for the failed connect.
 template <class MakeDriver>
 Tier2Host mount_server_host(const char* id, const char* vendor, const char* registry_id,
                             alpacacore::test::FakeMountServer::Responder responder, MakeDriver make) {
     Tier2Host h{id, vendor, "telescope", "fake_mount_server.h", DeviceType::Telescope, registry_id, {}, false, {}, ""};
+    h.connecting_unobservable =
+        "fake_mount_server.h answers every command at once and has no handshake-delay knob (source: the header), "
+        "so the Connecting window is a scheduling instant";
     h.connectable = [responder, make](bool) {
         auto server = std::make_shared<alpacacore::test::FakeMountServer>(responder);
         REQUIRE(server->ok());
@@ -676,16 +732,7 @@ Tier2Host mount_server_host(const char* id, const char* vendor, const char* regi
         hosted.fake = server;
         return hosted;
     };
-    h.failing = [make]() {
-        int port = 0;
-        {
-            alpacacore::test::FakeMountServer gone;  // its port has no listener once it is destroyed
-            port = gone.port();
-        }
-        Hosted hosted;
-        hosted.driver = make(port);
-        return hosted;
-    };
+    h.failing = [make]() { return host_over_held_port(SOCK_STREAM, make); };
     return h;
 }
 #endif
@@ -795,16 +842,10 @@ Tier2Host tier2_host_skywatcher_telescope() {
         return host_over(std::make_shared<alpacacore::test::FakeSkyWatcherMount>(),
                          [&](const alpacacore::test::FakeSkyWatcherMount& m) { return make(m.port()); });
     };
-    h.failing = [make]() {
-        int port = 0;
-        {
-            alpacacore::test::FakeSkyWatcherMount gone;
-            port = gone.port();
-        }
-        Hosted hosted;
-        hosted.driver = make(port);
-        return hosted;
-    };
+    h.failing = [make]() { return host_over_held_port(SOCK_DGRAM, make); };
+    h.connecting_unobservable =
+        "fake_skywatcher_mount.h replies to every UDP frame at once and has no handshake-delay knob (source: the "
+        "header)";
     return h;
 }
 
@@ -837,6 +878,9 @@ Tier2Host tier2_host_skywatcher_telescope_serial() {
         hosted.driver = make(kAbsentPort);
         return hosted;
     };
+    h.connecting_unobservable =
+        "fake_skywatcher_serial_board.h has delay_next_reply(), but it is not wired to the connect handshake for this "
+        "row (which command connect sends first is unverified); the default reply is immediate";
     return h;
 }
 #endif
@@ -867,16 +911,9 @@ Tier2Host tier2_host_ioptron_telescope() {
         REQUIRE(mount->ok());
         return host_over(mount, [&](const alpacacore::test::FakeIoptronMount& m) { return make(m.port()); });
     };
-    h.failing = [make]() {
-        int port = 0;
-        {
-            alpacacore::test::FakeIoptronMount gone("0012", 12.0);
-            port = gone.port();
-        }
-        Hosted hosted;
-        hosted.driver = make(port);
-        return hosted;
-    };
+    h.failing = [make]() { return host_over_held_port(SOCK_STREAM, make); };
+    h.connecting_unobservable =
+        "fake_ioptron_mount.h replies at once and has no handshake-delay knob (source: the header)";
     return h;
 }
 
@@ -902,6 +939,8 @@ Tier2Host tier2_host_ioptron_focuser() {
         hosted.driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, kAbsentPort);
         return hosted;
     };
+    h.connecting_unobservable =
+        "fake_ioptron_ieaf.h replies at once and has no handshake-delay knob (source: the header)";
     return h;
 }
 #endif
@@ -959,6 +998,9 @@ Tier2Host tier2_host_gemini_covercalibrator() {
         hosted.driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, kAbsentPort, 9600);
         return hosted;
     };
+    h.connecting_unobservable =
+        "fake_gemini_flatpanel.h has set_reply_delay(prefix, delay), but it is not wired to the connect handshake for "
+        "this row (which command connect sends first is unverified); the default reply is immediate";
     return h;
 }
 
@@ -976,6 +1018,8 @@ Tier2Host tier2_host_gemini_switch() {
         hosted.driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, kAbsentPort, 19200);
         return hosted;
     };
+    h.connecting_unobservable =
+        "fake_gemini_pdh.h replies at once and has no handshake-delay knob (source: the header)";
     return h;
 }
 #endif
@@ -1002,6 +1046,9 @@ Tier2Host tier2_host_qhy_camera() {
             return alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", s.sdk);
         });
     };
+    h.connecting_unobservable =
+        "fake_qhy_sdk.h returns from open at once; its before_call hook could block a named call but is not wired to "
+        "the connect path for this row (which SDK calls connect makes is unverified)";
     return h;
 }
 
@@ -1035,6 +1082,7 @@ Tier2Host tier2_host_qhy_filterwheel() {
         hosted.driver = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, kAbsentPort, settings());
         return hosted;
     };
+    h.connecting_unobservable = "fake_qhy_cfw3.h replies at once and has no handshake-delay knob (source: the header)";
     return h;
 }
 
@@ -1052,6 +1100,8 @@ Tier2Host tier2_host_qhy_focuser() {
         hosted.driver = alpacacore::vendor::qhy::create_qhy_focuser(0, kAbsentPort);
         return hosted;
     };
+    h.connecting_unobservable =
+        "fake_qhy_qfocuser.h replies at once and has no handshake-delay knob (source: the header)";
     return h;
 }
 #endif
@@ -1089,6 +1139,9 @@ Tier2Host tier2_host_touptek_camera() {
             return alpacacore::vendor::touptek::create_touptek_camera(0, 0, s.sdk);
         });
     };
+    h.connecting_unobservable =
+        "fake_touptek_sdk.h returns from open at once and has no delay knob (source: the header; it only injects "
+        "faults through throw_from)";
     return h;
 }
 #endif
@@ -1128,6 +1181,8 @@ Tier2Host tier2_host_gphoto_camera() {
             return alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, s.sdk, s.decoder);
         });
     };
+    h.connecting_unobservable =
+        "fake_gphoto_sdk.h returns from open at once and has no connect-delay knob (source: the header)";
     return h;
 }
 #endif
@@ -1162,6 +1217,9 @@ Tier2Host tier2_host_wandererastro_covercalibrator() {
         hosted.driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, kAbsentPort);
         return hosted;
     };
+    h.connecting_unobservable =
+        "fake_serial_streamer.h repeats one fixed frame at a fixed interval and has no handshake-hold knob (source: "
+        "the header); its set_muted() is not wired to the connect for this row (effect on connect unverified)";
     return h;
 }
 
@@ -1188,6 +1246,9 @@ Tier2Host tier2_host_wandererastro_filterwheel() {
         hosted.driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, kAbsentPort);
         return hosted;
     };
+    h.connecting_unobservable =
+        "fake_serial_streamer.h repeats one fixed frame at a fixed interval and has no handshake-hold knob (source: "
+        "the header); its set_muted() is not wired to the connect for this row (effect on connect unverified)";
     return h;
 }
 
@@ -1214,6 +1275,9 @@ Tier2Host tier2_host_wandererastro_switch() {
         hosted.driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, kAbsentPort);
         return hosted;
     };
+    h.connecting_unobservable =
+        "fake_serial_streamer.h repeats one fixed frame at a fixed interval and has no handshake-hold knob (source: "
+        "the header); its set_muted() is not wired to the connect for this row (effect on connect unverified)";
     return h;
 }
 #endif
@@ -1348,39 +1412,39 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 
     // Vendors this build compiles in that have a roster row.
     std::set<std::string> enabled;
-#define CS2_ENABLED(macro, name) enabled.insert(name);
+#define CS2_ENABLED(name) enabled.insert(name);
 #ifdef ALPACACORE_ENABLE_ZWO
-    CS2_ENABLED("ZWO", "zwo")
+    CS2_ENABLED("zwo")
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-    CS2_ENABLED("CELESTRON", "celestron")
+    CS2_ENABLED("celestron")
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-    CS2_ENABLED("SYNSCAN", "synscan")
+    CS2_ENABLED("synscan")
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-    CS2_ENABLED("ONSTEP", "onstep")
+    CS2_ENABLED("onstep")
 #endif
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
-    CS2_ENABLED("SKYWATCHER", "skywatcher")
+    CS2_ENABLED("skywatcher")
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-    CS2_ENABLED("IOPTRON", "ioptron")
+    CS2_ENABLED("ioptron")
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
-    CS2_ENABLED("GEMINI", "gemini")
+    CS2_ENABLED("gemini")
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
-    CS2_ENABLED("QHY", "qhy")
+    CS2_ENABLED("qhy")
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-    CS2_ENABLED("TOUPTEK", "touptek")
+    CS2_ENABLED("touptek")
 #endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
-    CS2_ENABLED("GPHOTO", "gphoto")
+    CS2_ENABLED("gphoto")
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-    CS2_ENABLED("WANDERERASTRO", "wandererastro")
+    CS2_ENABLED("wandererastro")
 #endif
 #undef CS2_ENABLED
     // A vendors-off build compiles no fake and so has no host; a build with any of them must have hosts.
@@ -1402,6 +1466,8 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
         CHECK(std::string(h.id).rfind(std::string(h.vendor) + "_" + h.device_type, 0) == 0);
         CHECK(registry_ids.count(h.hosts_registry_id) == 1);
         CHECK(static_cast<bool>(h.connectable));
+        CHECK((h.can_hold_connect ||
+               (h.connecting_unobservable != nullptr && std::string(h.connecting_unobservable).size() > 0)));
         CHECK((static_cast<bool>(h.failing) || std::string(h.failing_unavailable).size() > 0));
     }
     for (const auto& r : from_roster) {
