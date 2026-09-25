@@ -650,11 +650,28 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_ASTROASIS(X)
 #endif
 
-#define CONTRACT_SWEEP_ENTRIES(X)                                                                              \
-    CS_ZWO(X)                                                                                                  \
-    CS_QHY(X) CS_IOPTRON(X) CS_IOPTRON_POWERBOX(X) CS_PLAYERONE(X) CS_SYNSCAN(X) CS_SKYWATCHER(X) CS_ONSTEP(X) \
-        CS_CELESTRON(X) CS_BISQUE(X) CS_WEEWX(X) CS_GEMINI(X) CS_SVBONY(X) CS_GPHOTO(X) CS_TOUPTEK(X)          \
-            CS_TOUPTEK_STELLAVITA(X) CS_WANDERERASTRO(X) CS_ASTROASIS(X)
+// The formatter does not reach a fixed point on this continuation list.
+// clang-format off
+#define CONTRACT_SWEEP_ENTRIES(X) \
+    CS_ZWO(X) \
+    CS_QHY(X) \
+    CS_IOPTRON(X) \
+    CS_IOPTRON_POWERBOX(X) \
+    CS_PLAYERONE(X) \
+    CS_SYNSCAN(X) \
+    CS_SKYWATCHER(X) \
+    CS_ONSTEP(X) \
+    CS_CELESTRON(X) \
+    CS_BISQUE(X) \
+    CS_WEEWX(X) \
+    CS_GEMINI(X) \
+    CS_SVBONY(X) \
+    CS_GPHOTO(X) \
+    CS_TOUPTEK(X) \
+    CS_TOUPTEK_STELLAVITA(X) \
+    CS_WANDERERASTRO(X) \
+    CS_ASTROASIS(X)
+// clang-format on
 
 namespace alpacacore::test::contract {
 
