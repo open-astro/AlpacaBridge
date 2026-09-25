@@ -1305,7 +1305,8 @@ TEST_CASE("SkyWatcher pointing - the pier side changes at HA 0 and the axes stay
 // the driver was told. Two power-ons; the mount was hand-homed before each.
 //
 // The tolerances are set by the mount, not by the model. A seven-term fit to
-// these rows puts the polar axis 1.3 deg off the pole, the tube 0.8 deg off
+// 15 solved exposures (these 14 rows and the home row) puts the polar axis
+// 1.3 deg off the pole, the tube 0.8 deg off
 // square to the dec axis, the dec zero 0.8 and 3.3 deg off and the RA zero 3.3
 // and 6.2 deg off (first and second power-on), with 8 arcmin rms left over. The
 // plain model below has none of those terms, so it is up to 0.43 h and 4.6 deg
