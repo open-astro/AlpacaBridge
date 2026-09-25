@@ -154,10 +154,6 @@ struct ContractEntry {
     // Where the expectations above come from: "protocol document", "hardware run"
     // or "assumption", with the reference. The sweep requires one of those words.
     const char* source;
-    // Telescope only. Non-null: this driver answers get_at_park from driver-side parked state while
-    // disconnected instead of throwing NotConnected (AGENTS.md: every operational property does). The
-    // string names the issue and the source; the sweep pins today's behaviour until it is fixed.
-    const char* at_park_known_defect = nullptr;
 };
 
 // Platform 7 interface versions per device type.
@@ -193,26 +189,6 @@ inline const char* invalid_probe_reason_for(DeviceType t) {
     }
 }
 
-// get_at_park while disconnected: bisque, celestron, synscan and skywatcher return parked_ under the
-// state mutex with no connection check; onstep, ioptron and zwo check it (get_at_park in
-// AlpacaCore/src/vendors/<vendor>/<vendor>_telescope_driver.cpp).
-inline const char* at_park_known_defect_for(const std::string& vendor, const std::string& device_type) {
-    if (device_type != "telescope") return nullptr;
-    if (vendor == "bisque")
-        return "known defect, open-astro#656: bisque_telescope_driver.cpp get_at_park returns parked_ with no "
-               "NotConnected";
-    if (vendor == "celestron")
-        return "known defect, open-astro#656: celestron_telescope_driver.cpp get_at_park returns parked_ with no "
-               "NotConnected";
-    if (vendor == "synscan")
-        return "known defect, open-astro#656: synscan_telescope_driver.cpp get_at_park returns parked_ with no "
-               "NotConnected";
-    if (vendor == "skywatcher")
-        return "known defect, open-astro#656: skywatcher_telescope_driver.cpp get_at_park returns parked_ with no "
-               "NotConnected";
-    return nullptr;
-}
-
 inline ContractEntry make_entry(const char* id, const char* vendor, const char* device_type, DeviceType type,
                                 DriverFactory make, const char* source) {
     return ContractEntry{id,
@@ -225,8 +201,7 @@ inline ContractEntry make_entry(const char* id, const char* vendor, const char* 
                          {},
                          false,
                          invalid_probe_reason_for(type),
-                         source,
-                         at_park_known_defect_for(vendor, device_type)};
+                         source};
 }
 
 inline ContractEntry with_command_passthrough(ContractEntry e) {

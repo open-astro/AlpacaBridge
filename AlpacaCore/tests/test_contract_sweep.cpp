@@ -108,7 +108,7 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
 
 // Operational properties and methods that must throw NotConnected while
 // disconnected, with no early return that skips the check.
-std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, bool at_park_defect = false) {
+std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type) {
     std::vector<Probe> p;
     switch (type) {
         case DeviceType::Telescope: {
@@ -119,7 +119,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, bool a
             p.push_back({"get_azimuth", [&] { (void)t.get_azimuth(); }});
             p.push_back({"get_tracking", [&] { (void)t.get_tracking(); }});
             p.push_back({"get_slewing", [&] { (void)t.get_slewing(); }});
-            if (!at_park_defect) p.push_back({"get_at_park", [&] { (void)t.get_at_park(); }});
+            p.push_back({"get_at_park", [&] { (void)t.get_at_park(); }});
             p.push_back({"slew_to_coordinates", [&] { t.slew_to_coordinates(1.0, 1.0); }});
             p.push_back({"abort_slew", [&] { t.abort_slew(); }});
             break;
@@ -268,17 +268,11 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
 [[maybe_unused]] void case_operations_throw_not_connected(const ContractEntry& e) {
     auto d = e.make(0);
     REQUIRE(d != nullptr);
-    const auto probes = not_connected_probes(*d, e.type, e.at_park_known_defect != nullptr);
+    const auto probes = not_connected_probes(*d, e.type);
     REQUIRE_FALSE(probes.empty());
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
         CHECK(thrown_code(fn) == err::NotConnected);
-    }
-    if (e.at_park_known_defect != nullptr) {
-        // Pin today's behaviour so fixing the driver fails this and removes the expectation.
-        auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*d);
-        INFO(e.id << " get_at_park: " << e.at_park_known_defect);
-        CHECK(thrown_code([&] { (void)t.get_at_park(); }) == -1);
     }
 }
 
@@ -345,7 +339,7 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     REQUIRE(d != nullptr);
     std::vector<Probe> all;
     for (auto&& p : invalid_value_probes(*d, e.type)) all.push_back(std::move(p));
-    for (auto&& p : not_connected_probes(*d, e.type, e.at_park_known_defect != nullptr)) all.push_back(std::move(p));
+    for (auto&& p : not_connected_probes(*d, e.type)) all.push_back(std::move(p));
     all.push_back({"action", [&] { (void)d->action("no-such-action", ""); }});
     all.push_back({"command_blind", [&] { d->command_blind("x"); }});
     all.push_back({"command_bool", [&] { (void)d->command_bool("x"); }});
