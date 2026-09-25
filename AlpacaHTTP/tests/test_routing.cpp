@@ -115,10 +115,11 @@ void remove_device(alpacahttp::Router& router, const std::string& vendor, const 
 
 // Issue open-astro/AlpacaBridge#647 helpers. roundtrip_config() above POSTs
 // /management/v1/configuredevice, which registers with ConfigSource::Api. The
-// only caller of ConfigSource::Persisted is Router::load_persisted_devices(),
-// which runs once per Router instance, from its constructor. So a config only
-// reaches the persisted path when a NEW Router is constructed over a file that
-// already holds it. These helpers do exactly that.
+// only caller of ConfigSource::Persisted is Router::load_persisted_devices().
+// It is reached from the constructor and re-entered from a few request paths,
+// but the persisted_devices_loaded_ latch makes every later call return early,
+// so a config only reaches the persisted path when a NEW Router is constructed
+// over a file that already holds it. These helpers do exactly that.
 
 // POST a device config through the API and report what happened. On success
 // `config` is the Config object configureddevices shows for the device.
@@ -128,7 +129,12 @@ struct ApiAttempt {
     nlohmann::json config;
 };
 
-nlohmann::json listed_config(alpacahttp::Router& router, const std::string& device_type, int device_number) {
+// The whole configureddevices row for a device, matched on `device_type`
+// exactly and case-sensitively ("Telescope"). A persisted entry that failed to
+// register is listed too, but with a LOWER-CASE DeviceType, so it does not match
+// here: null means "not registered", not "not listed". Use listed_failed_entry()
+// for the failed row.
+nlohmann::json listed_entry(alpacahttp::Router& router, const std::string& device_type, int device_number) {
     const auto listed =
         nlohmann::json::parse(route_request(router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
     if (listed.is_discarded() || !listed.contains("Value") || !listed["Value"].is_array()) {
@@ -136,8 +142,23 @@ nlohmann::json listed_config(alpacahttp::Router& router, const std::string& devi
     }
     for (const auto& entry : listed["Value"]) {
         if (entry.value("DeviceType", "") == device_type && entry.value("DeviceNumber", -1) == device_number) {
-            return entry.value("Config", nlohmann::json());
+            return entry;
         }
+    }
+    return nlohmann::json();
+}
+
+nlohmann::json listed_config(alpacahttp::Router& router, const std::string& device_type, int device_number) {
+    const auto entry = listed_entry(router, device_type, device_number);
+    return entry.is_null() ? nlohmann::json() : entry.value("Config", nlohmann::json());
+}
+
+// The "<vendor> (failed to load)" row configureddevices lists for a persisted
+// entry that did not register (LoadError true, lower-case DeviceType).
+nlohmann::json listed_failed_entry(alpacahttp::Router& router, const std::string& lower_type, int device_number) {
+    const auto entry = listed_entry(router, lower_type, device_number);
+    if (!entry.is_null() && entry.value("LoadError", false)) {
+        return entry;
     }
     return nlohmann::json();
 }
@@ -161,8 +182,10 @@ ApiAttempt api_attempt(alpacahttp::Router& router, const nlohmann::json& posted,
 
 // What a fresh Router made of one entry in registered_devices.json.
 struct PersistedAttempt {
-    bool listed = false;
-    nlohmann::json config;
+    bool listed = false;          // REGISTERED: listed under its Alpaca type name, no LoadError
+    nlohmann::json config;        // Config of the registered device
+    bool failed_listed = false;   // not registered, but listed as "<vendor> (failed to load)"
+    nlohmann::json failed_entry;  // that row (DeviceType lower-case, LoadError true, sanitized Config)
     std::vector<std::string> warnings;
     std::vector<std::string> errors;  // an exception out of a driver constructor is logged at ERROR, not WARN
 };
@@ -199,15 +222,25 @@ PersistedAttempt persisted_attempt(const nlohmann::json& entry, const std::strin
     alpacacore::logging::set_log_sink(
         [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
             std::lock_guard<std::mutex> lock(warnings_mutex);
+            // Only lines about THIS entry's load. Any other WARN/ERROR in the
+            // process (a vendor SDK, another thread) is not this round trip's.
+            const std::string text(message);
+            if (text.find("persisted device") == std::string::npos && text.rfind("Persisted ", 0) != 0) {
+                return;
+            }
             if (level == alpacacore::logging::LogLevel::Warn) {
-                result.warnings.emplace_back(message);
+                result.warnings.emplace_back(text);
             } else if (level == alpacacore::logging::LogLevel::Error) {
-                result.errors.emplace_back(message);
+                result.errors.emplace_back(text);
             }
         });
     alpacahttp::Router startup_router;
     result.config = listed_config(startup_router, device_type, device_number);
     result.listed = !result.config.is_null();
+    if (!result.listed) {
+        result.failed_entry = listed_failed_entry(startup_router, lower_type, device_number);
+        result.failed_listed = !result.failed_entry.is_null();
+    }
     alpacacore::logging::set_log_sink(previous_sink);
 
     // Restore before anything that can abort (EXPECT is abort(): no unwinding,
@@ -587,7 +620,7 @@ void put_connected(alpacahttp::Router& router, const std::string& path_base, con
     EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
 }
 
-} // namespace
+}  // namespace
 
 int main() {
     // open-astro#354: host_time_zone() resolution table, through the seam
@@ -904,37 +937,22 @@ int main() {
 #ifdef ALPACACORE_ENABLE_ZWO
     // Ensure idempotent behavior across repeated test runs.
     {
-        nlohmann::json remove_body = {
-            {"vendor", "zwo"},
-            {"deviceType", "telescope"},
-            {"deviceNumber", 9101}
-        };
+        nlohmann::json remove_body = {{"vendor", "zwo"}, {"deviceType", "telescope"}, {"deviceNumber", 9101}};
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
     }
 #endif
 
     {
-        nlohmann::json configure_body = {
-            {"vendor", "zwo"},
-            {"deviceType", "telescope"},
-            {"deviceNumber", 9101},
-            {"connectionType", "serial"},
-            {"portPath", "/dev/null"},
-            {"baudRate", 9600},
-            {"responseTimeoutMs", 2500},
-            {"apertureDiameter", 0.1},
-            {"focalLength", 0.8},
-            {"siteLatitude", 34.5},
-            {"siteLongitude", -117.2},
-            {"siteElevation", 450.0},
-            {"syncTimeOnConnect", false}
-        };
+        nlohmann::json configure_body = {{"vendor", "zwo"},           {"deviceType", "telescope"},
+                                         {"deviceNumber", 9101},      {"connectionType", "serial"},
+                                         {"portPath", "/dev/null"},   {"baudRate", 9600},
+                                         {"responseTimeoutMs", 2500}, {"apertureDiameter", 0.1},
+                                         {"focalLength", 0.8},        {"siteLatitude", 34.5},
+                                         {"siteLongitude", -117.2},   {"siteElevation", 450.0},
+                                         {"syncTimeOnConnect", false}};
 
-        const auto configure_response = route_request(
-            router,
-            "POST",
-            "/management/v1/configuredevice",
-            configure_body.dump());
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
 #ifdef ALPACACORE_ENABLE_ZWO
@@ -948,8 +966,7 @@ int main() {
 
         bool found_device = false;
         for (const auto& entry : configured_json["Value"]) {
-            if (entry.value("DeviceType", "") == "Telescope" &&
-                entry.value("DeviceNumber", -1) == 9101) {
+            if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == 9101) {
                 EXPECT(entry.value("Vendor", "") == "zwo");
                 EXPECT(entry.contains("Config"));
                 const auto& cfg = entry["Config"];
@@ -981,16 +998,8 @@ int main() {
         EXPECT(actions_json.contains("Value"));
         EXPECT(actions_json["Value"].is_array());
 
-        nlohmann::json remove_body = {
-            {"vendor", "zwo"},
-            {"deviceType", "telescope"},
-            {"deviceNumber", 9101}
-        };
-        const auto remove_response = route_request(
-            router,
-            "POST",
-            "/management/v1/removedevice",
-            remove_body.dump());
+        nlohmann::json remove_body = {{"vendor", "zwo"}, {"deviceType", "telescope"}, {"deviceNumber", 9101}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
         const auto remove_json = nlohmann::json::parse(remove_response.body());
         EXPECT(remove_json.value("ErrorNumber", -1) == 0);
 #else
@@ -1126,37 +1135,21 @@ int main() {
     // --- Celestron telescope routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_CELESTRON
     {
-        nlohmann::json remove_body = {
-            {"vendor", "celestron"},
-            {"deviceType", "telescope"},
-            {"deviceNumber", 9102}
-        };
+        nlohmann::json remove_body = {{"vendor", "celestron"}, {"deviceType", "telescope"}, {"deviceNumber", 9102}};
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
     }
 #endif
 
     {
         nlohmann::json configure_body = {
-            {"vendor", "celestron"},
-            {"deviceType", "telescope"},
-            {"deviceNumber", 9102},
-            {"connectionType", "serial"},
-            {"portPath", "/dev/null"},
-            {"baudRate", 9600},
-            {"responseTimeoutMs", 5000},
-            {"apertureDiameter", 0.28},
-            {"focalLength", 2.8},
-            {"siteLatitude", 33.85},
-            {"siteLongitude", -118.34},
-            {"siteElevation", 100.0},
-            {"syncTimeOnConnect", true}
-        };
+            {"vendor", "celestron"},      {"deviceType", "telescope"}, {"deviceNumber", 9102},
+            {"connectionType", "serial"}, {"portPath", "/dev/null"},   {"baudRate", 9600},
+            {"responseTimeoutMs", 5000},  {"apertureDiameter", 0.28},  {"focalLength", 2.8},
+            {"siteLatitude", 33.85},      {"siteLongitude", -118.34},  {"siteElevation", 100.0},
+            {"syncTimeOnConnect", true}};
 
-        const auto configure_response = route_request(
-            router,
-            "POST",
-            "/management/v1/configuredevice",
-            configure_body.dump());
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -1170,8 +1163,7 @@ int main() {
 
         bool found_celestron = false;
         for (const auto& entry : configured_json["Value"]) {
-            if (entry.value("DeviceType", "") == "Telescope" &&
-                entry.value("DeviceNumber", -1) == 9102) {
+            if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == 9102) {
                 EXPECT(entry.value("Vendor", "") == "celestron");
                 EXPECT(entry.contains("Config"));
                 const auto& cfg = entry["Config"];
@@ -1194,20 +1186,12 @@ int main() {
         EXPECT(found_celestron);
 
         // Test network connection type sanitization
-        nlohmann::json net_configure_body = {
-            {"vendor", "celestron"},
-            {"deviceType", "telescope"},
-            {"deviceNumber", 9103},
-            {"connectionType", "network"},
-            {"host", "192.168.1.100"},
-            {"tcpPort", 2000}
-        };
+        nlohmann::json net_configure_body = {{"vendor", "celestron"},   {"deviceType", "telescope"},
+                                             {"deviceNumber", 9103},    {"connectionType", "network"},
+                                             {"host", "192.168.1.100"}, {"tcpPort", 2000}};
 
-        const auto net_response = route_request(
-            router,
-            "POST",
-            "/management/v1/configuredevice",
-            net_configure_body.dump());
+        const auto net_response =
+            route_request(router, "POST", "/management/v1/configuredevice", net_configure_body.dump());
         const auto net_json = nlohmann::json::parse(net_response.body());
         EXPECT(net_json.value("ErrorNumber", -1) == 0);
 
@@ -1227,24 +1211,12 @@ int main() {
         EXPECT(found_net_celestron);
 
         // Cleanup
-        nlohmann::json remove_body = {
-            {"vendor", "celestron"},
-            {"deviceType", "telescope"},
-            {"deviceNumber", 9102}
-        };
-        const auto remove_response = route_request(
-            router,
-            "POST",
-            "/management/v1/removedevice",
-            remove_body.dump());
+        nlohmann::json remove_body = {{"vendor", "celestron"}, {"deviceType", "telescope"}, {"deviceNumber", 9102}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
         const auto remove_json = nlohmann::json::parse(remove_response.body());
         EXPECT(remove_json.value("ErrorNumber", -1) == 0);
 
-        nlohmann::json remove_net_body = {
-            {"vendor", "celestron"},
-            {"deviceType", "telescope"},
-            {"deviceNumber", 9103}
-        };
+        nlohmann::json remove_net_body = {{"vendor", "celestron"}, {"deviceType", "telescope"}, {"deviceNumber", 9103}};
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_net_body.dump());
 #else
         EXPECT(configure_json.value("ErrorNumber", 0) != 0);
@@ -1254,28 +1226,17 @@ int main() {
     // --- ToupTek camera routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_TOUPTEK
     {
-        nlohmann::json remove_body = {
-            {"vendor", "touptek"},
-            {"deviceType", "camera"},
-            {"deviceNumber", 9201}
-        };
+        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "camera"}, {"deviceNumber", 9201}};
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
     }
 #endif
 
     {
         nlohmann::json configure_body = {
-            {"vendor", "touptek"},
-            {"deviceType", "camera"},
-            {"deviceNumber", 9201},
-            {"cameraIndex", 2}
-        };
+            {"vendor", "touptek"}, {"deviceType", "camera"}, {"deviceNumber", 9201}, {"cameraIndex", 2}};
 
-        const auto configure_response = route_request(
-            router,
-            "POST",
-            "/management/v1/configuredevice",
-            configure_body.dump());
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
 #ifdef ALPACACORE_ENABLE_TOUPTEK
@@ -1289,8 +1250,7 @@ int main() {
 
         bool found_touptek = false;
         for (const auto& entry : configured_json["Value"]) {
-            if (entry.value("DeviceType", "") == "Camera" &&
-                entry.value("DeviceNumber", -1) == 9201) {
+            if (entry.value("DeviceType", "") == "Camera" && entry.value("DeviceNumber", -1) == 9201) {
                 EXPECT(entry.value("Vendor", "") == "touptek");
                 EXPECT(entry.contains("Config"));
                 const auto& cfg = entry["Config"];
@@ -1303,16 +1263,8 @@ int main() {
         }
         EXPECT(found_touptek);
 
-        nlohmann::json remove_body = {
-            {"vendor", "touptek"},
-            {"deviceType", "camera"},
-            {"deviceNumber", 9201}
-        };
-        const auto remove_response = route_request(
-            router,
-            "POST",
-            "/management/v1/removedevice",
-            remove_body.dump());
+        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "camera"}, {"deviceNumber", 9201}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
         const auto remove_json = nlohmann::json::parse(remove_response.body());
         EXPECT(remove_json.value("ErrorNumber", -1) == 0);
 #else
@@ -1323,29 +1275,20 @@ int main() {
     // --- ToupTek AAF focuser routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_TOUPTEK
     {
-        nlohmann::json remove_body = {
-            {"vendor", "touptek"},
-            {"deviceType", "focuser"},
-            {"deviceNumber", 9202}
-        };
+        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "focuser"}, {"deviceNumber", 9202}};
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
     }
 #endif
 
     {
-        nlohmann::json configure_body = {
-            {"vendor", "touptek"},
-            {"deviceType", "focuser"},
-            {"deviceNumber", 9202},
-            {"focuserIndex", 0},
-            {"focuserId", "tp-aaf-routing-test"}
-        };
+        nlohmann::json configure_body = {{"vendor", "touptek"},
+                                         {"deviceType", "focuser"},
+                                         {"deviceNumber", 9202},
+                                         {"focuserIndex", 0},
+                                         {"focuserId", "tp-aaf-routing-test"}};
 
-        const auto configure_response = route_request(
-            router,
-            "POST",
-            "/management/v1/configuredevice",
-            configure_body.dump());
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
 #ifdef ALPACACORE_ENABLE_TOUPTEK
@@ -1359,8 +1302,7 @@ int main() {
 
         bool found_touptek_focuser = false;
         for (const auto& entry : configured_json["Value"]) {
-            if (entry.value("DeviceType", "") == "Focuser" &&
-                entry.value("DeviceNumber", -1) == 9202) {
+            if (entry.value("DeviceType", "") == "Focuser" && entry.value("DeviceNumber", -1) == 9202) {
                 EXPECT(entry.value("Vendor", "") == "touptek");
                 EXPECT(entry.contains("Config"));
                 const auto& cfg = entry["Config"];
@@ -1373,16 +1315,8 @@ int main() {
         }
         EXPECT(found_touptek_focuser);
 
-        nlohmann::json remove_body = {
-            {"vendor", "touptek"},
-            {"deviceType", "focuser"},
-            {"deviceNumber", 9202}
-        };
-        const auto remove_response = route_request(
-            router,
-            "POST",
-            "/management/v1/removedevice",
-            remove_body.dump());
+        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "focuser"}, {"deviceNumber", 9202}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
         const auto remove_json = nlohmann::json::parse(remove_response.body());
         EXPECT(remove_json.value("ErrorNumber", -1) == 0);
 #else
@@ -3587,18 +3521,18 @@ int main() {
     //   * astroasis / focuser by focuserIndex: the by-index constructor scans
     //     the USB bus eagerly (see the astroasis note in the #102 block), so
     //     only the hidPath form is round-tripped.
-    //   * The "auto" (and empty-connectionType) path of the ioptron, synscan,
-    //     skywatcher, onstep and celestron mounts, the network auto-probe of
-    //     ioptron, and the by-index path of the ioptron, gemini and qhy
-    //     focusers: each probes hardware while the driver is constructed, so
-    //     with none attached registration fails ("No ... found on any serial
-    //     port"). They cannot be registered fake-only; the #508 behaviour on
-    //     those paths is pinned through the probe cases at the end of this
-    //     block instead. Their serial and network forms ARE round-tripped.
-    //   * Nothing else is excluded: the sub-gated arms (ioptron/switch behind
-    //     ALPACACORE_IOPTRON_POWERBOX, touptek/switch stellavita behind
-    //     ALPACACORE_TOUPTEK_STELLAVITA) are covered whenever the build defines
-    //     them, and a build without libgpiod skips just those rows.
+    //   * Every arm whose "auto", empty-connectionType or by-index path probes
+    //     hardware or the network while the driver is constructed (the auto
+    //     paths of the ioptron, synscan, skywatcher, onstep and celestron
+    //     mounts, the ioptron network auto-scan, the by-index paths of the
+    //     ioptron, gemini and qhy focusers, and any other auto/by-index arm
+    //     that only registers with a device attached, e.g. the ioptron
+    //     filterwheel, qhy cfw3, gemini focuser and gemini lite cover
+    //     calibrator auto forms). Probing opens serial ports and scans the LAN,
+    //     so it is not fake-only and is deliberately NOT exercised here; their
+    //     serial and network forms ARE round-tripped, and the #508 items that
+    //     ride on those probe paths (items 3 and 4, and item 1 for the mounts'
+    //     by-index arms) are left unpinned until a seam exists to fake the probe.
     // =====================================================================
     {
         struct RoundtripCase {
@@ -4046,7 +3980,9 @@ int main() {
 
         // #508 item 1, the arms that DROP a saved entry on an empty portPath
         // instead of registering it with a WARN: it is rejected by the API and
-        // is NOT listed after a restart, so the web UI cannot edit it either.
+        // is NOT registered after a restart. It is still listed, as a
+        // "<vendor> (failed to load)" row (LoadError true, lower-case
+        // DeviceType), which is how the web UI can show and edit it.
         const std::string kPortRequired = "portPath is required when connectionType is 'serial' (or use 'auto').";
         const auto drop_pin = [&](const std::string& vendor, const std::string& device_type,
                                   const std::string& alpaca_type, const std::string& message) {
@@ -4127,173 +4063,18 @@ int main() {
                 }
             }
             EXPECT(persisted.listed == p.persisted_listed);
+            if (!p.persisted_listed) {
+                // Not registered is not the same as not listed: the failed
+                // entry is shown with LoadError and its saved Config.
+                EXPECT(persisted.failed_listed);
+                EXPECT(persisted.failed_entry.value("LoadError", false));
+                EXPECT(persisted.failed_entry.value("DeviceName", "") == vendor + " (failed to load)");
+                EXPECT(persisted.failed_entry["Config"].value("vendor", "") == vendor);
+            }
             if (persisted.listed) {
                 EXPECT(persisted.config == p.persisted_config);
             }
             EXPECT(warnings_ok);
-        }
-        // -----------------------------------------------------------------
-        // Arms whose "auto" path probes for hardware while the driver is
-        // CONSTRUCTED (mounts and the ioptron/gemini/qhy focusers): with no
-        // hardware, which is every fake-only build, registration itself
-        // fails. So the registered-Config round trip above cannot cover them,
-        // and the #508 behaviours that ride on that path are pinned by what
-        // the probe does with the config instead. Each fragment names the
-        // probe that ran; a build with the hardware attached registers the
-        // device instead, which the checks below accept.
-        // -----------------------------------------------------------------
-        struct ProbePin {
-            std::string label;
-            std::string vendor;
-            std::string device_type;
-            std::string alpaca_type;
-            std::string posted;
-            std::string probe_fragment;
-            std::string same_as;  // "" or the connectionType this must behave exactly like
-            std::vector<std::string> no_warn;
-        };
-        std::vector<ProbePin> probes;
-        const std::string kSerialProbe = "found on any serial port";
-        (void)kSite;
-#ifdef ALPACACORE_ENABLE_IOPTRON
-        // #508 item 3: "" is "auto" (it probes exactly like an explicit "auto").
-        probes.push_back({"empty connectionType (#508 item 3)",
-                          "ioptron",
-                          "telescope",
-                          "Telescope",
-                          R"({"connectionType":""})",
-                          kSerialProbe,
-                          "auto",
-                          {"has connectionType"}});
-        // #508 item 4: network with an empty host does NOT fail with "Host IP
-        // address is required" (SynScan's answer to the same config, above):
-        // it scans the local network for a mount.
-        probes.push_back({"network with empty host (#508 item 4)",
-                          "ioptron",
-                          "telescope",
-                          "Telescope",
-                          R"({"connectionType":"network","host":""})",
-                          "local network",
-                          "",
-                          {"Host IP address is required"}});
-        // #508 item 1: an empty portPath falls through to by-index detection.
-        probes.push_back({"serial with empty portPath (#508 item 1)",
-                          "ioptron",
-                          "focuser",
-                          "Focuser",
-                          R"({"connectionType":"serial","portPath":""})",
-                          kSerialProbe,
-                          "",
-                          {"Serial port path is required"}});
-#endif
-#ifdef ALPACACORE_ENABLE_SYNSCAN
-        probes.push_back({"empty connectionType (#508 item 3)",
-                          "synscan",
-                          "telescope",
-                          "Telescope",
-                          R"({"connectionType":""})",
-                          kSerialProbe,
-                          "auto",
-                          {"has connectionType"}});
-#endif
-#ifdef ALPACACORE_ENABLE_SKYWATCHER
-        probes.push_back({"empty connectionType (#508 item 3)",
-                          "skywatcher",
-                          "telescope",
-                          "Telescope",
-                          R"({"connectionType":"","siteLatitude":39.7392,"siteLongitude":-104.9903})",
-                          kSerialProbe,
-                          "auto",
-                          {"has connectionType"}});
-#endif
-#ifdef ALPACACORE_ENABLE_CELESTRON
-        probes.push_back({"empty connectionType (#508 item 3)",
-                          "celestron",
-                          "telescope",
-                          "Telescope",
-                          R"({"connectionType":""})",
-                          kSerialProbe,
-                          "auto",
-                          {"has connectionType"}});
-#endif
-#ifdef ALPACACORE_ENABLE_ONSTEP
-        probes.push_back({"empty connectionType (#508 item 3)",
-                          "onstep",
-                          "telescope",
-                          "Telescope",
-                          R"({"connectionType":""})",
-                          kSerialProbe,
-                          "auto",
-                          {"has connectionType"}});
-#endif
-#ifdef ALPACACORE_ENABLE_GEMINI
-        probes.push_back({"serial with empty portPath (#508 item 1)",
-                          "gemini",
-                          "focuser",
-                          "Focuser",
-                          R"({"connectionType":"serial","portPath":""})",
-                          kSerialProbe,
-                          "",
-                          {"Serial port path is required"}});
-#endif
-#ifdef ALPACACORE_ENABLE_QHY
-        probes.push_back({"serial with empty portPath (#508 item 1)",
-                          "qhy",
-                          "focuser",
-                          "Focuser",
-                          R"({"connectionType":"serial","portPath":""})",
-                          kSerialProbe,
-                          "",
-                          {"Serial port path is required"}});
-#endif
-        for (const auto& pr : probes) {
-            nlohmann::json posted = nlohmann::json::parse(pr.posted);
-            posted.update({{"vendor", pr.vendor}, {"deviceType", pr.device_type}, {"deviceNumber", ++next_number}});
-            const std::string label = pr.vendor + "/" + pr.device_type + " " + pr.label;
-
-            const auto api = api_attempt(router, posted, pr.alpaca_type);
-            if (!api.ok && api.message.find(pr.probe_fragment) == std::string::npos) {
-                std::cerr << "#647 probe pin differs for " << label << "\n  API error: " << api.message << "\n";
-            }
-            EXPECT(api.ok || api.message.find(pr.probe_fragment) != std::string::npos);
-            if (api.ok) {
-                remove_device(router, pr.vendor, pr.device_type, posted["deviceNumber"].get<int>());
-            }
-
-            const auto persisted = persisted_attempt(posted, pr.alpaca_type);
-            // Saved and API configs meet the same probe, so they agree, and
-            // when the probe finds nothing the constructor throws, the load
-            // logs it at ERROR and the entry is dropped.
-            EXPECT(persisted.listed == api.ok);
-            if (!persisted.listed) {
-                if (!any_warning_contains(persisted.errors, "Failed to load persisted device: " + api.message)) {
-                    std::cerr << "#647 probe pin differs for " << label << "\n  API error: " << api.message << "\n";
-                    for (const auto& w : persisted.errors) {
-                        std::cerr << "  WARN: " << w << "\n";
-                    }
-                }
-                EXPECT(any_warning_contains(persisted.errors, "Failed to load persisted device: " + api.message));
-            }
-            for (const auto& fragment : pr.no_warn) {
-                if (any_warning_contains(persisted.warnings, fragment)) {
-                    std::cerr << "#647 probe pin: unexpected WARN fragment \"" << fragment << "\" for " << label
-                              << "\n";
-                }
-                EXPECT(!any_warning_contains(persisted.warnings, fragment));
-                EXPECT(api.message.find(fragment) == std::string::npos);
-            }
-
-            if (!pr.same_as.empty()) {
-                nlohmann::json explicit_posted = posted;
-                explicit_posted["connectionType"] = pr.same_as;
-                explicit_posted["deviceNumber"] = ++next_number;
-                const auto explicit_api = api_attempt(router, explicit_posted, pr.alpaca_type);
-                EXPECT(explicit_api.ok == api.ok);
-                EXPECT(explicit_api.message == api.message);
-                if (explicit_api.ok) {
-                    remove_device(router, pr.vendor, pr.device_type, explicit_posted["deviceNumber"].get<int>());
-                }
-            }
         }
     }
 
