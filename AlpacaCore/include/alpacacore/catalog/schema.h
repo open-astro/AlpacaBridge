@@ -140,7 +140,12 @@ struct Schema {
     std::string_view display_name;
     std::string_view build_option;
     std::span<const FieldRef> fields;
-    // Cross-field rules only. Optional.
+    // Cross-field rules only. Optional. Must return the FULL config in
+    // NormalizeResult::config (copy the input, then adjust); the result replaces
+    // the config on success. A rejection's config is ignored. A NaN in a ranged
+    // numeric field is out of range, like read_site_coordinates().
+    // Lifetime: display_name, build_option, fields and everything FieldRef points
+    // at are borrowed, not copied. They must be static or outlive the catalog.
     std::function<NormalizeResult(const DeviceConfig&, Source)> normalize;
 };
 

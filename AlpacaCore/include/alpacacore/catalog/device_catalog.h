@@ -44,7 +44,9 @@ public:
     // NormalizeResult::rejection and the config is returned as given.
     // Source::Persisted: every failure becomes a warning and the config is
     // normalized so the device still registers (missing required stays absent,
-    // out-of-enum becomes the default, out-of-range becomes unset).
+    // out-of-enum becomes the default, out-of-range becomes unset). A wrong-type
+    // value is a failure too (Api rejects, Persisted erases it). An int64 in a Double
+    // field is wrong-type, so the JSON bridge must coerce by FieldRef::Kind first.
     NormalizeResult normalize(const DeviceKey& key, const DeviceConfig& in, Source source) const;
 
     // Every declared field except Role::Secret, recursing into record lists.
@@ -66,7 +68,7 @@ private:
     std::vector<Factory> factories_;
 };
 
-// Empty until the vendor-descriptor slices land (next slices of #650's plan).
+// Empty until the vendor-descriptor slices land (see docs/decisions/0004-device-catalog.md).
 void register_builtin_schemas(DeviceCatalog& catalog);
 void register_builtin_factories(DeviceCatalog& catalog);
 

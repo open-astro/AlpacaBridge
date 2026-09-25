@@ -75,7 +75,7 @@ DeviceConfig normalize_fields(std::span<const FieldRef> fields, const DeviceConf
         } else if (f.kind == FieldRef::Kind::Int || f.kind == FieldRef::Kind::Double) {
             const double d =
                 f.kind == FieldRef::Kind::Int ? static_cast<double>(std::get<std::int64_t>(*v)) : std::get<double>(*v);
-            if ((f.min && d < *f.min) || (f.max && d > *f.max)) {
+            if ((f.min && !(d >= *f.min)) || (f.max && !(d <= *f.max))) {
                 std::string range = "out of range";
                 if (f.min) range += " (min " + std::to_string(*f.min) + ")";
                 if (f.max) range += " (max " + std::to_string(*f.max) + ")";
@@ -162,7 +162,8 @@ NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfi
             cross.warnings.push_back(*cross.rejection);
         }
         for (auto& w : cross.warnings) result.warnings.push_back(std::move(w));
-        result.config = std::move(cross.config);
+        // A rejected Persisted config keeps the per-field result: the device must still register.
+        if (!cross.rejection) result.config = std::move(cross.config);
     }
     return result;
 }
