@@ -211,19 +211,12 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             auto& s = dynamic_cast<alpacacore::SwitchDriver&>(d);
             p.push_back({"get_switch(0)", [&] { (void)s.get_switch(0); }});
             p.push_back({"get_switch_value(0)", [&] { (void)s.get_switch_value(0); }});
-            // Write probe on the first writable id: iOptron's iMate switch 0 is a read-only
-            // pass-through that throws NotImplemented before the connection check (AGENTS.md).
-            int writable = -1;
-            try {
-                for (int id = 0; id < s.get_max_switch() && writable < 0; ++id) {
-                    if (s.get_can_write(id)) writable = id;
-                }
-            } catch (const AlpacaException&) {
-                // max_switch not answerable while disconnected: no write probe for this driver.
-            }
-            if (writable >= 0) {
-                p.push_back({"set_switch(writable)", [&s, writable] { s.set_switch(writable, false); }});
-            }
+            // Write probe on the id the registry entry names (never scanned from CanWrite, which throws
+            // NotConnected on most switches while disconnected and used to drop the probe silently).
+            // iOptron's iMate switch 0 is a read-only pass-through that throws NotImplemented before the
+            // connection check (AGENTS.md), which is why the id is named per entry.
+            const int writable = pins != nullptr ? pins->switch_writable_id : 0;
+            p.push_back({"set_switch(writable id)", [&s, writable] { s.set_switch(writable, false); }});
             break;
         }
         case DeviceType::FilterWheel: {
@@ -360,6 +353,26 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
         CHECK(thrown_code(fn) == err::NotConnected);
+    }
+    if (e.type == DeviceType::Switch) {
+        auto& s = dynamic_cast<alpacacore::SwitchDriver&>(*d);
+        const int id = e.switch_writable_id;
+        INFO(e.id << " switch_caps_source: " << e.switch_caps_source);
+        REQUIRE(id >= 0);
+        REQUIRE(std::string(e.switch_caps_source).size() > 0);
+        using alpacacore::test::contract::DisconnectedRead;
+        // Static: the read returns. NotConnected: it throws that code. Any other code is a defect.
+        const auto expect = [&](const char* name, DisconnectedRead mode, const std::function<void()>& fn) {
+            INFO(e.id << " " << name);
+            CHECK(thrown_code(fn) == (mode == DisconnectedRead::Static ? -1 : err::NotConnected));
+        };
+        expect("get_max_switch", e.switch_max_disconnected, [&] { (void)s.get_max_switch(); });
+        expect("get_can_write(id)", e.switch_caps_disconnected, [&] { (void)s.get_can_write(id); });
+        expect("get_can_async(id)", e.switch_caps_disconnected, [&] { (void)s.get_can_async(id); });
+        if (e.switch_max_disconnected == DisconnectedRead::Static) {
+            INFO(e.id << " writable id " << id << " must be inside the static MaxSwitch");
+            CHECK(s.get_max_switch() > id);
+        }
     }
     if (e.type == DeviceType::Camera) {
         // Pin today's behaviour so fixing the driver fails this and removes the expectation.

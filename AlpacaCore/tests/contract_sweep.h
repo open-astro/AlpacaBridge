@@ -129,10 +129,13 @@ using DriverFactory = std::function<std::unique_ptr<AlpacaDriver>(int device_num
 // can_move_axis), camera, rotator. Excluded, with the reason:
 //  - focuser, filter wheel, cover calibrator, observing conditions: the interface (AlpacaCore/include/
 //    alpacacore/*_driver.h) declares no Can* getter. The focuser's Absolute is read as one.
-//  - switch: CanWrite(id) and CanAsync(id) take an id. zwo, gemini, playerone, wandererastro and the ToupTek
-//    thermal switch throw NotConnected from them (validate the id, then ensure_connected()); ioptron and the
-//    ToupTek StellaVita and the ASIAIR drivers return static config. Which is the contract is not settled by
-//    AGENTS.md or a protocol document, so the sweep pins neither (assumption: no source says).
+//  - switch: CanWrite(id), CanAsync(id) and MaxSwitch while disconnected may answer from static configuration
+//    or throw NotConnected; any other code is a defect (decided in #655). Each switch entry states which of the
+//    two its driver does, with its source, and names a writable id that the set_switch probe uses. The
+//    sweep pins exactly the stated mode, so a driver that changes flips the case and the entry is updated.
+// How a per-id capability read behaves while disconnected: answered from static configuration, or NotConnected.
+enum class DisconnectedRead { Static, NotConnected };
+
 struct ContractEntry {
     const char* id;           // "<vendor>_<devicetype>", the ctest case name stem
     const char* vendor;       // router vendor string
@@ -159,6 +162,14 @@ struct ContractEntry {
     // issue and the source; the sweep pins today's behaviour until it is fixed.
     const char* image_ready_known_defect = nullptr;
     const char* ccd_temperature_known_defect = nullptr;
+    // Switch only (with_switch_caps): what MaxSwitch and CanWrite/CanAsync do while disconnected, where that
+    // is read from, and a writable id for the set_switch probe. A writable id is one whose writability the
+    // driver checks BEFORE the connection (iOptron, ToupTek StellaVita: a read-only port would answer
+    // NotImplemented) or that the connected device reports writable (the rest check the connection first).
+    DisconnectedRead switch_max_disconnected = DisconnectedRead::Static;
+    DisconnectedRead switch_caps_disconnected = DisconnectedRead::Static;
+    int switch_writable_id = -1;
+    const char* switch_caps_source = "";
 };
 
 // Platform 7 interface versions per device type.
@@ -244,6 +255,15 @@ inline ContractEntry with_command_passthrough(ContractEntry e) {
     return e;
 }
 
+inline ContractEntry with_switch_caps(ContractEntry e, DisconnectedRead max_switch, DisconnectedRead can_write_async,
+                                      int writable_id, const char* source) {
+    e.switch_max_disconnected = max_switch;
+    e.switch_caps_disconnected = can_write_async;
+    e.switch_writable_id = writable_id;
+    e.switch_caps_source = source;
+    return e;
+}
+
 // Source strings, kept short so every entry states one.
 inline constexpr const char* kSrcAgents =
     "protocol document: AGENTS.md ASCOM contract precedence + ASCOM Platform 7 interface docs; "
@@ -291,29 +311,38 @@ inline ContractEntry contract_entry_zwo_rotator() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_zwo_switch() {
-    return make_entry(
+    return with_switch_caps(
+        make_entry(
         "zwo_switch", "zwo", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::zwo::create_zwo_dew_heater_switch_by_index(n, 0); },
         "protocol document: AGENTS.md + ASCOM ISwitchV3; assumption: the ASIAIR switch drivers behind the same "
-        "router arm have their own entries below");
+        "router arm have their own entries below"),
+        DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
+        "zwo_switch_driver.cpp:188-203: MaxSwitch returns 1; CanWrite and CanAsync validate the id then ensure_connected()");
 }
 // Second and third backends behind the same (zwo, switch) router pair: the on-board GPIO switch of the
 // ASIAIR Pro and Plus (Pi CM4), and the ASIAIR Plus (RK3568) switch.
 inline ContractEntry contract_entry_zwo_switch_asiair() {
-    return make_entry(
+    return with_switch_caps(
+        make_entry(
         "zwo_switch_asiair", "zwo", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> {
             return vendor::zwo::create_zwo_asiair_switch(n, vendor::zwo::default_asiair_pro_config());
         },
-        kSrcAgents);
+        kSrcAgents),
+        DisconnectedRead::Static, DisconnectedRead::Static, 0,
+        "zwo_asiair_switch_driver.cpp:156-168: MaxSwitch is the configured port count; CanWrite is true and CanAsync false, both after validate_id only");
 }
 inline ContractEntry contract_entry_zwo_switch_asiair_plus() {
-    return make_entry(
+    return with_switch_caps(
+        make_entry(
         "zwo_switch_asiair_plus", "zwo", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> {
             return vendor::zwo::create_zwo_asiair_plus_switch(n, vendor::zwo::default_asiair_plus_rk3568_config());
         },
-        kSrcAgents);
+        kSrcAgents),
+        DisconnectedRead::Static, DisconnectedRead::Static, 0,
+        "zwo_asiair_plus_switch_driver.cpp:193-205: MaxSwitch is the configured port count; CanWrite is true and CanAsync false, both after validate_id only");
 }
 #endif
 
@@ -377,12 +406,15 @@ inline ContractEntry contract_entry_ioptron_filterwheel() {
 
 #if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
 inline ContractEntry contract_entry_ioptron_switch() {
-    return make_entry(
+    return with_switch_caps(
+        make_entry(
         "ioptron_switch", "ioptron", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> {
             return vendor::ioptron::create_ioptron_switch(n, vendor::ioptron::default_imate_powerbox_config());
         },
-        kSrcAgents);
+        kSrcAgents),
+        DisconnectedRead::Static, DisconnectedRead::Static, 1,
+        "ioptron_switch_driver.cpp:151-161 and the iMate config at :32-42: static port table; id 0 (DC3 always on) is read-only, id 1 (DC1) is writable");
 }
 #endif
 
@@ -415,10 +447,13 @@ inline ContractEntry contract_entry_playerone_filterwheel() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_playerone_switch() {
-    return make_entry(
+    return with_switch_caps(
+        make_entry(
         "playerone_switch", "playerone", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::playerone::create_playerone_switch(n, 0); },
-        kSrcAgents);
+        kSrcAgents),
+        DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
+        "playerone_switch_driver.cpp:181-199: MaxSwitch returns kMaxThermalElements while disconnected; CanWrite and CanAsync ensure_connected()");
 }
 #endif
 
@@ -540,10 +575,13 @@ inline ContractEntry contract_entry_gemini_focuser() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_gemini_switch() {
-    return make_entry(
+    return with_switch_caps(
+        make_entry(
         "gemini_switch", "gemini", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::gemini::create_gemini_pdh_switch(n, "/dev/null"); },
-        kSrcAgents);
+        kSrcAgents),
+        DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
+        "gemini_pdh_switch_driver.cpp:285-298 and kSwitches: MaxSwitch is kPdhSwitchCount; CanWrite and CanAsync ensure_connected(); id 0 (USB A) is writable");
 }
 #endif
 
@@ -589,21 +627,27 @@ inline ContractEntry contract_entry_touptek_focuser() {
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 // Second backend behind the same (touptek, switch) router pair; needs no libgpiod.
 inline ContractEntry contract_entry_touptek_switch_thermal() {
-    return make_entry(
+    return with_switch_caps(
+        make_entry(
         "touptek_switch_thermal", "touptek", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::touptek::create_touptek_thermal_switch(n, 0); },
-        kSrcAgents);
+        kSrcAgents),
+        DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
+        "touptek_thermal_switch_driver.cpp:191-212: MaxSwitch is the probed count or the kMaxThermalElements upper bound; CanWrite and CanAsync ensure_connected()");
 }
 #endif
 
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 inline ContractEntry contract_entry_touptek_switch() {
-    return make_entry(
+    return with_switch_caps(
+        make_entry(
         "touptek_switch", "touptek", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> {
             return vendor::touptek::create_touptek_switch(n, vendor::touptek::default_stellavita_config());
         },
-        kSrcAgents);
+        kSrcAgents),
+        DisconnectedRead::Static, DisconnectedRead::Static, 0,
+        "touptek_switch_driver.cpp:154-164 and the StellaVita config at :38-45: static port table, all four ports writable");
 }
 #endif
 
@@ -633,12 +677,15 @@ inline ContractEntry contract_entry_wandererastro_rotator() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_wandererastro_switch() {
-    return make_entry(
+    return with_switch_caps(
+        make_entry(
         "wandererastro_switch", "wandererastro", "switch", DeviceType::Switch,
         [](int n) -> std::unique_ptr<AlpacaDriver> {
             return vendor::wandererastro::create_wandererastro_box_switch(n, "/dev/null");
         },
-        kSrcAgents);
+        kSrcAgents),
+        DisconnectedRead::Static, DisconnectedRead::NotConnected, 2,
+        "wandererastro_box_switch_driver.cpp:258-271 and kSwitches: MaxSwitch is kBoxSwitchCount; CanWrite and CanAsync ensure_connected(); ids 0-1 are read-only, id 2 (DC3-4) is writable");
 }
 #endif
 
