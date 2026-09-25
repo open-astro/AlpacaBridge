@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -420,4 +421,111 @@ TEST_CASE("Persisted record with bad fields warns with the index and keeps the d
     CHECK(mentions(r.warnings[0], "ports[1].name"));
     CHECK(mentions(r.warnings[1], "ports[1].maxValue"));
     CHECK(r.config.get(ports_field()).size() == 2);
+}
+
+TEST_CASE("A value of the wrong type is rejected from the API and erased from a persisted config", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+    DeviceConfig cfg = valid_config();
+    cfg.set("pollMs", std::string{"1000"});  // declared int64
+
+    CHECK_FALSE(cfg.find(kPollMs).has_value());  // find() gives nullopt for a different type
+
+    auto api = catalog.normalize(kStubKey, cfg, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(mentions(*api.rejection, "pollMs"));
+    CHECK(mentions(*api.rejection, "wrong type"));
+
+    auto persisted = catalog.normalize(kStubKey, cfg, Source::Persisted);
+    CHECK_FALSE(persisted.rejection.has_value());
+    REQUIRE(persisted.warnings.size() == 1);
+    CHECK(mentions(persisted.warnings[0], "pollMs"));
+    CHECK_FALSE(persisted.config.has("pollMs"));  // erased, not kept with the wrong type
+
+    // The same rule applies inside a record: an int64 where the record declares a double.
+    DeviceConfig port = make_port("p1");
+    port.set("maxValue", std::int64_t{50});
+    DeviceConfig with_ports = valid_config();
+    with_ports.set("ports", std::vector<DeviceConfig>{port});
+    auto nested = catalog.normalize(kStubKey, with_ports, Source::Api);
+    REQUIRE(nested.rejection.has_value());
+    CHECK(mentions(*nested.rejection, "ports[0].maxValue"));
+}
+
+TEST_CASE("An unknown key is rejected from the API, warned for persisted, and cannot be created", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+    const DeviceKey unknown{"nosuchvendor", DeviceType::Switch};
+    const DeviceConfig cfg = valid_config();
+
+    auto api = catalog.normalize(unknown, cfg, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(mentions(*api.rejection, "unknown device"));
+
+    auto persisted = catalog.normalize(unknown, cfg, Source::Persisted);
+    CHECK_FALSE(persisted.rejection.has_value());
+    REQUIRE(persisted.warnings.size() == 1);
+    CHECK(mentions(persisted.warnings[0], "unknown device"));
+    CHECK(persisted.config.has("portPath"));  // the config comes back as given
+
+    CHECK(catalog.sanitize(unknown, cfg).find_value("portPath") == nullptr);
+
+    try {
+        (void)catalog.create(unknown, cfg, 1);
+        FAIL("create should have thrown");
+    } catch (const std::runtime_error& e) {
+        CHECK(mentions(e.what(), "cannot create unknown device"));
+    }
+}
+
+TEST_CASE("Adding a schema or factory with an existing key replaces it", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+
+    Schema replacement;
+    replacement.key = kStubKey;
+    replacement.display_name = "Replaced Switch";
+    replacement.build_option = "ALPACACORE_ENABLE_STUB";
+    replacement.fields = stub_fields();
+    catalog.add(std::move(replacement));
+    catalog.add(Factory{kStubKey, [](const DeviceConfig&, int n) {
+                            return std::unique_ptr<AlpacaDriver>(new StubDriver(n + 100));
+                        }});
+
+    auto v = catalog.describe();
+    REQUIRE(v.size() == 1);  // one entry per key, not two
+    CHECK(v[0].display_name == "Replaced Switch");
+    CHECK(v[0].available);
+    auto d = catalog.create(kStubKey, valid_config(), 7);
+    REQUIRE(d != nullptr);
+    CHECK(d->get_device_number() == 107);  // the replacement factory built it
+}
+
+TEST_CASE("Sanitize drops a secret inside a record list", "[catalog]") {
+    const Field<std::string> account_name{.key = "name", .default_value = ""};
+    const Field<std::string> account_token{.key = "token", .default_value = "", .role = Role::Secret};
+    const std::vector<FieldRef> account_fields{account_name.ref(), account_token.ref()};
+    const Field<std::vector<DeviceConfig>> accounts{
+        .key = "accounts", .default_value = {}, .record_fields = account_fields};
+    const std::vector<FieldRef> fields{accounts.ref()};
+
+    DeviceCatalog catalog;
+    const DeviceKey key{"secretrecords", DeviceType::Switch};
+    Schema schema;
+    schema.key = key;
+    schema.display_name = "Secret Records";
+    schema.build_option = "ALPACACORE_ENABLE_STUB";
+    schema.fields = fields;
+    catalog.add(std::move(schema));
+
+    DeviceConfig account;
+    account.set("name", std::string{"main"});
+    account.set("token", std::string{"hunter2"});
+    DeviceConfig cfg;
+    cfg.set("accounts", std::vector<DeviceConfig>{account});
+
+    auto clean = catalog.sanitize(key, cfg).get(accounts);
+    REQUIRE(clean.size() == 1);
+    CHECK(clean[0].find(account_name) == std::optional<std::string>{"main"});
+    CHECK_FALSE(clean[0].has("token"));
 }
