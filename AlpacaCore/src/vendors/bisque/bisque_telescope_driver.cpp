@@ -314,6 +314,7 @@ public:
 
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         return parked_;
     }
 

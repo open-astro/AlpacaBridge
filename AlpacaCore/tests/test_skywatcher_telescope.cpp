@@ -198,8 +198,9 @@ TEST_CASE("SkyWatcher Telescope Driver - Value range validation", "[skywatcher][
 TEST_CASE("SkyWatcher Telescope Driver - State machine", "[skywatcher][telescope][unit]") {
     auto driver = make_driver(0);
 
-    // Disconnected state machine facts that need no hardware.
-    CHECK_FALSE(driver->get_at_park());
+    // Disconnected state machine facts that need no hardware. AtPark throws NotConnected like every other
+    // operational property (open-astro#656); it used to return the driver-side parked_ flag.
+    require_alpaca_error([&] { (void)driver->get_at_park(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(driver->get_at_home());
     CHECK(driver->get_declination_rate() == 0.0);
     CHECK(driver->get_right_ascension_rate() == 0.0);
