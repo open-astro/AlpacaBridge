@@ -21,12 +21,18 @@ namespace {
 
 bool matches_kind(FieldRef::Kind kind, const ConfigValue& v) {
     switch (kind) {
-        case FieldRef::Kind::Bool: return std::holds_alternative<bool>(v);
-        case FieldRef::Kind::Int: return std::holds_alternative<std::int64_t>(v);
-        case FieldRef::Kind::Double: return std::holds_alternative<double>(v);
-        case FieldRef::Kind::String: return std::holds_alternative<std::string>(v);
-        case FieldRef::Kind::StringList: return std::holds_alternative<std::vector<std::string>>(v);
-        case FieldRef::Kind::RecordList: return std::holds_alternative<std::vector<DeviceConfig>>(v);
+        case FieldRef::Kind::Bool:
+            return std::holds_alternative<bool>(v);
+        case FieldRef::Kind::Int:
+            return std::holds_alternative<std::int64_t>(v);
+        case FieldRef::Kind::Double:
+            return std::holds_alternative<double>(v);
+        case FieldRef::Kind::String:
+            return std::holds_alternative<std::string>(v);
+        case FieldRef::Kind::StringList:
+            return std::holds_alternative<std::vector<std::string>>(v);
+        case FieldRef::Kind::RecordList:
+            return std::holds_alternative<std::vector<DeviceConfig>>(v);
     }
     return false;
 }
@@ -43,9 +49,7 @@ std::string allowed_list(const FieldRef& f) {
 // Applies the per-field rules to `in`, appending one message per failure.
 // The returned config is the Persisted normalization; Api callers use only
 // the messages.
-DeviceConfig normalize_fields(std::span<const FieldRef> fields,
-                              const DeviceConfig& in,
-                              const std::string& prefix,
+DeviceConfig normalize_fields(std::span<const FieldRef> fields, const DeviceConfig& in, const std::string& prefix,
                               std::vector<std::string>& messages) {
     DeviceConfig out = in;
     for (const FieldRef& f : fields) {
@@ -69,9 +73,8 @@ DeviceConfig normalize_fields(std::span<const FieldRef> fields,
                 out.set(f.key, f.default_value);
             }
         } else if (f.kind == FieldRef::Kind::Int || f.kind == FieldRef::Kind::Double) {
-            const double d = f.kind == FieldRef::Kind::Int
-                                 ? static_cast<double>(std::get<std::int64_t>(*v))
-                                 : std::get<double>(*v);
+            const double d =
+                f.kind == FieldRef::Kind::Int ? static_cast<double>(std::get<std::int64_t>(*v)) : std::get<double>(*v);
             if ((f.min && d < *f.min) || (f.max && d > *f.max)) {
                 std::string range = "out of range";
                 if (f.min) range += " (min " + std::to_string(*f.min) + ")";
@@ -82,8 +85,8 @@ DeviceConfig normalize_fields(std::span<const FieldRef> fields,
         } else if (f.kind == FieldRef::Kind::RecordList) {
             std::vector<DeviceConfig> records = std::get<std::vector<DeviceConfig>>(*v);
             for (std::size_t i = 0; i < records.size(); ++i) {
-                records[i] = normalize_fields(f.record_fields, records[i],
-                                              name + "[" + std::to_string(i) + "].", messages);
+                records[i] =
+                    normalize_fields(f.record_fields, records[i], name + "[" + std::to_string(i) + "].", messages);
             }
             out.set(f.key, std::move(records));
         }
@@ -111,9 +114,7 @@ DeviceConfig sanitize_fields(std::span<const FieldRef> fields, const DeviceConfi
     return out;
 }
 
-std::string describe_key(const DeviceKey& k) {
-    return "'" + k.vendor + "' " + device_type_to_string(k.type);
-}
+std::string describe_key(const DeviceKey& k) { return "'" + k.vendor + "' " + device_type_to_string(k.type); }
 
 }  // namespace
 
@@ -126,16 +127,16 @@ std::vector<DescriptorView> DeviceCatalog::describe() const {
     return views;
 }
 
-NormalizeResult DeviceCatalog::normalize(const DeviceKey& key,
-                                         const DeviceConfig& in,
-                                         Source source) const {
+NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfig& in, Source source) const {
     NormalizeResult result;
     result.config = in;
     const Schema* schema = find_schema(key);
     if (!schema) {
         std::string msg = "unknown device " + describe_key(key);
-        if (source == Source::Api) result.rejection = msg;
-        else result.warnings.push_back(msg);
+        if (source == Source::Api)
+            result.rejection = msg;
+        else
+            result.warnings.push_back(msg);
         return result;
     }
 
@@ -171,8 +172,7 @@ DeviceConfig DeviceCatalog::sanitize(const DeviceKey& key, const DeviceConfig& i
     return schema ? sanitize_fields(schema->fields, in) : DeviceConfig{};
 }
 
-std::unique_ptr<AlpacaDriver> DeviceCatalog::create(const DeviceKey& key,
-                                                    const DeviceConfig& normalized,
+std::unique_ptr<AlpacaDriver> DeviceCatalog::create(const DeviceKey& key, const DeviceConfig& normalized,
                                                     int device_number) const {
     const Schema* schema = find_schema(key);
     if (!schema) {

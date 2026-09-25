@@ -54,12 +54,10 @@ public:
 
     // Requires a factory. Throws std::runtime_error naming Schema::build_option
     // when the key has a schema but no factory, or naming the key when unknown.
-    std::unique_ptr<AlpacaDriver> create(const DeviceKey& key,
-                                         const DeviceConfig& normalized,
-                                         int device_number) const;
+    std::unique_ptr<AlpacaDriver> create(const DeviceKey& key, const DeviceConfig& normalized, int device_number) const;
 
-    void add(Schema schema);   // replaces a schema with the same key
-    void add(Factory factory); // replaces a factory with the same key
+    void add(Schema schema);    // replaces a schema with the same key
+    void add(Factory factory);  // replaces a factory with the same key
 
 private:
     const Schema* find_schema(const DeviceKey& key) const;

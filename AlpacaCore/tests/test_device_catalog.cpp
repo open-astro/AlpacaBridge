@@ -61,8 +61,8 @@ private:
 
 const char* const kSwitchTypes[] = {"basic", "stellavita"};
 
-const Field<std::string> kSwitchType{.key = "switchType", .default_value = "basic",
-                                     .role = Role::Discriminator, .allowed_values = kSwitchTypes};
+const Field<std::string> kSwitchType{
+    .key = "switchType", .default_value = "basic", .role = Role::Discriminator, .allowed_values = kSwitchTypes};
 const Field<std::string> kPortName{.key = "name", .default_value = "", .required = true};
 const Field<bool> kPortPwm{.key = "pwm", .default_value = false};
 const Field<double> kPortMax{.key = "maxValue", .default_value = 100.0, .min = 0.0, .max = 100.0};
@@ -78,24 +78,22 @@ const Field<std::vector<DeviceConfig>>& ports_field() {
     return f;
 }
 const Field<std::vector<std::string>> kFilterNames{.key = "filterNames", .default_value = {}};
-const Field<std::int64_t> kEnumIndex{.key = "enumerationIndex", .default_value = 0,
-                                     .role = Role::EnumerationIndex, .min = 0};
+const Field<std::int64_t> kEnumIndex{
+    .key = "enumerationIndex", .default_value = 0, .role = Role::EnumerationIndex, .min = 0};
 const Field<std::string> kDeviceId{.key = "deviceId", .default_value = "", .role = Role::DeviceId};
-const Field<std::string> kPortPath{.key = "portPath", .default_value = "", .required = true,
-                                   .role = Role::PortPath};
+const Field<std::string> kPortPath{.key = "portPath", .default_value = "", .required = true, .role = Role::PortPath};
 const Field<std::string> kHost{.key = "host", .default_value = "", .role = Role::Host};
 const Field<std::string> kApiKey{.key = "apiKey", .default_value = "", .role = Role::Secret};
-const Field<std::int64_t> kStellaChannel{.key = "stellaVitaChannel", .default_value = 0,
-                                         .applies_when = AppliesWhen{"switchType", "stellavita"}};
+const Field<std::int64_t> kStellaChannel{
+    .key = "stellaVitaChannel", .default_value = 0, .applies_when = AppliesWhen{"switchType", "stellavita"}};
 const Field<std::int64_t> kPollMs{.key = "pollMs", .default_value = 1000, .min = 100, .max = 60000};
 
 const DeviceKey kStubKey{"stub", DeviceType::Switch};
 
 const std::vector<FieldRef>& stub_fields() {
     static const std::vector<FieldRef> f{
-        kSwitchType.ref(), ports_field().ref(), kFilterNames.ref(), kEnumIndex.ref(),
-        kDeviceId.ref(),   kPortPath.ref(),     kHost.ref(),        kApiKey.ref(),
-        kStellaChannel.ref(), kPollMs.ref()};
+        kSwitchType.ref(), ports_field().ref(), kFilterNames.ref(), kEnumIndex.ref(),     kDeviceId.ref(),
+        kPortPath.ref(),   kHost.ref(),         kApiKey.ref(),      kStellaChannel.ref(), kPollMs.ref()};
     return f;
 }
 
@@ -113,16 +111,17 @@ void register_test_descriptors(DeviceCatalog& catalog, bool with_factory) {
         auto type = in.find(kSwitchType);
         if (type && *type == "stellavita" && !in.find(kStellaChannel)) {
             std::string msg = "stellaVitaChannel is required when switchType is stellavita";
-            if (source == Source::Api) r.rejection = msg;
-            else r.warnings.push_back(msg);
+            if (source == Source::Api)
+                r.rejection = msg;
+            else
+                r.warnings.push_back(msg);
         }
         return r;
     };
     catalog.add(std::move(schema));
     if (with_factory) {
-        catalog.add(Factory{kStubKey, [](const DeviceConfig&, int n) {
-                                return std::unique_ptr<AlpacaDriver>(new StubDriver(n));
-                            }});
+        catalog.add(Factory{
+            kStubKey, [](const DeviceConfig&, int n) { return std::unique_ptr<AlpacaDriver>(new StubDriver(n)); }});
     }
 }
 
@@ -142,9 +141,7 @@ DeviceConfig make_port(const std::string& name, bool has_name = true) {
     return p;
 }
 
-bool mentions(const std::string& s, const std::string& what) {
-    return s.find(what) != std::string::npos;
-}
+bool mentions(const std::string& s, const std::string& what) { return s.find(what) != std::string::npos; }
 
 }  // namespace
 

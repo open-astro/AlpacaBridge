@@ -37,8 +37,7 @@ void DeviceConfig::set(std::string_view key, ConfigValue value) {
 bool DeviceConfig::has(std::string_view key) const { return find_value(key) != nullptr; }
 
 void DeviceConfig::erase(std::string_view key) {
-    entries_.erase(std::remove_if(entries_.begin(), entries_.end(),
-                                  [&](const auto& e) { return e.first == key; }),
+    entries_.erase(std::remove_if(entries_.begin(), entries_.end(), [&](const auto& e) { return e.first == key; }),
                    entries_.end());
 }
 

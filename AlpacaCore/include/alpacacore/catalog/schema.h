@@ -64,8 +64,8 @@ struct FieldRef {
     Role role = Role::Plain;
     bool required = false;
     std::optional<AppliesWhen> applies_when;
-    std::span<const FieldRef> record_fields;       // RecordList only
-    std::span<const char* const> allowed_values;   // enum; empty means unconstrained
+    std::span<const FieldRef> record_fields;      // RecordList only
+    std::span<const char* const> allowed_values;  // enum; empty means unconstrained
     std::optional<double> min;
     std::optional<double> max;
     ConfigValue default_value;
@@ -78,8 +78,8 @@ struct Field {
     bool required = false;
     Role role = Role::Plain;
     std::optional<AppliesWhen> applies_when;
-    std::span<const FieldRef> record_fields;       // vector<DeviceConfig> only
-    std::span<const char* const> allowed_values;   // string enums
+    std::span<const FieldRef> record_fields;      // vector<DeviceConfig> only
+    std::span<const char* const> allowed_values;  // string enums
     std::optional<T> min;
     std::optional<T> max;
 

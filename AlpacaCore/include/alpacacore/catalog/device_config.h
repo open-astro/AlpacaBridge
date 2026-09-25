@@ -38,12 +38,9 @@ struct Field;
 
 class DeviceConfig;
 
-using ConfigValue = std::variant<bool,
-                                 std::int64_t,
-                                 double,
-                                 std::string,
-                                 std::vector<std::string>,   // filterNames
-                                 std::vector<DeviceConfig>>; // ports[]: one nested config per record
+using ConfigValue = std::variant<bool, std::int64_t, double, std::string,
+                                 std::vector<std::string>,    // filterNames
+                                 std::vector<DeviceConfig>>;  // ports[]: one nested config per record
 
 class DeviceConfig {
 public:
