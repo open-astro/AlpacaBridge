@@ -162,6 +162,32 @@ def router_pairs(router_text: str) -> set[tuple[str, str]]:
 FACTORY_VARIANT_SUFFIXES = ("_by_index", "_by_id", "_auto_network", "_auto", "_with_site")
 
 
+ARM_TOKEN_RE = re.compile(r'\b(?:vendor|device_type_str)\s*[!=]=\s*"|"\s*[!=]=\s*(?:vendor|device_type_str)\b')
+
+
+def unparsed_arm_findings(router_text: str) -> list[str]:
+    """Every vendor / device_type_str comparison in the router function must be part of an arm
+    ARM_RE consumed. A reversed-order or split condition would otherwise drop its pair from the
+    gate without a word."""
+    text = strip_comments(router_text)
+    start = text.find(ROUTER_FUNCTION)
+    if start < 0:
+        return []
+    open_idx = text.find("{", text.find(")", start))
+    close_idx = matching_brace(text, open_idx)
+    if open_idx < 0 or close_idx < 0:
+        return []
+    body = text[open_idx:close_idx]
+    tokens = len(ARM_TOKEN_RE.findall(body))
+    consumed = 2 * len(ARM_RE.findall(body))
+    if tokens == consumed:
+        return []
+    return ["UNPARSED ROUTER ARM: %s %s has %d vendor/device_type_str comparisons but the arm parser "
+            "consumed %d (it reads `vendor == \"x\" && device_type_str == \"y\"` only); an arm written any "
+            "other way is invisible to this gate -- rewrite it in that form or teach ARM_RE"
+            % (ROUTER, ROUTER_FUNCTION.rstrip("("), tokens, consumed)]
+
+
 def normalise_factory(name: str) -> str:
     for suffix in FACTORY_VARIANT_SUFFIXES:
         if name.endswith(suffix):
@@ -191,8 +217,22 @@ def router_backends(router_text: str) -> dict[tuple[str, str], set[str]]:
     return out
 
 
-def registry_factories(header_text: str) -> set[str]:
-    return {normalise_factory(f.group("f")) for f in FACTORY_RE.finditer(strip_comments(header_text))}
+def registry_factories(header_text: str, registered_ids: set[str]) -> set[str]:
+    """The create_* factories called inside contract_entry_<id>() for each REGISTERED id.
+
+    A factory that only appears in a function whose X(<id>) line was deleted, or in a
+    helper outside any entry function, is not swept."""
+    text = strip_comments(header_text)
+    out: set[str] = set()
+    for eid in registered_ids:
+        m = re.search(r"\bcontract_entry_%s\s*\(\s*\)\s*\{" % re.escape(eid), text)
+        if not m:
+            continue
+        close = matching_brace(text, m.end() - 1)
+        if close < 0:
+            continue
+        out |= {normalise_factory(f.group("f")) for f in FACTORY_RE.finditer(text[m.end():close])}
+    return out
 
 
 def registry_entries(header_text: str) -> dict[str, set[str]]:
@@ -270,6 +310,7 @@ def check(root: pathlib.Path) -> list[str]:
     if not pairs:
         failures.append("NO ROUTER ARMS FOUND in %s (%s): the parser is broken or the function moved"
                         % (ROUTER, ROUTER_FUNCTION))
+    failures.extend(unparsed_arm_findings(router_text))
     entries = registry_entries(header_text)
     if not entries:
         failures.append("EMPTY REGISTRY: no X(<vendor>_<type>) entries parsed from %s" % REGISTRY)
@@ -301,7 +342,7 @@ def check(root: pathlib.Path) -> list[str]:
     for pair, want in sorted(router_backends(router_text).items()):
         if pair not in entry_pairs:
             continue  # the pair-level check above owns this
-        have = registry_factories(header_text)
+        have = registry_factories(header_text, set(entries))
         for fac in sorted(want):
             key = (pair[0], pair[1], fac)
             if fac not in have and key not in BACKEND_ALLOWLIST:
@@ -429,8 +470,22 @@ FIX_HEADER = '''
 #define CS_PLAYERONE(X)
 #endif
 #define CONTRACT_SWEEP_ENTRIES(X) CS_BISQUE(X) CS_GEMINI(X) CS_PLAYERONE(X)
-inline auto f1() { return vendor::bisque::create_bisque_telescope(0, conn); }
-inline auto f2() { return vendor::gemini::create_gemini_pdh_switch(0, "/dev/null"); }
+inline ContractEntry contract_entry_bisque_telescope() {
+    return make_entry("bisque_telescope", "bisque", "telescope", DeviceType::Telescope,
+        [](int n) { return vendor::bisque::create_bisque_telescope(n, conn); }, kSrc);
+}
+inline ContractEntry contract_entry_gemini_switch() {
+    return make_entry("gemini_switch", "gemini", "switch", DeviceType::Switch,
+        [](int n) { return vendor::gemini::create_gemini_pdh_switch(n, "/dev/null"); }, kSrc);
+}
+'''
+
+# A second backend's entry function; whether it is registered is decided by the X(...) list.
+FIX_HUB2_FN = '''
+inline ContractEntry contract_entry_gemini_switch_b() {
+    return make_entry("gemini_switch_b", "gemini", "switch", DeviceType::Switch,
+        [](int n) { return vendor::gemini::create_gemini_hub2(n); }, kSrc);
+}
 '''
 
 FIX_CMAKE = '''
@@ -533,6 +588,26 @@ def self_test() -> int:
         expect("three-segment guard mismatch", _run(header=wrong_guard), "GUARD MISMATCH: bisque_telescope_b")
         expect("three-segment orphan", _run(header=FIX_HEADER.replace(
             "X(bisque_telescope)", "X(bisque_telescope) X(bisque_camera_b)")), "ORPHAN ENTRY: bisque_camera_b")
+        # Rule 2b scope: only the body of a REGISTERED entry's function counts. Deleting the X(...) line
+        # but keeping the function must not leave its factory looking swept.
+        hub2_router = FIX_ROUTER.replace(
+            "create_gemini_pdh_switch_by_index(2, 0);",
+            "create_gemini_pdh_switch_by_index(2, 0); auto k = alpacacore::vendor::gemini::create_gemini_hub2(2);")
+        registered = FIX_HEADER.replace("X(gemini_switch)", "X(gemini_switch) X(gemini_switch_b)") + FIX_HUB2_FN
+        expect("backend swept by a registered entry body", _run(router=hub2_router, header=registered), None)
+        expect("X line removed, body kept", _run(router=hub2_router, header=FIX_HEADER + FIX_HUB2_FN),
+               "UNSWEPT BACKEND: the router's gemini/switch arm constructs create_gemini_hub2")
+        # Router arms the parser did not consume: a reversed-order condition would otherwise vanish.
+        expect("reversed-order arm is not skipped silently", _run(router=FIX_ROUTER.replace(
+            "return false;\n}", 'if (device_type_str == "focuser" && vendor == "qhy") { return true; }\n    return false;\n}', 1)),
+            "UNPARSED ROUTER ARM")
+        # A compound guard names every macro; each must be defined for the tests.
+        compound = FIX_HEADER.replace("#ifdef ALPACACORE_ENABLE_GEMINI\n#define CS_GEMINI",
+                                      "#if defined(ALPACACORE_ENABLE_GEMINI) && defined(ALPACACORE_ENABLE_ZWO)\n#define CS_GEMINI")
+        if registry_entries(compound).get("gemini_switch") != {"ALPACACORE_ENABLE_GEMINI", "ALPACACORE_ENABLE_ZWO"}:
+            problems.append("compound #if guard tokens: %r" % registry_entries(compound).get("gemini_switch"))
+        expect("compound guard: second macro undefined for the tests", _run(header=compound),
+               "GUARD NOT DEFINED FOR TESTS: ALPACACORE_ENABLE_ZWO")
         # Rule 3: orphan and guard mismatch.
         expect("orphan", _run(header=FIX_HEADER.replace("X(bisque_telescope)", "X(bisque_telescope) X(bisque_camera)")),
                "ORPHAN ENTRY: bisque_camera")

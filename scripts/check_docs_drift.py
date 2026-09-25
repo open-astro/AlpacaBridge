@@ -1430,6 +1430,9 @@ HELPER_FAKES = {
 }
 
 
+ROSTER_REGISTRY_ID_RE = re.compile(r"\bX\(\s*([a-z0-9]+_[a-z0-9]+(?:_[a-z0-9]+)*)\s*\)")
+
+
 def _fake_roster_findings(header_text, disk_fakes, helpers=None):
     helpers = HELPER_FAKES if helpers is None else helpers
     failures = []
@@ -1439,6 +1442,14 @@ def _fake_roster_findings(header_text, disk_fakes, helpers=None):
         return ["AlpacaCore/tests/contract_sweep.h has no kFakeConnectableRoster rows (or the array moved): "
                 "the roster cannot be pinned to the fakes on disk"]
     rostered = {fake for _, _, fake in rows}
+    # Each row's (vendor, type) must be a pair the registry sweeps: an id is
+    # <vendor>_<devicetype>[_<backend>], so the pair is its first two segments.
+    registry_pairs = {tuple(i.split("_")[:2]) for i in ROSTER_REGISTRY_ID_RE.findall(_strip_comments(header_text))}
+    for vendor, dtype, fake in rows:
+        if (vendor, dtype) not in registry_pairs:
+            failures.append(
+                "kFakeConnectableRoster row {%s, %s, %s} names a (vendor, type) pair with no registry entry: "
+                "correct the row or add the X(%s_%s) entry to CONTRACT_SWEEP_ENTRIES" % (vendor, dtype, fake, vendor, dtype))
     for fake in sorted(disk_fakes):
         if fake not in rostered and fake not in helpers:
             failures.append(
@@ -1860,7 +1871,9 @@ def self_test():
     check("gphoto status: every validated model named passes",
           _gphoto_status_findings(gp_table, "**STATUS: validated: Nikon D3300, Canon EOS 4000D.**\n\nrest\n") == [])
 
-    roster_hdr = ("inline constexpr FakeRosterRow kFakeConnectableRoster[] = {\n"
+    roster_hdr = ("#define CS_ZWO(X) X(zwo_telescope)\n"
+                  "#define CS_GEMINI(X) X(gemini_switch) X(gemini_switch_b)\n"
+                  "inline constexpr FakeRosterRow kFakeConnectableRoster[] = {\n"
                   "    {\"zwo\", \"telescope\", \"fake_mount_server.h\"},\n"
                   "    {\"gemini\", \"switch\", \"fake_gemini_pdh.h\"},\n"
                   "};\n")
@@ -1880,6 +1893,15 @@ def self_test():
     f = _fake_roster_findings(roster_hdr, roster_disk, {"fake_pty_write.h": "h", "fake_gone.h": "h"})
     check("fake roster: a helper whose file is gone is a stale helper",
           any("STALE HELPER_FAKES entry: fake_gone.h does not exist" in x for x in f))
+    f = _fake_roster_findings(roster_hdr.replace('{"zwo", "telescope"', '{"zwoo", "telescope"'), roster_disk, roster_helpers)
+    check("fake roster: a row naming an unknown vendor is flagged",
+          any("zwoo" in x and "no registry entry" in x for x in f))
+    f = _fake_roster_findings(roster_hdr.replace('{"gemini", "switch"', '{"gemini", "focuser"'), roster_disk, roster_helpers)
+    check("fake roster: a row naming a pair the registry lacks is flagged",
+          any("gemini, focuser" in x and "no registry entry" in x for x in f))
+    only_backend = roster_hdr.replace("X(gemini_switch) X(gemini_switch_b)", "X(gemini_switch_b)")
+    check("fake roster: a pair covered only by a second-backend id (three segments) is a registry pair",
+          "X(gemini_switch)" not in only_backend and _fake_roster_findings(only_backend, roster_disk, roster_helpers) == [])
     check("fake roster: a missing roster array is a finding, not a silent pass",
           len(_fake_roster_findings("// nothing here\n", roster_disk, roster_helpers)) == 1)
     check("fake roster: a row inside a comment is not a row",
