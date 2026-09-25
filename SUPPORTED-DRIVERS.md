@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-09-21
+## Updated 2026-09-24
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -47,6 +47,8 @@ This document lists all hardware vendors and device types that are verified to w
 | Nikon D3200 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/GPhoto/Nikon%20D3200/) |
 | Nikon D3300 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/GPhoto/Nikon%20D3300/) |
 | Canon EOS 4000D | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/GPhoto/Canon%20EOS%204000D/) |
+| Canon EOS 70D | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/GPhoto/Canon%20EOS%2070D/) |
+| Canon EOS 250D | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/GPhoto/Canon%20EOS%20250D/) |
 
 <details>
 <summary><strong>GPhoto Camera Driver Notes</strong></summary>
@@ -55,7 +57,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB (PTP). Cameras enumerate by USB autodetect index (`cameraIndex`), same convention as ZWO/QHY/SVBONY/PlayerOne/ToupTek.
 - **Coverage**: any Canon/Nikon/Sony body libgphoto2 recognizes over PTP should work, since the driver talks the generic PTP capture/config protocol rather than a per-model SDK. Sensor geometry (CameraXSize/CameraYSize/BayerOffsetX/Y/MaxADU) is learned from a real decoded RAW frame the first time a given model connects on a rig, then cached — see `.github/instructions/gphoto.instructions.md`. Confirmed generalizing across models on the same rig: the D3200's real RAW crop (6034x4012) and 12-bit ADC (MaxADU 4095) were both learned automatically and differ from the D5300's (6016x4016, MaxADU 16383) with no code or config change, just swapping the physical camera; the D3300 then primed as the D5300's crop (6016x4016) with the D3200's 12-bit MaxADU (4095), a third combination learned the same way. `PixelSizeX`/`PixelSizeY` come from a static per-model table (~140 interchangeable-lens Nikon/Canon bodies); any other model, including every fixed-lens compact/camcorder libgphoto2 also supports, reports 0 (ASCOM "unknown").
 - **ISO modeled as Gain Index, not Gain Value**: unlike every other camera driver here, ISO is a discrete `Gains()` list (the camera's actual ISO choices) rather than a continuous register, since that is what a DSLR's hardware actually offers. `GainMin`/`GainMax` correctly throw `PropertyNotImplemented`.
-- **Tested models**: Canon EOS 4000D (first Canon body; reported by a user on a Raspberry Pi 5, Debian 13, libgphoto2 2.5.31, AlpacaBridge 4.0.0, issue #611: 5202 px wide, MaxADU 16383, 4.3 micron pixels), plus Nikon D5300, Nikon D3200 and Nikon D3300 on Linux arm64 (USB), same rig, same AlpacaBridge device slot -- swapped without reconfiguration. The D3300 primed as 6016x4016, MaxADU 4095, 3.92 micron pixels (libgphoto2 2.5.31, AlpacaBridge 4.0.0). Bulb exposures (anything past the body's 30 s native ceiling) validated on the D3300: 60 s and 300 s frames through the Alpaca API on the OpenAstro ASIAIR Pro image (issue #569). Camera-side settings for bulb: mode dial M, shutter speed Bulb, lens on MF, Long exposure NR Off.
+- **Tested models**: Canon EOS 4000D (first Canon body; reported by a user on a Raspberry Pi 5, Debian 13, libgphoto2 2.5.31, AlpacaBridge 4.0.0, issue #611: 5202x3464, MaxADU 16383, 4.3 micron pixels), Canon EOS 70D (its own Raspberry Pi 5, Debian 13, libgphoto2 2.5.31, AlpacaBridge 4.0.0 built from main `2f0c8338`, issue #637: 5496x3670, MaxADU 15303, 4.1 micron pixels) and Canon EOS 250D (sold as the EOS 200D II in Asia; the same Raspberry Pi 5 and build: 6024x4020, MaxADU 16383, 3.72 micron pixels). The 70D reports `ExposureMax` 30 s because it exposes no standalone `bulb` widget, and it needs the mode dial on M: on B the shutter-speed list is empty and `StartExposure` fails with "No shutter speed control exposed by this camera". Decoding its 20 MP CR2 takes about 4 s on a Raspberry Pi 3 (about 8 s per frame end to end, against about 4 s on a Pi 5), which makes ConformU's `StartExposure` wait time out there, so do not validate DSLRs on a Pi 3 (only the Pi 3 and Pi 5 were run on this body). The 250D needs the lens on MF: with AF the geometry priming capture and every exposure fail with `gp_camera_capture failed: Unspecified error` and no frame arrives. Nikon D5300, Nikon D3200 and Nikon D3300 were run on Linux arm64 (USB), same rig, same AlpacaBridge device slot -- swapped without reconfiguration. The D3300 primed as 6016x4016, MaxADU 4095, 3.92 micron pixels (libgphoto2 2.5.31, AlpacaBridge 4.0.0). Bulb exposures (anything past the body's 30 s native ceiling) validated on the D3300: 60 s and 300 s frames through the Alpaca API on the OpenAstro ASIAIR Pro image (issue #569). Camera-side settings for bulb: mode dial M, shutter speed Bulb, lens on MF, Long exposure NR Off.
 - **ConformU**: 4.5.1 — 0 errors, 0 issues, 0 timing issues on every model in the table above.
 
 </details>
