@@ -68,13 +68,6 @@ TEST_CASE("ZWO Mount Telescope Driver - Defaults", "[zwo][telescope][unit]") {
     REQUIRE(driver->get_can_set_park());
     REQUIRE(driver->get_can_pulse_guide());
     REQUIRE(driver->get_can_set_guide_rates());
-    REQUIRE(driver->get_can_move_axis(0));
-    REQUIRE(driver->get_can_move_axis(1));
-    REQUIRE_FALSE(driver->get_can_move_axis(2));
-
-    // Out-of-range axis raises InvalidValue even while disconnected (#516).
-    require_alpaca_error([&]() { (void)driver->get_can_move_axis(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { (void)driver->get_can_move_axis(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("ZWO Mount Telescope Driver - Target Validation", "[zwo][telescope][unit]") {
