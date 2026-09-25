@@ -19,13 +19,15 @@
 // agrees with itself and a wrong pointing model is invisible. That is how a
 // six-hour error shipped and passed conformance on three different boards.
 //
-// WHAT IS AND IS NOT AN EXTERNAL ANCHOR HERE. The four hardware rows in the
+// WHAT IS AND IS NOT AN EXTERNAL ANCHOR HERE. The hardware rows in the
 // first test case are: an EQM-35 Pro at latitude -37.2 was driven to known
 // axis positions on 2026-09-12 with the shipped (wrong) 3.5.1 build and the
-// tube's real direction was read off the mount by hand (three rows), and a
+// tube's real direction was read off the mount by hand (three rows), a
 // fourth, northern row comes from the Wave 150i report that opened the
-// issue. Those four, and the alt/az cross-check against what was observed,
-// are the only checks in this file that the driver cannot satisfy by
+// issue, and the rest are listed in that case. Those rows, the alt/az
+// cross-check against what was observed, and the plate-solved rows in the
+// last test case ("measured axes agree with the plate-solved sky across a
+// flip") are the only checks in this file that the driver cannot satisfy by
 // agreeing with itself.
 //
 // `sky_from_axes()` below is a transcription of the driver's own formula, so
@@ -37,7 +39,8 @@
 // agree with for a board of the same dec-axis sense.
 //
 // If you change the pointing model, this file is what has to justify it, and
-// a new hardware row is what has to extend it. Do not "verify" a change here
+// a new hardware row, in the first test case or as a plate-solved row in the
+// last, is what has to extend it. Do not "verify" a change here
 // against the driver's own readback.
 
 #ifndef _WIN32
@@ -1252,7 +1255,13 @@ TEST_CASE("SkyWatcher pointing - consecutive meridian flips return to the same a
 // either side, with the RA axis at the counterweight limit. The
 // targets sit 0.05 h either side because LST cannot be frozen: a target at
 // exactly HA 0 would land on either side depending on when the driver reads
-// the clock. At HA +/-0.05 h the RA axis is within 0.75 deg of +/-90, the
+// the clock. The driver aims ahead by an estimated slew time (distance over
+// the max rate plus goto overhead and resume latency) before it picks the
+// branch, so the test's LST read and the driver's own evaluation must stay
+// within 3 min (0.05 h) of each other; the simulated slew is about 27 s, so a
+// wrong `expected_side` here is a timing budget to look at before it is a
+// driver regression.
+// At HA +/-0.05 h the RA axis is within 0.75 deg of +/-90, the
 // counterweight-horizontal limit, and the two landings are on opposite dec
 // branches.
 TEST_CASE("SkyWatcher pointing - the pier side changes at HA 0 and the axes stay inside the limit, south",
@@ -1341,6 +1350,7 @@ TEST_CASE("SkyWatcher pointing - measured axes agree with the plate-solved sky a
     double first_offset[3][2] = {};
     bool seen[3][2] = {};
     for (const Row& r : rows) {
+        REQUIRE((r.power_on == 1 || r.power_on == 2));  // indexes first_offset / seen below
         const SkyPoint sky = sky_from_axes(latitude, r.a1, r.a2, -1);
         const double ha_offset = wrap_ha(sky.ha_hours - r.solved_ha);
         INFO(r.what << " (power-on " << r.power_on << "): model HA " << sky.ha_hours << " h dec " << sky.dec_degrees
