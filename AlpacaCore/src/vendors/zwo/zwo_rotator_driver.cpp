@@ -262,8 +262,8 @@ public:
     }
 
     void set_target_position(double position) override {
+        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
         ensure_connected();
-        validate_angle(position);
         std::lock_guard<std::mutex> lock(mutex_);
         target_position_ = normalize_angle(position);
         has_target_position_ = true;
@@ -275,8 +275,8 @@ public:
     }
 
     void move(double position) override {
+        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
         ensure_connected();
-        validate_angle(position);
         double current = get_position();
         double target = normalize_angle(current + position);
         double mechanical_target = to_mechanical_angle(target);
@@ -287,8 +287,8 @@ public:
     }
 
     void move_absolute(double position) override {
+        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
         ensure_connected();
-        validate_angle(position);
         double target = normalize_angle(position);
         double mechanical_target = to_mechanical_angle(target);
         ZWOCAASDKWrapper::instance().move_absolute(rotator_id_value(), mechanical_target);
@@ -298,8 +298,8 @@ public:
     }
 
     void move_mechanical(double position) override {
+        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
         ensure_connected();
-        validate_angle(position);
         double mechanical_target = normalize_angle(position);
         ZWOCAASDKWrapper::instance().move_mechanical(rotator_id_value(), mechanical_target);
         // CAAGetDegree() returns the logical (reverse-applied) angle. When Reverse is
@@ -312,8 +312,8 @@ public:
     }
 
     void sync(double position) override {
+        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
         ensure_connected();
-        validate_angle(position);
         double mechanical = ZWOCAASDKWrapper::instance().get_degree(rotator_id_value());
         double target = normalize_angle(position);
         // Write sync_offset_ under the same mutex_ that every reader takes —
