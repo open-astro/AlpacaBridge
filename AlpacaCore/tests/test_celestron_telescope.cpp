@@ -279,14 +279,12 @@ TEST_CASE("Celestron Telescope Driver - ASCOM Error Codes", "[celestron][telesco
 
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
 
-    // TODO: Celestron check_connected() throws DriverException (0x500) instead of
-    // NotConnected (0x407). Fix the driver, then change these to AlpacaError::NotConnected.
-    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { driver->set_tracking(true); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
     require_alpaca_error([&]() { driver->set_target_right_ascension(-0.1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);

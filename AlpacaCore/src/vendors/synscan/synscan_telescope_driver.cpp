@@ -1562,7 +1562,7 @@ private:
 
     void check_connected() const {
         if (!connected_) {
-            throw AlpacaException("Not connected to SynScan mount");
+            throw AlpacaException("Not connected to SynScan mount", AlpacaError::NotConnected);
         }
     }
 

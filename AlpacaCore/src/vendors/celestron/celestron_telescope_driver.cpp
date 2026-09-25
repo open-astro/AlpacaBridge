@@ -1718,7 +1718,7 @@ public:
 private:
     void check_connected() const {
         if (!connected_) {
-            throw AlpacaException("Not connected to Celestron mount");
+            throw AlpacaException("Not connected to Celestron mount", AlpacaError::NotConnected);
         }
     }
 
