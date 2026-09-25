@@ -339,10 +339,10 @@ def check(root: pathlib.Path) -> list[str]:
             "ALLOWLIST in %s" % (pair[0], pair[1], pair[0], pair[1], THIS_SCRIPT))
 
     # 2b: every backend factory a swept pair can construct has a registry entry that calls it.
+    have = registry_factories(header_text, set(entries))
     for pair, want in sorted(router_backends(router_text).items()):
         if pair not in entry_pairs:
             continue  # the pair-level check above owns this
-        have = registry_factories(header_text, set(entries))
         for fac in sorted(want):
             key = (pair[0], pair[1], fac)
             if fac not in have and key not in BACKEND_ALLOWLIST:

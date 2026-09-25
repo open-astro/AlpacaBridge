@@ -13,8 +13,8 @@
 // Cross-driver contract sweep, tier 1 (issue #571): every driver the router can
 // construct, disconnected, no fake. The registry is contract_sweep.h; each
 // (driver, case) pair below is its own TEST_CASE so `ctest -N` lists it by name
-// and a failure names the driver. Tier 2 (connected over a fake) follows in a
-// second PR.
+// and a failure names the driver. Tier 2 (connected over a roster fake) is further
+// down, one host per kFakeConnectableRoster row.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/camera_driver.h>
@@ -393,10 +393,6 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     REQUIRE(d != nullptr);
     const auto state = d->get_device_state();
     CHECK(state.empty());
-    for (const auto& s : state) {
-        INFO("unexpected DeviceState entry " << s.name);
-        CHECK(s.name != "TimeStamp");
-    }
 }
 
 [[maybe_unused]] void case_interface_version(const ContractEntry& e) {
