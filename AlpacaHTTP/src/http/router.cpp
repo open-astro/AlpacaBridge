@@ -1640,7 +1640,9 @@ RouteMatch Router::parse_route(const std::string& path) {
     }
 
     // Device API: /api/v1/{devicetype}/{devicenumber}/{method}
-    std::regex device_regex(R"(/api/v1/([^/]+)/(\d+)/([^/?]+))");
+    // Static: compiling a std::regex costs far more than matching it, and this
+    // runs on every device request (#646).
+    static const std::regex device_regex(R"(/api/v1/([^/]+)/(\d+)/([^/?]+))");
     std::smatch matches;
     if (std::regex_match(path, matches, device_regex)) {
         match.device_type = matches[1].str();
@@ -6293,7 +6295,7 @@ Response Router::handle_setup(const Request& request, std::uint32_t server_tx_id
     // Setup endpoints are expected to return an HTML page.
     // We provide a simple stub page that points users to the web UI.
     // Example path: /setup/v1/telescope/0/setup
-    std::regex setup_regex(R"(/setup/v1/([^/]+)/(\d+)/setup)");
+    static const std::regex setup_regex(R"(/setup/v1/([^/]+)/(\d+)/setup)");
     std::smatch matches;
 
     if (!std::regex_match(request.path(), matches, setup_regex)) {
