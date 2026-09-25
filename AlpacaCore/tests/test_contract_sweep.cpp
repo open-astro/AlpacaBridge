@@ -189,7 +189,9 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
 
 // Operational properties and methods that must throw NotConnected while
 // disconnected, with no early return that skips the check.
-std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type) {
+// `pins` (may be null) carries the camera known-defect pins: a pinned getter is left out here and asserted
+// to still answer in case_operations_throw_not_connected.
+std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const ContractEntry* pins = nullptr) {
     std::vector<Probe> p;
     switch (type) {
         case DeviceType::Telescope: {
@@ -263,9 +265,13 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type) {
         }
         case DeviceType::Camera: {
             auto& c = dynamic_cast<alpacacore::CameraDriver&>(d);
-            // get_ccd_temperature and get_image_ready are not probed: qhy answers the first and
-            // playerone, svbony, gphoto and touptek answer the second while disconnected.
             p.push_back({"get_gain", [&] { (void)c.get_gain(); }});
+            if (pins == nullptr || pins->image_ready_known_defect == nullptr) {
+                p.push_back({"get_image_ready", [&] { (void)c.get_image_ready(); }});
+            }
+            if (pins == nullptr || pins->ccd_temperature_known_defect == nullptr) {
+                p.push_back({"get_ccd_temperature", [&] { (void)c.get_ccd_temperature(); }});
+            }
             p.push_back({"start_exposure", [&] { c.start_exposure(1.0, true); }});
             break;
         }
@@ -349,11 +355,23 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
 [[maybe_unused]] void case_operations_throw_not_connected(const ContractEntry& e) {
     auto d = e.make(0);
     REQUIRE(d != nullptr);
-    const auto probes = not_connected_probes(*d, e.type);
+    const auto probes = not_connected_probes(*d, e.type, &e);
     REQUIRE_FALSE(probes.empty());
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
         CHECK(thrown_code(fn) == err::NotConnected);
+    }
+    if (e.type == DeviceType::Camera) {
+        // Pin today's behaviour so fixing the driver fails this and removes the expectation.
+        auto& c = dynamic_cast<alpacacore::CameraDriver&>(*d);
+        if (e.image_ready_known_defect != nullptr) {
+            INFO(e.id << " get_image_ready: " << e.image_ready_known_defect);
+            CHECK(thrown_code([&] { (void)c.get_image_ready(); }) == -1);
+        }
+        if (e.ccd_temperature_known_defect != nullptr) {
+            INFO(e.id << " get_ccd_temperature: " << e.ccd_temperature_known_defect);
+            CHECK(thrown_code([&] { (void)c.get_ccd_temperature(); }) == -1);
+        }
     }
 }
 
@@ -420,7 +438,7 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     REQUIRE(d != nullptr);
     std::vector<Probe> all;
     for (auto&& p : invalid_value_probes(*d, e.type)) all.push_back(std::move(p));
-    for (auto&& p : not_connected_probes(*d, e.type)) all.push_back(std::move(p));
+    for (auto&& p : not_connected_probes(*d, e.type, &e)) all.push_back(std::move(p));
     all.push_back({"action", [&] { (void)d->action("no-such-action", ""); }});
     all.push_back({"command_blind", [&] { d->command_blind("x"); }});
     all.push_back({"command_bool", [&] { (void)d->command_bool("x"); }});

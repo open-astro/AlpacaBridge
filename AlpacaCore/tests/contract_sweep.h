@@ -154,6 +154,11 @@ struct ContractEntry {
     // Where the expectations above come from: "protocol document", "hardware run"
     // or "assumption", with the reference. The sweep requires one of those words.
     const char* source;
+    // Camera only. Non-null: this driver answers get_image_ready / get_ccd_temperature while disconnected
+    // instead of throwing NotConnected (AGENTS.md: every operational property does). The string names the
+    // issue and the source; the sweep pins today's behaviour until it is fixed.
+    const char* image_ready_known_defect = nullptr;
+    const char* ccd_temperature_known_defect = nullptr;
 };
 
 // Platform 7 interface versions per device type.
@@ -189,6 +194,32 @@ inline const char* invalid_probe_reason_for(DeviceType t) {
     }
 }
 
+// Camera getters that answer while disconnected, one issue for the set (open-astro#658). get_image_ready
+// returns false on an early `!connected_` check in playerone (also behind the router's ioptron/camera arm),
+// svbony, gphoto and touptek; qhy get_ccd_temperature returns 0.0 with no ensure_connected(). zwo checks both.
+inline const char* image_ready_known_defect_for(const std::string& id) {
+    if (id == "playerone_camera" || id == "ioptron_camera")
+        return "known defect, open-astro#658: playerone_camera_driver.cpp:591 get_image_ready returns false when "
+               "!connected_";
+    if (id == "svbony_camera")
+        return "known defect, open-astro#658: svbony_camera_driver.cpp:648 get_image_ready returns false when "
+               "!connected_";
+    if (id == "gphoto_camera")
+        return "known defect, open-astro#658: gphoto_camera_driver.cpp:817 get_image_ready returns false when "
+               "!connected_";
+    if (id == "touptek_camera")
+        return "known defect, open-astro#658: touptek_camera_driver.cpp:590 get_image_ready returns false when "
+               "!connected_";
+    return nullptr;
+}
+
+inline const char* ccd_temperature_known_defect_for(const std::string& id) {
+    if (id == "qhy_camera")
+        return "known defect, open-astro#658: qhy_camera_driver.cpp:611 get_ccd_temperature returns 0.0 with no "
+               "ensure_connected()";
+    return nullptr;
+}
+
 inline ContractEntry make_entry(const char* id, const char* vendor, const char* device_type, DeviceType type,
                                 DriverFactory make, const char* source) {
     return ContractEntry{id,
@@ -201,7 +232,9 @@ inline ContractEntry make_entry(const char* id, const char* vendor, const char* 
                          {},
                          false,
                          invalid_probe_reason_for(type),
-                         source};
+                         source,
+                         image_ready_known_defect_for(id),
+                         ccd_temperature_known_defect_for(id)};
 }
 
 inline ContractEntry with_command_passthrough(ContractEntry e) {
