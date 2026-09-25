@@ -44,7 +44,6 @@
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
-#include <regex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -192,9 +191,78 @@ void check_route_table(alpacahttp::Router& router) {
 }
 
 // B. The tables in the router sources vs the snapshot (catches added rows).
+bool is_word_char(char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_'; }
+
+std::size_t skip_space(const std::string& text, std::size_t i) {
+    while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i])) != 0) {
+        ++i;
+    }
+    return i;
+}
+
+bool consume(const std::string& text, std::size_t& i, const char* literal) {
+    const std::string lit(literal);
+    if (text.compare(i, lit.size(), lit) != 0) {
+        return false;
+    }
+    i += lit.size();
+    return true;
+}
+
+// Plain string scan rather than std::regex: under ASan+UBSan a std::regex pass
+// over the whole router source cost minutes in the CI sanitizer job (#646).
+// Reads `{"name", kVerbGet | kVerbPut}` entries; sets `raw` for every
+// `{"name",` seen and returns the entries whose verb spelling it recognises.
+std::vector<std::pair<std::string, unsigned>> parse_entries(const std::string& body, std::size_t& raw) {
+    std::vector<std::pair<std::string, unsigned>> parsed;
+    raw = 0;
+    std::size_t i = 0;
+    while ((i = body.find('{', i)) != std::string::npos) {
+        std::size_t j = skip_space(body, i + 1);
+        if (j >= body.size() || body[j] != '"') {
+            i = j;
+            continue;
+        }
+        std::size_t k = j + 1;
+        while (k < body.size() && is_word_char(body[k])) {
+            ++k;
+        }
+        if (k == j + 1 || k >= body.size() || body[k] != '"') {
+            i = k;
+            continue;
+        }
+        const std::string name = body.substr(j + 1, k - j - 1);
+        k = skip_space(body, k + 1);
+        if (k >= body.size() || body[k] != ',') {
+            i = k;
+            continue;
+        }
+        ++raw;
+        k = skip_space(body, k + 1);
+        unsigned mask = 0;
+        if (consume(body, k, "kVerbGet")) {
+            mask = kGet;
+            std::size_t after = skip_space(body, k);
+            if (after < body.size() && body[after] == '|') {
+                after = skip_space(body, after + 1);
+                if (consume(body, after, "kVerbPut")) {
+                    mask = kGet | kPut;
+                    k = after;
+                }
+            }
+        } else if (consume(body, k, "kVerbPut")) {
+            mask = kPut;
+        }
+        k = skip_space(body, k);
+        if (mask != 0 && k < body.size() && body[k] == '}') {
+            parsed.emplace_back(name, mask);
+        }
+        i = k;
+    }
+    return parsed;
+}
+
 void check_source_tables() {
-    const std::regex table_start(R"(k(\w+)Methods\s*=\s*\{)");
-    const std::regex entry(R"re(\{\s*"(\w+)"\s*,\s*(kVerbGet\s*\|\s*kVerbPut|kVerbGet|kVerbPut)\s*\})re");
     std::map<std::string, unsigned> source;
     std::size_t tables = 0;
     for (const auto& file : std::filesystem::recursive_directory_iterator(ALPACAHTTP_ROUTER_SRC_DIR)) {
@@ -206,39 +274,44 @@ void check_source_tables() {
         std::stringstream buffer;
         buffer << in.rdbuf();
         const std::string text = buffer.str();
-        for (auto it = std::sregex_iterator(text.begin(), text.end(), table_start); it != std::sregex_iterator();
-             ++it) {
+        // A table opens with `k<Type>Methods = {`.
+        for (std::size_t at = text.find("Methods"); at != std::string::npos; at = text.find("Methods", at + 1)) {
+            std::size_t name_start = at;
+            while (name_start > 0 && is_word_char(text[name_start - 1])) {
+                --name_start;
+            }
+            std::size_t after = skip_space(text, at + 7);
+            if (text[name_start] != 'k' || name_start + 1 == at || after >= text.size() || text[after] != '=') {
+                continue;
+            }
+            after = skip_space(text, after + 1);
+            if (after >= text.size() || text[after] != '{') {
+                continue;
+            }
             ++tables;
-            std::string type = (*it)[1];
+            const std::string type_name = text.substr(name_start + 1, at - name_start - 1);
+            std::string type = type_name;
             for (char& c : type) {
                 c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             }
-            const std::size_t begin = static_cast<std::size_t>(it->position() + it->length());
+            const std::size_t begin = after + 1;
             const std::size_t end = text.find("\n};", begin);
             EXPECT(end != std::string::npos);
             const std::string body = text.substr(begin, end - begin);
             // Every {"name", ...} entry must parse; an unrecognised verb spelling
             // (e.g. kVerbPut | kVerbGet) would otherwise be skipped silently.
-            static const std::regex any_entry(R"re(\{\s*"\w+"\s*,)re");
-            const auto raw_count = static_cast<std::size_t>(
-                std::distance(std::sregex_iterator(body.begin(), body.end(), any_entry), std::sregex_iterator()));
-            std::size_t parsed_count = 0;
-            for (auto e = std::sregex_iterator(body.begin(), body.end(), entry); e != std::sregex_iterator(); ++e) {
-                const std::string verbs = (*e)[2];
-                const unsigned mask = (verbs.find("Get") != std::string::npos ? kGet : 0U) |
-                                      (verbs.find("Put") != std::string::npos ? kPut : 0U);
-                ++parsed_count;
-                const std::string key = type + "/" + std::string((*e)[1]);
-                std::vector<std::string> dup;
+            std::size_t raw_count = 0;
+            const auto entries = parse_entries(body, raw_count);
+            for (const auto& [name, mask] : entries) {
+                const std::string key = type + "/" + name;
                 if (!source.emplace(key, mask).second) {
-                    dup.push_back("duplicate table row " + key);
-                    report("B source tables", dup);
+                    report("B source tables", {"duplicate table row " + key});
                 }
             }
-            if (raw_count != parsed_count) {
+            if (raw_count != entries.size()) {
                 report("B source tables",
-                       {"k" + std::string((*it)[1]) + "Methods: " + std::to_string(raw_count) + " entries, only " +
-                        std::to_string(parsed_count) + " parsed (unrecognised verb spelling)"});
+                       {"k" + type_name + "Methods: " + std::to_string(raw_count) + " entries, only " +
+                        std::to_string(entries.size()) + " parsed (unrecognised verb spelling)"});
             }
         }
     }
