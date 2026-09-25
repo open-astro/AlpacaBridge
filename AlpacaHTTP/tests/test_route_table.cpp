@@ -224,14 +224,17 @@ std::vector<std::pair<std::string, unsigned>> parse_entries(const std::string& b
             continue;
         }
         std::size_t k = j + 1;
-        while (k < body.size() && is_word_char(body[k])) {
+        while (k < body.size() && body[k] != '"' && body[k] != '\n') {
             ++k;
         }
-        if (k == j + 1 || k >= body.size() || body[k] != '"') {
+        if (k >= body.size() || body[k] != '"') {
             i = k;
             continue;
         }
+        // Any quoted name counts as an entry; only a word-character name can
+        // parse, so an empty or oddly spelled name is reported, not skipped.
         const std::string name = body.substr(j + 1, k - j - 1);
+        const bool name_ok = !name.empty() && std::all_of(name.begin(), name.end(), is_word_char);
         k = skip_space(body, k + 1);
         if (k >= body.size() || body[k] != ',') {
             i = k;
@@ -254,7 +257,7 @@ std::vector<std::pair<std::string, unsigned>> parse_entries(const std::string& b
             mask = kPut;
         }
         k = skip_space(body, k);
-        if (mask != 0 && k < body.size() && body[k] == '}') {
+        if (name_ok && mask != 0 && k < body.size() && body[k] == '}') {
             parsed.emplace_back(name, mask);
         }
         i = k;
@@ -311,7 +314,7 @@ void check_source_tables() {
             if (raw_count != entries.size()) {
                 report("B source tables",
                        {"k" + type_name + "Methods: " + std::to_string(raw_count) + " entries, only " +
-                        std::to_string(entries.size()) + " parsed (unrecognised verb spelling)"});
+                        std::to_string(entries.size()) + " parsed (unrecognised name or verb spelling)"});
             }
         }
     }
