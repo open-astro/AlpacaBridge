@@ -29,15 +29,35 @@
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <limits>
+#include <map>
+#include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
 #include "contract_sweep.h"
+
+// Tier 2 hosts: the roster fakes, each under its vendor guard. Fakes over a pty or a loopback socket
+// are POSIX only.
+#ifndef _WIN32
+#ifdef ALPACACORE_ENABLE_CELESTRON
+#include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
+#include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
+
+#include "fake_mount_server.h"
+#endif
+#ifdef ALPACACORE_ENABLE_GEMINI
+#include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
+
+#include "fake_gemini_focuser.h"
+#endif
+#endif
 
 namespace {
 
@@ -370,6 +390,251 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tier 2 (issue #655): the connected half of the sweep, one host per
+// kFakeConnectableRoster row. contract_sweep.h keeps the roster a literal
+// three-field array because docs-drift check 13 parses it; the connect recipe and
+// the per-case expectations live here in CS2_HOSTS, and a non-vacuity case pins the
+// two lists to each other in both directions.
+// ---------------------------------------------------------------------------
+#ifndef _WIN32
+
+// A driver together with the fake it talks to. The fake is declared first so it is
+// destroyed after the driver.
+struct Hosted {
+    std::shared_ptr<void> fake;
+    std::unique_ptr<AlpacaDriver> driver;
+};
+
+struct Tier2Host {
+    const char* id;           // ctest stem: <vendor>_<devicetype>, plus _serial for the second Sky-Watcher fake
+    const char* vendor;       // roster row
+    const char* device_type;  // roster row
+    const char* fake_header;  // roster row
+    DeviceType type;
+    const char* hosts_registry_id;  // the tier-1 registry entry whose backend the fake exercises
+    // A driver over the fake that reaches Connected. `hold` asks the fake to keep the handshake
+    // open long enough that Connecting is observably true; a host that cannot says so through
+    // can_hold_connect.
+    std::function<Hosted(bool hold)> connectable;
+    bool can_hold_connect;
+    // A driver whose connect must fail, or empty with failing_unavailable naming why and the source.
+    std::function<Hosted()> failing;
+    const char* failing_unavailable;
+};
+
+using Clock = std::chrono::steady_clock;
+
+// Handshake hold for fakes that have the knob, and the part of it Connected is checked inside.
+constexpr std::chrono::milliseconds kHoldDelay{300};
+constexpr std::chrono::milliseconds kHoldWindow{100};
+
+struct ConnectObservation {
+    bool saw_connecting = false;
+    bool connected_early = false;  // Connected read true inside the hold window, before the handshake ended
+    bool settled = false;
+};
+
+// Connect() the way the router does (async), then poll until the task finishes. set_connected() is
+// deliberately not used: it is the synchronous PUT path and never exercises Connecting.
+// Connected and Connecting may both read true for an instant at the tail of a connect (the task calls
+// set_connected(true) and only then publishes Idle, async_connectable.h run_connection_task), so overlap
+// is not asserted. `hold_window` is the stretch in which a fake that holds its handshake guarantees the
+// connect is still open: Connected must read false throughout it.
+ConnectObservation connect_and_observe(AlpacaDriver& d, std::chrono::milliseconds hold_window = {},
+                                       std::chrono::milliseconds budget = std::chrono::seconds(30)) {
+    ConnectObservation o;
+    d.connect();
+    const auto t0 = Clock::now();
+    const auto deadline = t0 + budget;
+    while (Clock::now() < deadline) {
+        const bool connecting = d.get_connecting();
+        const bool connected = d.get_connected();
+        if (connecting) o.saw_connecting = true;
+        if (connected && Clock::now() - t0 < hold_window) o.connected_early = true;
+        if (!connecting) {
+            o.settled = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return o;
+}
+
+Hosted connected_host(const Tier2Host& h) {
+    Hosted hosted = h.connectable(false);
+    REQUIRE(hosted.driver != nullptr);
+    const auto o = connect_and_observe(*hosted.driver);
+    REQUIRE(o.settled);
+    REQUIRE(hosted.driver->get_connected());
+    return hosted;
+}
+
+// Case 1. Connect returns at once; Connecting reads true, then false; Connected reads true only
+// after. A connect that fails leaves Connected false and keeps the driver's reason.
+[[maybe_unused]] void case_t2_connecting(const Tier2Host& h) {
+    INFO(h.id << " over " << h.fake_header);
+    {
+        Hosted hosted = h.connectable(h.can_hold_connect);
+        REQUIRE(hosted.driver != nullptr);
+        CHECK_FALSE(hosted.driver->get_connected());
+        const auto t0 = Clock::now();
+        const auto o = connect_and_observe(*hosted.driver, h.can_hold_connect ? kHoldWindow : std::chrono::milliseconds{});
+        CHECK(o.settled);
+        CHECK(hosted.driver->get_connected());
+        CHECK_FALSE(hosted.driver->get_connecting());
+        if (h.can_hold_connect) {
+            INFO("the fake holds the handshake for " << kHoldDelay.count() << " ms: Connecting reads true and Connected false");
+            CHECK(o.saw_connecting);
+            CHECK_FALSE(o.connected_early);
+        }
+        CHECK(Clock::now() - t0 < std::chrono::seconds(30));
+    }
+    if (!h.failing) {
+        INFO(h.id << " cannot host the failed-connect leg: " << h.failing_unavailable);
+        REQUIRE(std::string(h.failing_unavailable).size() > 0);
+        return;
+    }
+    Hosted hosted = h.failing();
+    REQUIRE(hosted.driver != nullptr);
+    const auto o = connect_and_observe(*hosted.driver);
+    CHECK(o.settled);
+    CHECK_FALSE(hosted.driver->get_connected());
+    CHECK_FALSE(hosted.driver->get_connecting());
+    const std::string reason = hosted.driver->get_last_connect_error();
+    INFO("get_last_connect_error() after a failed connect: '" << reason << "'");
+    CHECK_FALSE(reason.empty());
+    // The reason stays until the next attempt clears it.
+    CHECK(hosted.driver->get_last_connect_error() == reason);
+}
+
+// Case 2, telescope rows only. AGENTS.md (TargetRightAscension and TargetDeclination are independent):
+// each getter throws ValueNotSet until that property itself is written. Issue #655 says
+// InvalidOperation; every driver and every per-vendor test uses ValueNotSet (0x402), so that is the rule.
+[[maybe_unused]] void case_t2_target_flags(const Tier2Host& h) {
+    if (h.type != DeviceType::Telescope) {
+        SUCCEED(std::string(h.id) + ": target flags apply to telescopes only");
+        return;
+    }
+    Hosted hosted = connected_host(h);
+    auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+    CHECK(thrown_code([&] { (void)t.get_target_right_ascension(); }) == err::ValueNotSet);
+    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == err::ValueNotSet);
+    t.set_target_right_ascension(5.5);
+    CHECK(t.get_target_right_ascension() == 5.5);
+    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == err::ValueNotSet);
+    t.set_target_declination(20.25);
+    CHECK(t.get_target_right_ascension() == 5.5);
+    CHECK(t.get_target_declination() == 20.25);
+}
+
+// Case 3. The out-of-range inputs tier 1 probes while disconnected are still InvalidValue when connected.
+[[maybe_unused]] void case_t2_invalid_value_connected(const Tier2Host& h) {
+    Hosted hosted = connected_host(h);
+    const auto probes = invalid_value_probes(*hosted.driver, h.type);
+    if (probes.empty()) {
+        const std::string reason = alpacacore::test::contract::invalid_probe_reason_for(h.type);
+        INFO(h.id << " has no static out-of-range probe: " << reason);
+        CHECK_FALSE(reason.empty());
+        return;
+    }
+    for (const auto& [name, fn] : probes) {
+        INFO(h.id << " " << name);
+        CHECK(thrown_code(fn) == err::InvalidValue);
+    }
+}
+
+// Case 4. Connected DeviceState is non-empty and carries TimeStamp (base classes, PR #625).
+[[maybe_unused]] void case_t2_device_state_connected(const Tier2Host& h) {
+    Hosted hosted = connected_host(h);
+    const auto state = hosted.driver->get_device_state();
+    CHECK_FALSE(state.empty());
+    const bool has_timestamp = std::any_of(state.begin(), state.end(), [](const alpacacore::DeviceState& s) {
+        return s.name == "TimeStamp";
+    });
+    CHECK(has_timestamp);
+}
+
+#ifdef ALPACACORE_ENABLE_CELESTRON
+// FakeMountServer answering every command with a position-pair sized reply; the recipe of
+// test_celestron_concurrency_stress.cpp.
+Tier2Host tier2_host_celestron_telescope() {
+    namespace cel = alpacacore::vendor::celestron;
+    auto endpoint = [](int port) {
+        cel::ConnectionInfo info;
+        info.type = cel::ConnectionType::Network;
+        info.host = "127.0.0.1";
+        info.tcp_port = port;
+        info.response_timeout_ms = 50;
+        return info;
+    };
+    Tier2Host h{"celestron_telescope", "celestron", "telescope", "fake_mount_server.h", DeviceType::Telescope,
+                "celestron_telescope", {}, false, {}, ""};
+    h.connectable = [endpoint](bool) {
+        auto server = std::make_shared<alpacacore::test::FakeMountServer>(
+            [](const std::string&) { return std::string("00000000,00000000#"); });
+        REQUIRE(server->ok());
+        Hosted hosted;
+        hosted.driver = cel::create_celestron_telescope(0, endpoint(server->port()));
+        hosted.fake = server;
+        return hosted;
+    };
+    h.failing = [endpoint]() {
+        int port = 0;
+        {
+            alpacacore::test::FakeMountServer probe;  // a port nothing listens on once it is gone
+            port = probe.port();
+        }
+        Hosted hosted;
+        hosted.driver = cel::create_celestron_telescope(0, endpoint(port));
+        return hosted;
+    };
+    return h;
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_GEMINI
+// FakeGeminiFocuser over a pty; its handshake delay is the hold knob that makes Connecting
+// deterministic (recipe of test_gemini_focuser.cpp).
+Tier2Host tier2_host_gemini_focuser() {
+    Tier2Host h{"gemini_focuser", "gemini", "focuser", "fake_gemini_focuser.h", DeviceType::Focuser,
+                "gemini_focuser", {}, true, {}, ""};
+    h.connectable = [](bool hold) {
+        auto fake = std::make_shared<alpacacore::test::FakeGeminiFocuser>();
+        if (hold) fake->set_handshake_delay(kHoldDelay);
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake->slave_path());
+        hosted.fake = fake;
+        return hosted;
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::gemini::create_gemini_focuser(0, "/dev/alpacacore-no-such-port");
+        return hosted;
+    };
+    return h;
+}
+#endif
+
+// One X(id) per hosted roster row, under the vendor's guard.
+// clang-format off
+#ifdef ALPACACORE_ENABLE_CELESTRON
+#define CS2_CELESTRON(X) X(celestron_telescope)
+#else
+#define CS2_CELESTRON(X)
+#endif
+#ifdef ALPACACORE_ENABLE_GEMINI
+#define CS2_GEMINI(X) X(gemini_focuser)
+#else
+#define CS2_GEMINI(X)
+#endif
+#define CONTRACT_SWEEP_TIER2_HOSTS(X) \
+    CS2_CELESTRON(X) \
+    CS2_GEMINI(X)
+// clang-format on
+
+#endif  // !_WIN32
+
 }  // namespace
 
 // One TEST_CASE per (entry, case). The name carries the registry id, so a
@@ -398,6 +663,22 @@ CONTRACT_SWEEP_ENTRIES(CS_T1_UID)
 CONTRACT_SWEEP_ENTRIES(CS_T1_ACTION)
 CONTRACT_SWEEP_ENTRIES(CS_T1_ERRVOCAB)
 CONTRACT_SWEEP_ENTRIES(CS_T1_CAN)
+
+#ifndef _WIN32
+#define CS2_CASE(id, casename, body)                                                          \
+    TEST_CASE("Contract sweep tier 2 - " #id " - " casename, "[contract][tier2][" #id "]") { \
+        body(tier2_host_##id());                                                              \
+    }
+#define CS2_CONNECTING(id) CS2_CASE(id, "Connecting semantics", case_t2_connecting)
+#define CS2_TARGETS(id) CS2_CASE(id, "target flags until set", case_t2_target_flags)
+#define CS2_INVALID(id) CS2_CASE(id, "InvalidValue wins while connected", case_t2_invalid_value_connected)
+#define CS2_STATE(id) CS2_CASE(id, "connected DeviceState has TimeStamp", case_t2_device_state_connected)
+
+CONTRACT_SWEEP_TIER2_HOSTS(CS2_CONNECTING)
+CONTRACT_SWEEP_TIER2_HOSTS(CS2_TARGETS)
+CONTRACT_SWEEP_TIER2_HOSTS(CS2_INVALID)
+CONTRACT_SWEEP_TIER2_HOSTS(CS2_STATE)
+#endif
 
 // Non-vacuity guard. The vendor ALPACACORE_ENABLE_<V> macros are not inherited
 // from the vendor targets: tests/CMakeLists.txt must define them for
