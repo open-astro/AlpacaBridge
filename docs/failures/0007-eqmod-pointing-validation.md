@@ -32,6 +32,7 @@ reintroduced from stale bring-up notes.
 - Regression coverage: `AlpacaCore/tests/test_skywatcher_pointing.cpp` and
   `AlpacaCore/tests/test_skywatcher_async.cpp`.
 - The historical notes distinguish measured positive-Dec-axis-branch behavior from
-  loopback-only negative-branch coverage and pending physical southern pier-side
-  validation. This record does not promote those pending checks to completed ones.
+  loopback-only negative-branch coverage. Southern pier-side handling was
+  plate-solved on 2026-09-24 (see the instruction file above). This record does not
+  promote the still-pending negative-branch checks to completed ones.
 - [Related pointing-clock rationale](../decisions/0001-skywatcher-pointing-clock.md).

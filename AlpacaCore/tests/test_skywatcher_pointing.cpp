@@ -1317,9 +1317,11 @@ TEST_CASE("SkyWatcher pointing - the pier side changes at HA 0 and the axes stay
 // power-on, west) and 19.0 to 72.1 deg (second power-on, west).
 // The home row is left out: at a2 = 0 the dec branch is undefined (#459).
 // Before adding a row, check its residuals against the bounds below: the dec
-// bound has only 0.42 deg of margin here (4.58 measured), and that margin is
-// set by this rig's own dec-zero error, so a row from a worse-homed rig would
-// fail on the rig, not on the model.
+// bound has only 0.42 deg of margin here (4.58 measured) and the HA bound
+// 0.066 h (0.434 measured, "Dec -40 circle 1"), and both margins are set by
+// this rig's own zero errors, so a row from a worse-homed rig would fail on the
+// rig, not on the model. The same-side spread only constrains groups with two
+// or more rows: power-on 2 east has one, so its check compares it to itself.
 TEST_CASE("SkyWatcher pointing - measured axes agree with the plate-solved sky across a flip, south",
           "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
     struct Row {
