@@ -33,6 +33,7 @@
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
@@ -46,6 +47,7 @@
 #include <regex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -374,10 +376,91 @@ void check_rejections(alpacahttp::Router& router) {
     report("D rejections", failures);
 }
 
+// DIAGNOSTIC (#646): where does one request spend its time under the CI
+// sanitizer build? Median microseconds per operation, split into parse,
+// route and response-body JSON parse, plus micro-benchmarks of things the
+// sanitizers are known to make slow.
+template <typename F>
+long long median_us(int n, F&& fn) {
+    std::vector<long long> samples;
+    for (int i = 0; i < n; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        fn();
+        const auto t1 = std::chrono::steady_clock::now();
+        samples.push_back(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+    }
+    std::sort(samples.begin(), samples.end());
+    return samples[samples.size() / 2];
+}
+
+void probe(const char* label, long long us) { std::cerr << "PROBE " << label << ": " << us << " us\n"; }
+
+std::string raw_get(const std::string& path) { return "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n"; }
+
+void run_probes(alpacahttp::Router& router) {
+    const std::vector<std::pair<const char*, std::string>> kinds = {
+        {"unknown type", "/api/v1/wibble/0/connected"},
+        {"unknown method", "/api/v1/telescope/4646/notarealmethod"},
+        {"wrong verb (PUT-only via GET)", "/api/v1/telescope/4646/abortslew"},
+        {"device not found", "/api/v1/telescope/4646/connected"},
+        {"management apiversions", "/management/apiversions"},
+    };
+    for (const auto& [label, path] : kinds) {
+        const std::string raw = raw_get(path);
+        probe((std::string("parse   ") + label).c_str(), median_us(20, [&] {
+                  alpacahttp::Request request;
+                  EXPECT(request.parse(raw));
+              }));
+        alpacahttp::Request request;
+        EXPECT(request.parse(raw));
+        alpacahttp::Response last;
+        probe((std::string("route   ") + label).c_str(), median_us(20, [&] { last = router.route(request, 1); }));
+        const std::string body = last.body();
+        probe((std::string("json    ") + label).c_str(),
+              median_us(20, [&] { (void)nlohmann::json::parse(body, nullptr, false); }));
+    }
+    probe("router.cpp:1643 device_regex construct",
+          median_us(20, [] { std::regex re(R"(/api/v1/([^/]+)/(\d+)/([^/?]+))"); }));
+    {
+        const std::regex re(R"(/api/v1/([^/]+)/(\d+)/([^/?]+))");
+        const std::string path = "/api/v1/telescope/4646/notarealmethod";
+        probe("router.cpp:1643 device_regex match only", median_us(20, [&] {
+                  std::smatch m;
+                  (void)std::regex_match(path, m, re);
+              }));
+    }
+    probe("throw+catch", median_us(50, [] {
+              try {
+                  throw std::runtime_error("x");
+              } catch (const std::exception&) {
+              }
+          }));
+    probe("std::regex construct", median_us(20, [] { std::regex re("k(\\w+)Methods\\s*=\\s*\\{"); }));
+    probe("1000 x new/delete 1KB", median_us(20, [] {
+              for (int i = 0; i < 1000; ++i) {
+                  delete[] new char[1024];
+              }
+          }));
+    probe("filesystem::exists x100", median_us(20, [] {
+              for (int i = 0; i < 100; ++i) {
+                  (void)std::filesystem::exists("config/registered_devices.json");
+              }
+          }));
+    probe("ostringstream x100", median_us(20, [] {
+              for (int i = 0; i < 100; ++i) {
+                  std::ostringstream o;
+                  o << "GET " << i << " HTTP/1.1";
+              }
+          }));
+}
+
 }  // namespace
 
 int main() {
     alpacahttp::Router router;
+    run_probes(router);
+    std::cerr << "DIAGNOSTIC: probes only, failing on purpose\n";
+    return 1;
 
     check_route_table(router);
     check_source_tables();
