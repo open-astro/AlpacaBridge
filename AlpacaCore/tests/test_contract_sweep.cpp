@@ -528,11 +528,17 @@ constexpr std::chrono::milliseconds kHoldWindow{100};
 constexpr std::chrono::milliseconds kSerialBoardHold{150};  // Sky-Watcher serial: response_timeout_ms is 300
 constexpr std::chrono::milliseconds kFlatPanelHold{300};    // Gemini flat panel: handshake read timeout is 2 s
 constexpr std::chrono::milliseconds kQhyOpenHold{300};      // QHY: the SDK open_camera call, no reply timeout
+constexpr std::chrono::milliseconds kHold{300};  // generic hold for rows whose reply timeout is >= 1.5 s or has none
+constexpr std::chrono::milliseconds kUdpMountHold{150};  // Sky-Watcher UDP: response_timeout_ms is 250
+constexpr std::chrono::milliseconds kCfw3Hold{200};      // QHY CFW3: reply_timeout_ms is 300 (VRS reply held)
+constexpr int kHeldReplyTimeoutMs = 1000;  // mount-server rows raise their reply timeout to this in the hold case
 
 struct ConnectObservation {
     bool saw_connecting = false;
-    bool first_sample_in_flight = false;  // right after connect() returned: Connecting or already Connected
-    bool connected_early = false;         // Connected read true inside the hold window, before the handshake ended
+    bool first_sample_in_flight = false;   // right after connect() returned: Connecting or already Connected
+    bool first_sample_connecting = false;  // Connecting read true on the very first sample after connect() returned
+    std::chrono::milliseconds connect_call{0};  // how long the connect() call itself took
+    bool connected_early = false;  // Connected read true inside the hold window, before the handshake ended
     bool settled = false;
 };
 
@@ -545,14 +551,21 @@ struct ConnectObservation {
 ConnectObservation connect_and_observe(AlpacaDriver& d, std::chrono::milliseconds hold_window = {},
                                        std::chrono::milliseconds budget = std::chrono::seconds(30)) {
     ConnectObservation o;
+    const auto call_start = Clock::now();
     d.connect();
     const auto t0 = Clock::now();
+    o.connect_call = std::chrono::duration_cast<std::chrono::milliseconds>(t0 - call_start);
     const auto deadline = t0 + budget;
     bool first = true;
     while (Clock::now() < deadline) {
         const bool connecting = d.get_connecting();
         const bool connected = d.get_connected();
-        if (first) o.first_sample_in_flight = connecting || connected;
+        if (first) {
+            o.first_sample_in_flight = connecting || connected;
+            // Connected is not part of this: on the drivers whose get_connected() blocks behind the connect
+            // (async_connectable.h), that read only returns once the connect has finished.
+            o.first_sample_connecting = connecting;
+        }
         first = false;
         if (connecting) o.saw_connecting = true;
         if (connected && Clock::now() - t0 < hold_window) o.connected_early = true;
@@ -597,6 +610,10 @@ Hosted connected_host(const Tier2Host& h) {
         } else {
             INFO("the fake holds the handshake open past the "
                  << kHoldWindow.count() << " ms window: Connecting reads true and Connected false");
+            // A synchronous connect cannot pass these: connect() must return before the shortest hold ends, the
+            // very first sample must read Connecting true, and Connected stays false for the window.
+            CHECK(o.connect_call < kUdpMountHold);
+            CHECK(o.first_sample_connecting);
             CHECK(o.saw_connecting);
             CHECK_FALSE(o.connected_early);
         }
@@ -625,10 +642,8 @@ Hosted connected_host(const Tier2Host& h) {
 // each getter throws ValueNotSet until that property itself is written. Issue #655 says
 // InvalidOperation; every driver and every per-vendor test uses ValueNotSet (0x402), so that is the rule.
 [[maybe_unused]] void case_t2_target_flags(const Tier2Host& h) {
-    if (h.type != DeviceType::Telescope) {
-        SUCCEED(std::string(h.id) + ": target flags apply to telescopes only");
-        return;
-    }
+    // Registered over telescope hosts only (kind TEL below); the guard case pins that.
+    REQUIRE(h.type == DeviceType::Telescope);
     Hosted hosted = connected_host(h);
     auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
     CHECK(thrown_code([&] { (void)t.get_target_right_ascension(); }) == err::ValueNotSet);
@@ -644,13 +659,10 @@ Hosted connected_host(const Tier2Host& h) {
 // Case 3. The out-of-range inputs tier 1 probes while disconnected are still InvalidValue when connected.
 [[maybe_unused]] void case_t2_invalid_value_connected(const Tier2Host& h) {
     Hosted hosted = connected_host(h);
+    // Registered only over hosts whose type has probes (kinds TEL and PRB below); a type without a static
+    // out-of-range input states why through invalid_probe_reason_for() in contract_sweep.h, checked by the guard.
     const auto probes = invalid_value_probes(*hosted.driver, h.type);
-    if (probes.empty()) {
-        const std::string reason = alpacacore::test::contract::invalid_probe_reason_for(h.type);
-        INFO(h.id << " has no static out-of-range probe: " << reason);
-        CHECK_FALSE(reason.empty());
-        return;
-    }
+    REQUIRE_FALSE(probes.empty());
     for (const auto& [name, fn] : probes) {
         INFO(h.id << " " << name);
         CHECK(thrown_code(fn) == err::InvalidValue);
@@ -725,18 +737,24 @@ template <class MakeDriver>
 Tier2Host mount_server_host(const char* id, const char* vendor, const char* registry_id,
                             alpacacore::test::FakeMountServer::Responder responder, MakeDriver make) {
     Tier2Host h{id, vendor, "telescope", "fake_mount_server.h", DeviceType::Telescope, registry_id, {}, false, {}, ""};
-    h.connecting_unobservable =
-        "fake_mount_server.h answers every command at once and has no handshake-delay knob (source: the header), "
-        "so the Connecting window is a scheduling instant";
-    h.connectable = [responder, make](bool) {
-        auto server = std::make_shared<alpacacore::test::FakeMountServer>(responder);
+    h.can_hold_connect = true;
+    // FakeMountServer::Responder (fake_mount_server.h) runs before every reply, so a responder that sleeps on
+    // the first chunk holds the connect with no fake change. The driver's reply timeout is raised for the
+    // hold case (make(port, hold)) so the held reply is late, not lost.
+    h.connectable = [responder, make](bool hold) {
+        auto first = std::make_shared<std::atomic<bool>>(hold);
+        auto held = [responder, first](const std::string& chunk) {
+            if (first->exchange(false)) std::this_thread::sleep_for(kHold);
+            return responder(chunk);
+        };
+        auto server = std::make_shared<alpacacore::test::FakeMountServer>(held);
         REQUIRE(server->ok());
         Hosted hosted;
-        hosted.driver = make(server->port());
+        hosted.driver = make(server->port(), hold);
         hosted.fake = server;
         return hosted;
     };
-    h.failing = [make]() { return host_over_held_port(SOCK_STREAM, make); };
+    h.failing = [make]() { return host_over_held_port(SOCK_STREAM, [make](int port) { return make(port, false); }); };
     return h;
 }
 #endif
@@ -756,12 +774,12 @@ Tier2Host tier2_host_zwo_telescope() {
                        ? "1#"
                        : "0#";
         },
-        [](int port) -> std::unique_ptr<AlpacaDriver> {
+        [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
             zwo::ConnectionInfo info;
             info.type = zwo::ConnectionType::Network;
             info.host = "127.0.0.1";
             info.tcp_port = port;
-            info.response_timeout_ms = 250;
+            info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 250;
             return zwo::create_zwo_telescope(0, info);
         });
 }
@@ -774,12 +792,12 @@ Tier2Host tier2_host_celestron_telescope() {
     return mount_server_host(
         "celestron_telescope", "celestron", "celestron_telescope",
         [](const std::string&) { return std::string("00000000,00000000#"); },
-        [](int port) -> std::unique_ptr<AlpacaDriver> {
+        [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
             cel::ConnectionInfo info;
             info.type = cel::ConnectionType::Network;
             info.host = "127.0.0.1";
             info.tcp_port = port;
-            info.response_timeout_ms = 50;
+            info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
             return cel::create_celestron_telescope(0, info);
         });
 }
@@ -791,12 +809,12 @@ Tier2Host tier2_host_synscan_telescope() {
     namespace syn = alpacacore::vendor::synscan;
     return mount_server_host("synscan_telescope", "synscan", "synscan_telescope",
                              alpacacore::test::FakeMountServer::default_responder(),
-                             [](int port) -> std::unique_ptr<AlpacaDriver> {
+                             [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
                                  syn::ConnectionInfo info;
                                  info.type = syn::ConnectionType::Network;
                                  info.host = "127.0.0.1";
                                  info.tcp_port = port;
-                                 info.response_timeout_ms = 50;
+                                 info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
                                  return syn::create_synscan_telescope(0, info, syn::SynScanVersion::V4);
                              });
 }
@@ -808,12 +826,12 @@ Tier2Host tier2_host_onstep_telescope() {
     namespace ons = alpacacore::vendor::onstep;
     return mount_server_host("onstep_telescope", "onstep", "onstep_telescope",
                              alpacacore::test::FakeMountServer::default_responder(),
-                             [](int port) -> std::unique_ptr<AlpacaDriver> {
+                             [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
                                  ons::ConnectionInfo info;
                                  info.type = ons::ConnectionType::Network;
                                  info.host = "127.0.0.1";
                                  info.tcp_port = port;
-                                 info.response_timeout_ms = 50;
+                                 info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
                                  return ons::create_onstep_telescope(0, info);
                              });
 }
@@ -839,17 +857,15 @@ Tier2Host tier2_host_skywatcher_telescope() {
                 DeviceType::Telescope,
                 "skywatcher_telescope",
                 {},
-                false,
+                true,
                 {},
                 ""};
-    h.connectable = [make](bool) {
-        return host_over(std::make_shared<alpacacore::test::FakeSkyWatcherMount>(),
-                         [&](const alpacacore::test::FakeSkyWatcherMount& m) { return make(m.port()); });
+    h.connectable = [make](bool hold) {
+        auto mount = std::make_shared<alpacacore::test::FakeSkyWatcherMount>();
+        if (hold) mount->hold_next_reply(kUdpMountHold);
+        return host_over(mount, [&](const alpacacore::test::FakeSkyWatcherMount& m) { return make(m.port()); });
     };
     h.failing = [make]() { return host_over_held_port(SOCK_DGRAM, make); };
-    h.connecting_unobservable =
-        "fake_skywatcher_mount.h replies to every UDP frame at once and has no handshake-delay knob (source: the "
-        "header)";
     return h;
 }
 
@@ -909,17 +925,16 @@ Tier2Host tier2_host_ioptron_telescope() {
                 DeviceType::Telescope,
                 "ioptron_telescope",
                 {},
-                false,
+                true,
                 {},
                 ""};
-    h.connectable = [make](bool) {
+    h.connectable = [make](bool hold) {
         auto mount = std::make_shared<alpacacore::test::FakeIoptronMount>("0012", 12.0);
         REQUIRE(mount->ok());
+        if (hold) mount->hold_next_reply(kHold);
         return host_over(mount, [&](const alpacacore::test::FakeIoptronMount& m) { return make(m.port()); });
     };
     h.failing = [make]() { return host_over_held_port(SOCK_STREAM, make); };
-    h.connecting_unobservable =
-        "fake_ioptron_mount.h replies at once and has no handshake-delay knob (source: the header)";
     return h;
 }
 
@@ -931,22 +946,21 @@ Tier2Host tier2_host_ioptron_focuser() {
                 DeviceType::Focuser,
                 "ioptron_focuser",
                 {},
-                false,
+                true,
                 {},
                 ""};
-    h.connectable = [](bool) {
-        return host_over(std::make_shared<alpacacore::test::FakeIoptronIeaf>(),
-                         [](const alpacacore::test::FakeIoptronIeaf& f) -> std::unique_ptr<AlpacaDriver> {
-                             return alpacacore::vendor::ioptron::create_ieaf_focuser(0, f.slave_path());
-                         });
+    h.connectable = [](bool hold) {
+        auto ieaf = std::make_shared<alpacacore::test::FakeIoptronIeaf>();
+        if (hold) ieaf->hold_next_reply(kHold);
+        return host_over(ieaf, [](const alpacacore::test::FakeIoptronIeaf& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::ioptron::create_ieaf_focuser(0, f.slave_path());
+        });
     };
     h.failing = []() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, kAbsentPort);
         return hosted;
     };
-    h.connecting_unobservable =
-        "fake_ioptron_ieaf.h replies at once and has no handshake-delay knob (source: the header)";
     return h;
 }
 #endif
@@ -1011,21 +1025,28 @@ Tier2Host tier2_host_gemini_covercalibrator() {
 }
 
 Tier2Host tier2_host_gemini_switch() {
-    Tier2Host h{"gemini_switch", "gemini", "switch", "fake_gemini_pdh.h", DeviceType::Switch, "gemini_switch", {},
-                false,           {},       ""};
-    h.connectable = [](bool) {
-        return host_over(std::make_shared<alpacacore::test::FakeGeminiPdh>(),
-                         [](const alpacacore::test::FakeGeminiPdh& f) -> std::unique_ptr<AlpacaDriver> {
-                             return alpacacore::vendor::gemini::create_gemini_pdh_switch(0, f.slave_path(), 19200);
-                         });
+    Tier2Host h{"gemini_switch",
+                "gemini",
+                "switch",
+                "fake_gemini_pdh.h",
+                DeviceType::Switch,
+                "gemini_switch",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto pdh = std::make_shared<alpacacore::test::FakeGeminiPdh>();
+        if (hold) pdh->hold_next_reply(kHold);
+        return host_over(pdh, [](const alpacacore::test::FakeGeminiPdh& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::gemini::create_gemini_pdh_switch(0, f.slave_path(), 19200);
+        });
     };
     h.failing = []() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, kAbsentPort, 19200);
         return hosted;
     };
-    h.connecting_unobservable =
-        "fake_gemini_pdh.h replies at once and has no handshake-delay knob (source: the header)";
     return h;
 }
 #endif
@@ -1080,40 +1101,39 @@ Tier2Host tier2_host_qhy_filterwheel() {
                 DeviceType::FilterWheel,
                 "qhy_filterwheel_cfw3",
                 {},
-                false,
+                true,
                 {},
                 ""};
-    h.connectable = [settings](bool) {
-        return host_over(std::make_shared<alpacacore::test::FakeQhyCfw3>(),
-                         [&](const alpacacore::test::FakeQhyCfw3& f) -> std::unique_ptr<AlpacaDriver> {
-                             return alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, f.slave_path(), settings());
-                         });
+    h.connectable = [settings](bool hold) {
+        auto wheel = std::make_shared<alpacacore::test::FakeQhyCfw3>();
+        if (hold) wheel->hold_next_reply(kCfw3Hold);
+        return host_over(wheel, [&](const alpacacore::test::FakeQhyCfw3& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, f.slave_path(), settings());
+        });
     };
     h.failing = [settings]() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, kAbsentPort, settings());
         return hosted;
     };
-    h.connecting_unobservable = "fake_qhy_cfw3.h replies at once and has no handshake-delay knob (source: the header)";
     return h;
 }
 
 Tier2Host tier2_host_qhy_focuser() {
     Tier2Host h{"qhy_focuser", "qhy", "focuser", "fake_qhy_qfocuser.h", DeviceType::Focuser, "qhy_focuser", {},
-                false,         {},    ""};
-    h.connectable = [](bool) {
-        return host_over(std::make_shared<alpacacore::test::FakeQhyQFocuser>(),
-                         [](const alpacacore::test::FakeQhyQFocuser& f) -> std::unique_ptr<AlpacaDriver> {
-                             return alpacacore::vendor::qhy::create_qhy_focuser(0, f.slave_path());
-                         });
+                true,          {},    ""};
+    h.connectable = [](bool hold) {
+        auto focuser = std::make_shared<alpacacore::test::FakeQhyQFocuser>();
+        if (hold) focuser->hold_next_reply(kHold);
+        return host_over(focuser, [](const alpacacore::test::FakeQhyQFocuser& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::qhy::create_qhy_focuser(0, f.slave_path());
+        });
     };
     h.failing = []() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::qhy::create_qhy_focuser(0, kAbsentPort);
         return hosted;
     };
-    h.connecting_unobservable =
-        "fake_qhy_qfocuser.h replies at once and has no handshake-delay knob (source: the header)";
     return h;
 }
 #endif
@@ -1136,11 +1156,17 @@ Tier2Host tier2_host_touptek_camera() {
                 DeviceType::Camera,
                 "touptek_camera",
                 {},
-                false,
+                true,
                 {},
                 ""};
-    h.connectable = [](bool) {
-        return host_over(std::make_shared<ToupTekSdkHold>(), [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+    h.connectable = [](bool hold) {
+        auto sdk_hold = std::make_shared<ToupTekSdkHold>();
+        if (hold) {
+            sdk_hold->fake.before_call = [](const std::string& name) {
+                if (name == "open_camera_by_id") std::this_thread::sleep_for(kHold);
+            };
+        }
+        return host_over(sdk_hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::touptek::create_touptek_camera(0, 0, s.sdk);
         });
     };
@@ -1151,9 +1177,6 @@ Tier2Host tier2_host_touptek_camera() {
             return alpacacore::vendor::touptek::create_touptek_camera(0, 0, s.sdk);
         });
     };
-    h.connecting_unobservable =
-        "fake_touptek_sdk.h returns from open at once and has no delay knob (source: the header; it only injects "
-        "faults through throw_from)";
     return h;
 }
 #endif
@@ -1180,10 +1203,24 @@ struct GPhotoSdkHold {
 
 // Recipe of test_gphoto_concurrency_stress.cpp.
 Tier2Host tier2_host_gphoto_camera() {
-    Tier2Host h{"gphoto_camera", "gphoto", "camera", "fake_gphoto_sdk.h", DeviceType::Camera, "gphoto_camera", {},
-                false,           {},       ""};
-    h.connectable = [](bool) {
-        return host_over(std::make_shared<GPhotoSdkHold>(), [](GPhotoSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+    Tier2Host h{"gphoto_camera",
+                "gphoto",
+                "camera",
+                "fake_gphoto_sdk.h",
+                DeviceType::Camera,
+                "gphoto_camera",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk_hold = std::make_shared<GPhotoSdkHold>();
+        if (hold) {
+            sdk_hold->fake.before_call = [](const std::string& name) {
+                if (name == "open_camera") std::this_thread::sleep_for(kHold);
+            };
+        }
+        return host_over(sdk_hold, [](GPhotoSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, s.sdk, s.decoder);
         });
     };
@@ -1193,8 +1230,6 @@ Tier2Host tier2_host_gphoto_camera() {
             return alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, s.sdk, s.decoder);
         });
     };
-    h.connecting_unobservable =
-        "fake_gphoto_sdk.h returns from open at once and has no connect-delay knob (source: the header)";
     return h;
 }
 #endif
@@ -1214,24 +1249,22 @@ Tier2Host tier2_host_wandererastro_covercalibrator() {
                 DeviceType::CoverCalibrator,
                 "wandererastro_covercalibrator",
                 {},
-                false,
+                true,
                 {},
                 ""};
-    h.connectable = [](bool) {
-        return host_over(
-            std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererCoverFrame, std::chrono::milliseconds(50)),
-            [](const alpacacore::test::FakeSerialStreamer& f) -> std::unique_ptr<AlpacaDriver> {
-                return alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, f.slave_path());
-            });
+    h.connectable = [](bool hold) {
+        auto streamer =
+            std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererCoverFrame, std::chrono::milliseconds(50));
+        if (hold) streamer->hold_first_frame(kHold);
+        return host_over(streamer, [](const alpacacore::test::FakeSerialStreamer& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, f.slave_path());
+        });
     };
     h.failing = []() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, kAbsentPort);
         return hosted;
     };
-    h.connecting_unobservable =
-        "fake_serial_streamer.h repeats one fixed frame at a fixed interval and has no handshake-hold knob (source: "
-        "the header); its set_muted() is not wired to the connect for this row (effect on connect unverified)";
     return h;
 }
 
@@ -1243,24 +1276,22 @@ Tier2Host tier2_host_wandererastro_filterwheel() {
                 DeviceType::FilterWheel,
                 "wandererastro_filterwheel",
                 {},
-                false,
+                true,
                 {},
                 ""};
-    h.connectable = [](bool) {
-        return host_over(
-            std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererSfwFrame, std::chrono::milliseconds(50)),
-            [](const alpacacore::test::FakeSerialStreamer& f) -> std::unique_ptr<AlpacaDriver> {
-                return alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, f.slave_path());
-            });
+    h.connectable = [](bool hold) {
+        auto streamer =
+            std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererSfwFrame, std::chrono::milliseconds(50));
+        if (hold) streamer->hold_first_frame(kHold);
+        return host_over(streamer, [](const alpacacore::test::FakeSerialStreamer& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, f.slave_path());
+        });
     };
     h.failing = []() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, kAbsentPort);
         return hosted;
     };
-    h.connecting_unobservable =
-        "fake_serial_streamer.h repeats one fixed frame at a fixed interval and has no handshake-hold knob (source: "
-        "the header); its set_muted() is not wired to the connect for this row (effect on connect unverified)";
     return h;
 }
 
@@ -1272,82 +1303,83 @@ Tier2Host tier2_host_wandererastro_switch() {
                 DeviceType::Switch,
                 "wandererastro_switch",
                 {},
-                false,
+                true,
                 {},
                 ""};
-    h.connectable = [](bool) {
-        return host_over(
-            std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererBoxFrame, std::chrono::milliseconds(50)),
-            [](const alpacacore::test::FakeSerialStreamer& f) -> std::unique_ptr<AlpacaDriver> {
-                return alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, f.slave_path());
-            });
+    h.connectable = [](bool hold) {
+        auto streamer =
+            std::make_shared<alpacacore::test::FakeSerialStreamer>(kWandererBoxFrame, std::chrono::milliseconds(50));
+        if (hold) streamer->hold_first_frame(kHold);
+        return host_over(streamer, [](const alpacacore::test::FakeSerialStreamer& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, f.slave_path());
+        });
     };
     h.failing = []() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, kAbsentPort);
         return hosted;
     };
-    h.connecting_unobservable =
-        "fake_serial_streamer.h repeats one fixed frame at a fixed interval and has no handshake-hold knob (source: "
-        "the header); its set_muted() is not wired to the connect for this row (effect on connect unverified)";
     return h;
 }
 #endif
 
-// One X(id) per hosted roster row, under the vendor's guard.
+// One X(id, kind) per hosted roster row, under the vendor's guard. kind decides which cases the row is
+// registered for, so no case is registered where it would assert nothing: TEL = telescope (target flags and
+// InvalidValue apply), PRB = other type with static out-of-range probes (InvalidValue applies), NPR = a type
+// with no such probe (invalid_probe_reason_for() in contract_sweep.h states why; the guard case pins it).
 // clang-format off
 #ifdef ALPACACORE_ENABLE_ZWO
-#define CS2_ZWO(X) X(zwo_telescope)
+#define CS2_ZWO(X) X(zwo_telescope, TEL)
 #else
 #define CS2_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS2_CELESTRON(X) X(celestron_telescope)
+#define CS2_CELESTRON(X) X(celestron_telescope, TEL)
 #else
 #define CS2_CELESTRON(X)
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-#define CS2_SYNSCAN(X) X(synscan_telescope)
+#define CS2_SYNSCAN(X) X(synscan_telescope, TEL)
 #else
 #define CS2_SYNSCAN(X)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-#define CS2_ONSTEP(X) X(onstep_telescope)
+#define CS2_ONSTEP(X) X(onstep_telescope, TEL)
 #else
 #define CS2_ONSTEP(X)
 #endif
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
-#define CS2_SKYWATCHER(X) X(skywatcher_telescope) X(skywatcher_telescope_serial)
+#define CS2_SKYWATCHER(X) X(skywatcher_telescope, TEL) X(skywatcher_telescope_serial, TEL)
 #else
 #define CS2_SKYWATCHER(X)
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-#define CS2_IOPTRON(X) X(ioptron_telescope) X(ioptron_focuser)
+#define CS2_IOPTRON(X) X(ioptron_telescope, TEL) X(ioptron_focuser, NPR)
 #else
 #define CS2_IOPTRON(X)
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
-#define CS2_GEMINI(X) X(gemini_focuser) X(gemini_covercalibrator) X(gemini_switch)
+#define CS2_GEMINI(X) X(gemini_focuser, NPR) X(gemini_covercalibrator, PRB) X(gemini_switch, PRB)
 #else
 #define CS2_GEMINI(X)
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
-#define CS2_QHY(X) X(qhy_camera) X(qhy_filterwheel) X(qhy_focuser)
+#define CS2_QHY(X) X(qhy_camera, NPR) X(qhy_filterwheel, PRB) X(qhy_focuser, NPR)
 #else
 #define CS2_QHY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-#define CS2_TOUPTEK(X) X(touptek_camera)
+#define CS2_TOUPTEK(X) X(touptek_camera, NPR)
 #else
 #define CS2_TOUPTEK(X)
 #endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
-#define CS2_GPHOTO(X) X(gphoto_camera)
+#define CS2_GPHOTO(X) X(gphoto_camera, NPR)
 #else
 #define CS2_GPHOTO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-#define CS2_WANDERERASTRO(X) X(wandererastro_covercalibrator) X(wandererastro_filterwheel) X(wandererastro_switch)
+#define CS2_WANDERERASTRO(X) X(wandererastro_covercalibrator, PRB) X(wandererastro_filterwheel, PRB) X(wandererastro_switch, PRB)
 #else
 #define CS2_WANDERERASTRO(X)
 #endif
@@ -1399,10 +1431,17 @@ CONTRACT_SWEEP_ENTRIES(CS_T1_CAN)
 #ifndef _WIN32
 #define CS2_CASE(id, casename, body) \
     TEST_CASE("Contract sweep tier 2 - " #id " - " casename, "[contract][tier2][" #id "]") { body(tier2_host_##id()); }
-#define CS2_CONNECTING(id) CS2_CASE(id, "Connecting semantics", case_t2_connecting)
-#define CS2_TARGETS(id) CS2_CASE(id, "target flags until set", case_t2_target_flags)
-#define CS2_INVALID(id) CS2_CASE(id, "InvalidValue wins while connected", case_t2_invalid_value_connected)
-#define CS2_STATE(id) CS2_CASE(id, "connected DeviceState has TimeStamp", case_t2_device_state_connected)
+#define CS2_CONNECTING(id, kind) CS2_CASE(id, "Connecting semantics", case_t2_connecting)
+#define CS2_STATE(id, kind) CS2_CASE(id, "connected DeviceState has TimeStamp", case_t2_device_state_connected)
+// Target flags: telescopes only. InvalidValue: every kind except NPR.
+#define CS2_TARGETS(id, kind) CS2_TARGETS_##kind(id)
+#define CS2_TARGETS_TEL(id) CS2_CASE(id, "target flags until set", case_t2_target_flags)
+#define CS2_TARGETS_PRB(id)
+#define CS2_TARGETS_NPR(id)
+#define CS2_INVALID(id, kind) CS2_INVALID_##kind(id)
+#define CS2_INVALID_TEL(id) CS2_CASE(id, "InvalidValue wins while connected", case_t2_invalid_value_connected)
+#define CS2_INVALID_PRB(id) CS2_INVALID_TEL(id)
+#define CS2_INVALID_NPR(id)
 
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_CONNECTING)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_TARGETS)
@@ -1418,7 +1457,10 @@ CONTRACT_SWEEP_TIER2_HOSTS(CS2_STATE)
 TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contract][tier2][contract-sweep-guard]") {
     using alpacacore::test::contract::kFakeConnectableRoster;
     std::vector<Tier2Host> hosts;
-#define CS2_PUSH(id) hosts.push_back(tier2_host_##id());
+    std::vector<std::string> kinds;
+#define CS2_PUSH(id, kind)              \
+    hosts.push_back(tier2_host_##id()); \
+    kinds.push_back(#kind);
     CONTRACT_SWEEP_TIER2_HOSTS(CS2_PUSH)
 #undef CS2_PUSH
 
@@ -1471,13 +1513,25 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
     std::set<std::string> registry_ids;
     for (const auto& e : alpacacore::test::contract::contract_entries()) registry_ids.insert(e.id);
     std::set<std::string> host_ids;
-    for (const auto& h : hosts) {
+    for (std::size_t i = 0; i < hosts.size(); ++i) {
+        const auto& h = hosts[i];
         from_hosts.emplace(h.vendor, h.device_type, h.fake_header);
         INFO("host " << h.id);
         CHECK(host_ids.insert(h.id).second);
         CHECK(std::string(h.id).rfind(std::string(h.vendor) + "_" + h.device_type, 0) == 0);
         CHECK(registry_ids.count(h.hosts_registry_id) == 1);
         CHECK(static_cast<bool>(h.connectable));
+        // The registration kind must match the host, so no case is registered where it asserts nothing.
+        const std::string& kind = kinds[i];
+        CHECK((kind == "TEL") == (h.type == DeviceType::Telescope));
+        const bool states_no_probe =
+            std::string(alpacacore::test::contract::invalid_probe_reason_for(h.type)).size() > 0;
+        CHECK(states_no_probe == (kind == "NPR"));
+        {
+            Hosted probe_host = h.connectable(false);
+            REQUIRE(probe_host.driver != nullptr);
+            CHECK(invalid_value_probes(*probe_host.driver, h.type).empty() == (kind == "NPR"));
+        }
         CHECK((h.can_hold_connect ||
                (h.connecting_unobservable != nullptr && std::string(h.connecting_unobservable).size() > 0)));
         CHECK((static_cast<bool>(h.failing) || std::string(h.failing_unavailable).size() > 0));

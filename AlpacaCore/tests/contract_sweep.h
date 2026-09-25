@@ -871,10 +871,11 @@ inline std::vector<ContractEntry> contract_entries() {
 // literal three-field list because check 13 parses it, so each row's connect recipe
 // and the registry entry it hosts live in CONTRACT_SWEEP_TIER2_HOSTS there, and the
 // case "Contract sweep tier 2 - hosts match kFakeConnectableRoster" pins the two
-// together. Every row hosts every applicable case (target flags: telescopes only);
-// the one place a row can differ is Connecting: only a fake with a handshake-hold knob can show
-// Connecting reading true (can_hold_connect), and every other row states why and the source in its
-// connecting_unobservable reason there instead of skipping the check silently. A row whose fake covers
+// together. Every row hosts every applicable case and no case is registered where it would assert
+// nothing: target flags on telescopes only, InvalidValue only on types with a static out-of-range probe
+// (invalid_probe_reason_for() states why the others have none). A row whose fake cannot hold a connect
+// open states why and the source in its connecting_unobservable reason there instead of skipping the
+// Connecting check silently. A row whose fake covers
 // less than its registry entry says so inline.
 // ---------------------------------------------------------------------------
 

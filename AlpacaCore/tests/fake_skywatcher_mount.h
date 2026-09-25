@@ -224,6 +224,10 @@ public:
         stop_ramp_ms_ = ms;
     }
 
+    /// Hold the reply to the NEXT command for @p delay (one shot), so a connect that is waiting on it stays
+    /// open that long. Used by the contract sweep to make Connecting observable.
+    void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+
     /// While @p on, answer every ":e" identity request with a reply of the
     /// right length that is not hex, so the driver's identify fails
     /// (open-astro#458 review: an unidentified board loses its measured
@@ -644,6 +648,8 @@ private:
                 frame.pop_back();
             }
             std::string reply = handle(frame) + "\r";
+            if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
             ::sendto(fd_, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr*>(&peer), plen);
         }
     }
@@ -653,6 +659,7 @@ private:
     FakeMountProfile profile_;
     std::atomic<bool> stop_{false};
     std::thread thread_;
+    std::atomic<int> hold_ms_{0};
     std::mutex mutex_;
     int stop_ramp_ms_ = 0;
     bool garbled_version_replies_ = false;  // ":e" replies made unparseable (test knob)

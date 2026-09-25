@@ -32,6 +32,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -88,6 +89,10 @@ public:
     void set_steps_per_poll(int n) { steps_per_poll_.store(n); }
     /// Supply voltage reported in c_r (tenths of a volt): 125 = 12.5 V.
     void set_voltage_tenths(int v) { voltage_tenths_.store(v); }
+    /// Hold the reply to the NEXT command for @p delay (one shot), so a connect that is waiting on it stays
+    /// open that long. Used by the contract sweep to make Connecting observable.
+    void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+
     /// Model the real GD32 firmware's one-reply-behind behaviour: each reply is
     /// held until a later inbound OUT (a command or the driver's newline kick)
     /// clocks it out. With this on, a driver that never kicks gets no reply and
@@ -159,6 +164,9 @@ private:
         }
         const int id = field(cmd, "cmd_id");
         std::string reply;
+        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+
         switch (id) {
             case 1:
                 reply = "{\"idx\":1,\"id\":\"\\u001f@SL3KG\\u0018TH2C\",\"version\":20231207,\"bv\":208}";
@@ -222,6 +230,7 @@ private:
     PtyPair pty_;
     std::thread reader_;
     std::atomic<bool> stop_{false};
+    std::atomic<int> hold_ms_{0};
 
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;

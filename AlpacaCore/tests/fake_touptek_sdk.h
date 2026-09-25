@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -64,6 +65,9 @@ public:
 
     // --- scripting knobs ---------------------------------------------------
     std::set<std::string> throw_from;
+    // Runs before every call (after it is counted, before throw_from), so a case can make one named call
+    // block. Null in every ordinary test; the contract sweep uses it to hold a connect open.
+    std::function<void(const std::string&)> before_call;
     // When true, wait_image blocks (an exposure stays in flight) until
     // release_wait_image() or stop() is called, or the driver's timeout
     // elapses. Lets a test observe the driver's mid-exposure behaviour.
@@ -504,6 +508,7 @@ private:
             std::lock_guard<std::mutex> lock(sync_->calls_mutex);
             ++calls[fn];
         }
+        if (before_call) before_call(fn);
         if (throw_from.count(fn) != 0) {
             throw AlpacaException(std::string("fake: injected failure in ") + fn, AlpacaError::DriverException);
         }

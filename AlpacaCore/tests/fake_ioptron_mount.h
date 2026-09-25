@@ -23,10 +23,12 @@
 #ifndef _WIN32
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "fake_mount_server.h"
@@ -48,6 +50,10 @@ public:
     /// open-astro#575: answer ":MS1"/":MS2" with "0" (GOTO rejected, as the
     /// firmware does for a target below the altitude limit) instead of "1".
     void set_reject_goto(bool reject) { reject_goto_.store(reject); }
+
+    /// Hold the reply to the NEXT command for @p delay (one shot), so a connect that is waiting on it stays
+    /// open that long. Used by the contract sweep to make Connecting observable.
+    void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
 
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -78,6 +84,8 @@ private:
     }
 
     std::string respond(const std::string& chunk) {
+        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
         std::string out;
         std::string cmd;
         for (char ch : chunk) {
@@ -143,6 +151,7 @@ private:
 
     std::string model_code_;
     double landing_error_arcsec_;
+    std::atomic<int> hold_ms_{0};
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
     long long pending_ra_ = 0;

@@ -59,6 +59,11 @@ public:
         frame_ = std::move(frame);
     }
     void set_muted(bool muted) { muted_.store(muted); }
+    /// Send no frame until @p delay after the fake starts, so a connect that waits for the first streamed frame
+    /// stays open that long. Set before the driver connects. Used by the contract sweep to make Connecting observable.
+    void hold_first_frame(std::chrono::milliseconds delay) {
+        first_frame_hold_ms_.store(static_cast<int>(delay.count()));
+    }
 
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -85,6 +90,7 @@ private:
     void run() {
         std::string pending;
         char buf[64];
+        const auto started = std::chrono::steady_clock::now();
         auto last_stream = std::chrono::steady_clock::now() - std::chrono::hours(1);
         while (!stop_.load()) {
             struct pollfd pfd {};
@@ -107,7 +113,8 @@ private:
                 }
             }
             const auto now = std::chrono::steady_clock::now();
-            if (!muted_.load() && now - last_stream >= std::chrono::milliseconds(interval_ms_)) {
+            if (!muted_.load() && now - started >= std::chrono::milliseconds(first_frame_hold_ms_.load()) &&
+                now - last_stream >= std::chrono::milliseconds(interval_ms_)) {
                 last_stream = now;
                 std::string frame;
                 {
@@ -125,6 +132,7 @@ private:
     std::thread worker_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> muted_{false};
+    std::atomic<int> first_frame_hold_ms_{0};
     int interval_ms_;
 
     mutable std::mutex mutex_;

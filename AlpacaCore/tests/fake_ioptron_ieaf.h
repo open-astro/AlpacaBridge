@@ -32,6 +32,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -79,6 +80,9 @@ public:
 
     int position() const { return position_.load(); }
     void set_position(int p) { position_.store(p); }
+    /// Hold the reply to the NEXT command for @p delay (one shot), so a connect that is waiting on it stays
+    /// open that long. Used by the contract sweep to make Connecting observable.
+    void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
     /// Model code answered in the handshake: 2 = iEAF (default), 3 = iAFS2/3.
     void set_model(int m) { model_.store(m); }
 
@@ -110,6 +114,8 @@ private:
             commands_.push_back(cmd);
         }
         char reply[40] = {};
+        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
         if (cmd == ":DeviceInfo#") {
             std::snprintf(reply, sizeof(reply), "%+06d%02d%04d#", position_.load(), model_.load(), 100);
         } else if (cmd == ":FI#") {
@@ -134,6 +140,7 @@ private:
     PtyPair pty_;
     std::thread reader_;
     std::atomic<bool> stop_{false};
+    std::atomic<int> hold_ms_{0};
 
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
