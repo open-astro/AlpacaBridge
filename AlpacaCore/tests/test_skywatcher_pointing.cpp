@@ -1313,8 +1313,13 @@ TEST_CASE("SkyWatcher pointing - the pier side changes at HA 0 and the axes stay
 // a 6 h or 12 h hour-angle error, a wrong sign, a wrong dec branch across the
 // meridian, or a wrong RA-axis scale or direction. The last is the within-
 // power-on check: the RA zero cancels there, so rows on one side of the
-// meridian must share one HA offset while a1 spans 19 to 80 deg.
+// meridian must share one HA offset while a1 spans 38.7 to 80.4 deg (first
+// power-on, west) and 19.0 to 72.1 deg (second power-on, west).
 // The home row is left out: at a2 = 0 the dec branch is undefined (#459).
+// Before adding a row, check its residuals against the bounds below: the dec
+// bound has only 0.42 deg of margin here (4.58 measured), and that margin is
+// set by this rig's own dec-zero error, so a row from a worse-homed rig would
+// fail on the rig, not on the model.
 TEST_CASE("SkyWatcher pointing - measured axes agree with the plate-solved sky across a flip, south",
           "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
     struct Row {
@@ -1359,7 +1364,9 @@ TEST_CASE("SkyWatcher pointing - measured axes agree with the plate-solved sky a
         CHECK(std::abs(sky.dec_degrees - r.solved_dec) < kRowDecToleranceDegrees);
         // Data check on the recorded rows: each landing's dec branch is the side of
         // the meridian the sky put the tube on. A wrong branch in the model is caught
-        // by the HA check above, not by this line.
+        // by the HA check above, not by this line. This assumes this board's
+        // k = s * eps = +1 (EQM-35 Pro, south): an eps = +1 board in the south
+        // would legitimately fail it.
         CHECK((r.solved_ha >= 0.0) == (r.a2 >= 0.0));
 
         const int side = r.a2 >= 0.0 ? 0 : 1;
