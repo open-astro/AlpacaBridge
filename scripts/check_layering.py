@@ -175,8 +175,9 @@ def self_test() -> int:
         r = pathlib.Path(t)
         _write(r, "AlpacaHTTP/src/a.cpp", inc + inc)
         _write(r, "AlpacaHTTP/src/b.cpp", "// #include <alpacacore/vendor/zwo/x.h>\n")
-        rc, _ = _run(r, base)
-        case("include inside a comment counts", rc == 1)
+        _write(r, "AlpacaCore/src/catalog/c.cpp", "int x;\n")
+        rc, err = _run(r, base)
+        case("include inside a comment counts", rc == 1 and "b.cpp:1:" in err)
 
     with tempfile.TemporaryDirectory() as t:
         r = pathlib.Path(t)
@@ -188,8 +189,11 @@ def self_test() -> int:
              rc == 1 and "b.cpp" in err)
 
     with tempfile.TemporaryDirectory() as t:
-        rc, _ = _run(pathlib.Path(t), base)
-        case("missing AlpacaHTTP dir fails (vacuous)", rc == 1)
+        r = pathlib.Path(t)
+        _write(r, "AlpacaCore/src/catalog/c.cpp", "int x;\n")
+        rc, err = _run(r, base)
+        case("missing AlpacaHTTP dir fails (vacuous)",
+             rc == 1 and "AlpacaHTTP region scanned no files" in err)
 
     with tempfile.TemporaryDirectory() as t:
         r = pathlib.Path(t)
