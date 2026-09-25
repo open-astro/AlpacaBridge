@@ -61,7 +61,7 @@ using route_table_fixture::kRoutes;
 using route_table_fixture::RouteRow;
 
 constexpr int kProbeDevice = 4646;
-constexpr int kInvalidValue = 0x401;
+constexpr int kInvalidValue = alpacacore::AlpacaError::InvalidValue;
 
 const std::vector<std::string> kTypeNames = {
     "camera", "telescope",       "filterwheel",         "focuser",      "rotator", "dome",
@@ -341,13 +341,13 @@ void check_rejections(alpacahttp::Router& router) {
         // NaN-class parameters are not an HTTP error: the router answers 200
         // with the Alpaca InvalidValue number in the body.
         {"NaN parameter", "PUT", "/api/v1/telescope/4646/targetdeclination", "TargetDeclination=nan&ClientID=1", 200,
-         kInvalidValue, ""},
+         kInvalidValue, "Invalid value for parameter: TargetDeclination"},
         {"inf parameter", "PUT", "/api/v1/telescope/4646/targetdeclination", "TargetDeclination=inf&ClientID=1", 200,
-         kInvalidValue, ""},
+         kInvalidValue, "Invalid value for parameter: TargetDeclination"},
         {"-infinity parameter", "PUT", "/api/v1/telescope/4646/targetdeclination",
-         "TargetDeclination=-infinity&ClientID=1", 200, kInvalidValue, ""},
+         "TargetDeclination=-infinity&ClientID=1", 200, kInvalidValue, "Invalid value for parameter: TargetDeclination"},
         {"hex-float parameter", "PUT", "/api/v1/telescope/4646/targetdeclination", "TargetDeclination=0x1p3&ClientID=1",
-         200, kInvalidValue, ""},
+         200, kInvalidValue, "Invalid value for parameter: TargetDeclination"},
     };
     std::vector<std::string> failures;
     for (const auto& c : cases) {

@@ -25,8 +25,6 @@
 // The "common" pseudo-type is kCommonMethods, accepted by every device type.
 // Rows are sorted by method name within each type block.
 
-#include <cstddef>
-
 namespace route_table_fixture {
 
 constexpr unsigned kGet = 1;
@@ -288,7 +286,5 @@ constexpr RouteRow kRoutes[] = {
     // ---- safetymonitor ----
     {"safetymonitor", "issafe", kGet},
 };
-
-constexpr std::size_t kRouteCount = sizeof(kRoutes) / sizeof(kRoutes[0]);
 
 }  // namespace route_table_fixture
