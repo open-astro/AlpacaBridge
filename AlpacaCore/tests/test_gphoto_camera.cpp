@@ -92,7 +92,7 @@ TEST_CASE("GPhoto Camera Driver - Disconnected state", "[gphoto][camera][unit]")
     CHECK(driver->get_max_bin_x() == 1);
     CHECK(driver->get_max_bin_y() == 1);
     require_alpaca_error([&]() { driver->get_cooler_on(); }, alpacacore::AlpacaError::NotConnected);
-    CHECK(driver->get_cooler_power() == 0.0);
+    require_alpaca_error([&]() { driver->get_cooler_power(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_readout_modes() == std::vector<std::string>{"Normal"});
 }
 
@@ -134,10 +134,11 @@ TEST_CASE("GPhoto Camera Driver - Value range validation and ASCOM error codes",
 TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
-    // Properties this vendor never supports (no offset register, no cooler,
-    // no fast readout) throw NotImplemented regardless of connection state (except
-    // get_set_ccd_temperature, which checks the connection first, #658) --
-    // distinct from the NotConnected-gated properties above.
+    // Properties this vendor never supports (no offset register, no fast readout)
+    // throw NotImplemented regardless of connection state -- distinct from the
+    // NotConnected-gated properties above. The cooler members are not in this
+    // group: while disconnected they throw NotConnected first (AGENTS.md:224); the
+    // connected NotImplemented is pinned in test_gphoto_fake_sdk.cpp.
     require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->set_offset(0); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->get_offset_max(); }, alpacacore::AlpacaError::NotImplemented);
@@ -154,7 +155,7 @@ TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][cam
     require_alpaca_error([&]() { driver->get_gain_min(); }, alpacacore::AlpacaError::PropertyNotImplemented);
 
     require_alpaca_error([&]() { driver->get_set_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->set_set_ccd_temperature(0.0); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->set_set_ccd_temperature(0.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_fast_readout(); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->set_fast_readout(true); }, alpacacore::AlpacaError::NotImplemented);
 
