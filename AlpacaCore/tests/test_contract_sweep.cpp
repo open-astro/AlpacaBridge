@@ -207,6 +207,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_tracking", [&] { (void)t.get_tracking(); }});
             p.push_back({"get_slewing", [&] { (void)t.get_slewing(); }});
             p.push_back({"get_at_park", [&] { (void)t.get_at_park(); }});
+            p.push_back({"get_at_home", [&] { (void)t.get_at_home(); }});
             p.push_back({"slew_to_coordinates", [&] { t.slew_to_coordinates(1.0, 1.0); }});
             p.push_back({"abort_slew", [&] { t.abort_slew(); }});
             break;
