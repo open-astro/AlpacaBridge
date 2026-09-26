@@ -406,11 +406,11 @@ public:
     void sync_to_alt_az(double, double) override { throw_not_connected(); }
 };
 
-// Mirrors bisque_telescope_driver.cpp/skywatcher_telescope_driver.cpp et al.:
-// these vendor drivers answer AtPark with a cached bool while disconnected
-// instead of throwing NotConnected. get_device_state() must still report the
-// empty list for a disconnected driver regardless of what an individual
-// vendor getter does.
+// Synthetic: no telescope driver answers AtPark with a cached bool while
+// disconnected any more (open-astro#656), and the tier-1 contract sweep probes
+// get_at_park/get_at_home on every telescope. This fixture keeps
+// get_device_state() reporting the empty list for a disconnected driver even
+// if an individual getter does not throw.
 class LeakyDisconnectedTelescope final : public DisconnectedTelescope {
 public:
     bool get_at_park() const override { return false; }
