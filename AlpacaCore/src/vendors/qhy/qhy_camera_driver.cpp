@@ -640,6 +640,7 @@ public:
     }
 
     void set_cooler_on(bool cooler_on) override {
+        ensure_connected();
         if (cooler_on) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
