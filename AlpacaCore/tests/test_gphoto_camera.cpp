@@ -83,7 +83,7 @@ TEST_CASE("GPhoto Camera Driver - Disconnected state", "[gphoto][camera][unit]")
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
-    CHECK(driver->get_image_ready() == false);
+    require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_camera_x_size() == 0);
     CHECK(driver->get_camera_y_size() == 0);
@@ -168,7 +168,7 @@ TEST_CASE("GPhoto Camera Driver - State machine contracts", "[gphoto][camera][un
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
     REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
-    REQUIRE(driver->get_image_ready() == false);
+    require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);

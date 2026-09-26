@@ -194,9 +194,7 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
 
 // Operational properties and methods that must throw NotConnected while
 // disconnected, with no early return that skips the check.
-// `pins` carries the camera known-defect pins: a pinned getter is left out here and asserted
-// to still answer in case_operations_throw_not_connected.
-std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const ContractEntry& pins) {
+std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const ContractEntry& entry) {
     std::vector<Probe> p;
     switch (type) {
         case DeviceType::Telescope: {
@@ -221,7 +219,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             // NotConnected on most switches while disconnected and used to drop the probe silently).
             // iOptron's iMate switch 0 is a read-only pass-through that throws NotImplemented before the
             // connection check (AGENTS.md), which is why the id is named per entry.
-            const int writable = pins.switch_writable_id;
+            const int writable = entry.switch_writable_id;
             p.push_back({"set_switch(writable id)", [&s, writable] { s.set_switch(writable, false); }});
             break;
         }
@@ -265,12 +263,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
         case DeviceType::Camera: {
             auto& c = dynamic_cast<alpacacore::CameraDriver&>(d);
             p.push_back({"get_gain", [&] { (void)c.get_gain(); }});
-            if (pins.image_ready_known_defect == nullptr) {
-                p.push_back({"get_image_ready", [&] { (void)c.get_image_ready(); }});
-            }
-            if (pins.ccd_temperature_known_defect == nullptr) {
-                p.push_back({"get_ccd_temperature", [&] { (void)c.get_ccd_temperature(); }});
-            }
+            p.push_back({"get_image_ready", [&] { (void)c.get_image_ready(); }});
+            p.push_back({"get_ccd_temperature", [&] { (void)c.get_ccd_temperature(); }});
             p.push_back({"start_exposure", [&] { c.start_exposure(1.0, true); }});
             break;
         }
@@ -378,18 +372,6 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
         if (e.switch_max_disconnected == DisconnectedRead::Static) {
             INFO(e.id << " writable id " << id << " must be inside the static MaxSwitch");
             CHECK(s.get_max_switch() > id);
-        }
-    }
-    if (e.type == DeviceType::Camera) {
-        // Pin today's behaviour so fixing the driver fails this and removes the expectation.
-        auto& c = dynamic_cast<alpacacore::CameraDriver&>(*d);
-        if (e.image_ready_known_defect != nullptr) {
-            INFO(e.id << " get_image_ready: " << e.image_ready_known_defect);
-            CHECK(thrown_code([&] { (void)c.get_image_ready(); }) == -1);
-        }
-        if (e.ccd_temperature_known_defect != nullptr) {
-            INFO(e.id << " get_ccd_temperature: " << e.ccd_temperature_known_defect);
-            CHECK(thrown_code([&] { (void)c.get_ccd_temperature(); }) == -1);
         }
     }
 }
