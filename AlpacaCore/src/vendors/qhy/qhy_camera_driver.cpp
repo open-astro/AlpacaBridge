@@ -631,6 +631,7 @@ public:
     }
 
     bool get_cooler_on() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.has_cooler) {
             return false;
@@ -759,6 +760,7 @@ public:
     }
 
     double get_cooler_power() const override {
+        ensure_connected();
         // Explicitly report that cooler power is not implemented to avoid
         // higher-level clients repeatedly polling this property and triggering
         // timeouts on QHY SDK edge cases.
@@ -1165,6 +1167,7 @@ public:
     }
 
     double get_set_ccd_temperature() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.has_cooler) {
             throw AlpacaException("Cooler not available", AlpacaError::PropertyNotImplemented);
@@ -1184,6 +1187,7 @@ public:
                 "Set point " + std::to_string(temperature) + " exceeds maximum allowed (60°C)",
                 AlpacaError::InvalidValue);
         }
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_info_valid_ && !camera_info_.has_cooler) {
             throw AlpacaException("Cooler not available", AlpacaError::PropertyNotImplemented);

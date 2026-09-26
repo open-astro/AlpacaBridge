@@ -694,7 +694,10 @@ public:
         return *sensor_temperature_;
     }
 
-    bool get_cooler_on() const override { return false; }
+    bool get_cooler_on() const override {
+        ensure_connected();
+        return false;
+    }
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
         if (cooler_on) {
@@ -702,7 +705,10 @@ public:
         }
     }
 
-    double get_cooler_power() const override { return 0.0; }
+    double get_cooler_power() const override {
+        ensure_connected();
+        return 0.0;
+    }
     double get_electrons_per_adu() const override { return 1.0; }  // unknown; ConformU rejects 0
 
     double get_exposure_max() const override {
@@ -911,9 +917,11 @@ public:
     }
 
     double get_set_ccd_temperature() const override {
+        ensure_connected();
         throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
     }
     void set_set_ccd_temperature(double) override {
+        ensure_connected();
         throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
     }
 
