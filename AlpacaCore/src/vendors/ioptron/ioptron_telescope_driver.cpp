@@ -14,6 +14,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/units.h>
@@ -55,10 +56,12 @@ public:
      */
     iOptronTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                            std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-                           std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect)
+                           std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+                           util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
         : AsyncConnectable("iOptron"),
           device_number_(device_number),
           connection_info_(connection_info),
+          connection_resolver_(std::move(connection_resolver)),
           connected_(false),
           mount_info_(),
           target_ra_hours_(0.0),
@@ -229,9 +232,27 @@ public:
             ALPACA_LOG_INFO("iOptron", "Attempting to connect...");
             auto& protocol = iOptronProtocolWrapper::instance();
             ALPACA_LOG_INFO("iOptron", "Got protocol instance");
-            
-            ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
-            if (protocol.connect(connection_info_)) {
+
+            // Auto-detected devices resolve their port or host here, not in the
+            // factory: a persisted device is constructed at server start-up,
+            // when a Wi-Fi mount has often not joined the network yet (#659).
+            util::connect_resolved(
+                connection_info_, connection_resolved_, connection_resolver_,
+                [&protocol](const ConnectionInfo& info) {
+                    ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
+                    if (!protocol.connect(info)) {
+                        ALPACA_LOG_ERROR("iOptron", "protocol.connect() returned false");
+                        // A refused TCP connect or a vanished serial node means the
+                        // resolved endpoint is gone: re-scan. A node that is present
+                        // but would not open is not stale (busy, permissions).
+                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
+                            throw util::StaleEndpoint("Failed to connect to iOptron mount");
+                        }
+                        throw AlpacaException("Failed to connect to iOptron mount");
+                    }
+                },
+                "iOptron");
+            {
                 ALPACA_LOG_INFO("iOptron", "protocol.connect() returned true");
                 connected_ = true;
                 site_info_valid_ = false;
@@ -300,13 +321,10 @@ public:
                 std::string mount_desc = mount_info_.model_name.empty()
                     ? "unknown model"
                     : mount_info_.model_name + " (" + mount_info_.model_code + ")";
-                ALPACA_LOG_INFO("iOptron", "Connected to " + mount_desc + " over " +
-                                            std::string(connection_info_.type == ConnectionType::Serial
-                                                            ? "Serial/USB"
-                                                            : "Network"));
-            } else {
-                ALPACA_LOG_ERROR("iOptron", "protocol.connect() returned false");
-                throw AlpacaException("Failed to connect to iOptron mount");
+                ALPACA_LOG_INFO(
+                    "iOptron",
+                    "Connected to " + mount_desc + " over " +
+                        std::string(connection_info_.type == ConnectionType::Serial ? "Serial/USB" : "Network"));
             }
         } else {
             ALPACA_LOG_INFO("iOptron", "Disconnecting...");
@@ -2737,6 +2755,11 @@ private:
     
     int device_number_;
     ConnectionInfo connection_info_;
+    // Set by the auto-detect factories; empty for an explicit port or host.
+    // connection_resolved_ is true once a connect has run the resolver, so a
+    // later connect retries that endpoint before scanning again.
+    util::ConnectionResolver<ConnectionInfo> connection_resolver_;
+    bool connection_resolved_ = false;
     std::atomic<bool> connected_{false};
     mutable MountInfo mount_info_;
     mutable std::mutex mutex_;
@@ -2896,14 +2919,19 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_with_site(
         sync_time_on_connect);
 }
 
-std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(
-    int device_number,
-    int mount_index,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect) {
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_deferred(
+    int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
+    std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect) {
+    if (!connection_resolver) {
+        throw AlpacaException("iOptron telescope: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    return std::make_unique<iOptronTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
+                                                    site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                    std::move(connection_resolver));
+}
 
+ConnectionInfo resolve_ioptron_serial_auto(int mount_index) {
     auto ports = enumerate_ioptron_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("iOptron mount"));
@@ -2923,20 +2951,10 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(
     conn.type = ConnectionType::Serial;
     conn.port_path = port.port_path;
     conn.baud_rate = 115200;
-
-    return create_ioptron_telescope_with_site(
-        device_number, conn, site_latitude_deg, site_longitude_deg,
-        site_elevation_m, sync_time_on_connect);
+    return conn;
 }
 
-std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(
-    int device_number,
-    int mount_index,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect) {
-
+ConnectionInfo resolve_ioptron_network_auto(int mount_index) {
     ALPACA_LOG_INFO("iOptron", "Starting network auto-discovery...");
     auto hosts = enumerate_ioptron_network_hosts();
     if (hosts.empty()) {
@@ -2961,10 +2979,30 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(
     conn.type = ConnectionType::Network;
     conn.host = found.host;
     conn.tcp_port = found.tcp_port;
+    return conn;
+}
 
-    return create_ioptron_telescope_with_site(
-        device_number, conn, site_latitude_deg, site_longitude_deg,
-        site_elevation_m, sync_time_on_connect);
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(int device_number, int mount_index,
+                                                               std::optional<double> site_latitude_deg,
+                                                               std::optional<double> site_longitude_deg,
+                                                               std::optional<double> site_elevation_m,
+                                                               std::optional<bool> sync_time_on_connect) {
+    // The serial scan runs at connect time (#659), not here.
+    return create_ioptron_telescope_deferred(
+        device_number, [mount_index] { return resolve_ioptron_serial_auto(mount_index); }, site_latitude_deg,
+        site_longitude_deg, site_elevation_m, sync_time_on_connect);
+}
+
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(int device_number, int mount_index,
+                                                                       std::optional<double> site_latitude_deg,
+                                                                       std::optional<double> site_longitude_deg,
+                                                                       std::optional<double> site_elevation_m,
+                                                                       std::optional<bool> sync_time_on_connect) {
+    // The subnet sweep runs at connect time (#659), not here: at server
+    // start-up the mount is usually still joining the access point.
+    return create_ioptron_telescope_deferred(
+        device_number, [mount_index] { return resolve_ioptron_network_auto(mount_index); }, site_latitude_deg,
+        site_longitude_deg, site_elevation_m, sync_time_on_connect);
 }
 
 } // namespace alpacacore::vendor::ioptron

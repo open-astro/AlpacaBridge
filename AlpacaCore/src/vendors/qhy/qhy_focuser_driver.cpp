@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
@@ -42,10 +43,12 @@ class QhyFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnec
 public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    QhyFocuserDriver(int device_number, QFocuserConnectionConfig config, QFocuserSettings settings)
+    QhyFocuserDriver(int device_number, QFocuserConnectionConfig config, QFocuserSettings settings,
+                     util::ConnectionResolver<QFocuserConnectionConfig> connection_resolver = {})
         : AsyncConnectable("QHY"),
           device_number_(device_number),
           config_(std::move(config)),
+          connection_resolver_(std::move(connection_resolver)),
           settings_(std::move(settings)),
           connected_(false) {
         if (settings_.max_step < 1) settings_.max_step = 1;
@@ -131,7 +134,21 @@ public:
                 // so the reconnect below starts from a clean driver.
                 teardown_locked();
             }
-            QFocuserDeviceInfo info = protocol_.connect(config_);
+            // An auto-detected focuser resolves its port here, not in the factory (#659).
+            QFocuserDeviceInfo info;
+            util::connect_resolved(
+                config_, connection_resolved_, connection_resolver_,
+                [this, &info](const QFocuserConnectionConfig& cfg) {
+                    try {
+                        info = protocol_.connect(cfg);
+                    } catch (const AlpacaException& e) {
+                        // Only a vanished node is stale; a handshake miss on a present port is not.
+                        if (util::device_node_missing(cfg.serial_port))
+                            throw util::StaleEndpoint(e.what(), e.error_code());
+                        throw;
+                    }
+                },
+                kLogTag);
             try {
                 apply_settings();
             } catch (...) {
@@ -337,6 +354,11 @@ private:
 
     int device_number_;
     QFocuserConnectionConfig config_;
+    // Set by the by-index factory; empty for an explicit port. connection_resolved_
+    // is true once a connect has run the resolver, so a later connect retries
+    // that port before scanning again (#659).
+    util::ConnectionResolver<QFocuserConnectionConfig> connection_resolver_;
+    bool connection_resolved_ = false;
     QFocuserSettings settings_;
     std::atomic<bool> connected_;
     QFocuserProtocolWrapper protocol_;
@@ -363,8 +385,16 @@ std::unique_ptr<FocuserDriver> create_qhy_focuser(int device_number, const std::
     return std::make_unique<QhyFocuserDriver>(device_number, std::move(config), settings);
 }
 
-std::unique_ptr<FocuserDriver> create_qhy_focuser_by_index(int device_number, int focuser_index,
+std::unique_ptr<FocuserDriver> create_qhy_focuser_deferred(int device_number,
+                                                           util::ConnectionResolver<QFocuserConnectionConfig> resolver,
                                                            const QFocuserSettings& settings) {
+    if (!resolver) {
+        throw AlpacaException("QHY Q-Focuser: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    return std::make_unique<QhyFocuserDriver>(device_number, QFocuserConnectionConfig{}, settings, std::move(resolver));
+}
+
+QFocuserConnectionConfig resolve_qhy_focuser_by_index(int focuser_index) {
     auto ports = enumerate_qfocuser_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("QHY Q-Focuser"), AlpacaError::NotConnected);
@@ -377,7 +407,16 @@ std::unique_ptr<FocuserDriver> create_qhy_focuser_by_index(int device_number, in
     const auto& port = ports[static_cast<std::size_t>(focuser_index)];
     ALPACA_LOG_INFO(kLogTag, "Auto-detected Q-Focuser at " + port.port_path + " (firmware " +
                                  std::to_string(port.info.firmware) + ")");
-    return create_qhy_focuser(device_number, port.port_path, settings);
+    QFocuserConnectionConfig config;
+    config.serial_port = port.port_path;
+    return config;
+}
+
+std::unique_ptr<FocuserDriver> create_qhy_focuser_by_index(int device_number, int focuser_index,
+                                                           const QFocuserSettings& settings) {
+    // The serial scan runs at connect time (#659), not here.
+    return create_qhy_focuser_deferred(
+        device_number, [focuser_index] { return resolve_qhy_focuser_by_index(focuser_index); }, settings);
 }
 
 }  // namespace alpacacore::vendor::qhy

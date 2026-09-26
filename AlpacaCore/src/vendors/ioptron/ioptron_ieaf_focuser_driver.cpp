@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
@@ -37,10 +38,12 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    IeafFocuserDriver(int device_number, IeafConnectionConfig config)
+    IeafFocuserDriver(int device_number, IeafConnectionConfig config,
+                      util::ConnectionResolver<IeafConnectionConfig> connection_resolver = {})
         : AsyncConnectable("iOptron"),
           device_number_(device_number),
           config_(std::move(config)),
+          connection_resolver_(std::move(connection_resolver)),
           connected_(false),
           protocol_() {
         model_name_ = model_name_for(config_.model);
@@ -128,7 +131,21 @@ public:
         }
 
         if (connected) {
-            IeafDeviceInfo info = protocol_.connect(config_);
+            // An auto-detected focuser resolves its port here, not in the factory (#659).
+            IeafDeviceInfo info;
+            util::connect_resolved(
+                config_, connection_resolved_, connection_resolver_,
+                [this, &info](const IeafConnectionConfig& cfg) {
+                    try {
+                        info = protocol_.connect(cfg);
+                    } catch (const AlpacaException& e) {
+                        // Only a vanished node is stale; a handshake miss on a present port is not.
+                        if (util::device_node_missing(cfg.serial_port))
+                            throw util::StaleEndpoint(e.what(), e.error_code());
+                        throw;
+                    }
+                },
+                "iOptron");
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_ = info.firmware > 0 ? std::to_string(info.firmware) : std::string();
@@ -266,6 +283,11 @@ private:
 
     int device_number_;
     IeafConnectionConfig config_;
+    // Set by the by-index factory; empty for an explicit port. connection_resolved_
+    // is true once a connect has run the resolver, so a later connect retries
+    // that port before scanning again (#659).
+    util::ConnectionResolver<IeafConnectionConfig> connection_resolver_;
+    bool connection_resolved_ = false;
     std::atomic<bool> connected_;
     IeafProtocolWrapper protocol_;
     // firmware_ has its OWN mutex, NOT the base's connection mutex:
@@ -295,8 +317,18 @@ std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std:
     return std::make_unique<IeafFocuserDriver>(device_number, std::move(config));
 }
 
-std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index,
+std::unique_ptr<FocuserDriver> create_ieaf_focuser_deferred(int device_number,
+                                                            util::ConnectionResolver<IeafConnectionConfig> resolver,
                                                             const std::string& model) {
+    if (!resolver) {
+        throw AlpacaException("iOptron iEAF focuser: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    IeafConnectionConfig config;
+    config.model = model;
+    return std::make_unique<IeafFocuserDriver>(device_number, std::move(config), std::move(resolver));
+}
+
+IeafConnectionConfig resolve_ieaf_focuser_by_index(int focuser_index, const std::string& model) {
     auto ports = enumerate_ieaf_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("iOptron iEAF focuser"),
@@ -315,7 +347,14 @@ std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, i
     IeafConnectionConfig config;
     config.serial_port = port.port_path;
     config.model = model;
-    return std::make_unique<IeafFocuserDriver>(device_number, std::move(config));
+    return config;
+}
+
+std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index,
+                                                            const std::string& model) {
+    // The serial scan runs at connect time (#659), not here.
+    return create_ieaf_focuser_deferred(
+        device_number, [focuser_index, model] { return resolve_ieaf_focuser_by_index(focuser_index, model); }, model);
 }
 
 }  // namespace alpacacore::vendor::ioptron

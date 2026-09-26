@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
@@ -31,10 +32,12 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    GeminiFocuserDriver(int device_number, ConnectionConfig config)
+    GeminiFocuserDriver(int device_number, ConnectionConfig config,
+                        util::ConnectionResolver<ConnectionConfig> connection_resolver = {})
         : AsyncConnectable("Gemini"),
           device_number_(device_number),
           config_(std::move(config)),
+          connection_resolver_(std::move(connection_resolver)),
           connected_(false),
           protocol_() {}
 
@@ -149,7 +152,21 @@ public:
         }
 
         if (connected) {
-            protocol_.connect(config_);
+            // An auto-detected focuser resolves its port here, not in the factory (#659).
+            util::connect_resolved(
+                config_, connection_resolved_, connection_resolver_,
+                [this](const ConnectionConfig& cfg) {
+                    try {
+                        protocol_.connect(cfg);
+                    } catch (const AlpacaException& e) {
+                        // Only a vanished node is stale; a handshake miss on a present
+                        // port must not trigger the probe, which resets every CH340 MCU.
+                        if (util::device_node_missing(cfg.serial_port))
+                            throw util::StaleEndpoint(e.what(), e.error_code());
+                        throw;
+                    }
+                },
+                "Gemini");
             // Cache the focuser firmware once (web UI only — never DriverInfo).
             // firmware_ is exactly what get_device_firmware() reports; a failed
             // query must not fail the connect.
@@ -299,6 +316,11 @@ private:
 
     int device_number_;
     ConnectionConfig config_;
+    // Set by the by-index factory; empty for an explicit port. connection_resolved_
+    // is true once a connect has run the resolver, so a later connect retries
+    // that port before scanning again (#659).
+    util::ConnectionResolver<ConnectionConfig> connection_resolver_;
+    bool connection_resolved_ = false;
     std::atomic<bool> connected_;
     GeminiProtocolWrapper protocol_;
     // firmware_ has its OWN mutex, NOT the base's connection mutex:
@@ -320,8 +342,15 @@ std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
     return std::make_unique<GeminiFocuserDriver>(device_number, std::move(config));
 }
 
-std::unique_ptr<FocuserDriver> create_gemini_focuser_by_index(int device_number,
-                                                               int focuser_index) {
+std::unique_ptr<FocuserDriver> create_gemini_focuser_deferred(int device_number,
+                                                              util::ConnectionResolver<ConnectionConfig> resolver) {
+    if (!resolver) {
+        throw AlpacaException("Gemini focuser: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    return std::make_unique<GeminiFocuserDriver>(device_number, ConnectionConfig{}, std::move(resolver));
+}
+
+ConnectionConfig resolve_gemini_focuser_by_index(int focuser_index) {
     auto ports = enumerate_gemini_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("Gemini/MyFocuserPro2 focuser"),
@@ -340,7 +369,13 @@ std::unique_ptr<FocuserDriver> create_gemini_focuser_by_index(int device_number,
     ConnectionConfig config;
     config.type = ConnectionType::Serial;
     config.serial_port = port.port_path;
-    return std::make_unique<GeminiFocuserDriver>(device_number, std::move(config));
+    return config;
+}
+
+std::unique_ptr<FocuserDriver> create_gemini_focuser_by_index(int device_number, int focuser_index) {
+    // The serial scan runs at connect time (#659), not here.
+    return create_gemini_focuser_deferred(device_number,
+                                          [focuser_index] { return resolve_gemini_focuser_by_index(focuser_index); });
 }
 
 } // namespace alpacacore::vendor::gemini

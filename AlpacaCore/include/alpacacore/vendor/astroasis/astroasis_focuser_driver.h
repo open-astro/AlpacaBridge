@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/focuser_driver.h>
+#include <alpacacore/util/connection_resolver.h>
 
 #include <memory>
 #include <string>
@@ -39,5 +40,14 @@ std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const
  * @return Unique pointer to focuser driver
  */
 std::unique_ptr<FocuserDriver> create_astroasis_focuser_by_index(int device_number, int focuser_index = 0);
+
+/// HID path resolved at connect time by `resolver` (#659); the by-index
+/// factory above wraps it. The scan runs at connect, so construction succeeds
+/// while the focuser is absent.
+std::unique_ptr<FocuserDriver> create_astroasis_focuser_deferred(int device_number,
+                                                                 util::ConnectionResolver<std::string> resolver);
+
+/// The USB HID scan behind create_astroasis_focuser_by_index(); throws when nothing answers.
+std::string resolve_astroasis_focuser_by_index(int focuser_index);
 
 }  // namespace alpacacore::vendor::astroasis

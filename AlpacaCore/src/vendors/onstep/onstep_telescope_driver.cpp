@@ -14,6 +14,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
@@ -121,10 +122,12 @@ public:
 
     OnStepTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                           std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-                          std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect)
+                          std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+                          util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
         : AsyncConnectable("OnStep"),
           device_number_(device_number),
           connection_info_(connection_info),
+          connection_resolver_(std::move(connection_resolver)),
           connected_(false),
           site_elevation_m_(site_elevation_m.value_or(0.0)),
           pending_site_latitude_(site_latitude_deg),
@@ -208,9 +211,19 @@ public:
 
         auto& protocol = OnStepProtocolWrapper::instance();
         if (connected) {
-            if (!protocol.connect(connection_info_)) {
-                throw AlpacaException("Failed to connect to OnStep mount");
-            }
+            // An auto-detected mount resolves its port here, not in the factory (#659).
+            util::connect_resolved(
+                connection_info_, connection_resolved_, connection_resolver_,
+                [&protocol](const ConnectionInfo& info) {
+                    if (!protocol.connect(info)) {
+                        // Refused TCP connect or vanished serial node: stale, re-scan.
+                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
+                            throw util::StaleEndpoint("Failed to connect to OnStep mount");
+                        }
+                        throw AlpacaException("Failed to connect to OnStep mount");
+                    }
+                },
+                "OnStep");
             connected_ = true;
             status_cache_valid_ = false;
             equatorial_cache_valid_ = false;
@@ -1239,6 +1252,11 @@ private:
 
     int device_number_;
     ConnectionInfo connection_info_;
+    // Set by the auto-detect factory; empty for an explicit port or host.
+    // connection_resolved_ is true once a connect has run the resolver, so a
+    // later connect retries that endpoint before scanning again (#659).
+    util::ConnectionResolver<ConnectionInfo> connection_resolver_;
+    bool connection_resolved_ = false;
     mutable std::mutex mutex_;
     bool connected_;
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
@@ -1321,11 +1339,19 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_with_site(int device_nu
                                                    site_longitude_deg, site_elevation_m, sync_time_on_connect);
 }
 
-std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number, int mount_index,
-                                                              std::optional<double> site_latitude_deg,
-                                                              std::optional<double> site_longitude_deg,
-                                                              std::optional<double> site_elevation_m,
-                                                              std::optional<bool> sync_time_on_connect) {
+std::unique_ptr<TelescopeDriver> create_onstep_telescope_deferred(
+    int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
+    std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect) {
+    if (!connection_resolver) {
+        throw AlpacaException("OnStep telescope: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    return std::make_unique<OnStepTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
+                                                   site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                   std::move(connection_resolver));
+}
+
+ConnectionInfo resolve_onstep_serial_auto(int mount_index) {
     auto ports = enumerate_onstep_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("OnStep mount"));
@@ -1341,9 +1367,18 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number,
     ConnectionInfo conn;
     conn.type = ConnectionType::Serial;
     conn.port_path = port.port_path;
+    return conn;
+}
 
-    return create_onstep_telescope_with_site(device_number, conn, site_latitude_deg, site_longitude_deg,
-                                             site_elevation_m, sync_time_on_connect);
+std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number, int mount_index,
+                                                              std::optional<double> site_latitude_deg,
+                                                              std::optional<double> site_longitude_deg,
+                                                              std::optional<double> site_elevation_m,
+                                                              std::optional<bool> sync_time_on_connect) {
+    // The serial scan runs at connect time (#659), not here.
+    return create_onstep_telescope_deferred(
+        device_number, [mount_index] { return resolve_onstep_serial_auto(mount_index); }, site_latitude_deg,
+        site_longitude_deg, site_elevation_m, sync_time_on_connect);
 }
 
 }  // namespace alpacacore::vendor::onstep

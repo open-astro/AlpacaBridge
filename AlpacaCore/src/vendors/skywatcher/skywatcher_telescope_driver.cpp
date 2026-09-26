@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/logging.h>
@@ -233,10 +234,12 @@ public:
     SkyWatcherTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                               std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                               std::optional<double> site_elevation_m,
-                              std::unique_ptr<SkyWatcherProtocolWrapper> protocol)
+                              std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
+                              util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
         : AsyncConnectable("SkyWatcher"),
           device_number_(device_number),
           connection_info_(connection_info),
+          connection_resolver_(std::move(connection_resolver)),
           protocol_(protocol ? std::move(protocol) : std::make_unique<SkyWatcherProtocolWrapper>()),
           site_latitude_(site_latitude_deg.value_or(0.0)),
           site_longitude_(site_longitude_deg.value_or(0.0)),
@@ -384,9 +387,19 @@ public:
                     "before Connected.",
                     AlpacaError::InvalidOperation);
             }
-            if (!protocol.connect(connection_info_)) {
-                throw AlpacaException("Failed to connect to Sky-Watcher motor controller");
-            }
+            // An auto-detected mount resolves its port or host here, not in the factory (#659).
+            util::connect_resolved(
+                connection_info_, connection_resolved_, connection_resolver_,
+                [&protocol](const ConnectionInfo& info) {
+                    if (!protocol.connect(info)) {
+                        // Unanswered UDP endpoint or vanished serial node: stale, re-scan.
+                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
+                            throw util::StaleEndpoint("Failed to connect to Sky-Watcher motor controller");
+                        }
+                        throw AlpacaException("Failed to connect to Sky-Watcher motor controller");
+                    }
+                },
+                "SkyWatcher");
             connected_ = true;
             reset_runtime_state_locked();
 
@@ -4431,6 +4444,11 @@ private:
 
     int device_number_;
     ConnectionInfo connection_info_;
+    // Set by the auto-detect factory; empty for an explicit port or host.
+    // connection_resolved_ is true once a connect has run the resolver, so a
+    // later connect retries that endpoint before scanning again (#659).
+    util::ConnectionResolver<ConnectionInfo> connection_resolver_;
+    bool connection_resolved_ = false;
     std::unique_ptr<SkyWatcherProtocolWrapper> protocol_;
     mutable std::mutex mutex_;
     bool connected_ = false;
@@ -4685,10 +4703,19 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, 
                                                        site_longitude_deg, site_elevation_m, std::move(protocol));
 }
 
-std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_number, int mount_index,
-                                                                  std::optional<double> site_latitude_deg,
-                                                                  std::optional<double> site_longitude_deg,
-                                                                  std::optional<double> site_elevation_m) {
+std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
+    int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
+    std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m, std::unique_ptr<SkyWatcherProtocolWrapper> protocol) {
+    if (!connection_resolver) {
+        throw AlpacaException("Sky-Watcher telescope: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    return std::make_unique<SkyWatcherTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
+                                                       site_longitude_deg, site_elevation_m, std::move(protocol),
+                                                       std::move(connection_resolver));
+}
+
+ConnectionInfo resolve_skywatcher_auto(int mount_index) {
     auto ports = enumerate_skywatcher_ports();
     if (!ports.empty()) {
         if (mount_index < 0 || mount_index >= static_cast<int>(ports.size())) {
@@ -4704,8 +4731,7 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_num
         // The probe already proved which baud this board answers at; dropping
         // it here would reopen an EQM-35 Pro's 115200 port at the 9600 default.
         conn.baud_rate = port.baud_rate;
-        return create_skywatcher_telescope(device_number, conn, site_latitude_deg, site_longitude_deg,
-                                           site_elevation_m);
+        return conn;
     }
 
     auto hosts = discover_skywatcher_hosts();
@@ -4724,7 +4750,17 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_num
     conn.type = ConnectionType::Network;
     conn.host = host.host;
     conn.udp_port = host.udp_port;
-    return create_skywatcher_telescope(device_number, conn, site_latitude_deg, site_longitude_deg, site_elevation_m);
+    return conn;
+}
+
+std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_number, int mount_index,
+                                                                  std::optional<double> site_latitude_deg,
+                                                                  std::optional<double> site_longitude_deg,
+                                                                  std::optional<double> site_elevation_m) {
+    // The serial scan and UDP discovery run at connect time (#659), not here.
+    return create_skywatcher_telescope_deferred(device_number,
+                                                [mount_index] { return resolve_skywatcher_auto(mount_index); },
+                                                site_latitude_deg, site_longitude_deg, site_elevation_m, {});
 }
 
 }  // namespace alpacacore::vendor::skywatcher

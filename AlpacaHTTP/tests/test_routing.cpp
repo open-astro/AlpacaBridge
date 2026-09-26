@@ -207,7 +207,8 @@ PersistedAttempt persisted_attempt(const nlohmann::json& entry, const std::strin
         original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     }
     // Only this entry: the Router below registers EVERY entry in the file, and
-    // some vendors touch hardware eagerly.
+    // an entry left behind by an earlier block (or a real one on a dev box)
+    // would be re-registered here as a side effect.
     nlohmann::json entries = nlohmann::json::array();
     entries.push_back(entry);
     std::filesystem::create_directories(persisted.parent_path());
@@ -2266,8 +2267,7 @@ int main() {
     {
         // astroasis / focuser — explicit hidPath persists through
         // sanitize_device_config. (An empty hidPath instead falls back to
-        // focuserIndex, which eagerly scans the USB bus at construction and
-        // has no lazy no-hardware path to round-trip in this test.)
+        // focuserIndex, whose USB scan runs at connect time since #659.)
         const auto cfg = roundtrip_config(
             router,
             {{"vendor", "astroasis"}, {"deviceType", "focuser"}, {"deviceNumber", 9621}, {"hidPath", "/dev/hidraw3"}},
@@ -2275,6 +2275,19 @@ int main() {
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("hidPath", "") == "/dev/hidraw3");
         remove_device(router, "astroasis", "focuser", 9621);
+    }
+    {
+        // astroasis / focuser, focuserIndex form (#659): the by-index factory
+        // no longer scans the USB bus at construction, so a persisted
+        // auto-detect device registers with no hardware attached instead of
+        // becoming "(failed to load)", and focuserIndex survives the round-trip.
+        const auto cfg = roundtrip_config(
+            router, {{"vendor", "astroasis"}, {"deviceType", "focuser"}, {"deviceNumber", 9622}, {"focuserIndex", 1}},
+            "Focuser", 9622);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("focuserIndex", -1) == 1);
+        EXPECT(cfg.value("hidPath", "") == "");
+        remove_device(router, "astroasis", "focuser", 9622);
     }
 #endif
 
@@ -3141,10 +3154,11 @@ int main() {
         }
         // Only this entry, rather than appending to whatever is on disk: the
         // second Router below re-registers EVERY entry in the file and builds
-        // that vendor's driver, and some vendors touch hardware eagerly (the
-        // astroasis by-index path .github/instructions/astroasis.instructions.md warns about). Appending would make
-        // this case depend on every earlier block having removed what it added,
-        // which nothing enforces. The original contents are restored below.
+        // that vendor's driver (construction is hardware-free for every arm
+        // since #659, but an SDK-index vendor still opens its SDK). Appending
+        // would make this case depend on every earlier block having removed
+        // what it added, which nothing enforces. The original contents are
+        // restored below.
         nlohmann::json entries = nlohmann::json::array();
         entries.push_back({{"vendor", "skywatcher"},
                            {"deviceType", "telescope"},
@@ -3615,23 +3629,17 @@ int main() {
     // Every field configureddevices shows must equal the expected object, and
     // no extra key may appear. Device numbers 97xx (assigned in order below).
     //
-    // NOT round-tripped in this fake-only build (a pair listed here is not
-    // covered from either source, and why):
-    //   * astroasis / focuser by focuserIndex: the by-index constructor scans
-    //     the USB bus eagerly (see the astroasis note in the #102 block), so
-    //     only the hidPath form is round-tripped.
-    //   * Every arm whose "auto", empty-connectionType or by-index path probes
-    //     hardware or the network while the driver is constructed (the auto
-    //     paths of the ioptron, synscan, skywatcher, onstep and celestron
-    //     mounts, the ioptron network auto-scan, the by-index paths of the
-    //     ioptron, gemini and qhy focusers, and any other auto/by-index arm
-    //     that only registers with a device attached, e.g. the ioptron
-    //     filterwheel, qhy cfw3 and gemini focuser auto forms). Probing opens
-    //     serial ports and scans the LAN,
-    //     so it is not fake-only and is deliberately NOT exercised here; their
-    //     serial and network forms ARE round-tripped, and the #508 items that
-    //     ride on those probe paths (items 3 and 4, and item 1 for the mounts'
-    //     by-index arms) are left unpinned until a seam exists to fake the probe.
+    // Since #659 no "auto", empty-connectionType or by-index arm touches
+    // hardware while the driver is constructed: the auto paths of the
+    // ioptron, synscan, skywatcher, onstep and celestron mounts, the ioptron
+    // network auto-scan, the by-index paths of the ioptron, gemini, qhy and
+    // astroasis focusers and of the qhy cfw3 wheel all hand the driver a
+    // connect-time resolver, so they register with nothing attached and are
+    // round-tripped below as "auto" variants. That is also the router-level
+    // regression check for the #659 symptom ("(failed to load)" at start-up):
+    // a factory that scans at construction again throws out of
+    // register_device_from_config() here. The scan itself still runs only
+    // inside Connected=true, which nothing in this test issues.
     // =====================================================================
     {
         struct RoundtripCase {
@@ -3713,6 +3721,8 @@ int main() {
             R"("speed":4,"holdForce":true,"holdIhold":6,"holdIrun":12,"temperatureSource":"chip","cameraIndex":7})",
             R"({"connectionType":"serial","portPath":"/dev/ttyACM3","focuserIndex":1,"maxStep":30000,"reverse":true,)"
             R"("speed":4,"holdForce":true,"holdIhold":6,"holdIrun":12,"temperatureSource":"chip"})");
+        add("qhy", "focuser", "Focuser", "auto", R"({"connectionType":"auto","focuserIndex":1})",
+            R"({"connectionType":"auto","focuserIndex":1})");  // #659
         add("qhy", "filterwheel", "FilterWheel", "integrated",
             R"({"wheelType":"integrated","cameraIndex":3,"cameraId":"QHY-CFW-1","filterNames":["L","R"],)"
             R"("connectionType":"serial","portPath":"/dev/x","filterwheelIndex":4})",
@@ -3722,6 +3732,9 @@ int main() {
             R"("filterNames":["L","R","G"],"cameraIndex":3,"cameraId":"x"})",
             R"({"wheelType":"cfw3-usb","connectionType":"serial","portPath":"/dev/ttyUSB7","filterwheelIndex":1,)"
             R"("filterNames":["L","R","G"]})");
+        add("qhy", "filterwheel", "FilterWheel", "cfw3-usb auto",
+            R"({"wheelType":"cfw3-usb","connectionType":"auto","filterwheelIndex":1,"filterNames":["L","R","G"]})",
+            R"({"wheelType":"cfw3-usb","connectionType":"auto","filterwheelIndex":1,"filterNames":["L","R","G"]})");  // #659
 #endif
 
 #ifdef ALPACACORE_ENABLE_SVBONY
@@ -3779,6 +3792,14 @@ int main() {
         add("ioptron", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.1.9","tcpPort":4030,"mountIndex":2,"portPath":"/dev/x"})",
             R"({"connectionType":"network","host":"192.168.1.9","tcpPort":4030,"mountIndex":2})");
+        // #659: the auto arms construct without a scan, so they register here.
+        add("ioptron", "telescope", "Telescope", "auto", R"({"connectionType":"auto","mountIndex":1})",
+            R"({"connectionType":"auto","mountIndex":1})");
+        add("ioptron", "telescope", "Telescope", "network auto-scan",
+            R"({"connectionType":"network","tcpPort":4030,"mountIndex":1})",
+            R"({"connectionType":"network","tcpPort":4030,"mountIndex":1})");
+        add("ioptron", "focuser", "Focuser", "auto", R"({"connectionType":"auto","focuserIndex":1,"model":"ieaf"})",
+            R"({"connectionType":"auto","focuserIndex":1,"model":"ieaf"})");
         add("ioptron", "focuser", "Focuser", "",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","focuserIndex":2,"model":"iafs2","baudRate":9})",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","focuserIndex":2,"model":"iafs2"})");
@@ -3796,6 +3817,9 @@ int main() {
         add("synscan", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.1.5","tcpPort":11880,"synscanVersion":"v3","portPath":"/dev/x"})",
             R"({"connectionType":"network","host":"192.168.1.5","tcpPort":11880,"synscanVersion":"v3"})");
+        add("synscan", "telescope", "Telescope", "auto",
+            R"({"connectionType":"auto","synscanVersion":"v4","mountIndex":1})",
+            R"({"connectionType":"auto","synscanVersion":"v4","mountIndex":1})");  // #659
 #endif
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
@@ -3810,12 +3834,17 @@ int main() {
             R"("siteLongitude":151.21,"portPath":"/dev/x","tcpPort":1})",
             R"({"connectionType":"network","host":"192.168.4.1","udpPort":11880,"siteLatitude":-33.87,)"
             R"("siteLongitude":151.21})");
+        add("skywatcher", "telescope", "Telescope", "auto",
+            R"({"connectionType":"auto","mountIndex":1,"siteLatitude":39.7392,"siteLongitude":-104.9903})",
+            R"({"connectionType":"auto","mountIndex":1,"siteLatitude":39.7392,"siteLongitude":-104.9903})");  // #659
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
         add("onstep", "telescope", "Telescope", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1,"host":"h"})",
             R"({"connectionType":"serial","portPath":"/dev/ttyACM0","baudRate":9600,"mountIndex":1})");
+        add("onstep", "telescope", "Telescope", "auto", R"({"connectionType":"auto","mountIndex":1})",
+            R"({"connectionType":"auto","mountIndex":1})");  // #659
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -3826,6 +3855,8 @@ int main() {
         add("celestron", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.1.7","tcpPort":2000,"mountIndex":2,"portPath":"/dev/x"})",
             R"({"connectionType":"network","host":"192.168.1.7","tcpPort":2000,"mountIndex":2})");
+        add("celestron", "telescope", "Telescope", "auto", R"({"connectionType":"auto","mountIndex":1})",
+            R"({"connectionType":"auto","mountIndex":1})");  // #659
 #endif
 
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -3837,6 +3868,8 @@ int main() {
         add("gemini", "focuser", "Focuser", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","baudRate":19200,"focuserIndex":1,"panelIndex":2})",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","baudRate":19200,"focuserIndex":1,"panelIndex":2})");
+        add("gemini", "focuser", "Focuser", "auto", R"({"connectionType":"auto","focuserIndex":1})",
+            R"({"connectionType":"auto","focuserIndex":1})");  // #659
         add("gemini", "covercalibrator", "CoverCalibrator", "lite",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","baudRate":19200,"panelIndex":2})",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","baudRate":19200,"panelIndex":2})");
@@ -3857,6 +3890,8 @@ int main() {
 #ifdef ALPACACORE_ENABLE_ASTROASIS
         add("astroasis", "focuser", "Focuser", "hidPath", R"({"hidPath":"/dev/hidraw3","focuserIndex":2})",
             R"({"hidPath":"/dev/hidraw3","focuserIndex":2})");
+        add("astroasis", "focuser", "Focuser", "focuserIndex", R"({"focuserIndex":1})",
+            R"({"focuserIndex":1})");  // #659
 #endif
 
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
@@ -4110,8 +4145,9 @@ int main() {
 
         // #508 item 1, the arms that fall through to by-index auto-detect on an
         // empty portPath: registered from both sources, no WARN, and the entry
-        // keeps connectionType "serial" with the empty portPath. (The other
-        // three such arms probe hardware while constructing; see below.)
+        // keeps connectionType "serial" with the empty portPath. (Since #659
+        // no arm probes hardware while constructing; the mount and focuser
+        // auto arms are round-tripped in the #647 table below.)
         const auto silent_pin = [&](const std::string& vendor, const std::string& device_type,
                                     const std::string& alpaca_type, const std::string& extra) {
             const std::string body = obj({R"("connectionType":"serial","portPath":"")", extra});
