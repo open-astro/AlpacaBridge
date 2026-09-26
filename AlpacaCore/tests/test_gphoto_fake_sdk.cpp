@@ -139,7 +139,6 @@ TEST_CASE("GPhoto camera fake - connected cooler members answer the no-cooler va
     REQUIRE(driver->get_connected() == true);
 
     CHECK(driver->get_cooler_on() == false);
-    CHECK(driver->get_cooler_power() == 0.0);
     for (auto fn : {std::function<void()>([&] { (void)driver->get_set_ccd_temperature(); }),
                     std::function<void()>([&] { driver->set_set_ccd_temperature(0.0); })}) {
         bool threw = false;

@@ -78,6 +78,8 @@ TEST_CASE("QHY Camera Driver - Not connected throws", "[qhy][camera][unit]") {
     require_alpaca_error([&] { driver->get_set_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->get_cooler_power(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_set_ccd_temperature(0.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_cooler_on(true); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_cooler_on(false); }, alpacacore::AlpacaError::NotConnected);
     CHECK_THROWS_AS(driver->get_gain(), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->set_gain(100), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->get_offset(), alpacacore::AlpacaException);
@@ -121,7 +123,6 @@ TEST_CASE("QHY Camera Driver - Sub-exposure not supported", "[qhy][camera][unit]
 TEST_CASE("QHY Camera Driver - ASCOM Error Codes", "[qhy][camera][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0);
 
-    // QHY get_ccd_temperature returns 0.0 when disconnected rather than throwing
     require_alpaca_error([&]() { driver->get_gain(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_gain(100); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotConnected);

@@ -269,6 +269,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_cooler_power", [&] { (void)c.get_cooler_power(); }});
             p.push_back({"get_set_ccd_temperature", [&] { (void)c.get_set_ccd_temperature(); }});
             p.push_back({"set_set_ccd_temperature", [&] { c.set_set_ccd_temperature(0.0); }});
+            p.push_back({"set_cooler_on_true", [&] { c.set_cooler_on(true); }});
+            p.push_back({"set_cooler_on_false", [&] { c.set_cooler_on(false); }});
             p.push_back({"start_exposure", [&] { c.start_exposure(1.0, true); }});
             break;
         }
