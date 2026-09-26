@@ -73,7 +73,7 @@ TEST_CASE("ToupTek Camera Driver - Disconnected state", "[touptek][camera][unit]
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
 
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
-    CHECK(driver->get_image_ready() == false);
+    require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_can_abort_exposure() == true);
     CHECK(driver->get_can_stop_exposure() == true);
@@ -130,7 +130,7 @@ TEST_CASE("ToupTek Camera Driver - State Machine Contracts", "[touptek][camera][
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
 
     REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
-    REQUIRE(driver->get_image_ready() == false);
+    require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);

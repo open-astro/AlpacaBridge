@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <functional>
 #include <string>
 #include <thread>
 
@@ -120,6 +121,35 @@ TEST_CASE("GPhoto camera fake - connected PulseGuide is NotImplemented and names
         CHECK(msg.find("DSLR / mirrorless camera") != std::string::npos);
     }
     CHECK(threw);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - connected cooler members answer the no-cooler values",
+          "[gphoto][camera][unit][fakesdk]") {
+    // While disconnected these throw NotConnected first (AGENTS.md:224, #658);
+    // once connected a camera without a cooler answers its own no-cooler values.
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected() == true);
+
+    CHECK(driver->get_cooler_on() == false);
+    for (auto fn : {std::function<void()>([&] { (void)driver->get_set_ccd_temperature(); }),
+                    std::function<void()>([&] { driver->set_set_ccd_temperature(0.0); })}) {
+        bool threw = false;
+        try {
+            fn();
+        } catch (const AlpacaException& e) {
+            threw = true;
+            CHECK(e.error_code() == alpacacore::AlpacaError::NotImplemented);
+        }
+        CHECK(threw);
+    }
 
     driver->set_connected(false);
 }
