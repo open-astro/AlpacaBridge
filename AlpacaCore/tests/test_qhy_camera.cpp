@@ -73,6 +73,7 @@ TEST_CASE("QHY Camera Driver - Not connected throws", "[qhy][camera][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0);
 
     require_alpaca_error([&] { driver->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->get_heat_sink_temperature(); }, alpacacore::AlpacaError::NotConnected);
     CHECK_THROWS_AS(driver->get_gain(), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->set_gain(100), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->get_offset(), alpacacore::AlpacaException);
