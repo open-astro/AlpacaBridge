@@ -1,0 +1,15 @@
+# #657: every device-type name AlpacaHTTP/src/http/router.cpp accepts in
+# /api/v1/<type>/..., i.e. the set is_known_device_type_name() answers true for.
+# test_route_table.cpp reads this file (checks A, C, F); check F fails if the
+# router and this list disagree in either direction. One name per line.
+camera
+telescope
+mount
+filterwheel
+focuser
+rotator
+dome
+switch
+covercalibrator
+observingconditions
+safetymonitor

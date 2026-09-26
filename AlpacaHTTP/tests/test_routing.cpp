@@ -190,22 +190,45 @@ struct PersistedAttempt {
     std::vector<std::string> errors;  // an exception out of a driver constructor is logged at ERROR, not WARN
 };
 
-// Write [entry] as the whole registered_devices.json, construct a Router (which
-// loads it with ConfigSource::Persisted), read configureddevices, capture every
-// WARN and ERROR the load logged, then put the file back and unregister the device from
-// the process-wide DeviceRegistry. `device_type` is the listed name
-// ("Telescope"); the entry carries the lower-case one.
+// Runs in a scratch working directory of its own. The Router reads and rewrites
+// the fixed relative path config/registered_devices.json, so writing the entry
+// into the real one meant putting the original back on every exit path, and a
+// scope guard cannot do that here: EXPECT is std::abort() (test_assert.h), no
+// destructor runs, and a failure between the write and the restore left the
+// entry in the real file to fail the next run with "already registered" (#657).
+// With the file in a scratch directory the real one is never written, so there is
+// nothing to restore on a return, a throw or an abort. The directory is entered
+// only for this call, which is safe because nothing routes on another Router while
+// it runs (the callers are sequential).
+struct ScopedCwd {
+    std::filesystem::path original = std::filesystem::current_path();
+    std::filesystem::path dir = original / "persisted_attempt_cwd" / std::to_string(::getpid());
+    ScopedCwd() {
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir);
+        std::filesystem::current_path(dir);
+    }
+    ~ScopedCwd() {
+        std::error_code ec;
+        std::filesystem::current_path(original, ec);
+        std::filesystem::remove_all(dir, ec);
+    }
+    ScopedCwd(const ScopedCwd&) = delete;
+    ScopedCwd& operator=(const ScopedCwd&) = delete;
+};
+
+// Write [entry] as the whole registered_devices.json of a scratch directory,
+// construct a Router (which loads it with ConfigSource::Persisted), read
+// configureddevices, capture every WARN and ERROR the load logged, and
+// unregister the device from the process-wide DeviceRegistry. `device_type` is
+// the listed name ("Telescope"); the entry carries the lower-case one.
 PersistedAttempt persisted_attempt(const nlohmann::json& entry, const std::string& device_type) {
     const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
     const std::string vendor = entry.value("vendor", "");
     const std::string lower_type = entry.value("deviceType", "");
     const int device_number = entry.value("deviceNumber", -1);
 
-    std::string original;
-    if (std::filesystem::exists(persisted)) {
-        std::ifstream in(persisted);
-        original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    }
+    const ScopedCwd scratch;
     // Only this entry: the Router below registers EVERY entry in the file, and
     // an entry left behind by an earlier block (or a real one on a dev box)
     // would be re-registered here as a side effect.
@@ -244,17 +267,10 @@ PersistedAttempt persisted_attempt(const nlohmann::json& entry, const std::strin
     }
     alpacacore::logging::set_log_sink(previous_sink);
 
-    // Restore before anything that can abort (EXPECT is abort(): no unwinding,
-    // no scope guards). remove_device() is itself an EXPECT, and a device the
-    // load dropped was never registered, so it is only called for a listed one.
-    const auto restore_original = [&] {
-        std::ofstream restore(persisted, std::ios::trunc);
-        restore << (original.empty() ? std::string("[]") : original);
-    };
-    restore_original();
+    // A device the load dropped was never registered, so remove_device() (itself an
+    // EXPECT) is only called for a listed one. It saves "[]" over the scratch file only.
     if (result.listed) {
         remove_device(startup_router, vendor, lower_type, device_number);
-        restore_original();  // remove_device() saved "[]" over the file (#408)
     }
     return result;
 }

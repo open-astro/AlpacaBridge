@@ -12,6 +12,9 @@
 
 // #646: pins the router's accepted surface and its rejection responses.
 //
+// Run order: F, A, B, C, D. F runs first so a fixture/router mismatch reports
+// as F's message instead of as A's per-method failures.
+//
 //  A. Route table: for every device type name and every method name in the
 //     committed snapshot (router_route_table_fixture.h), the verb mask the live
 //     router derives for it equals the snapshot. The mask is read off the
@@ -24,9 +27,17 @@
 //  C. Dispatch reach: with a do-nothing driver registered per device type,
 //     every accepted (type, method, verb) is answered by its dispatcher and
 //     never by the "not yet implemented" fallback.
+//  F. Type names: every name in fixtures/device_type_names.txt is recognised
+//     by the router and "telescopes" is not, and the names scanned out of
+//     is_known_device_type_name() equal the fixture (#657). Checks A and C
+//     iterate that fixture too.
 //  D. Rejection fixture: exact HTTP status, Alpaca error number and message
 //     for a wrong verb, an unknown method, an out-of-range device number and a
 //     NaN parameter, as on origin/main c4640d6e.
+//
+// The per-request cost check that used to be E is gone (#657): a wall-clock
+// ratio was coarse in Release. scripts/check_docs_drift.py check 14 now
+// requires every std::regex in router.cpp to be static instead.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/device_registry.h>
@@ -35,7 +46,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -64,9 +74,31 @@ using route_table_fixture::RouteRow;
 constexpr int kProbeDevice = 4646;
 constexpr int kInvalidValue = alpacacore::AlpacaError::InvalidValue;
 
-const std::vector<std::string> kTypeNames = {
-    "camera", "telescope",       "filterwheel",         "focuser",      "rotator", "dome",
-    "switch", "covercalibrator", "observingconditions", "safetymonitor"};
+// The accepted device-type names live in tests/fixtures/device_type_names.txt,
+// not here: a copy in this file could only agree with router.cpp by hand (#657).
+// ALPACAHTTP_ROUTER_SRC_DIR is <AlpacaHTTP>/src, so the tests dir is its sibling.
+std::vector<std::string> load_type_names() {
+    const auto path =
+        std::filesystem::path(ALPACAHTTP_ROUTER_SRC_DIR).parent_path() / "tests" / "fixtures" / "device_type_names.txt";
+    std::ifstream in(path);
+    if (!in) {
+        std::cerr << "cannot open " << path << "\n";
+    }
+    EXPECT(static_cast<bool>(in));
+    std::vector<std::string> names;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        EXPECT(std::all_of(line.begin(), line.end(),
+                           [](char c) { return std::islower(static_cast<unsigned char>(c)) != 0; }));
+        EXPECT(std::find(names.begin(), names.end(), line) == names.end());
+        names.push_back(line);
+    }
+    EXPECT(!names.empty());
+    return names;
+}
 
 struct Answer {
     int status = 0;
@@ -156,8 +188,7 @@ void check_route_table(alpacahttp::Router& router) {
         }
     }
 
-    std::vector<std::string> types = kTypeNames;
-    types.push_back("mount");
+    const std::vector<std::string> types = load_type_names();
     std::vector<std::string> failures;
     std::size_t probes = 0;
     for (const auto& type : types) {
@@ -185,6 +216,7 @@ void check_route_table(alpacahttp::Router& router) {
             }
         }
     }
+    EXPECT(probes > 0);
     std::cout << "A: " << probes << " probes over " << types.size() << " type names x " << methods.size()
               << " method names\n";
     report("A route table", failures);
@@ -360,9 +392,11 @@ std::vector<std::shared_ptr<alpacacore::AlpacaDriver>> make_stubs() {
 void check_dispatch_reach(alpacahttp::Router& router) {
     std::vector<std::string> failures;
     std::size_t requests = 0;
-    for (const auto& type : kTypeNames) {
+    for (const auto& type : load_type_names()) {
+        // "mount" is the router's alias of telescope, so it takes telescope's rows.
+        const std::string row_type = type == "mount" ? "telescope" : type;
         for (const RouteRow& row : kRoutes) {
-            if (std::string(row.type) != "common" && type != row.type) {
+            if (std::string(row.type) != "common" && row_type != row.type) {
                 continue;
             }
             for (const auto& [verb, bit] : {std::pair<std::string, unsigned>{"GET", kGet}, {"PUT", kPut}}) {
@@ -381,6 +415,7 @@ void check_dispatch_reach(alpacahttp::Router& router) {
             }
         }
     }
+    EXPECT(requests > 0);
     std::cout << "C: " << requests << " dispatched requests\n";
     report("C dispatch reach", failures);
 }
@@ -443,37 +478,67 @@ void check_rejections(alpacahttp::Router& router) {
     report("D rejections", failures);
 }
 
-// E. Per-request cost. A rejected device-path request does the same kind of work
-// as a management request (parse the path, build a small JSON body), so its
-// cost must stay within a small multiple of it. Router::route used to build a
-// std::regex for the device route on every call, which made every /api/v1
-// request roughly 14x a management request in a plain build (404 us against
-// 28 us) and about 30x under ASan+UBSan (184 ms against 6 ms), so the ~5,000
-// requests of check A took 1,110 s in the sanitizer CI job. A ratio, not a
-// time budget, so it holds on any machine and build type.
-long long median_route_us(alpacahttp::Router& router, const std::string& path) {
-    alpacahttp::Request request;
-    EXPECT(request.parse("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n"));
-    (void)router.route(request, 1);  // warm-up: first-use initialisation is not per-request cost
-    std::vector<long long> samples;
-    for (int i = 0; i < 21; ++i) {
-        const auto start = std::chrono::steady_clock::now();
-        (void)router.route(request, 1);
-        const auto stop = std::chrono::steady_clock::now();
-        samples.push_back(std::chrono::duration_cast<std::chrono::microseconds>(stop - start).count());
+// F. The device-type names: fixture vs router, both directions.
+// Limit: the scan reads only the kDeviceTypes initialiser in router.cpp. A name accepted some other way
+// (an extra `||` in is_known_device_type_name(), a second set, an alias) is not seen by the scan or the probes.
+std::set<std::string> scan_router_type_names() {
+    std::ifstream in(std::filesystem::path(ALPACAHTTP_ROUTER_SRC_DIR) / "http" / "router.cpp");
+    EXPECT(static_cast<bool>(in));
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    const std::string text = buffer.str();
+    std::set<std::string> names;
+    const std::size_t fn = text.find("bool is_known_device_type_name(");
+    EXPECT(fn != std::string::npos);
+    const std::size_t open = text.find("kDeviceTypes", fn);
+    EXPECT(open != std::string::npos);
+    const std::size_t begin = text.find('{', open);
+    const std::size_t end = text.find("};", begin);
+    EXPECT(begin != std::string::npos && end != std::string::npos);
+    for (std::size_t i = begin; i < end;) {
+        const std::size_t q = text.find('"', i);
+        if (q == std::string::npos || q >= end) {
+            break;
+        }
+        const std::size_t close = text.find('"', q + 1);
+        EXPECT(close != std::string::npos);
+        names.insert(text.substr(q + 1, close - q - 1));
+        i = close + 1;
     }
-    std::sort(samples.begin(), samples.end());
-    return samples[samples.size() / 2];
+    return names;
 }
 
-void check_request_cost(alpacahttp::Router& router) {
-    constexpr double kMaxRatio = 6.0;
-    const long long device_us = median_route_us(router, "/api/v1/telescope/4646/notarealmethod");
-    const long long management_us = median_route_us(router, "/management/apiversions");
-    const double ratio = static_cast<double>(device_us) / static_cast<double>(std::max(management_us, 1LL));
-    std::cerr << "E request cost: device path " << device_us << " us, management path " << management_us
-              << " us, ratio " << ratio << " (limit " << kMaxRatio << ")\n";
-    EXPECT(ratio < kMaxRatio);
+void check_type_names(alpacahttp::Router& router) {
+    std::vector<std::string> failures;
+    const std::vector<std::string> fixture = load_type_names();
+    for (const auto& name : fixture) {
+        const Answer a = send(router, "GET", "/api/v1/" + name + "/" + std::to_string(kProbeDevice) + "/connected");
+        if (a.status != 400 || a.error_number != kInvalidValue || !starts_with(a.message, "Device not found: ")) {
+            failures.push_back("fixture name '" + name + "' is not recognised by the router: HTTP " +
+                               std::to_string(a.status) + " '" + a.message + "'");
+        }
+    }
+    const Answer plural = send(router, "GET", "/api/v1/telescopes/" + std::to_string(kProbeDevice) + "/connected");
+    if (plural.status != 400 || plural.error_number != kInvalidValue ||
+        plural.message != "Unknown device type: telescopes") {
+        failures.push_back("'telescopes' must be rejected as an unknown type, got HTTP " +
+                           std::to_string(plural.status) + " '" + plural.message + "'");
+    }
+    const std::set<std::string> scanned = scan_router_type_names();
+    EXPECT(!scanned.empty());
+    const std::set<std::string> listed(fixture.begin(), fixture.end());
+    for (const auto& name : scanned) {
+        if (listed.count(name) == 0) {
+            failures.push_back("router.cpp accepts '" + name + "' but device_type_names.txt lacks it");
+        }
+    }
+    for (const auto& name : listed) {
+        if (scanned.count(name) == 0) {
+            failures.push_back("device_type_names.txt lists '" + name + "' but is_known_device_type_name() lacks it");
+        }
+    }
+    std::cout << "F: " << fixture.size() + 1 << " names probed, " << scanned.size() << " scanned from the router\n";
+    report("F type names", failures);
 }
 
 }  // namespace
@@ -481,6 +546,7 @@ void check_request_cost(alpacahttp::Router& router) {
 int main() {
     alpacahttp::Router router;
 
+    check_type_names(router);
     check_route_table(router);
     check_source_tables();
 
@@ -491,7 +557,6 @@ int main() {
     }
     check_dispatch_reach(router);
     check_rejections(router);
-    check_request_cost(router);
     for (const auto& stub : stubs) {
         registry.unregister_device(stub->get_device_type(), kProbeDevice);
     }

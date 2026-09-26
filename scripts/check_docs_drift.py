@@ -94,6 +94,13 @@ Checks:
      follow-up PR to #571, so today this check pins the list, not any case. HELPER_FAKES names the
      fakes that are not a driver's connect path, each with a reason, and a
      helper that has since been given a roster row is itself a finding.
+ 14. Every std::regex in AlpacaHTTP/src/http/router.cpp is a static object
+     (issue #657, from #646). Router::route once built a std::regex per
+     request, which made a device-path request about 14x a management request
+     (30x under ASan). This replaces a wall-clock ratio test, which was coarse
+     in Release and flaky under load. A construction with no `static` in its
+     statement, or an unnamed temporary, is a finding, and so is finding no
+     construction at all (the extractor is stale or the regexes moved).
 """
 
 import glob
@@ -408,7 +415,11 @@ def _strip_comments(text):
     """Comments blanked (newlines kept). These headers carry long doc comments
     whose prose contains parentheses and identifiers, and both patterns above
     scan across whitespace -- without this a sentence in a comment is matched
-    as a method signature. No raw string literals exist in either header."""
+    as a method signature. Written for the two QHY headers, which hold no raw
+    string literals. Check 14 also runs it over router.cpp, which does (R"(...)"
+    regexes) and holds "://" (origin.find), so LINE_COMMENT_RE blanks the rest of
+    that line; that is harmless only while no std::regex sits on such a line or
+    after a stray /* -- re-check both if the gate ever misses one."""
     text = BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     return LINE_COMMENT_RE.sub("", text)
 
@@ -1478,6 +1489,37 @@ def check_fake_roster_matches_disk(root=ROOT):
     return _fake_roster_findings(read("AlpacaCore/tests/contract_sweep.h", root), disk)
 
 
+STD_REGEX_TEMP_RE = re.compile(r"\bstd::regex\s*[({]")
+STD_REGEX_NAMED_RE = re.compile(r"\bstd::regex\s+(?:const\s+)?(\w+)\s*[({=]")
+
+
+def _static_regex_findings(text, path="AlpacaHTTP/src/http/router.cpp"):
+    code = _strip_comments(text)
+    findings = []
+    seen = 0
+    for m in STD_REGEX_TEMP_RE.finditer(code):
+        seen += 1
+        line = code.count("\n", 0, m.start()) + 1
+        findings.append("%s:%d: std::regex constructed as a temporary -- make it a static const "
+                        "(a per-request build costs 14x a management request, #646)" % (path, line))
+    for m in STD_REGEX_NAMED_RE.finditer(code):
+        seen += 1
+        # The statement so far: back to the previous ';', '{' or '}'.
+        start = max(code.rfind(c, 0, m.start()) for c in ";{}") + 1
+        if not re.search(r"\bstatic\b", code[start:m.start()]):
+            line = code.count("\n", 0, m.start()) + 1
+            findings.append("%s:%d: std::regex %s is not static -- a per-request build costs 14x a "
+                            "management request (#646); the gate wants the static keyword and does not model "
+                            "scope, so a namespace-scope regex needs it too" % (path, line, m.group(1)))
+    if seen == 0:
+        findings.append("no std::regex construction found in %s: the extractor is stale or the regexes moved" % path)
+    return findings
+
+
+def check_router_regexes_static(root=ROOT):
+    return _static_regex_findings(read("AlpacaHTTP/src/http/router.cpp", root))
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -1493,6 +1535,7 @@ CHECKS = [
     ("Skill Device API snapshot matches docs/ schema", check_skill_spec_hash),
     ("GPhoto STATUS paragraph names every validated body", check_gphoto_status_names_validated_bodies),
     ("Fake-connectable roster matches the fakes on disk", check_fake_roster_matches_disk),
+    ("Every std::regex in router.cpp is built once (static)", check_router_regexes_static),
 ]
 
 
@@ -1906,6 +1949,35 @@ def self_test():
           len(_fake_roster_findings("// nothing here\n", roster_disk, roster_helpers)) == 1)
     check("fake roster: a row inside a comment is not a row",
           len(_fake_roster_findings("// {\"a\", \"b\", \"fake_x.h\"},\n" + roster_hdr, roster_disk, roster_helpers)) == 0)
+
+    rx_ok = 'static const std::regex kX(R"(a)");\n'
+    check("static regex: a static const regex is clean", _static_regex_findings(rx_ok) == [])
+    f = _static_regex_findings(rx_ok.replace("static ", ""))
+    check("static regex: dropping 'static' is flagged as not static",
+          len(f) == 1 and "kX is not static" in f[0])
+    f = _static_regex_findings('if (std::regex_match(p, m, std::regex("a"))) {}\n' + rx_ok)
+    check("static regex: an unnamed temporary is flagged (regex_match itself is not)",
+          len(f) == 1 and "temporary" in f[0])
+    check("static regex: a construction inside a comment is not one",
+          _static_regex_findings("// std::regex x(\"a\");\n" + rx_ok) == [])
+    check("static regex: 'static' on the previous line still counts",
+          _static_regex_findings('static\nconst std::regex kX(R"(a)");\n') == [])
+    check("static regex: 'static' belonging to an earlier statement does not count",
+          len(_static_regex_findings('static int n = 0;\nconst std::regex kX(R"(a)");\n')) == 1)
+    f = _static_regex_findings('auto r = std::regex{"a"};\n' + rx_ok)
+    check("static regex: a brace-built temporary is flagged",
+          len(f) == 1 and "temporary" in f[0])
+    f = _static_regex_findings('std::regex const kY("a");\n' + rx_ok)
+    check("static regex: 'std::regex const name' without static is flagged",
+          len(f) == 1 and "kY is not static" in f[0])
+    f = _static_regex_findings(rx_ok.replace("static ", ""))
+    check("static regex: the not-static finding names the static keyword (scope is not modelled)",
+          len(f) == 1 and "static keyword" in f[0])
+    check("static regex: 'static std::regex const name' is clean",
+          _static_regex_findings('static std::regex const kY("a");\n') == [])
+    f = _static_regex_findings("int x = 1;\n")
+    check("static regex: no construction at all is a floor finding, not a pass",
+          len(f) == 1 and "extractor is stale" in f[0])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
