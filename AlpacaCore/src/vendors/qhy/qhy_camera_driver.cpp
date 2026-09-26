@@ -610,6 +610,7 @@ public:
 
     double get_ccd_temperature() const override {
         ALPACA_LOG_TRACE("QHY", "get_ccd_temperature entry");
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.has_cooler) {
             ALPACA_LOG_TRACE("QHY", "get_ccd_temperature exit (no cooler)");

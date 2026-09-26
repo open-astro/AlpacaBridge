@@ -815,7 +815,7 @@ public:
     std::string get_image_array_variant() const override { return "Int32"; }
 
     bool get_image_ready() const override {
-        if (!connected_.load()) return false;
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         return last_exposure_valid_ && image_ready_ && image_cached_;
     }

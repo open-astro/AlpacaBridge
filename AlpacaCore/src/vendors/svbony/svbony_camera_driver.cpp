@@ -646,9 +646,7 @@ public:
     }
 
     bool get_image_ready() const override {
-        if (!connected_.load()) {
-            return false;
-        }
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!last_exposure_valid_) {
             return false;
