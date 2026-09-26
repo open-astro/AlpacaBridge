@@ -62,7 +62,18 @@ function localZoneLabel(date, timeZone) {
     }
 }
 
+// True when a synctime Value (whole seconds) can become a valid Date. Number.isFinite
+// alone passes 1e15, which is finite but far outside the +-8.64e15 ms Date range
+// (issue #511); such a Value is the same error case as a non-numeric one.
+function isValidClockSeconds(value) {
+    return Number.isFinite(value) && !Number.isNaN(new Date(value * 1000).getTime());
+}
+
 function formatServerClock(date, timeZone) {
+    if (Number.isNaN(date.getTime())) {
+        // No time to show; the UTC arm below would throw on toISOString().
+        return '--:--:--';
+    }
     if (timeZone) {
         // Prove the zone before using it: the viewer-zone tier is the right
         // fallback for a name this browser's Intl does not know, and it must
@@ -185,5 +196,5 @@ function buildBadgeLabel(info) {
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { localZoneLabel, formatServerClock, buildBadgeLabel };
+    module.exports = { isValidClockSeconds, localZoneLabel, formatServerClock, buildBadgeLabel };
 }

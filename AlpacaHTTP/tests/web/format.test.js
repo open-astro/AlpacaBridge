@@ -274,3 +274,25 @@ test('localZoneLabel returns a label, and an empty string when Intl throws', () 
         }
     }));
 });
+
+test('formatServerClock does not throw on an Invalid Date (issue #511)', () => {
+    // A finite but absurd clock Value (1e15 s) passes Number.isFinite() and
+    // yields an Invalid Date; the catch arm's toISOString() used to throw.
+    withTZ('UTC', () => withFormat(({ formatServerClock }) => {
+        assert.doesNotThrow(() => formatServerClock(new Date(1e18)));
+        assert.equal(formatServerClock(new Date(1e18)), '--:--:--');
+        assert.equal(formatServerClock(new Date(NaN), 'UTC'), '--:--:--');
+    }));
+});
+
+test('isValidClockSeconds rejects non-finite and out-of-range Values (issue #511)', () => {
+    withFormat(({ isValidClockSeconds }) => {
+        assert.equal(isValidClockSeconds(1.7e9), true);
+        assert.equal(isValidClockSeconds(1e15), false);
+        assert.equal(isValidClockSeconds(-1e15), false);
+        assert.equal(isValidClockSeconds(NaN), false);
+        assert.equal(isValidClockSeconds(Infinity), false);
+        assert.equal(isValidClockSeconds('1700000000'), false);
+        assert.equal(isValidClockSeconds(null), false);
+    });
+});

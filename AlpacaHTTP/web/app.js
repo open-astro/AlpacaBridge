@@ -1790,7 +1790,7 @@ async function syncTime() {
             result = null;
         }
 
-        if (result && result.ErrorNumber === 0) {
+        if (result && result.ErrorNumber === 0 && isValidClockSeconds(result.Value)) {
             // Account for round-trip latency so the confirmation shows the
             // server's adjusted time, not the browser's send time.
             const roundTripMs = Date.now() - t0;
@@ -1799,7 +1799,7 @@ async function syncTime() {
             alert('Time synced! Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
             refreshClockRow();  // the source is now "client" (open-astro#292); that row only, after the dialog
         } else {
-            alert('Error syncing time: ' + (result ? result.ErrorMessage : 'unknown error'));
+            alert('Error syncing time: ' + (result ? (result.ErrorMessage || 'invalid time value') : 'unknown error'));
         }
     } catch (e) {
         alert('Error syncing time: ' + e.message);
@@ -1821,7 +1821,7 @@ async function refreshServerClockOffset() {
         const t0 = Date.now();
         const response = await fetch(API_BASE + '/management/v1/synctime');
         const result = await response.json();
-        if (result && result.ErrorNumber === 0 && Number.isFinite(result.Value)) {
+        if (result && result.ErrorNumber === 0 && isValidClockSeconds(result.Value)) {
             // Value is whole seconds; assume the server read its clock halfway
             // through the round trip.
             //
@@ -1836,10 +1836,8 @@ async function refreshServerClockOffset() {
             //
             // Number.isFinite alone is the whole check: it is false for every
             // non-number, so a `typeof` test in front of it would be redundant.
-            // It does NOT cover a finite but out-of-range Value (e.g. 1e15
-            // seconds), which is still an Invalid Date downstream; that input
-            // was broken before this change too and clamping it to the server's
-            // own 2000-2100 window belongs with that endpoint, not here.
+            // isValidClockSeconds() also rejects a finite but out-of-range
+            // Value (e.g. 1e15 seconds), which would be an Invalid Date (#511).
             const midpoint = t0 + (Date.now() - t0) / 2;
             serverClockOffsetMs = (result.Value * 1000) - midpoint;
         }
