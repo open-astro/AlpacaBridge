@@ -527,6 +527,7 @@ public:
 
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         return at_home_;
     }
 
