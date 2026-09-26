@@ -83,7 +83,7 @@ TEST_CASE("GPhoto Camera Driver - Disconnected state", "[gphoto][camera][unit]")
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
-    CHECK(driver->get_image_ready() == false);
+    require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_camera_x_size() == 0);
     CHECK(driver->get_camera_y_size() == 0);
@@ -91,8 +91,8 @@ TEST_CASE("GPhoto Camera Driver - Disconnected state", "[gphoto][camera][unit]")
     CHECK(driver->get_bin_y() == 1);
     CHECK(driver->get_max_bin_x() == 1);
     CHECK(driver->get_max_bin_y() == 1);
-    CHECK(driver->get_cooler_on() == false);
-    CHECK(driver->get_cooler_power() == 0.0);
+    require_alpaca_error([&]() { driver->get_cooler_on(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_cooler_power(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_readout_modes() == std::vector<std::string>{"Normal"});
 }
 
@@ -134,9 +134,11 @@ TEST_CASE("GPhoto Camera Driver - Value range validation and ASCOM error codes",
 TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
-    // Properties this vendor never supports (no offset register, no cooler,
-    // no fast readout) throw NotImplemented regardless of connection state --
-    // distinct from the NotConnected-gated properties above.
+    // Properties this vendor never supports (no offset register, no fast readout)
+    // throw NotImplemented regardless of connection state -- distinct from the
+    // NotConnected-gated properties above. The cooler members are not in this
+    // group: while disconnected they throw NotConnected first (AGENTS.md:224); the
+    // connected NotImplemented is pinned in test_gphoto_fake_sdk.cpp.
     require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->set_offset(0); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->get_offset_max(); }, alpacacore::AlpacaError::NotImplemented);
@@ -152,8 +154,8 @@ TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][cam
     require_alpaca_error([&]() { driver->get_gain_max(); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&]() { driver->get_gain_min(); }, alpacacore::AlpacaError::PropertyNotImplemented);
 
-    require_alpaca_error([&]() { driver->get_set_ccd_temperature(); }, alpacacore::AlpacaError::NotImplemented);
-    require_alpaca_error([&]() { driver->set_set_ccd_temperature(0.0); }, alpacacore::AlpacaError::NotImplemented);
+    require_alpaca_error([&]() { driver->get_set_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_set_ccd_temperature(0.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_fast_readout(); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->set_fast_readout(true); }, alpacacore::AlpacaError::NotImplemented);
 
@@ -168,7 +170,7 @@ TEST_CASE("GPhoto Camera Driver - State machine contracts", "[gphoto][camera][un
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
     REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
-    REQUIRE(driver->get_image_ready() == false);
+    require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);
