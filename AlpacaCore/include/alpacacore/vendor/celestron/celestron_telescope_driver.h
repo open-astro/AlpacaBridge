@@ -13,7 +13,9 @@
 #pragma once
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
+
 #include <memory>
 #include <optional>
 
@@ -31,8 +33,20 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_with_site(
     std::optional<double> site_elevation_m,
     std::optional<bool> sync_time_on_connect);
 
-// Auto-detect: scans serial ports, probes for NexStar mount, creates driver.
-// mount_index selects which mount if multiple are found (0 = first).
+/// Endpoint resolved at connect time by `connection_resolver` (#659); the
+/// auto-detect factory below wraps it, tests inject a fake's endpoint.
+std::unique_ptr<TelescopeDriver> create_celestron_telescope_deferred(
+    int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
+    std::optional<double> site_latitude_deg = std::nullopt, std::optional<double> site_longitude_deg = std::nullopt,
+    std::optional<double> site_elevation_m = std::nullopt, std::optional<bool> sync_time_on_connect = std::nullopt);
+
+/// The serial scan behind create_celestron_telescope_auto(); throws when nothing answers.
+ConnectionInfo resolve_celestron_serial_auto(int mount_index);
+
+// Auto-detect: scans serial ports, probes for a NexStar mount, creates the
+// driver; mount_index selects which mount if several are found (0 = first).
+// The scan runs at connect time, so construction succeeds while the mount is
+// absent (#659).
 std::unique_ptr<TelescopeDriver> create_celestron_telescope_auto(
     int device_number,
     int mount_index = 0,

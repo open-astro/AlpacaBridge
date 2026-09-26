@@ -8734,8 +8734,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (!port_path.empty()) {
                 wheel = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(device_number, port_path);
             } else {
-                // "auto": probe the CP210x bridges (each probe resets the
-                // device behind it).
+                // "auto": the CP210x probe (each probe resets the device
+                // behind it) runs inside the wheel's connect, not here (#659).
                 const int wheel_index = config_get(config, "filterwheelIndex", 0);
                 if (wheel_index < 0) {
                     error_message = "QHY CFW3 filterwheelIndex must be 0 or greater";

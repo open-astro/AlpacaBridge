@@ -13,6 +13,8 @@ Protocol documentation: `AlpacaCore/external/iOptron/RS-232_Command_Language2014
 
 Connection types: Serial (USB serial, 115200 baud default per v3.10 spec) and Network (WiFi TCP, default port 4030; varies by model — HEM27 uses 8899).
 
+- **Auto-detect scans at connect, and the first connect after a service restart pays for it** (#659): a Wi-Fi mount with no `host` runs the subnet sweep inside `Connected=true` (5.5 s on the Pi rig with the HAE29C, against ConformU's 5 s Platform 7 `Connecting` budget); every later connect reuses the found host (1.6 s). Before a ConformU run against a freshly restarted service, connect the mount once from the web UI, or give the config an explicit `host`.
+
 - Auto-detection scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for Prolific/FTDI/CP210x/Silicon Labs USB-serial adapters, probes each port with `:MountInfo#`, and connects to the first responding mount.
 - **`:MountInfo#` quirk**: iOptron returns exactly 4 ASCII digit bytes with no `#` terminator. The protocol wrapper uses idle-timeout read mode (`require_hash_terminator=false`) for this command. Most other commands do terminate with `#`.
 - **Model code table**: iOptron reassigned model codes between protocol v2 and v3 (e.g., code `0025` is HEM27 in v3, was CEM25 in v2). Use the INDI v3 driver's mapping, not the older Indigo-derived table.

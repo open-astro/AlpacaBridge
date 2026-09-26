@@ -607,6 +607,53 @@ empty on Windows. When an auto-detect driver finds no ports, throw
 hard-coded "no device found" string, so the Windows path reports "auto-detect not
 supported on this platform" instead of implying missing hardware.
 
+### Auto-detect resolves at connect, never in a factory (`util/connection_resolver.h`)
+
+A persisted device is constructed at server start-up, and the hardware is often
+not there yet: a Wi-Fi mount is still joining the access point, a USB adapter is
+powered after the SBC. Every auto-detect factory (`create_*_auto`,
+`_auto_network`, `_by_index`) used to run its serial probe or subnet sweep at
+construction, so the factory threw, the router logged "Failed to load persisted
+device", the web UI showed `(failed to load)`, and nothing ever retried (issue
+#659, iOptron HAE over Wi-Fi on the Pi rig). Rules:
+
+- **The factory hands the driver a `util::ConnectionResolver<Info>`** (the
+  scan as a callable that returns the endpoint or throws the operator-facing
+  refusal) and constructs without touching the bus. The scan body stays a
+  plain function (`resolve_<vendor>_<mode>(index)`) so it is reusable and
+  testable on its own.
+- **The connect path calls `util::connect_resolved(info_, resolved_, resolver_,
+  try_connect)`** under whatever lock it already holds. `try_connect` throws on
+  failure (the existing `if (!protocol.connect(info)) throw ...` moved into the
+  lambda). The helper retries the last resolved endpoint before scanning again,
+  so repeated ConformU / NINA connects stay under the Platform 7 5 s `Connect()`
+  budget. **Re-scanning is opt-in**: the retry falls through to the resolver
+  only when the lambda throws `util::StaleEndpoint`, which it does for a
+  vanished serial or HID node (`util::device_node_missing()`), a refused network
+  connect, or a failed identity gate (SynScan's echo test). Every other
+  exception propagates: a scan DTR-resets every CP210x / CH340 device on the
+  box, so a wheel still homing or a handshake that missed once must never start
+  one (review of #660). The scan's own message propagates as the connect
+  refusal (#358), so it reaches the client and `LastConnectError`. **The first
+  connect after a service restart pays the scan** (5.5 s for the iOptron Wi-Fi
+  sweep, up to two boots for the CFW3 probe) inside the Platform 7 `Connecting`
+  window, so before a ConformU run against a freshly restarted service connect
+  the device once from the web UI, or give it an explicit port or host.
+- **Every driver converted from a construction-time scan (the ten in #660)
+  exposes a `create_*_deferred(device_number, resolver, ...)` seam** and ships
+  the cases in `tests/deferred_connect_cases.h` over its fake:
+  refused (construction succeeds, the refusal is the connect error, sync and
+  async), reused (one scan across a reconnect), re-resolved (the fake behind the
+  resolved endpoint dies, a new one appears, the driver reaches it). A driver
+  with no fake (Astroasis, hidapi) ships the refusal case alone and says so.
+  Put the vendor's cheap identity gate (SynScan's echo test) INSIDE the
+  `try_connect` lambda: the helper only re-scans when the lambda throws, and a
+  stale port another adapter now owns still opens.
+- Drivers that resolve inside `set_connected(true)` by hand (iEFW
+  `resolve_serial_port_locked()`, Gemini PDH / flat panel, WandererAstro) already
+  meet the rule; do not move them back into a factory. A new `_auto` or
+  `_by_index` factory that scans at construction is a review-blocking regression.
+
 ### Serial auto-detect scan (`util/serial_by_id_scan.h`)
 
 Every auto-detect `enumerate_*_ports()` scans `/dev/serial/by-id` and, for most

@@ -13,6 +13,8 @@
 #pragma once
 
 #include <alpacacore/focuser_driver.h>
+#include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/vendor/ioptron/ioptron_ieaf_protocol_wrapper.h>
 
 #include <memory>
 #include <string>
@@ -34,6 +36,16 @@ namespace alpacacore::vendor::ioptron {
 std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std::string& serial_port,
                                                    const std::string& model = "ieaf");
 
+/// Port resolved at connect time by `resolver` (#659); the by-index factory
+/// below wraps it, tests inject a fake's pty path. `model` names the unit as
+/// create_ieaf_focuser() does; the resolver's config carries the port.
+std::unique_ptr<FocuserDriver> create_ieaf_focuser_deferred(int device_number,
+                                                            util::ConnectionResolver<IeafConnectionConfig> resolver,
+                                                            const std::string& model = "ieaf");
+
+/// The serial scan behind create_ieaf_focuser_by_index(); throws when nothing answers.
+IeafConnectionConfig resolve_ieaf_focuser_by_index(int focuser_index, const std::string& model);
+
 /**
  * @brief Create an iOptron iEAF / iAFS2/3 focuser driver by auto-detecting the serial port.
  *
@@ -45,6 +57,9 @@ std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std:
  * @param focuser_index 0-based index into the list of detected focusers
  * @param model "ieaf" (default) or "iafs2": sets the reported device name
  * @return Unique pointer to focuser driver
+ *
+ * Auto-detect by enumeration index. The scan runs at connect time, so
+ * construction succeeds while the focuser is absent (#659).
  */
 std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index = 0,
                                                             const std::string& model = "ieaf");

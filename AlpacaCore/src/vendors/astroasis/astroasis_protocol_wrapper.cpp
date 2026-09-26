@@ -36,10 +36,11 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // ref-counted context and the backend's udev/libusb bus scan behind
 // hid_enumerate/hid_open_path -- and hidapi does not serialize them for us
 // (upstream documents only "different hid_device handles from different
-// threads" as safe). Impl::mutex_ is per instance, so it cannot order an
-// enumerate on the HTTP thread (create_astroasis_focuser_by_index) against a
-// second instance's connect. Every call into those entry points, from any
-// thread, takes this one lock.
+// threads" as safe). Impl::mutex_ is per instance, so it cannot order one
+// instance's enumerate (the focuserIndex scan runs inside set_connected(true)
+// since #659: on the connection thread for an async connect, on the HTTP
+// thread for a sync PUT Connected=true) against a second instance's connect.
+// Every call into those entry points, from any thread, takes this one lock.
 //
 // Deliberately NOT held across hid_write/hid_read_timeout: those are per-handle
 // I/O that hidapi already supports concurrently across distinct handles, and the

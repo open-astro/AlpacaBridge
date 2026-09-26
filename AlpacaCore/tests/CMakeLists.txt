@@ -31,6 +31,7 @@ set(TEST_SOURCES
     test_fake_pty_write.cpp
     test_host_clock.cpp
     test_poll_settle.cpp
+    test_connection_resolver.cpp
     test_serial_by_id_scan.cpp
     test_stress_call_guard.cpp
     test_synscan_handset_probe.cpp
@@ -64,10 +65,14 @@ if(TARGET alpacacore_qhy)
     # connect path, so it carries its own [stress] registration.
     list(APPEND TEST_SOURCES test_qhy_focuser.cpp)
     list(APPEND TEST_SOURCES test_qhy_focuser_concurrency_stress.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_qhy_focuser_deferred_connect.cpp)
     # Standalone QHYCFW3 over its own CP2102 USB port: bare-ASCII serial
     # protocol, no SDK; the pty fake gives it a real connect path too.
     list(APPEND TEST_SOURCES test_qhy_cfw3_filterwheel.cpp)
     list(APPEND TEST_SOURCES test_qhy_cfw3_concurrency_stress.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_qhy_cfw3_filterwheel_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)
@@ -78,6 +83,8 @@ if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_async_park.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_synscan_async_slew_failure.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_synscan_telescope_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
@@ -87,6 +94,8 @@ if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_skywatcher_async_slew_failure.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_skywatcher_telescope_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope.cpp test_ioptron_ieaf_focuser.cpp
@@ -95,6 +104,9 @@ if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_ioptron_async_slew_failure.cpp)
+    # Auto-detect resolves at connect time (issue #659): mount and iEAF.
+    list(APPEND TEST_SOURCES test_ioptron_telescope_deferred_connect.cpp
+        test_ioptron_ieaf_focuser_deferred_connect.cpp)
     # The PowerBox Switch test only builds when its driver was compiled in
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_IOPTRON_POWERBOX)
@@ -108,6 +120,8 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_telescope.cpp)
     # Same telescope [stress] coverage as SynScan/iOptron (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_onstep_concurrency_stress.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_onstep_telescope_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_weewx)
     # ObservingConditions [stress] coverage over an unreachable URL, #271.
@@ -118,6 +132,8 @@ if(TARGET alpacacore_gemini)
          test_gemini_pdh_switch.cpp)
     # switch/covercalibrator over the pty fakes + fail-fast focuser [stress], #271
     list(APPEND TEST_SOURCES test_gemini_concurrency_stress.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_gemini_focuser_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp
@@ -127,6 +143,8 @@ if(TARGET alpacacore_wandererastro)
 endif()
 if(TARGET alpacacore_astroasis)
     list(APPEND TEST_SOURCES test_astroasis_focuser.cpp test_astroasis_concurrency_stress.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_astroasis_focuser_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_svbony)
     list(APPEND TEST_SOURCES test_svbony_camera.cpp)
@@ -147,6 +165,8 @@ if(TARGET alpacacore_celestron)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_celestron_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_celestron_async_park.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_celestron_telescope_deferred_connect.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_celestron_async_slew_failure.cpp)
 endif()

@@ -13,7 +13,9 @@
 #pragma once
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
+
 #include <memory>
 #include <optional>
 
@@ -48,6 +50,26 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_with_site(
     std::optional<double> site_elevation_m,
     std::optional<bool> sync_time_on_connect);
 
+/**
+ * @brief Create a driver whose endpoint is resolved at connect time.
+ *
+ * The resolver runs inside set_connected(true) and returns the endpoint to
+ * open, or throws the refusal the client should see. The auto-detect
+ * factories below are thin wrappers over it (#659); tests inject a resolver
+ * that returns a fake's endpoint or throws.
+ */
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_deferred(
+    int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
+    std::optional<double> site_latitude_deg = std::nullopt, std::optional<double> site_longitude_deg = std::nullopt,
+    std::optional<double> site_elevation_m = std::nullopt, std::optional<bool> sync_time_on_connect = std::nullopt);
+
+/// The serial scan behind create_ioptron_telescope_auto(); throws when nothing answers.
+ConnectionInfo resolve_ioptron_serial_auto(int mount_index);
+/// The network sweep behind create_ioptron_telescope_auto_network(); throws when nothing answers.
+ConnectionInfo resolve_ioptron_network_auto(int mount_index);
+
+// Auto-detect (serial). The scan runs at connect time, so construction
+// succeeds even while the mount is absent (#659).
 std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(
     int device_number,
     int mount_index = 0,
@@ -56,6 +78,7 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(
     std::optional<double> site_elevation_m = std::nullopt,
     std::optional<bool> sync_time_on_connect = std::nullopt);
 
+// Auto-detect (Wi-Fi). The subnet sweep runs at connect time (#659).
 std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(
     int device_number,
     int mount_index = 0,

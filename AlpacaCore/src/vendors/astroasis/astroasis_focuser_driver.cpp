@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
@@ -28,10 +29,12 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    AstroasisFocuserDriver(int device_number, std::string hid_path)
+    AstroasisFocuserDriver(int device_number, std::string hid_path,
+                           util::ConnectionResolver<std::string> connection_resolver = {})
         : AsyncConnectable("Astroasis"),
           device_number_(device_number),
           hid_path_(std::move(hid_path)),
+          connection_resolver_(std::move(connection_resolver)),
           connected_(false),
           protocol_() {}
 
@@ -121,7 +124,19 @@ public:
         }
 
         if (connected) {
-            protocol_.connect(hid_path_);
+            // An auto-detected focuser resolves its HID path here, not in the factory (#659).
+            util::connect_resolved(
+                hid_path_, connection_resolved_, connection_resolver_,
+                [this](const std::string& path) {
+                    try {
+                        protocol_.connect(path);
+                    } catch (const AlpacaException& e) {
+                        // Only a vanished hidraw node is stale; a handshake miss on a present one is not.
+                        if (util::device_node_missing(path)) throw util::StaleEndpoint(e.what(), e.error_code());
+                        throw;
+                    }
+                },
+                "Astroasis");
             connected_.store(true);
             ALPACA_LOG_INFO("Astroasis", "Focuser connected");
         } else {
@@ -256,6 +271,11 @@ private:
 
     int device_number_;
     std::string hid_path_;
+    // Set by the by-index factory; empty for an explicit path. connection_resolved_
+    // is true once a connect has run the resolver, so a later connect retries
+    // that path before scanning again (#659).
+    util::ConnectionResolver<std::string> connection_resolver_;
+    bool connection_resolved_ = false;
     std::atomic<bool> connected_;
     AstroasisProtocolWrapper protocol_;
     mutable std::mutex mutex_;
@@ -265,7 +285,15 @@ std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const
     return std::make_unique<AstroasisFocuserDriver>(device_number, hid_path);
 }
 
-std::unique_ptr<FocuserDriver> create_astroasis_focuser_by_index(int device_number, int focuser_index) {
+std::unique_ptr<FocuserDriver> create_astroasis_focuser_deferred(int device_number,
+                                                                 util::ConnectionResolver<std::string> resolver) {
+    if (!resolver) {
+        throw AlpacaException("Astroasis focuser: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    return std::make_unique<AstroasisFocuserDriver>(device_number, std::string{}, std::move(resolver));
+}
+
+std::string resolve_astroasis_focuser_by_index(int focuser_index) {
     auto ports = enumerate_astroasis_focusers();
     if (ports.empty()) {
         throw AlpacaException("No Astroasis Oasis Focuser detected on the USB bus", AlpacaError::NotConnected);
@@ -278,8 +306,13 @@ std::unique_ptr<FocuserDriver> create_astroasis_focuser_by_index(int device_numb
 
     const auto& port = ports[static_cast<std::size_t>(focuser_index)];
     ALPACA_LOG_INFO("Astroasis", "Auto-detected focuser at " + port.hid_path);
+    return port.hid_path;
+}
 
-    return std::make_unique<AstroasisFocuserDriver>(device_number, port.hid_path);
+std::unique_ptr<FocuserDriver> create_astroasis_focuser_by_index(int device_number, int focuser_index) {
+    // The USB HID scan runs at connect time (#659), not here.
+    return create_astroasis_focuser_deferred(
+        device_number, [focuser_index] { return resolve_astroasis_focuser_by_index(focuser_index); });
 }
 
 }  // namespace alpacacore::vendor::astroasis

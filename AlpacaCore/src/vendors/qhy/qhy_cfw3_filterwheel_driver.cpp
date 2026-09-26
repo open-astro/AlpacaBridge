@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
@@ -54,8 +55,13 @@ class QhyCfw3FilterWheelDriver : public FilterWheelDriver, protected alpacacore:
 public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    QhyCfw3FilterWheelDriver(int device_number, Cfw3ConnectionConfig config)
-        : AsyncConnectable("QHY"), device_number_(device_number), config_(std::move(config)), connected_(false) {}
+    QhyCfw3FilterWheelDriver(int device_number, Cfw3ConnectionConfig config,
+                             util::ConnectionResolver<Cfw3ConnectionConfig> connection_resolver = {})
+        : AsyncConnectable("QHY"),
+          device_number_(device_number),
+          config_(std::move(config)),
+          connection_resolver_(std::move(connection_resolver)),
+          connected_(false) {}
 
     ~QhyCfw3FilterWheelDriver() override {
         // Base contract: block new connection tasks and join the in-flight one
@@ -131,7 +137,23 @@ public:
                 // Stale connection over a lost link: drop it before reconnecting.
                 teardown_locked();
             }
-            const Cfw3DeviceInfo info = protocol_.connect(config_);
+            // An auto-detected wheel resolves its port here, not in the factory (#659).
+            Cfw3DeviceInfo info;
+            util::connect_resolved(
+                config_, connection_resolved_, connection_resolver_,
+                [this, &info](const Cfw3ConnectionConfig& cfg) {
+                    try {
+                        info = protocol_.connect(cfg);
+                    } catch (const AlpacaException& e) {
+                        // Only a vanished node is stale. The out-of-step refusal of a wheel
+                        // that is still homing, or any other failure on a present port, must
+                        // NOT trigger the probe: it DTR-resets every CP210x device on the box.
+                        if (util::device_node_missing(cfg.serial_port))
+                            throw util::StaleEndpoint(e.what(), e.error_code());
+                        throw;
+                    }
+                },
+                kLogTag);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 slot_count_ = info.slot_count;
@@ -390,6 +412,11 @@ private:
 
     int device_number_;
     Cfw3ConnectionConfig config_;
+    // Set by the by-index factory; empty for an explicit port. connection_resolved_
+    // is true once a connect has run the resolver, so a later connect retries
+    // that port before scanning again (#659).
+    util::ConnectionResolver<Cfw3ConnectionConfig> connection_resolver_;
+    bool connection_resolved_ = false;
     std::atomic<bool> connected_;
     Cfw3ProtocolWrapper protocol_;
 
@@ -432,8 +459,15 @@ std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel(int device_number
     return std::make_unique<QhyCfw3FilterWheelDriver>(device_number, std::move(config));
 }
 
-std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_by_index(int device_number, int wheel_index,
-                                                                        const Cfw3Settings& settings) {
+std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_deferred(
+    int device_number, util::ConnectionResolver<Cfw3ConnectionConfig> resolver) {
+    if (!resolver) {
+        throw AlpacaException("QHYCFW3 filter wheel: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    return std::make_unique<QhyCfw3FilterWheelDriver>(device_number, Cfw3ConnectionConfig{}, std::move(resolver));
+}
+
+Cfw3ConnectionConfig resolve_qhy_cfw3_filterwheel_by_index(int wheel_index, const Cfw3Settings& settings) {
     auto ports = enumerate_cfw3_ports(settings.boot_timeout_ms);
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("QHYCFW3 filter wheel"),
@@ -446,7 +480,22 @@ std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_by_index(int devi
     }
     const auto& port = ports[static_cast<std::size_t>(wheel_index)];
     ALPACA_LOG_INFO(kLogTag, "Auto-detected QHYCFW3 at " + port.port_path);
-    return create_qhy_cfw3_filterwheel(device_number, port.port_path, settings);
+    Cfw3ConnectionConfig config;
+    config.serial_port = port.port_path;
+    config.boot_timeout_ms = settings.boot_timeout_ms;
+    config.reply_timeout_ms = settings.reply_timeout_ms;
+    config.move_timeout_ms = settings.move_timeout_ms;
+    return config;
+}
+
+std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_by_index(int device_number, int wheel_index,
+                                                                        const Cfw3Settings& settings) {
+    // The serial scan runs at connect time (#659), not here. That matters
+    // twice for this wheel: the probe DTR-resets every CP210x device on the
+    // box, and at server start-up the wheel is often still booting.
+    return create_qhy_cfw3_filterwheel_deferred(device_number, [wheel_index, settings] {
+        return resolve_qhy_cfw3_filterwheel_by_index(wheel_index, settings);
+    });
 }
 
 }  // namespace alpacacore::vendor::qhy
