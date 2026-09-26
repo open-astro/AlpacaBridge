@@ -1834,9 +1834,9 @@ async function refreshServerClockOffset() {
             // the previous offset in place instead is what the fetch-failure
             // comment below already promises for every other bad answer.
             //
-            // Number.isFinite alone is the whole check: it is false for every
-            // non-number, so a `typeof` test in front of it would be redundant.
-            // isValidClockSeconds() also rejects a finite but out-of-range
+            // isValidClockSeconds() starts with Number.isFinite, which is false for
+            // every non-number, so a `typeof` test in front of it would be
+            // redundant. It also rejects a finite but out-of-range
             // Value (e.g. 1e15 seconds), which would be an Invalid Date (#511).
             const midpoint = t0 + (Date.now() - t0) / 2;
             serverClockOffsetMs = (result.Value * 1000) - midpoint;
