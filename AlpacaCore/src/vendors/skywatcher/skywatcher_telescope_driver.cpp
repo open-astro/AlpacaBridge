@@ -76,6 +76,22 @@ constexpr int measured_dec_axis_sense(std::uint8_t mount_code) {
     }
 }
 
+// open-astro#666: whether a live in-place ":I" on a running axis needs a ":J"
+// re-latch before the motor follows it. The EQM-35 Pro (MC 3.39) stores a bare
+// ":I" without applying it (2026-09-06), so every board re-latches by default,
+// as INDI does. The EQ-AL55i Pro (0x09, MC 3.48) applied 16 of 16 bare ":I"
+// writes (sidereal, 0.5x and 1.5x) within the +-2 counts/s a 2 s ":j" window
+// resolves (2026-09-26), and on that board the ":J" is not free: each start
+// re-anchors the trajectory on the encoder, turning the RA servo's following
+// error into a position step whose sign follows the mount's balance (+1.8
+// counts per ":J1" with the RA axis at -45 deg, -1.4 at +45 deg, bare mount).
+// Two per guide pulse put ConformU's 5 s East/West pulses outside its 0.07 s
+// tolerance. Such a board still gets the sampled rate-applied check and its
+// ":I"+":J" resend where the caller runs one. Gated on the mount code alone:
+// only MC 3.48 was measured, and the other 0x09 board on record (a reporter's,
+// MC 3.46) was not.
+constexpr bool live_rate_change_needs_relatch(std::uint8_t mount_code) { return mount_code != 0x09; }
+
 constexpr uint32_t kCountsMask = 0xFFFFFF;
 constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
@@ -418,6 +434,7 @@ public:
                                                   std::to_string(static_cast<int>(board.mount_code)) + "), firmware " +
                                                   board.firmware_version);
                 dec_axis_sense_ = measured_dec_axis_sense(board.mount_code);  // open-astro#458
+                live_rate_relatch_ = live_rate_change_needs_relatch(board.mount_code);  // open-astro#666
             } catch (...) {
                 // A board that will not answer ":e" is still usable, so never
                 // fail the connect over it -- but do not keep a previous
@@ -1460,7 +1477,9 @@ public:
                         auto& proto = *protocol_;
                         proto.set_step_period(kAxisRa, tracking_step_period_for(restore_rate),
                                               /*with_readback=*/false);
-                        proto.start_motion(kAxisRa);
+                        if (live_rate_relatch_) {  // open-astro#666
+                            proto.start_motion(kAxisRa);
+                        }
                         cmd_axis_rate_deg_s_[0] = restore_rate;
                         return;
                     } catch (const std::exception& e) {
@@ -1507,15 +1526,20 @@ public:
                     // INDI's skywatcherAPI.cpp always follows an in-place
                     // SetClockTicksPerMicrostep with StartAxisMotion even
                     // when the axis never stopped; do the same, and verify
-                    // below in case that alone is not sufficient.
-                    proto.start_motion(kAxisRa);
+                    // below in case that alone is not sufficient. Not on a
+                    // board where the ":J" itself moves the axis and a bare
+                    // ":I" is known to apply (open-astro#666).
+                    if (live_rate_relatch_) {
+                        proto.start_motion(kAxisRa);
+                    }
                     cmd_axis_rate_deg_s_[0] = ra_pulse_rate;
                     // Only sample-verify when the pulse is long enough to
                     // absorb the sample window. A real autoguider sends
                     // 50-500 ms pulses; there the ~450 ms check would BE the
                     // pulse (the deduction below can only clamp at zero, not
                     // give the time back), so short pulses rely on the ":J"
-                    // kick alone. ConformU's 5 s pulses are always verified.
+                    // kick alone (or, on a no-re-latch board, on the bare
+                    // ":I"). ConformU's 5 s pulses are always verified.
                     verify_dispatch_rate = duration >= kMinPulseForRateVerifyMs;
                 } else if (restore_tracking) {
                     // The pulse runs against the axis's own tracking sense
@@ -1598,10 +1622,13 @@ public:
                 if (restore_tracking && !pulse_restart && !ra_reverses) {
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped. Same ":J" kick as
-                    // the dispatch above, for the same reason.
+                    // the dispatch above, for the same reason, and skipped
+                    // on the same boards.
                     proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec),
                                           /*with_readback=*/false);
-                    proto.start_motion(kAxisRa);
+                    if (live_rate_relatch_) {
+                        proto.start_motion(kAxisRa);
+                    }
                     std::lock_guard<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
                 } else if (restore_tracking) {
@@ -2477,6 +2504,8 @@ private:
         // open-astro#458: a board that will not answer ":e" is an unmeasured
         // one; never carry the previous connection's sense into this one.
         dec_axis_sense_ = 0;
+        // open-astro#666: likewise an unidentified board gets the ":J" re-latch.
+        live_rate_relatch_ = true;
         // Both are MEASURED off the mount that was connected, so they must not
         // survive into the next one: a driver instance reconnected to
         // different hardware would otherwise aim a goto ahead by the previous
@@ -3046,10 +3075,12 @@ private:
         const double delta_counts_per_sec = std::abs(expected_counts_per_sec - previous_counts_per_sec);
         const double needed_s = delta_counts_per_sec > 0.0 ? kMinResolvableDeltaCounts / delta_counts_per_sec : 1e9;
         if (needed_s > std::chrono::duration<double>(effective_max_window).count()) {
-            ALPACA_LOG_INFO("SkyWatcher", "Axis " + std::to_string(channel) + " rate change of " +
-                                              std::to_string(delta_counts_per_sec) +
-                                              " counts/s is below the rate-applied check's resolution; relying "
-                                              "on the :J re-latch alone");
+            ALPACA_LOG_INFO(
+                "SkyWatcher",
+                "Axis " + std::to_string(channel) + " rate change of " + std::to_string(delta_counts_per_sec) +
+                    " counts/s is below the rate-applied check's resolution; relying "
+                    "on " +
+                    (live_rate_relatch_ ? std::string("the :J re-latch") : std::string("the bare :I")) + " alone");
             return;
         }
         const auto window =
@@ -3538,7 +3569,9 @@ private:
             reap_rate_verify_task();
             auto& protocol = *protocol_;
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
-            protocol.start_motion(kAxisRa);
+            if (live_rate_relatch_) {  // open-astro#666: see live_rate_change_needs_relatch()
+                protocol.start_motion(kAxisRa);
+            }
             cmd_axis_rate_deg_s_[0] = eff;  // keep dead reckoning on the new rate
             spawn_rate_verify_task_locked(previous_effective, eff);
         } else {
@@ -4499,6 +4532,10 @@ private:
     // open-astro#458: measured_dec_axis_sense() of the connected board, 0 when
     // unmeasured or unknown. See home_term_sign_locked().
     int dec_axis_sense_ = 0;
+    // open-astro#666: live_rate_change_needs_relatch() of the connected board,
+    // true when unknown. Atomic because the pulse task's restore reads it
+    // without mutex_.
+    std::atomic<bool> live_rate_relatch_{true};
     mutable bool position_cache_valid_ = false;
     // open-astro#505: set when a recovered link turned out to belong to a
     // board that had restarted (init_done cleared, position registers reset).

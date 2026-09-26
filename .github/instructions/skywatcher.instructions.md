@@ -147,8 +147,17 @@ datagrams before each send so replies cannot get off-by-one.
   2026-09-06): the board stores the preset (`:i` reads it back) but the motor keeps its old
   rate. Every live in-place `:I` is therefore followed by a `:J` re-latch (INDI does the
   same), and the driver sample-verifies the rate over ~450 ms (`verify_live_rate_or_rekick`)
-  and resends `:I`+`:J` if the axis did not change speed. Pulses ≥ 1.5 s verify inside the
-  pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone);
+  and resends `:I`+`:J` if the axis did not change speed. **Except on the EQ-AL55i Pro
+  (0x09, `live_rate_change_needs_relatch()`, open-astro#666):** there a bare `:I` applied
+  16 of 16 times, and the `:J` is not free: each one re-anchors the board's trajectory on
+  the encoder, stepping the tracking RA axis by the servo's following error (~2 counts,
+  sign set by the mount's balance), which put ConformU's 5 s E/W pulses outside tolerance.
+  That board skips the re-latch at every live-rate site (pulse dispatch and restore, the
+  rate setters, the dispatch-failure recovery); the verify and its `:I`+`:J` resend stay.
+  Add a board to that exception only on the same evidence: bare `:I` applied on hardware
+  AND a measured `:J` position step. Pulses ≥ 1.5 s verify inside the
+  pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone,
+  or on 0x09 on the bare `:I`);
   the `RightAscensionRate`/`TrackingRate` setters cannot wait 450 ms inside a property call,
   so they spawn a one-shot background task (`rate_verify_thread_`, open-astro #248). That
   task never takes `mutex_`, which is what lets every RA-taking path reap it WITH `mutex_`
