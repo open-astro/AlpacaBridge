@@ -94,3 +94,26 @@ jobs:
             gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
               --title "${GITHUB_REF_NAME}" --notes-file release-notes.md --verify-tag
           fi
+
+      - name: Trigger the apt.openastro.net release
+        # Ask open-astro/apt-openastro-net to build, sign and publish this
+        # tag's .deb right away (its Release workflow listens for this event
+        # and builds AlpacaBridge at the tag it is given). That repo is private
+        # and GITHUB_TOKEN is scoped to this one, so it takes a dedicated
+        # token: APT_REPO_DISPATCH_TOKEN, a fine-grained PAT for that single
+        # repo with Contents: read & write (what repository_dispatch needs).
+        # Without the secret this only warns — apt-openastro-net also polls
+        # this repo's latest Release every hour, so the .deb still ships, just
+        # up to an hour later.
+        env:
+          GH_TOKEN: ${{ secrets.APT_REPO_DISPATCH_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::APT_REPO_DISPATCH_TOKEN is not set; apt-openastro-net will pick up ${TAG} on its hourly poll instead."
+            exit 0
+          fi
+          printf '{"event_type":"alpacabridge-release","client_payload":{"tag":"%s"}}\n' "${TAG}" \
+            | gh api --method POST repos/open-astro/apt-openastro-net/dispatches --input -
+          echo "Dispatched alpacabridge-release (${TAG}) to open-astro/apt-openastro-net."
