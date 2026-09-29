@@ -33,6 +33,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -71,6 +72,15 @@ struct FieldRef {
     std::optional<double> max;
     ConfigValue default_value;
 };
+
+// An Int field's bound as the int64 it was declared as. Field::ref() widens
+// INT64_MAX to the double 2^63, which no int64 holds and which a plain cast
+// turns into undefined behavior, so the bound is clamped to the int64 range.
+inline std::int64_t int_bound(double bound) {
+    if (bound >= 9223372036854775808.0) return std::numeric_limits<std::int64_t>::max();
+    if (bound <= -9223372036854775808.0) return std::numeric_limits<std::int64_t>::min();
+    return static_cast<std::int64_t>(bound);
+}
 
 template <class T>
 struct Field {

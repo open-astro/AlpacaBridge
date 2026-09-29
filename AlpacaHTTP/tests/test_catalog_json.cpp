@@ -35,6 +35,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <string>
@@ -257,6 +258,20 @@ int main() {
         const nlohmann::json described_with_factory = cj::describe_json(catalog);
         EXPECT(described_with_factory[1].at("available") == true);
         EXPECT(described_with_factory[1].at("fields") == zzz.at("fields"));
+    }
+
+    // 6. An int64 extreme bound: Field::ref() widens INT64_MAX to the double 2^63,
+    // which no int64 holds, and the range must still read INT64_MAX.
+    {
+        static const alpacacore::catalog::Field<std::int64_t> kBig{
+            .key = "big", .default_value = 0, .min = 0, .max = std::numeric_limits<std::int64_t>::max()};
+        static const std::vector<alpacacore::catalog::FieldRef> big_fields{kBig.ref()};
+        alpacacore::catalog::Schema big = tc::make_schema();
+        big.fields = big_fields;
+        DeviceCatalog catalog;
+        catalog.add(big);
+        const nlohmann::json described = cj::describe_json(catalog);
+        EXPECT(field_named(described[0], "big").at("range").dump() == R"({"max":9223372036854775807,"min":0})");
     }
 
     std::cout << "All catalog JSON bridge tests passed!\n";

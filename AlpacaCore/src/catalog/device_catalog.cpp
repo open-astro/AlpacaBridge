@@ -12,6 +12,7 @@
 
 #include <alpacacore/catalog/device_catalog.h>
 
+#include <charconv>
 #include <stdexcept>
 #include <string>
 
@@ -44,6 +45,15 @@ std::string allowed_list(const FieldRef& f) {
         s += a;
     }
     return s;
+}
+
+// Formats a range bound for a message: an Int field without a fraction, a
+// Double field in its shortest round-trip form (0.5, 100).
+std::string format_bound(FieldRef::Kind kind, double bound) {
+    if (kind == FieldRef::Kind::Int) return std::to_string(int_bound(bound));
+    char buf[32];
+    auto res = std::to_chars(buf, buf + sizeof(buf), bound);
+    return std::string(buf, res.ptr);
 }
 
 // Applies the per-field rules to `in`, appending one message per failure.
@@ -86,12 +96,12 @@ DeviceConfig normalize_fields(std::span<const FieldRef> fields, const DeviceConf
                 std::string range = "out of range";
                 if (f.min) {
                     range += " (min ";
-                    range += std::to_string(*f.min);
+                    range += format_bound(f.kind, *f.min);
                     range += ")";
                 }
                 if (f.max) {
                     range += " (max ";
-                    range += std::to_string(*f.max);
+                    range += format_bound(f.kind, *f.max);
                     range += ")";
                 }
                 std::string message = name;

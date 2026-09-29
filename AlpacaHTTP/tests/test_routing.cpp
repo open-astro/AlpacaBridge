@@ -6221,7 +6221,7 @@ int main() {
         EXPECT(!persisted.config.contains("token"));
         EXPECT(any_warning_contains(
             persisted.warnings,
-            "Persisted zzz focuser 9256 config normalized: count is out of range (min 1.000000) (max 8.000000). "
+            "Persisted zzz focuser 9256 config normalized: count is out of range (min 1) (max 8). "
             "The saved value is not used: the field falls back to its default, or stays unset if it has none. "
             "Registered so it stays listed and editable in the web UI."));
         EXPECT(any_warning_contains(
