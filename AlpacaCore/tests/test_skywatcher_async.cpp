@@ -3247,10 +3247,10 @@ TEST_CASE("SkyWatcher async - a goto landing that reports stopped early is waite
     // counts cannot be the signal: refine_goto_landing() burns all three
     // iterations on this fake whether or not a landing coasts (measured:
     // 4 Dec gotos either way), so the count is saturated before the coast
-    // can move it. Wall-clock timing cannot be the signal either -- the 3 s
-    // slew_force_until_ window and the tracking restore both sit between the
-    // landing and Slewing clearing, and either swamps a coast short enough
-    // to be waited out.
+    // can move it. Wall-clock timing cannot be the signal either -- the
+    // tracking restore sits between the landing and Slewing clearing (as the
+    // 3 s slew_force_until_ window also did before #715), and it swamps a
+    // coast short enough to be waited out.
     //
     // So: coast for longer than kLandingSettleTimeout (2 s). The stationary
     // check gives up and says so, in a string nothing else in the driver

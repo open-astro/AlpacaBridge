@@ -32,6 +32,7 @@ using alpacacore::AlpacaException;
 using alpacacore::catalog::ConfigValue;
 using alpacacore::catalog::DeviceConfig;
 using alpacacore::catalog::FieldRef;
+using alpacacore::catalog::int_bound;
 using alpacacore::catalog::Role;
 
 [[noreturn]] void throw_wrong_type(const std::string& name, const nlohmann::json& value) {
@@ -192,8 +193,8 @@ nlohmann::json field_to_json(const FieldRef& f) {
     if (f.min || f.max) {
         nlohmann::json range = nlohmann::json::object();
         if (f.kind == FieldRef::Kind::Int) {
-            if (f.min) range["min"] = static_cast<std::int64_t>(*f.min);
-            if (f.max) range["max"] = static_cast<std::int64_t>(*f.max);
+            if (f.min) range["min"] = int_bound(*f.min);
+            if (f.max) range["max"] = int_bound(*f.max);
         } else {
             if (f.min) range["min"] = *f.min;
             if (f.max) range["max"] = *f.max;

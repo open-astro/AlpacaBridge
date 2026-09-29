@@ -33,6 +33,7 @@ set(TEST_SOURCES
     test_host_clock.cpp
     test_poll_settle.cpp
     test_task_clock.cpp
+    test_async_operation.cpp
     test_connection_resolver.cpp
     test_serial_by_id_scan.cpp
     test_stress_call_guard.cpp

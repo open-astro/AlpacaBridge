@@ -1173,12 +1173,11 @@ public:
             if (homing_) {
                 return;  // already homing
             }
-            if (at_home_ && !get_hardware_slewing_locked()) {
+            if (at_home_ && !get_hardware_slewing_locked(true)) {
                 return;  // already at home
             }
             invalidate_position_cache_locked();
             slewing_cached_ = true;
-            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             restore_tracking_after_slew_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
@@ -1230,13 +1229,11 @@ public:
             } catch (const std::exception& ex) {
                 homing_ = false;
                 slewing_cached_ = false;
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", std::string("FindHome failed: ") + ex.what());
             } catch (...) {
                 homing_ = false;
                 slewing_cached_ = false;
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", "FindHome failed with unknown exception");
             }
@@ -1282,7 +1279,6 @@ public:
             target_dec_axis = park_dec_axis_deg_;
             invalidate_position_cache_locked();
             slewing_cached_ = true;
-            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             restore_tracking_after_slew_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
@@ -1324,13 +1320,11 @@ public:
             } catch (const std::exception& ex) {
                 parking_ = false;
                 slewing_cached_ = false;
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Park failed: ") + ex.what());
             } catch (...) {
                 parking_ = false;
                 slewing_cached_ = false;
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", "Park failed with unknown exception");
             }
@@ -1833,6 +1827,9 @@ public:
             // failed.
             clear_last_slew_error_locked();
             slew_epoch = slew_error_epoch_;
+            // Slewing must read true once this returns, but goto_in_progress_
+            // is only set when the task below takes mutex_. This window covers
+            // that gap for client reads; landing detection ignores it.
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
@@ -1861,6 +1858,11 @@ public:
         slew_task_thread_ = std::thread([this, ra, dec, slew_epoch]() {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!connected_ || slew_task_cancel_.load()) {
+                // Reaped before it dispatched (a newer Park/FindHome/slew,
+                // AbortSlew, disconnect): drop the initiator's window with it,
+                // or Slewing reads true for the rest of its 8 s after the
+                // reaper's own operation has failed or finished.
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 return;
             }
             goto_in_progress_ = true;
@@ -3729,13 +3731,12 @@ private:
 
     // After the first goto lands, close the residual (prediction error) with
     // short re-gotos until inside the deadband. Slewing is held true across
-    // the inter-goto gaps via slew_force_until_.
+    // the inter-goto gaps by goto_in_progress_, which both callers set.
     void refine_goto_landing(std::unique_lock<std::mutex>& lock, double ra, double dec) {
         for (int iter = 0; iter < 3; ++iter) {
             if (slew_task_cancel_.load()) {
                 break;  // AbortSlew/unpark/disconnect cancelled the slew
             }
-            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(3);
             refresh_position_cache_locked(true);
             // Judge the landing against the target ADVANCED by the resume
             // window -- the mount deliberately lands ahead (see above).
@@ -3748,7 +3749,6 @@ private:
             dispatch_predicted_goto_locked(lock, ra, dec);
             wait_for_slew_complete(lock);
         }
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
         slewing_cached_ = false;
     }
 
@@ -3759,7 +3759,6 @@ private:
         // that retries a rejected goto (even via the blocking
         // SlewToCoordinates) must not be told the OLD goto failed.
         clear_last_slew_error_locked();
-        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         restore_tracking_after_slew_ = tracking_;
         // open-astro#404: the target is what the client ASKED for, so it is
         // published before dispatch on every writer (this one, the async slew
@@ -3775,7 +3774,6 @@ private:
             // Dispatch failed before the mount started moving: clear the
             // pre-published slew state so Slewing cannot wedge true.
             slewing_cached_ = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
             restore_tracking_after_slew_ = false;
             throw;
         }
@@ -4017,18 +4015,25 @@ private:
         if (parking_ || homing_ || goto_in_progress_ || restoring_tracking_) {
             return true;
         }
-        return get_hardware_slewing_locked();
+        return get_hardware_slewing_locked(true);
     }
 
     // Hardware/manual slewing state WITHOUT the parking_ override. The park
     // task's own wait_for_slew_complete must poll this variant: polling
     // get_slewing_locked() while parking_ is set can never see "stopped" and
     // times out at 180s (AtPark stays false -- ConformU Park failure).
-    bool get_hardware_slewing_locked() const {
+    //
+    // honor_force_window: client-facing reads (get_slewing_locked, the
+    // FindHome already-at-home check) pass true, so Slewing reads true from
+    // the moment SlewToCoordinatesAsync returns until its task has set
+    // goto_in_progress_. Landing detection (wait_for_slew_complete) passes
+    // false and asks the board on every poll: a goto has landed when the
+    // board says it stopped, not when a timer expires (open-astro#715).
+    bool get_hardware_slewing_locked(bool honor_force_window) const {
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
-        if (std::chrono::steady_clock::now() < slew_force_until_) {
+        if (honor_force_window && std::chrono::steady_clock::now() < slew_force_until_) {
             return true;
         }
         bool was_slewing = slewing_cached_;
@@ -4287,7 +4292,7 @@ private:
                 // the join is bounded.
                 throw AlpacaException("Slew wait cancelled");
             }
-            bool slewing = get_hardware_slewing_locked();
+            bool slewing = get_hardware_slewing_locked(false);
             if (slewing) {
                 saw_slewing = true;
             }
@@ -4315,6 +4320,8 @@ private:
             last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
         }
         slewing_cached_ = false;
+        // Landed: end the async initiator's window too, or Slewing would stay
+        // true for the rest of its 8 s after a short goto and its restore.
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         invalidate_position_cache_locked();
         // No post-slew position freeze: gotos are LST-compensated and refined
@@ -4612,8 +4619,8 @@ private:
     mutable bool parking_ = false;
     mutable bool homing_ = false;
     // True from goto dispatch until the landing refinement finishes: Slewing
-    // must not flicker false mid-refinement (the timed slew_force_until_
-    // expired during a slow refine iteration, ConformU proceeded, and the
+    // must not flicker false mid-refinement (the timed 3 s window this
+    // replaced expired during a slow refine iteration, ConformU proceeded, and the
     // next refinement goto fought its pulse-guide test for the motors).
     mutable bool goto_in_progress_ = false;
     // Slewing must stay true across the post-slew tracking restore and its

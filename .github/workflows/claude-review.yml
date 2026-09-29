@@ -91,7 +91,7 @@ jobs:
           fi
           git status --short
 
-      - uses: anthropics/claude-code-action@cfc3eb22bfed5c26ef66e3223c982af27e4524de  # v1
+      - uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790  # v1
         env:
           # allowed_non_write_users turns on subprocess secret scrubbing, which
           # strips the GitHub token the agent's `gh` calls need. The label is

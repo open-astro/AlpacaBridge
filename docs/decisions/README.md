@@ -19,3 +19,4 @@ A record is referred to by its slug until it is written, and numbered then.
 - [Documentation drift gates](0003-docs-drift-gates.md)
 - [Device catalog](0004-device-catalog.md)
 - [Task clock](0005-task-clock.md)
+- [Async operation ownership](0006-async-operation-ownership.md)

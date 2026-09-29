@@ -583,3 +583,46 @@ TEST_CASE("An int64 in a double field is accepted and widened", "[catalog]") {
     CHECK(mentions(*out_of_range.rejection, "ports[0].maxValue"));
     CHECK_FALSE(mentions(*out_of_range.rejection, "wrong type"));
 }
+
+TEST_CASE("Range messages print int bounds without a fraction and double bounds short", "[catalog]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+    DeviceConfig bad_int = valid_config();
+    bad_int.set("pollMs", std::int64_t{5});
+    auto r1 = catalog.normalize(kStubKey, bad_int, Source::Persisted);
+    REQUIRE(r1.warnings.size() == 1);
+    CHECK(r1.warnings[0] == "pollMs is out of range (min 100) (max 60000)");
+
+    static const Field<double> kGain{.key = "gain", .default_value = 1.0, .min = 0.5, .max = 2.25};
+    static const std::vector<FieldRef> gain_fields{kGain.ref()};
+    Schema schema;
+    schema.key = DeviceKey{"gain", DeviceType::Switch};
+    schema.display_name = "Gain";
+    schema.build_option = "ALPACACORE_ENABLE_GAIN";
+    schema.fields = gain_fields;
+    catalog.add(std::move(schema));
+    DeviceConfig bad_double;
+    bad_double.set("gain", 3.0);
+    auto r2 = catalog.normalize(DeviceKey{"gain", DeviceType::Switch}, bad_double, Source::Persisted);
+    REQUIRE(r2.warnings.size() == 1);
+    CHECK(r2.warnings[0] == "gain is out of range (min 0.5) (max 2.25)");
+}
+
+TEST_CASE("Range messages print an int64 extreme bound exactly", "[catalog]") {
+    // Field::ref() widens INT64_MAX to the double 2^63, which is outside the int64 range.
+    static const Field<std::int64_t> kCount{
+        .key = "count", .default_value = 0, .min = 0, .max = std::numeric_limits<std::int64_t>::max()};
+    static const std::vector<FieldRef> count_fields{kCount.ref()};
+    DeviceCatalog catalog;
+    Schema schema;
+    schema.key = DeviceKey{"count", DeviceType::Switch};
+    schema.display_name = "Count";
+    schema.build_option = "ALPACACORE_ENABLE_COUNT";
+    schema.fields = count_fields;
+    catalog.add(std::move(schema));
+    DeviceConfig bad;
+    bad.set("count", std::int64_t{-1});
+    auto r = catalog.normalize(DeviceKey{"count", DeviceType::Switch}, bad, Source::Persisted);
+    REQUIRE(r.warnings.size() == 1);
+    CHECK(r.warnings[0] == "count is out of range (min 0) (max 9223372036854775807)");
+}

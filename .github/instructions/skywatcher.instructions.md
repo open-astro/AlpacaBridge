@@ -262,6 +262,11 @@ datagrams before each send so replies cannot get off-by-one.
   constant ~79 arcsec sync-return error). Diagnosed by logging every motion
   frame (:G/:I/:J/:K) at WARN and killing ConformU at the first issue -- the
   trace showed three refinement gotos interleaved with the pulse.
+  Landing detection follows the same rule since open-astro#715: `wait_for_slew_complete()`
+  asks the board on every poll (`get_hardware_slewing_locked(false)`) instead of waiting out
+  an 8 s window, so a short goto lands when the board stops. The one window left is
+  `SlewToCoordinatesAsync`'s, covering only the gap before its task sets `goto_in_progress_`;
+  every exit of that task clears it, the early return of a reaped task included.
 - **Reap the pulse task at every motion boundary** (slews, park, home,
   moveaxis, sync, abort): ConformU's dual-axis pulse test leaves a live pulse
   timer that otherwise fires its stop/step-period restore into the middle of
@@ -450,8 +455,8 @@ below was one of them.
   clearing while the last counts still arrive -- and it needed its own seam (`land_short_by()`:
   report the landing stopped N counts short, then creep the remainder in). Goto counts could not
   be the signal either (`refine_goto_landing()` burns all three iterations on this fake whether or
-  not a landing coasts), nor wall-clock timing (the 3 s `slew_force_until_` window and the
-  tracking restore both sit between the landing and `Slewing` clearing). What works: coast for
+  not a landing coasts), nor wall-clock timing (the tracking restore sits between the landing
+  and `Slewing` clearing, as the 3 s `slew_force_until_` window also did before #715). What works: coast for
   longer than `kLandingSettleTimeout` and assert the check's own give-up WARN, a string nothing
   else emits. **Rule:** before claiming a change is covered, delete it and run the suite; if it
   stays green, the seam models the wrong failure.
