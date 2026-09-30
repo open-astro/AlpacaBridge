@@ -124,6 +124,18 @@ override_dh_auto_install:
 	install -D -m 644 $(CURDIR)/debian/alpacabridge.polkit-rules \
 	  $(STAGING)/usr/share/polkit-1/rules.d/50-alpacabridge-wifi.rules
 
+	# --- Software update helper (docs/software-update.md) ---
+	# Root-owned oneshot unit + helper script + the polkit rule that lets the
+	# service user start exactly that unit. The unit is installed here rather
+	# than through dh_installsystemd's debian/<pkg>.<name>.service lookup so
+	# the override below can keep it out of the enable/start snippets.
+	install -D -m 755 $(CURDIR)/debian/alpacabridge-software-update \
+	  $(STAGING)/usr/libexec/alpacabridge/software-update
+	install -D -m 644 $(CURDIR)/debian/alpacabridge-update.service \
+	  $(STAGING)/usr/lib/systemd/system/alpacabridge-update.service
+	install -D -m 644 $(CURDIR)/debian/alpacabridge-update.polkit-rules \
+	  $(STAGING)/usr/share/polkit-1/rules.d/50-alpacabridge-update.rules
+
 	# --- Web UI assets ---
 	install -d $(STAGING)/usr/share/alpacabridge/web
 	cp -a $(CURDIR)/AlpacaHTTP/web/. $(STAGING)/usr/share/alpacabridge/web/
@@ -140,6 +152,14 @@ override_dh_auto_install:
 
 override_dh_auto_clean:
 	rm -rf $(BUILD_DIR)
+
+# Only the main service gets enable/start/restart maintainer-script snippets.
+# dh_installsystemd otherwise acts on EVERY non-template unit in the package,
+# [Install] section or not, and would have the new package's postinst
+# `deb-systemd-invoke restart alpacabridge-update.service` -- from inside the
+# apt run that unit is executing (docs/software-update.md).
+override_dh_installsystemd:
+	dh_installsystemd alpacabridge.service
 
 # Tell dh_shlibdeps where to find bundled proprietary shared libraries
 override_dh_shlibdeps:

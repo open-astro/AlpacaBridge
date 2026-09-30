@@ -187,6 +187,17 @@ Privileged operations use two mechanisms, both scoped tightly:
   systemd applies them at exec; `CapabilityBoundingSet` is limited to the
   same two.
 
+The Software Update card (4.2.0, `src/util/software_update.cpp`,
+[software-update.md](software-update.md)) adds a third mechanism for the one
+thing neither of the above can do, run `apt` as root: the daemon asks systemd
+over the same sd-bus connection to start the root-owned oneshot unit
+`alpacabridge-update.service`, whose `ExecStart` is fixed to the packaged
+helper script, and a second polkit rule
+(`50-alpacabridge-update.rules`) lets the service user start exactly that unit
+and nothing else. The version check needs no privilege at all: it fetches the
+repository's `Packages` index with libcurl in-process. Routes live under
+`/management/v1/update/`.
+
 Every state-changing management request carries a CSRF guard (browser
 `Origin` header must match `Host`, else 403); the surface is otherwise
 unauthenticated per the trusted-LAN model, and the guard is what keeps that
@@ -198,7 +209,8 @@ reached the WiFi endpoints first (PR #198), then `synctime` and the
 issue #348 the rest:
 `restart`, `shutdown`, `configuredevice`, `removedevice`, `loglevel`, the
 `description` `PUT`/`POST` and both forms of `DELETE /management/v1/logfiles` (the
-collection and a single named file). Note that
+collection and a single named file), and since 4.2.0 `update/check` and
+`update/install`. Note that
 it compares the request's `Origin` against the request's own `Host`, so it
 stops a drive-by from an attacker-controlled origin but not DNS rebinding
 (issue #392). `GET /management/v1/buildinfo` (3.6.0) is a read-only companion

@@ -13,6 +13,7 @@
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacahttp/config.h>
+#include <alpacahttp/software_update.h>
 #include <unistd.h>
 
 #include <cstdlib>
@@ -144,6 +145,82 @@ int main() {
         alpacahttp::Config bad_value;
         EXPECT(bad_value.load(path));
         EXPECT(bad_value.sync_system_clock_from_clients() == true);
+        ::unlink(path.c_str());
+    }
+
+    // Software update (docs/software-update.md): update_packages_url under
+    // [server]. The default is the arm64 Trixie index; the file and the
+    // environment both override it, and an explicit empty value (which
+    // disables the check) is kept rather than replaced by the default.
+    {
+        alpacahttp::Config fresh;
+        EXPECT(fresh.update_packages_url() == std::string(alpacahttp::util::kDefaultPackagesUrl));
+        EXPECT(fresh.update_packages_url().find("apt.openastro.net") != std::string::npos);
+        fresh.set_update_packages_url("https://mirror.example/Packages");
+        EXPECT(fresh.update_packages_url() == "https://mirror.example/Packages");
+
+        char path_template[] = "/tmp/alpacahttp_test_update_url_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        {
+            std::ofstream out(path);
+            // The value carries a colon of its own; the parser must split on
+            // the first one only.
+            out << "server:\n"
+                   "  update_packages_url: https://mirror.example/dists/trixie/main/binary-arm64/Packages  # note\n";
+        }
+        ::close(fd);
+
+        ::unsetenv("ALPACAHTTP_UPDATE_PACKAGES_URL");
+        alpacahttp::Config from_file;
+        EXPECT(from_file.load(path));
+        EXPECT(from_file.update_packages_url() == "https://mirror.example/dists/trixie/main/binary-arm64/Packages");
+
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  update_packages_url: \"\"\n";
+        }
+        alpacahttp::Config from_file_empty;
+        EXPECT(from_file_empty.load(path));
+        EXPECT(from_file_empty.update_packages_url().empty());
+
+        ::setenv("ALPACAHTTP_UPDATE_PACKAGES_URL", "https://env.example/Packages", 1);
+        alpacahttp::Config from_env;
+        EXPECT(from_env.load(path));
+        EXPECT(from_env.update_packages_url() == "https://env.example/Packages");
+        ::setenv("ALPACAHTTP_UPDATE_PACKAGES_URL", "", 1);
+        alpacahttp::Config from_env_empty;
+        EXPECT(from_env_empty.load(path));
+        EXPECT(from_env_empty.update_packages_url().empty());
+        ::unsetenv("ALPACAHTTP_UPDATE_PACKAGES_URL");
+
+        // The release-notes and release-page templates follow the same rules.
+        EXPECT(fresh.update_release_notes_url() == std::string(alpacahttp::util::kDefaultReleaseNotesUrl));
+        EXPECT(fresh.update_release_url() == std::string(alpacahttp::util::kDefaultReleaseUrl));
+        EXPECT(fresh.update_release_notes_url().find("{version}") != std::string::npos);
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  update_release_notes_url: https://notes.example/{version}.md\n"
+                   "  update_release_url: \"\"\n";
+        }
+        ::unsetenv("ALPACAHTTP_UPDATE_RELEASE_NOTES_URL");
+        ::unsetenv("ALPACAHTTP_UPDATE_RELEASE_URL");
+        alpacahttp::Config templates_from_file;
+        EXPECT(templates_from_file.load(path));
+        EXPECT(templates_from_file.update_release_notes_url() == "https://notes.example/{version}.md");
+        EXPECT(templates_from_file.update_release_url().empty());
+        ::setenv("ALPACAHTTP_UPDATE_RELEASE_NOTES_URL", "", 1);
+        ::setenv("ALPACAHTTP_UPDATE_RELEASE_URL", "https://rel.example/v{version}", 1);
+        alpacahttp::Config templates_from_env;
+        EXPECT(templates_from_env.load(path));
+        EXPECT(templates_from_env.update_release_notes_url().empty());
+        EXPECT(templates_from_env.update_release_url() == "https://rel.example/v{version}");
+        ::unsetenv("ALPACAHTTP_UPDATE_RELEASE_NOTES_URL");
+        ::unsetenv("ALPACAHTTP_UPDATE_RELEASE_URL");
+
         ::unlink(path.c_str());
     }
 

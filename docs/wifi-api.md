@@ -175,8 +175,10 @@ state-changing management endpoint carries the same guard — `synctime`,
 `description` `PUT`/`POST` (as with `configuredevice` and `removedevice`, the
 handler accepts both and the guard covers both), and both
 `DELETE /management/v1/logfiles` (all files) and
-`DELETE /management/v1/logfiles/<name>` (one file). The rejection message names
-the endpoint.
+`DELETE /management/v1/logfiles/<name>` (one file), and since 4.2.0 the
+software-update pair `POST /management/v1/update/check` and
+`POST /management/v1/update/install` ([software-update.md](software-update.md)).
+The rejection message names the endpoint.
 
 The guard compares the request's `Origin` against the request's own `Host`,
 which stops a page served from an attacker-controlled origin. It does not
