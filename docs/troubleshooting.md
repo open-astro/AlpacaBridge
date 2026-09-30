@@ -15,7 +15,7 @@ Common build and runtime issues for AlpacaBridge.
 **Warning**: `Catch2 not found. Install Catch2 (v2 or v3) to build AlpacaCore tests.`
 
 **Solution**: `sudo apt install catch2`. A manual CMake configure can opt out instead with
-`cmake .. -DALPACACORE_BUILD_TESTS=OFF`, but `run_all_tests.sh` and `scripts/ci_preflight.sh`
+`cmake -S AlpacaHTTP -B AlpacaHTTP/build -DALPACACORE_BUILD_TESTS=OFF`, but `run_all_tests.sh` and `scripts/ci_preflight.sh`
 always build the tests, so Catch2 is required for those.
 
 ### Vendor SDK not found
@@ -45,14 +45,8 @@ always build the tests, so Catch2 is required for those.
 
 ### Missing system libraries
 
-**Solution**: Install all build dependencies:
-
-```sh
-sudo apt install build-essential cmake g++ \
-    libusb-1.0-0-dev libudev-dev \
-    nlohmann-json3-dev libcurl4-openssl-dev \
-    catch2
-```
+**Solution**: Install every package in the `Build-Depends` field of `debian/control`, the complete list (it includes `zlib1g-dev`, `libsystemd-dev` and `pkgconf`, which the configure step requires).
+Add `catch2` to build the tests. [development.md](development.md#prerequisites) has the `apt install` command.
 
 ## Runtime issues
 
@@ -80,7 +74,7 @@ See [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) for driver-specific notes.
 
 **Solution**:
 1. Ensure you have write permissions in the build directory
-2. Don't build in system directories — use a local `build/` directory
+2. Don't build in system directories — use the component build directory `AlpacaHTTP/build`
 3. For USB devices, add udev rules and join the `dialout` group
 
 ### Device clock resets to a stale time after reboot
@@ -120,19 +114,39 @@ This keeps Alpaca timestamps correct even with no NTP reachable. The hardware RT
 
 **Any request to the device resets the timer**, including a client's own routine `Slewing` polls — normal NINA/PHD2/ConformU polling (every few seconds) never comes close to the limit. A synchronous request (a plain, non-async `SlewToCoordinates`) that itself blocks past the limit is also covered: it counts as activity for its whole duration, not just when it started, so a long deliberate goto does not get aborted out from under the very client that is waiting on it. A genuine trip means requests really did stop arriving for that long — which also means a request from any OTHER client still addressing the same telescope (a planetarium app polling position, say) keeps the watchdog disarmed even after the client that started the motion has gone away.
 
-**To change the limit or turn it off**: set `server.motion_watchdog_seconds` in your config (default 30; 0 disables it) or the `ALPACAHTTP_MOTION_WATCHDOG_SECONDS` environment variable. A slower-polling client may want a longer value; disabling it removes this backstop entirely, so only do that if you have another way to guarantee a hung client's slew gets stopped.
+**To change the limit or turn it off**: set `motion_watchdog_seconds` under `server:` in the server config file (default 30; 0 disables it). A slower-polling client may want a longer value; disabling it removes this backstop entirely, so only do that if you have another way to guarantee a hung client's slew gets stopped.
+
+On a package install the server config file is `/var/lib/alpacabridge/config/default.yaml`, owned by the `alpacabridge` service user. The package does not ship it (the web UI creates it on the first Server Info save), so it may not exist yet. Edit or create it as that user, because a file created with plain `sudo` is owned by root and later web UI saves then fail with "Unable to open config file for writing":
+
+```sh
+sudo -u alpacabridge nano /var/lib/alpacabridge/config/default.yaml
+```
+
+Put the key under the `server:` section (the section name at the start of the line, the key indented with spaces):
+
+```yaml
+server:
+  motion_watchdog_seconds: 0
+```
+
+The value is read once at start, so apply it with `sudo systemctl restart alpacabridge`. Alternatively, set the `ALPACAHTTP_MOTION_WATCHDOG_SECONDS` environment variable, which overrides the file: run `sudo systemctl edit alpacabridge`, add the lines below, save, then `sudo systemctl restart alpacabridge`.
+
+```ini
+[Service]
+Environment=ALPACAHTTP_MOTION_WATCHDOG_SECONDS=0
+```
 
 ## Clean build
 
 If all else fails, try a clean build:
 
 ```sh
-rm -rf build
-mkdir build
-cd build
-cmake ..
-cmake --build . --parallel
+rm -rf AlpacaHTTP/build
+cmake -S AlpacaHTTP -B AlpacaHTTP/build
+cmake --build AlpacaHTTP/build --parallel
 ```
+
+Run it from the repository root; it builds into `AlpacaHTTP/build`, the directory `./build_and_run.sh` also uses (that script then installs and starts the server).
 
 ## Getting help
 

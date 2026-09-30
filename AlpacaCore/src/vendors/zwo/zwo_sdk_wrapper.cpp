@@ -298,14 +298,19 @@ std::vector<ZWOCameraInfo> ZWOSDKWrapper::enumerate_cameras() {
 }
 
 bool ZWOSDKWrapper::get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) {
+    // Not ASIGetCameraPropertyByID: it answers only for an opened camera
+    // (ASI_ERROR_CAMERA_CLOSED otherwise, SDK 1.41 on the Pi rig, issue #738),
+    // and the driver looks its camera up before opening it.
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    ASI_CAMERA_INFO sdk_info{};
-    ASI_ERROR_CODE code = ASIGetCameraPropertyByID(camera_id, &sdk_info);
-    if (code != ASI_SUCCESS) {
-        return false;
+    int count = ASIGetNumOfConnectedCameras();
+    for (int i = 0; i < count; ++i) {
+        ASI_CAMERA_INFO sdk_info{};
+        if (ASIGetCameraProperty(&sdk_info, i) == ASI_SUCCESS && sdk_info.CameraID == camera_id) {
+            info = convert_camera_info(sdk_info);
+            return true;
+        }
     }
-    info = convert_camera_info(sdk_info);
-    return true;
+    return false;
 }
 
 bool ZWOSDKWrapper::get_camera_info_by_index(int camera_index, ZWOCameraInfo& info) {

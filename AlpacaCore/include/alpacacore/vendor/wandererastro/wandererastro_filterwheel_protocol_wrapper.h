@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -100,7 +102,9 @@ std::vector<FilterWheelPortInfo> enumerate_wanderer_filterwheel_ports();
  */
 class WandererFilterWheelProtocolWrapper {
 public:
-    WandererFilterWheelProtocolWrapper();
+    /// Link-health timing (issue #730) reads @p clock; tests pass a FakeTaskClock.
+    /// Read timeouts and the connect wait stay on steady_clock.
+    explicit WandererFilterWheelProtocolWrapper(util::TaskClock& clock = util::default_task_clock());
     ~WandererFilterWheelProtocolWrapper();
 
     WandererFilterWheelProtocolWrapper(const WandererFilterWheelProtocolWrapper&) = delete;

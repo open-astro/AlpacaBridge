@@ -129,3 +129,36 @@ TEST_CASE("ZWO Camera Driver - State Machine Contracts", "[zwo][camera][unit]") 
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);
 }
+
+namespace {
+
+std::string connect_error(alpacacore::CameraDriver& driver) {
+    try {
+        driver.set_connected(true);
+    } catch (const alpacacore::AlpacaException& ex) {
+        return ex.what();
+    }
+    return "";
+}
+
+}  // namespace
+
+// Issue #738: a camera registered by cameraId lost that id the first time a
+// client read its name while it was disconnected, so every later connect
+// failed with "Camera ID not specified". A name query must not change what a
+// connect does. The id is 256, the SDK's ASICAMERA_ID_MAX, which no attached
+// camera can have, so the connect fails with or without cameras on the bus;
+// the point is that both drivers fail the same way, on the configured id.
+TEST_CASE("ZWO Camera Driver - A name query keeps the configured camera id", "[zwo][camera][unit]") {
+    constexpr int kNoSuchCameraId = 256;
+    auto untouched = alpacacore::vendor::zwo::create_zwo_camera(0, kNoSuchCameraId);
+    const std::string expected = connect_error(*untouched);
+    REQUIRE_FALSE(expected.empty());
+
+    auto queried = alpacacore::vendor::zwo::create_zwo_camera(0, kNoSuchCameraId);
+    (void)queried->get_name();
+    const std::string actual = connect_error(*queried);
+
+    CHECK(actual != "Camera ID not specified");
+    CHECK(actual == expected);
+}

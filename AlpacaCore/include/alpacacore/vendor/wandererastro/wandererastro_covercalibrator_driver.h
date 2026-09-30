@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/covercalibrator_driver.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <memory>
 #include <string>
@@ -28,11 +29,12 @@ namespace alpacacore::vendor::wandererastro {
  * @param device_number Alpaca device number
  * @param serial_port Serial port path (e.g., "/dev/ttyUSB0")
  * @param baud_rate Serial baud rate (default 19200)
+ * @param clock Clock for the link-health silence check (tests pass a FakeTaskClock)
  * @return Unique pointer to CoverCalibrator driver
  */
-std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(int device_number,
-                                                                            const std::string& serial_port,
-                                                                            int baud_rate = 19200);
+std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(
+    int device_number, const std::string& serial_port, int baud_rate = 19200,
+    util::TaskClock& clock = util::default_task_clock());
 
 /**
  * @brief Create a WandererCover V4 driver by auto-detecting the serial port.

@@ -356,7 +356,7 @@ std::vector<FilterWheelPortInfo> enumerate_wanderer_filterwheel_ports() {
 
 class WandererFilterWheelProtocolWrapper::Impl {
 public:
-    Impl() = default;
+    explicit Impl(util::TaskClock& clock) : clock_(clock) {}
 
     ~Impl() { disconnect(); }
 
@@ -379,7 +379,7 @@ public:
         // Start the background reader that keeps the latest streamed status.
         {
             std::lock_guard<std::mutex> status_lock(status_mutex_);
-            link_.reset(std::chrono::steady_clock::now());
+            link_.reset(clock_.now());
         }
         running_.store(true);
         reader_thread_ = std::thread([this] { reader_loop(); });
@@ -428,7 +428,7 @@ public:
             std::lock_guard<std::mutex> status_lock(status_mutex_);
             status_ = FilterWheelStatus{};
             firmware_date_.clear();
-            link_.reset(std::chrono::steady_clock::now());
+            link_.reset(clock_.now());
         }
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
@@ -561,7 +561,7 @@ private:
                     continue;
                 }
                 status_ = updated;
-                if (link_.on_frame(std::chrono::steady_clock::now())) {
+                if (link_.on_frame(clock_.now())) {
                     ALPACA_LOG_INFO("WandererAstro",
                                     "Filter wheel: serial link restored, status frames are flowing again");
                 }
@@ -592,8 +592,7 @@ private:
         std::optional<std::string> latched;
         {
             std::lock_guard<std::mutex> lock(status_mutex_);
-            latched = link_.check_silence(std::chrono::steady_clock::now(),
-                                          std::chrono::milliseconds(kFilterWheelLinkSilenceMs));
+            latched = link_.check_silence(clock_.now(), std::chrono::milliseconds(kFilterWheelLinkSilenceMs));
             if (latched.has_value()) {
                 status_.valid = false;
             }
@@ -713,6 +712,7 @@ private:
     std::thread reader_thread_;
     FilterWheelStatus status_;
     util::StreamLinkHealth link_;  // issue #237; guarded by status_mutex_
+    util::TaskClock& clock_;       // link_ timing only (issue #730); outlives the wrapper
     // Firmware date (YYYY-MM-DD), captured once from the first valid frame and
     // cleared on disconnect; guarded by status_mutex_ alongside status_.
     std::string firmware_date_;
@@ -726,7 +726,8 @@ private:
 
 // --- WandererFilterWheelProtocolWrapper public interface forwarding ---
 
-WandererFilterWheelProtocolWrapper::WandererFilterWheelProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
+WandererFilterWheelProtocolWrapper::WandererFilterWheelProtocolWrapper(util::TaskClock& clock)
+    : impl_(std::make_unique<Impl>(clock)) {}
 
 WandererFilterWheelProtocolWrapper::~WandererFilterWheelProtocolWrapper() = default;
 

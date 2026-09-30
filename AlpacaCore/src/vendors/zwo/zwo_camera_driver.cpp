@@ -1370,7 +1370,10 @@ private:
                     camera_info_ = info;
                     camera_info_valid_ = true;
                     refreshed = true;
-                } else {
+                } else if (camera_index.has_value()) {
+                    // Only an id resolved from the index is re-resolved; an id
+                    // from the config is kept, or the next connect fails with
+                    // "Camera ID not specified" (issue #738).
                     std::lock_guard<std::mutex> lock(mutex_);
                     camera_id_.reset();
                     serial_number_.clear();

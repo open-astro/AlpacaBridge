@@ -32,12 +32,13 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    WandererFilterWheelDriver(int device_number, FilterWheelConnectionConfig config)
+    WandererFilterWheelDriver(int device_number, FilterWheelConnectionConfig config,
+                              util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("WandererAstro"),
           device_number_(device_number),
           config_(std::move(config)),
           connected_(false),
-          protocol_() {
+          protocol_(clock) {
         // The whole Wanderer lineup is 8-slot, so slot-sized state can be built
         // at construction rather than at connect (unlike SDK-enumerated wheels).
         filter_names_.assign(kFilterWheelSlotCount, std::string());
@@ -360,11 +361,11 @@ private:
 };
 
 std::unique_ptr<FilterWheelDriver> create_wandererastro_filterwheel(int device_number, const std::string& serial_port,
-                                                                    int baud_rate) {
+                                                                    int baud_rate, util::TaskClock& clock) {
     FilterWheelConnectionConfig config;
     config.serial_port = serial_port;
     config.baud_rate = baud_rate;
-    return std::make_unique<WandererFilterWheelDriver>(device_number, std::move(config));
+    return std::make_unique<WandererFilterWheelDriver>(device_number, std::move(config), clock);
 }
 
 std::unique_ptr<FilterWheelDriver> create_wandererastro_filterwheel_by_index(int device_number, int filterwheel_index) {
