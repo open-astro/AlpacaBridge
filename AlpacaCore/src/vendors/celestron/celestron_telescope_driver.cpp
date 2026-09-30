@@ -1212,8 +1212,8 @@ public:
         if (stop_error.empty()) {
             slewing_cached_ = false;
         } else {
-            ALPACA_LOG_ERROR("Celestron", "stop after park failure failed: " + stop_error +
-                                             "; the mount may still be moving");
+            ALPACA_LOG_ERROR("Celestron",
+                             "stop after park failure failed: " + stop_error + "; the mount may still be moving");
         }
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         position_override_until_ = std::chrono::steady_clock::time_point::min();

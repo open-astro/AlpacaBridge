@@ -387,7 +387,6 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
     REQUIRE_FALSE(driver->get_connected());
 }
 
-
 // #742: the three stops Unpark sends to cancel a park in flight (cancel GOTO,
 // then both axes to rate 0) sat in one empty catch, and Unpark then set
 // Slewing false and returned success. The SynScan stops are blind sends, so a
