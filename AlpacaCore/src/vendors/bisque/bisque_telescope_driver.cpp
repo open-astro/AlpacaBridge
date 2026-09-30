@@ -191,7 +191,16 @@ public:
                                       connection_info_.host + ":" +
                                       std::to_string(connection_info_.tcp_port));
             }
-            if (!protocol.handshake()) {
+            // A handshake that throws (timeout, send failure, closed socket) must
+            // release the shared wrapper too, or every later connect is refused.
+            bool handshake_ok = false;
+            try {
+                handshake_ok = protocol.handshake();
+            } catch (...) {
+                protocol.disconnect();
+                throw;
+            }
+            if (!handshake_ok) {
                 protocol.disconnect();
                 throw AlpacaException("TheSkyX handshake failed — is the mount connected in TheSkyX?");
             }
