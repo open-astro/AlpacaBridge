@@ -366,7 +366,7 @@ std::vector<BoxPortInfo> enumerate_wandererbox_ports() {
 
 class WandererBoxProtocolWrapper::Impl {
 public:
-    Impl() = default;
+    explicit Impl(util::TaskClock& clock) : clock_(clock) {}
 
     ~Impl() { disconnect(); }
 
@@ -413,7 +413,7 @@ public:
             std::lock_guard<std::mutex> state_lock(state_mutex_);
             state_ = *state;
             firmware_date_ = format_firmware_date(state->firmware_version);
-            link_.reset(std::chrono::steady_clock::now());
+            link_.reset(clock_.now());
         }
         connected_ = true;
         reader_running_.store(true);
@@ -439,7 +439,7 @@ public:
             std::lock_guard<std::mutex> state_lock(state_mutex_);
             state_ = BoxState{};
             firmware_date_.clear();
-            link_.reset(std::chrono::steady_clock::now());
+            link_.reset(clock_.now());
         }
 #ifndef _WIN32
         close_serial_locked();
@@ -596,7 +596,7 @@ private:
                         std::lock_guard<std::mutex> state_lock(state_mutex_);
                         state_ = *state;
                         firmware_date_ = format_firmware_date(state->firmware_version);
-                        restored = link_.on_frame(std::chrono::steady_clock::now());
+                        restored = link_.on_frame(clock_.now());
                     }
                     if (restored) {
                         ALPACA_LOG_INFO("WandererAstro",
@@ -614,8 +614,7 @@ private:
         std::optional<std::string> latched;
         {
             std::lock_guard<std::mutex> state_lock(state_mutex_);
-            latched =
-                link_.check_silence(std::chrono::steady_clock::now(), std::chrono::milliseconds(kBoxLinkSilenceMs));
+            latched = link_.check_silence(clock_.now(), std::chrono::milliseconds(kBoxLinkSilenceMs));
             if (latched.has_value()) {
                 state_.valid = false;
             }
@@ -681,6 +680,7 @@ private:
     BoxState state_;
     std::string firmware_date_;    // YYYY-MM-DD, from the status stream
     util::StreamLinkHealth link_;  // issue #237; guarded by state_mutex_
+    util::TaskClock& clock_;       // link_ timing only (issue #730); outlives the wrapper
 
     std::atomic<bool> reader_running_{false};
     std::thread reader_thread_;
@@ -692,7 +692,7 @@ private:
 
 // --- WandererBoxProtocolWrapper public interface forwarding ---
 
-WandererBoxProtocolWrapper::WandererBoxProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
+WandererBoxProtocolWrapper::WandererBoxProtocolWrapper(util::TaskClock& clock) : impl_(std::make_unique<Impl>(clock)) {}
 
 WandererBoxProtocolWrapper::~WandererBoxProtocolWrapper() = default;
 

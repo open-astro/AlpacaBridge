@@ -308,7 +308,7 @@ std::vector<WandererPortInfo> enumerate_wanderer_ports() {
 
 class WandererProtocolWrapper::Impl {
 public:
-    Impl() = default;
+    explicit Impl(util::TaskClock& clock) : clock_(clock) {}
 
     ~Impl() { disconnect(); }
 
@@ -332,7 +332,7 @@ public:
         }
         {
             std::lock_guard<std::mutex> status_lock(status_mutex_);
-            link_.reset(std::chrono::steady_clock::now());
+            link_.reset(clock_.now());
         }
 
         // Start the background reader that keeps the latest streamed status.
@@ -377,7 +377,7 @@ public:
             std::lock_guard<std::mutex> status_lock(status_mutex_);
             status_ = WandererStatus{};
             firmware_date_.clear();
-            link_.reset(std::chrono::steady_clock::now());
+            link_.reset(clock_.now());
         }
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
@@ -522,7 +522,7 @@ private:
                     bool restored = false;
                     std::lock_guard<std::mutex> lock(status_mutex_);
                     status_ = parsed;
-                    restored = link_.on_frame(std::chrono::steady_clock::now());
+                    restored = link_.on_frame(clock_.now());
                     if (restored) {
                         ALPACA_LOG_INFO("WandererAstro",
                                         "WandererCover: serial link restored, status frames are flowing again");
@@ -560,8 +560,7 @@ private:
         std::optional<std::string> latched;
         {
             std::lock_guard<std::mutex> lock(status_mutex_);
-            latched =
-                link_.check_silence(std::chrono::steady_clock::now(), std::chrono::milliseconds(kCoverLinkSilenceMs));
+            latched = link_.check_silence(clock_.now(), std::chrono::milliseconds(kCoverLinkSilenceMs));
             if (latched.has_value()) {
                 status_.valid = false;
             }
@@ -671,6 +670,7 @@ private:
     // cleared on disconnect; guarded by status_mutex_ alongside status_.
     std::string firmware_date_;
     util::StreamLinkHealth link_;  // issue #237; guarded by status_mutex_
+    util::TaskClock& clock_;       // link_ timing only (issue #730); outlives the wrapper
 
 #ifdef _WIN32
     HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
@@ -681,7 +681,7 @@ private:
 
 // --- WandererProtocolWrapper public interface forwarding ---
 
-WandererProtocolWrapper::WandererProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
+WandererProtocolWrapper::WandererProtocolWrapper(util::TaskClock& clock) : impl_(std::make_unique<Impl>(clock)) {}
 
 WandererProtocolWrapper::~WandererProtocolWrapper() = default;
 

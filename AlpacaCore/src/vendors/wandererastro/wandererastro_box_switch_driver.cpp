@@ -113,12 +113,13 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    WandererBoxSwitchDriver(int device_number, BoxConnectionConfig config)
+    WandererBoxSwitchDriver(int device_number, BoxConnectionConfig config,
+                            util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("WandererAstro"),
           device_number_(device_number),
           config_(std::move(config)),
           connected_(false),
-          protocol_() {
+          protocol_(clock) {
         for (int i = 0; i < kBoxSwitchCount; ++i) {
             switch_names_[static_cast<std::size_t>(i)] = kSwitches[static_cast<std::size_t>(i)].name;
         }
@@ -517,11 +518,11 @@ private:
 };
 
 std::unique_ptr<SwitchDriver> create_wandererastro_box_switch(int device_number, const std::string& serial_port,
-                                                              int baud_rate) {
+                                                              int baud_rate, util::TaskClock& clock) {
     BoxConnectionConfig config;
     config.serial_port = serial_port;
     config.baud_rate = baud_rate;
-    return std::make_unique<WandererBoxSwitchDriver>(device_number, std::move(config));
+    return std::make_unique<WandererBoxSwitchDriver>(device_number, std::move(config), clock);
 }
 
 std::unique_ptr<SwitchDriver> create_wandererastro_box_switch_by_index(int device_number, int box_index) {

@@ -59,10 +59,30 @@ public:
     FakeTaskClock& operator=(const FakeTaskClock&) = delete;
     ~FakeTaskClock() = default;
 
-    /// The virtual time.
+    /// The virtual time. Each call is counted (now_calls()) under the same
+    /// lock that reads the time, so a call counted after an advance() has
+    /// returned saw the advanced time.
     clock::time_point now() const override {
         std::lock_guard<std::mutex> guard(mutex_);
+        ++now_calls_;
+        count_cv_.notify_all();
         return now_;
+    }
+
+    /// The number of now() calls so far.
+    std::uint64_t now_calls() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return now_calls_;
+    }
+
+    /// Blocks the test thread until now() has been called at least `n` times
+    /// in total, or until `real_timeout` of real time passes; returns whether
+    /// `n` was reached. A driver loop that reads the clock once per pass is
+    /// observed through this: take now_calls() after an advance() and wait
+    /// for one more to know the loop has run once on the advanced time.
+    bool wait_for_now_calls(std::uint64_t n, std::chrono::milliseconds real_timeout) {
+        std::unique_lock<std::mutex> guard(mutex_);
+        return count_cv_.wait_for(guard, real_timeout, [this, n] { return now_calls_ >= n; });
     }
 
     /**
@@ -209,8 +229,9 @@ private:
 
     mutable std::mutex mutex_;
     std::condition_variable sleep_cv_;
-    std::condition_variable count_cv_;
+    mutable std::condition_variable count_cv_;  // notified from now(), which is const
     clock::time_point now_{};
+    mutable std::uint64_t now_calls_ = 0;
     std::uint64_t next_id_ = 0;
     std::map<std::uint64_t, Entry> waiters_;
 };

@@ -44,12 +44,13 @@ public:
 
     enum class CoverTarget : std::uint8_t { None, Opening, Closing };
 
-    WandererCoverCalibratorDriver(int device_number, ConnectionConfig config)
+    WandererCoverCalibratorDriver(int device_number, ConnectionConfig config,
+                                  util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("WandererAstro"),
           device_number_(device_number),
           config_(std::move(config)),
           connected_(false),
-          protocol_() {}
+          protocol_(clock) {}
 
     ~WandererCoverCalibratorDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -456,12 +457,12 @@ private:
 
 std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator(int device_number,
                                                                             const std::string& serial_port,
-                                                                            int baud_rate) {
+                                                                            int baud_rate, util::TaskClock& clock) {
     ConnectionConfig config;
     config.type = ConnectionType::Serial;
     config.serial_port = serial_port;
     config.baud_rate = baud_rate;
-    return std::make_unique<WandererCoverCalibratorDriver>(device_number, std::move(config));
+    return std::make_unique<WandererCoverCalibratorDriver>(device_number, std::move(config), clock);
 }
 
 std::unique_ptr<CoverCalibratorDriver> create_wandererastro_covercalibrator_by_index(int device_number,
