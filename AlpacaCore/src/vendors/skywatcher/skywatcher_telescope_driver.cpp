@@ -261,11 +261,13 @@ public:
                               std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                               std::optional<double> site_elevation_m,
                               std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-                              util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
+                              util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
+                              util::MotionLimits motion_limits = {})
         : AsyncConnectable("SkyWatcher"),
           device_number_(device_number),
           connection_info_(connection_info),
           connection_resolver_(std::move(connection_resolver)),
+          motion_limits_(motion_limits),
           protocol_(protocol ? std::move(protocol) : std::make_unique<SkyWatcherProtocolWrapper>()),
           site_latitude_(site_latitude_deg.value_or(0.0)),
           site_longitude_(site_longitude_deg.value_or(0.0)),
@@ -4509,6 +4511,9 @@ private:
     // connection_resolved_ is true once a connect has run the resolver, so a
     // later connect retries that endpoint before scanning again (#659).
     util::ConnectionResolver<ConnectionInfo> connection_resolver_;
+    // open-astro#436: per-device limits, off by default. TODO(#436): consulted
+    // by nothing yet (RED-phase scaffolding); the goto target check reads it.
+    util::MotionLimits motion_limits_;
     bool connection_resolved_ = false;
     std::unique_ptr<SkyWatcherProtocolWrapper> protocol_;
     mutable std::mutex mutex_;
@@ -4763,21 +4768,24 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, 
                                                              std::optional<double> site_latitude_deg,
                                                              std::optional<double> site_longitude_deg,
                                                              std::optional<double> site_elevation_m,
-                                                             std::unique_ptr<SkyWatcherProtocolWrapper> protocol) {
+                                                             std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
+                                                             util::MotionLimits motion_limits) {
     return std::make_unique<SkyWatcherTelescopeDriver>(device_number, connection_info, site_latitude_deg,
-                                                       site_longitude_deg, site_elevation_m, std::move(protocol));
+                                                       site_longitude_deg, site_elevation_m, std::move(protocol),
+                                                       util::ConnectionResolver<ConnectionInfo>{}, motion_limits);
 }
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m, std::unique_ptr<SkyWatcherProtocolWrapper> protocol) {
+    std::optional<double> site_elevation_m, std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
+    util::MotionLimits motion_limits) {
     if (!connection_resolver) {
         throw AlpacaException("Sky-Watcher telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<SkyWatcherTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
                                                        site_longitude_deg, site_elevation_m, std::move(protocol),
-                                                       std::move(connection_resolver));
+                                                       std::move(connection_resolver), motion_limits);
 }
 
 ConnectionInfo resolve_skywatcher_auto(int mount_index) {
@@ -4821,11 +4829,12 @@ ConnectionInfo resolve_skywatcher_auto(int mount_index) {
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_number, int mount_index,
                                                                   std::optional<double> site_latitude_deg,
                                                                   std::optional<double> site_longitude_deg,
-                                                                  std::optional<double> site_elevation_m) {
+                                                                  std::optional<double> site_elevation_m,
+                                                                  util::MotionLimits motion_limits) {
     // The serial scan and UDP discovery run at connect time (#659), not here.
-    return create_skywatcher_telescope_deferred(device_number,
-                                                [mount_index] { return resolve_skywatcher_auto(mount_index); },
-                                                site_latitude_deg, site_longitude_deg, site_elevation_m, {});
+    return create_skywatcher_telescope_deferred(
+        device_number, [mount_index] { return resolve_skywatcher_auto(mount_index); }, site_latitude_deg,
+        site_longitude_deg, site_elevation_m, {}, motion_limits);
 }
 
 }  // namespace alpacacore::vendor::skywatcher
