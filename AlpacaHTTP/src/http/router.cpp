@@ -2280,8 +2280,14 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
 
         // Get device from registry
         auto& registry = alpacacore::management::DeviceRegistry::instance();
-        auto device = registry.get_device(device_type, static_cast<int>(match.device_number));
-        
+        // #627: the registry keys devices by int, so a valid uint32 number
+        // above INT_MAX names no device; it takes the not-found reply below
+        // instead of a narrowing cast (4294967295 would look up -1).
+        std::shared_ptr<alpacacore::AlpacaDriver> device;
+        if (match.device_number <= static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+            device = registry.get_device(device_type, static_cast<int>(match.device_number));
+        }
+
         if (!device) {
             response.set_status(400, "Bad Request");
             AlpacaResponse alpaca_response = make_error_response(

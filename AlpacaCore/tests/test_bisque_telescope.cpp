@@ -15,10 +15,14 @@
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <limits>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_mount_server.h"
@@ -379,6 +383,132 @@ TEST_CASE("Bisque Telescope Driver - non-finite input is rejected", "[bisque][te
         require_alpaca_error([&]() { driver->set_guide_rate({0.004, -inf}); }, alpacacore::AlpacaError::InvalidValue);
         CHECK(driver->get_guide_rate().dec == before.dec);
     }
+}
+
+// #627: the checks behind the coordinate slew/sync forms and MoveAxis, called
+// directly. The driver-level cases below cover the call sites.
+TEST_CASE("Bisque Telescope Driver - non-finite slew coordinates and MoveAxis rate are rejected",
+          "[bisque][telescope][unit][nonfinite]") {
+    using alpacacore::vendor::bisque::detail::validate_move_axis_rate;
+    using alpacacore::vendor::bisque::detail::validate_ra_dec;
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+
+    SECTION("RightAscension") {
+        for (const double bad : {nan, inf, -inf}) {
+            require_alpaca_error([&]() { validate_ra_dec(bad, 10.0); }, alpacacore::AlpacaError::InvalidValue);
+        }
+    }
+    SECTION("Declination") {
+        for (const double bad : {nan, inf, -inf}) {
+            require_alpaca_error([&]() { validate_ra_dec(12.0, bad); }, alpacacore::AlpacaError::InvalidValue);
+        }
+    }
+    SECTION("RA is checked before Dec") {
+        try {
+            validate_ra_dec(nan, nan);
+            FAIL("Expected AlpacaException");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(std::string(ex.what()).find("RA out of range") != std::string::npos);
+        }
+    }
+    SECTION("MoveAxis rate") {
+        for (const double bad : {nan, inf, -inf}) {
+            require_alpaca_error([&]() { validate_move_axis_rate(bad); }, alpacacore::AlpacaError::InvalidValue);
+        }
+    }
+    SECTION("finite values in range still pass") {
+        CHECK_NOTHROW(validate_ra_dec(0.0, -90.0));
+        CHECK_NOTHROW(validate_ra_dec(23.999, 90.0));
+        CHECK_NOTHROW(validate_move_axis_rate(0.0));
+        CHECK_NOTHROW(validate_move_axis_rate(-2.5));
+        CHECK_NOTHROW(validate_move_axis_rate(4.0));
+    }
+}
+
+// #627: argument validation precedes the connection check (AGENTS.md), so a
+// non-finite coordinate or rate is InvalidValue on a disconnected driver too.
+TEST_CASE("Bisque Telescope Driver - non-finite slew, sync and MoveAxis arguments are InvalidValue while disconnected",
+          "[bisque][telescope][unit][nonfinite]") {
+    alpacacore::vendor::bisque::ConnectionInfo conn;
+    conn.host = "localhost";
+    conn.tcp_port = 3040;
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+    REQUIRE_FALSE(driver->get_connected());
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    namespace AlpacaError = alpacacore::AlpacaError;
+
+    for (const double bad : {nan, inf, -inf}) {
+        require_alpaca_error([&]() { driver->slew_to_coordinates(bad, 10.0); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->slew_to_coordinates(12.0, bad); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(bad, 10.0); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, bad); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->sync_to_coordinates(bad, 10.0); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, bad); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->move_axis(0, bad); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->move_axis(1, bad); }, AlpacaError::InvalidValue);
+    }
+    // An out-of-range axis is InvalidValue before the connection check as well.
+    require_alpaca_error([&]() { driver->move_axis(2, 1.0); }, AlpacaError::InvalidValue);
+    // Valid arguments still reach the connection check.
+    require_alpaca_error([&]() { driver->slew_to_coordinates(12.0, 10.0); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, 10.0); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, 10.0); }, AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->move_axis(0, 1.0); }, AlpacaError::NotConnected);
+}
+
+// #627: on a driver connected over FakeMountServer, the same arguments are
+// refused before any command reaches TheSkyX.
+TEST_CASE("Bisque Telescope Driver - connected slew, sync and MoveAxis refuse non-finite arguments",
+          "[bisque][telescope][unit][nonfinite]") {
+    std::mutex seen_mutex;
+    std::vector<std::string> seen;
+    alpacacore::test::FakeMountServer server([&](const std::string& chunk) {
+        std::lock_guard<std::mutex> lock(seen_mutex);
+        seen.push_back(chunk);
+        // A wrapped command (try { ... } Out = 'OK#') wants TheSkyX's success
+        // text; the handshake and queries take the plain reply.
+        return std::string(chunk.find("try {") != std::string::npos ? "|No error. Error = 0.OK#" : "1#");
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    REQUIRE(driver->get_connected());
+
+    auto motion_commands_sent = [&]() {
+        std::lock_guard<std::mutex> lock(seen_mutex);
+        return std::count_if(seen.begin(), seen.end(), [](const std::string& c) {
+            return c.find("SlewToRaDec") != std::string::npos || c.find("Sync(") != std::string::npos ||
+                   c.find("DoCommand(9") != std::string::npos;
+        });
+    };
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    namespace AlpacaError = alpacacore::AlpacaError;
+
+    for (const double bad : {nan, inf, -inf}) {
+        require_alpaca_error([&]() { driver->slew_to_coordinates(bad, 10.0); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->slew_to_coordinates(12.0, bad); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(bad, 10.0); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, bad); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->sync_to_coordinates(bad, 10.0); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, bad); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->move_axis(0, bad); }, AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->move_axis(1, bad); }, AlpacaError::InvalidValue);
+    }
+    CHECK(motion_commands_sent() == 0);
+    // Nothing was stored as a target either.
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, AlpacaError::ValueNotSet);
+
+    // The fake is live: a finite MoveAxis rate does reach it.
+    CHECK_NOTHROW(driver->move_axis(0, 1.0));
+    CHECK(motion_commands_sent() == 1);
+    driver->set_connected(false);
 }
 
 // open-astro#727: a TheSkyX that accepts the TCP connect but never answers the handshake

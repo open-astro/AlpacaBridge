@@ -38,6 +38,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -1011,6 +1012,27 @@ int main() {
             const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
         }
+
+        // 4. #627: a valid uint32 device number above INT_MAX names no device
+        // (the registry keys devices by int). It gets the ordinary not-found
+        // reply naming the number as sent, never a lookup of the negative int
+        // a narrowing cast would give (4294967295 -> -1, 2147483648 ->
+        // INT_MIN). Stubs sit at both negative numbers, so the old cast
+        // found one and answered 200.
+        EXPECT(registry.register_device(std::make_shared<TelescopeClockStubDriver>(-1)));
+        EXPECT(registry.register_device(std::make_shared<TelescopeClockStubDriver>(std::numeric_limits<int>::min())));
+        EXPECT(registry.get_device(alpacacore::DeviceType::Telescope, -1) != nullptr);
+        EXPECT(registry.get_device(alpacacore::DeviceType::Telescope, std::numeric_limits<int>::min()) != nullptr);
+        for (const std::string number : {"4294967295", "2147483648"}) {
+            const auto resp = route_request(router, "GET", "/api/v1/telescope/" + number + "/connected");
+            EXPECT(resp.status_code() == 400);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(!json.is_discarded() &&
+                   json.value("ErrorMessage", std::string()) == "Device not found: telescope #" + number);
+        }
+        registry.unregister_device(alpacacore::DeviceType::Telescope, -1);
+        registry.unregister_device(alpacacore::DeviceType::Telescope, std::numeric_limits<int>::min());
     }
 
 #ifdef ALPACACORE_ENABLE_ZWO
