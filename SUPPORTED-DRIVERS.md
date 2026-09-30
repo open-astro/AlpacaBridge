@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-09-27
+## Updated 2026-09-30
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
