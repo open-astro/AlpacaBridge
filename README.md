@@ -14,7 +14,7 @@ AlpacaBridge turns a single-board computer into a control server for your entire
 
 Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., APT, CCDciel, Sequence Generator Pro, SharpCap, or [Ara](https://www.openastro.net).
 
-#### [4.1.0] - 2026-09-27 &middot; [Changelog](CHANGELOG.md)
+#### [4.2.0] - 2026-09-30 &middot; [Changelog](CHANGELOG.md)
 
 ## Why AlpacaBridge
 
@@ -90,6 +90,8 @@ The service starts automatically and runs as the `alpacabridge` system user. The
 sudo apt update && sudo apt upgrade alpacabridge   # update
 sudo apt remove alpacabridge                       # uninstall
 ```
+
+Or from the web UI: **Server Info** > **Software Update** > **Check for Updates**, then **Install Update**. It runs the same apt upgrade and restarts the service; see [docs/software-update.md](docs/software-update.md).
 
 </details>
 

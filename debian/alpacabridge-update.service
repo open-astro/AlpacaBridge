@@ -1,0 +1,40 @@
+[Unit]
+Description=AlpacaBridge software update (apt upgrade of the alpacabridge package)
+Documentation=https://github.com/open-astro/AlpacaBridge
+# Root-side half of the web UI's "Install Update" flow (docs/software-update.md).
+# alpacabridge.service runs as the alpacabridge user with NoNewPrivileges=true,
+# so the daemon cannot run apt itself: it asks systemd over D-Bus to start this
+# unit, and the polkit rule in 50-alpacabridge-update.rules authorises exactly
+# that (this one unit, the start verb, that one user). The daemon passes no
+# arguments; what runs is fixed here. The helper's own transcript goes to
+# /var/log/alpacabridge-update/update.log (LogsDirectory= below), which the
+# daemon reads back for the UI.
+#
+# No [Install] section on purpose: this unit is started on demand only, never
+# at boot, and debian/rules keeps dh_installsystemd from generating
+# enable/start/restart snippets for it (an upgrade must not restart the
+# updater from inside the updater).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/alpacabridge/software-update
+# The transcript directory: created root:root 0755 by systemd, readable by
+# the daemon, writable by root only. It is deliberately NOT the daemon's own
+# /var/log/AlpacaBridge: that directory belongs to the alpacabridge user, and
+# root truncating and chmod-ing a path there would follow a symlink the
+# service user planted (PR #745 review). Keep in step with kUpdateLogPath in
+# AlpacaHTTP/include/alpacahttp/software_update.h; test_software_update
+# checks the two agree.
+LogsDirectory=alpacabridge-update
+LogsDirectoryMode=0755
+# apt needs the real /usr, /var and /etc, so no mount-namespace hardening.
+PrivateTmp=true
+# A wedged apt (a dead mirror mid-download, a dpkg prompt that noninteractive
+# should have answered) is killed rather than left running for good; the
+# transcript then ends without a result marker and the UI reports it failed.
+TimeoutStartSec=30min
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpacabridge-update

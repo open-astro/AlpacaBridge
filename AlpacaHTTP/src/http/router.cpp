@@ -1683,6 +1683,17 @@ RouteMatch Router::parse_route(const std::string& path) {
             return match;
         }
     }
+    {
+        // Software update: /management/v1/update/<status|check|install>.
+        static const std::regex kUpdateRegex(R"(^/management/(?:v1/)?update/([a-z]+)/?$)");
+        std::smatch update_match;
+        if (std::regex_match(path, update_match, kUpdateRegex)) {
+            match.is_management = true;
+            match.management_endpoint = "update";
+            match.method_name = update_match[1].str();
+            return match;
+        }
+    }
 
     // Device API: /api/v1/{devicetype}/{devicenumber}/{method}
     // Static: compiling a std::regex costs far more than matching it, and this
@@ -1752,6 +1763,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_sync_time(request, server_tx_id);
     } else if (match.management_endpoint == "wifi") {
         return handle_wifi(request, match, server_tx_id);
+    } else if (match.management_endpoint == "update") {
+        return handle_software_update(request, match, server_tx_id);
     }
 
     Response response;
@@ -7588,6 +7601,65 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
         return fail(util::ErrorCode::DRIVER_ERROR, std::string("WiFi: ") + e.what());
     } catch (const std::exception& e) {
         return fail(util::ErrorCode::DRIVER_ERROR, std::string("WiFi (internal): ") + e.what());
+    }
+}
+
+void Router::set_software_update_manager(std::unique_ptr<util::SoftwareUpdateManager> manager) {
+    software_update_ = std::move(manager);
+}
+
+Response Router::handle_software_update(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id) {
+    // Unauthenticated like every other management endpoint (trusted-LAN
+    // threat model, see handle_sync_time). What a caller can make happen is
+    // bounded outside this process: the helper unit installs one fixed
+    // package from the host's own signed apt sources, and the polkit rule
+    // lets the service user start that one unit and nothing else. The
+    // check is read-only.
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // CSRF guard for the state-changing sub-endpoints (check fetches from
+    // the network, install starts the helper); GET status is exempt.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "software update")) {
+        return *rejected;
+    }
+
+    auto fail = [&](std::int32_t code, const std::string& msg) {
+        AlpacaResponse alpaca_response = make_error_response(client_tx_id, server_tx_id, code, msg);
+        response.set_body(alpaca_response);
+        return response;
+    };
+
+    if (!software_update_) {
+        return fail(util::ErrorCode::NOT_IMPLEMENTED, "Software update not configured");
+    }
+
+    const std::string& sub = match.method_name;
+    const bool is_get = request.method() == HttpMethod::GET;
+    const bool is_put = request.method() == HttpMethod::PUT || request.method() == HttpMethod::POST;
+
+    try {
+        AlpacaResponse ok(client_tx_id, server_tx_id);
+        if (sub == "status" && is_get) {
+            ok.value = software_update_->status();
+        } else if (sub == "check" && is_put) {
+            ok.value = software_update_->check();
+        } else if (sub == "install" && is_put) {
+            ok.value = software_update_->install();
+        } else {
+            return fail(util::ErrorCode::INVALID_VALUE, "Unknown update endpoint or method: " + sub);
+        }
+        response.set_body(ok);
+        return response;
+    } catch (const util::SoftwareUpdateError& e) {
+        return fail(e.alpaca_error(), e.what());
+    } catch (const std::exception& e) {
+        return fail(util::ErrorCode::DRIVER_ERROR, std::string("Software update (internal): ") + e.what());
     }
 }
 

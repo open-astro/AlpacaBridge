@@ -258,6 +258,7 @@ set(ALPACAHTTP_SOURCES
     src/util/error_mapping.cpp
     src/util/host_timezone.cpp
     src/util/wifi_manager.cpp
+    src/util/software_update.cpp
 )
 
 if(ALPACAHTTP_ENABLE_DISCOVERY)
@@ -301,9 +302,15 @@ target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_GIT_BRANCH="${ALPACAHTTP
 # zlib: gzip framing for the combined log download endpoint
 find_package(ZLIB REQUIRED)
 
-# libsystemd: sd-bus client for the NetworkManager-backed wifi endpoints
+# libsystemd: sd-bus client for the NetworkManager-backed wifi endpoints and
+# for starting the software-update helper unit (docs/software-update.md)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+
+# libcurl: the software-update check fetches the APT Packages index
+# (already a build dependency through the WeeWX driver; debian/control and
+# every CI job install libcurl4-openssl-dev)
+find_package(CURL REQUIRED)
 
 target_link_libraries(alpacahttp
     PUBLIC
@@ -312,6 +319,7 @@ target_link_libraries(alpacahttp
         AlpacaCore::alpacacore_builtins
         ZLIB::ZLIB
         PkgConfig::SYSTEMD
+        CURL::libcurl
 )
 
 # Both QHY and ZWO SDKs define isLeapYear() at file scope — silence the
@@ -423,4 +431,14 @@ if(ALPACAHTTP_BUILD_TESTS)
     add_executable(test_wifi_manager tests/test_wifi_manager.cpp)
     target_link_libraries(test_wifi_manager alpacahttp)
     add_test(NAME test_wifi_manager COMMAND test_wifi_manager)
+
+    # Software update: dpkg version ordering, Packages index parsing and the
+    # manager's policy over a scripted backend (docs/software-update.md).
+    add_executable(test_software_update tests/test_software_update.cpp)
+    target_link_libraries(test_software_update alpacahttp)
+    # It reads debian/alpacabridge-software-update and the two unit files to
+    # pin the transcript path on both sides of the root helper.
+    target_compile_definitions(test_software_update PRIVATE
+        ALPACAHTTP_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    add_test(NAME test_software_update COMMAND test_software_update)
 endif()

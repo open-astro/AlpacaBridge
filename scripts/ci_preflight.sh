@@ -222,7 +222,7 @@ mapfile -t SRC_CPP_FILES < <(
 mapfile -t SH_FILES < <(
   {
     printf '%s\n' "${CHANGED[@]}" | grep -E '\.sh$' | grep -v '^AlpacaCore/external/'
-    for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm; do
+    for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm debian/alpacabridge-software-update; do
       printf '%s\n' "${CHANGED[@]}" | grep -qx "${f}" && echo "${f}"
     done
   } | sort -u

@@ -1,0 +1,26 @@
+// Allow the alpacabridge service user to start the root-owned software
+// update unit for the web UI's "Install Update" button
+// (/management/v1/update/install, docs/software-update.md). systemctl and the
+// daemon's own sd-bus call both ask systemd over D-Bus, and systemd asks
+// polkit; this rule answers. The daemon's unit runs with
+// NoNewPrivileges=true, so sudo/setuid cannot be used for this.
+//
+// Scoped to exactly one unit and one verb: stop, restart, mask, edit and
+// every other unit stay NOT_HANDLED, which falls through to the default
+// (admin authentication, i.e. denied for a service user). Same shape as
+// 50-alpacabridge-wifi.rules.
+polkit.addRule(function(action, subject) {
+    if (subject.user !== "alpacabridge") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (action.lookup("unit") !== "alpacabridge-update.service") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (action.lookup("verb") === "start") {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

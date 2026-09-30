@@ -1760,6 +1760,227 @@ function refreshServerInfo() {
     loadLogSettings();
     loadLogFiles();
     wifiRefresh();
+    updateRefresh();
+}
+
+// ---------------------------------------------------------------------------
+// Software update card (docs/software-update.md)
+// ---------------------------------------------------------------------------
+
+const UPDATE_BASE = API_BASE + '/management/v1/update';
+let updatePollTimer = null;
+// The version that was running when Install was pressed: the poll reloads the
+// page once a DIFFERENT version answers, which is how it knows the restart
+// that the upgrade performs has completed.
+let updateInstallFromVersion = null;
+let updateRestartSeen = false;
+
+function updateEl(id) {
+    return document.getElementById(id);
+}
+
+async function updateApi(sub, method) {
+    const response = await fetch(UPDATE_BASE + '/' + sub, { method: method || 'GET' });
+    const result = await response.json();
+    if (result.ErrorNumber !== 0) throw new Error(result.ErrorMessage || 'unknown error');
+    return result.Value;
+}
+
+function updateMessage(text, isError) {
+    const el = updateEl('update-message');
+    if (!el) return;
+    el.textContent = text || '';
+    el.classList.toggle('error', !!isError);
+}
+
+function updateRender(status) {
+    const installed = updateEl('update-installed');
+    const line = updateEl('update-status-line');
+    const summary = updateEl('update-summary');
+    const installBtn = updateEl('update-install');
+    const installerLine = updateEl('update-installer-line');
+    const log = updateEl('update-log');
+    if (!installed || !line || !installBtn || !installerLine || !log) return;
+
+    const installer = status.Installer || {};
+    const checkBtn = updateEl('update-check');
+    if (checkBtn) checkBtn.disabled = status.CheckEnabled === false;
+    installed.textContent = status.InstalledVersion || '?';
+    line.textContent = updateStatusText(status);
+    line.classList.toggle('update-available', !!status.UpdateAvailable);
+    if (summary) {
+        summary.textContent = status.UpdateAvailable ? 'Update available'
+            : installer.State === 'running' ? 'Installing...' : '';
+    }
+    // The button shows only when there is something to install AND this host
+    // can install it; a source build gets the apt instructions instead.
+    const canInstall = !!status.UpdateAvailable && installer.State !== 'running' && installer.State !== 'unavailable';
+    installBtn.hidden = !canInstall;
+    installBtn.disabled = !canInstall;
+
+    // The newer version's plain-language notes, so the operator decides
+    // with the changes in front of them. Rendered from a fixed Markdown
+    // subset with everything escaped first (format.js renderReleaseNotes).
+    const notes = updateEl('update-notes');
+    const notesBody = updateEl('update-notes-body');
+    const notesTitle = updateEl('update-notes-title');
+    const notesMissing = updateEl('update-notes-missing');
+    const releaseLink = updateEl('update-release-link');
+    if (notes && notesBody && notesTitle && notesMissing && releaseLink) {
+        if (status.UpdateAvailable) {
+            notesTitle.textContent = "What's new in " + status.LatestVersion;
+            const rendered = renderReleaseNotes(status.ReleaseNotes || '');
+            notesBody.innerHTML = rendered;
+            notesBody.hidden = !rendered;
+            notesMissing.hidden = !!rendered;
+            notesMissing.textContent = rendered ? ''
+                : 'The release notes could not be fetched' + (status.ReleaseUrl ? '; read them on the release page.' : '.');
+            if (status.ReleaseUrl) {
+                releaseLink.href = status.ReleaseUrl;
+                releaseLink.hidden = false;
+            } else {
+                releaseLink.hidden = true;
+            }
+            notes.classList.remove('hidden');
+        } else {
+            notesBody.innerHTML = '';
+            notes.classList.add('hidden');
+        }
+    }
+
+    installerLine.textContent = installerStateText(installer);
+    installerLine.classList.toggle('error', installer.State === 'failed');
+    if (installer.Log) {
+        log.textContent = installer.Log;
+        log.classList.remove('hidden');
+        log.scrollTop = log.scrollHeight;
+    } else {
+        log.textContent = '';
+        log.classList.add('hidden');
+    }
+}
+
+async function updateRefresh() {
+    if (!updateEl('update-installed')) return;
+    try {
+        const status = await updateApi('status', 'GET');
+        updateRender(status);
+        if ((status.Installer || {}).State === 'running') {
+            // A page opened (or reloaded) mid-install joins the run: remember
+            // the version now answering so the poll can still detect the
+            // switch to the new one.
+            if (!updateInstallFromVersion) updateInstallFromVersion = status.InstalledVersion || null;
+            updateStartPolling();
+        }
+    } catch (error) {
+        updateMessage('Could not read the update status: ' + error.message, true);
+    }
+}
+
+async function updateCheckClicked() {
+    const btn = updateEl('update-check');
+    if (!btn) return;
+    btn.dataset.originalLabel = btn.textContent;
+    btn.textContent = 'Checking...';
+    btn.disabled = true;
+    updateMessage('');
+    try {
+        const status = await updateApi('check', 'POST');
+        updateRender(status);
+    } catch (error) {
+        updateMessage(error.message, true);
+        // The status still carries the failure and whatever was known before.
+        try { updateRender(await updateApi('status', 'GET')); } catch (e) { /* message already shown */ }
+    } finally {
+        btn.textContent = btn.dataset.originalLabel || 'Check for Updates';
+        btn.disabled = false;
+    }
+}
+
+async function updateInstallClicked() {
+    let status;
+    try {
+        status = await updateApi('status', 'GET');
+    } catch (error) {
+        updateMessage('Could not read the update status: ' + error.message, true);
+        return;
+    }
+    if (!status.UpdateAvailable) {
+        updateRender(status);
+        updateMessage('No update is available. Check for updates first.', true);
+        return;
+    }
+    const latest = status.LatestVersion;
+    const installed = status.InstalledVersion;
+    if (!confirm('Install AlpacaBridge ' + latest + ' (currently ' + installed + ')?\n\n' +
+                 'The server restarts when the upgrade finishes and every connected client is ' +
+                 'disconnected for a few seconds. Do not start this during an exposure or a slew.')) {
+        return;
+    }
+    const btn = updateEl('update-install');
+    if (btn) btn.disabled = true;
+    updateMessage('');
+    try {
+        updateInstallFromVersion = installed;
+        updateRestartSeen = false;
+        const started = await updateApi('install', 'POST');
+        updateRender(started);
+        updateStartPolling();
+    } catch (error) {
+        updateInstallFromVersion = null;
+        updateMessage(error.message, true);
+        if (btn) btn.disabled = false;
+    }
+}
+
+function updateStartPolling() {
+    if (updatePollTimer) return;
+    updatePollTimer = setInterval(updatePollTick, 2000);
+}
+
+function updateStopPolling() {
+    if (!updatePollTimer) return;
+    clearInterval(updatePollTimer);
+    updatePollTimer = null;
+}
+
+async function updatePollTick() {
+    let status;
+    try {
+        status = await updateApi('status', 'GET');
+    } catch (error) {
+        // The upgrade restarts the service part-way through: a failed poll
+        // here is the expected shape, not an error to show.
+        updateRestartSeen = true;
+        updateMessage('The server is restarting to finish the update. Waiting for it to come back...');
+        return;
+    }
+    if (updateInstallFromVersion && status.InstalledVersion && status.InstalledVersion !== updateInstallFromVersion) {
+        updateStopPolling();
+        updateRender(status);
+        updateMessage('Updated to ' + status.InstalledVersion + '. Reloading...');
+        setTimeout(() => { window.location.reload(); }, 1500);
+        return;
+    }
+    updateRender(status);
+    const state = (status.Installer || {}).State;
+    if (state === 'running') {
+        if (updateRestartSeen) updateMessage('The server is back. Finishing the update...');
+        return;
+    }
+    // Not running any more and the version did not change: the run ended
+    // without installing anything, or the new package restarted us back on
+    // the same number (a dev build). Stop and leave the transcript up.
+    updateStopPolling();
+    updateInstallFromVersion = null;
+    if (state === 'succeeded') {
+        updateMessage(updateRestartSeen
+            ? 'The update finished. Reload the page to see the new version.'
+            : 'The update finished without changing the installed version.');
+        if (updateRestartSeen) setTimeout(() => { window.location.reload(); }, 1500);
+    } else if (state === 'failed') {
+        updateMessage('The update did not complete. The transcript above has the details.', true);
+    }
 }
 
 // Sync the SBC's system clock from the browser's clock. The browser machine

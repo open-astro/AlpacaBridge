@@ -1141,6 +1141,57 @@ Related decision: [Documentation drift gates](docs/decisions/0003-docs-drift-gat
 - Log level set via `POST/PUT /management/v1/loglevel` is persisted to `config/runtime_state.json` and reapplied on the next start (overrides `default.yaml`'s `logging.level`). Delete that file to fall back to the YAML default. Persistence failures are logged at WARNING and never block the API response.
 - Alpaca-style management responses (including the new logfile endpoints) return HTTP 200 even when `ErrorNumber != 0` — clients must inspect the body, not the HTTP status.
 
+## Privileged operations from the daemon (polkit + root helper unit)
+
+The service runs as the `alpacabridge` user with `NoNewPrivileges=true`, so
+`sudo`, setuid helpers and `pkexec` cannot work from inside it, and the project
+policy is no subprocesses in the daemon. Three mechanisms exist; pick by what
+the operation needs, never add a fourth without a decision record:
+
+- **An ambient capability** for an in-process syscall (`CAP_SYS_TIME` for
+  `clock_settime`, `CAP_NET_ADMIN` for nl80211). Granted in
+  `debian/alpacabridge.service`; keep `CapabilityBoundingSet` equal to the
+  ambient set.
+- **A polkit rule on a system D-Bus service** the daemon already talks to
+  in-process over sd-bus (NetworkManager for the WiFi card,
+  `debian/alpacabridge.polkit-rules`).
+- **A root-owned oneshot systemd unit started over sd-bus, authorised by a
+  polkit rule scoped to that one unit and the `start` verb** (the software
+  update, `debian/alpacabridge-update.service` +
+  `debian/alpacabridge-software-update` + `debian/alpacabridge-update.polkit-rules`,
+  `docs/software-update.md`). Use this for anything that must run as root and
+  has no D-Bus API (apt, dpkg, mount, mkfs). Rules that came out of building it:
+  - **The daemon passes no arguments.** What runs is fixed in the unit's
+    `ExecStart`; parameters travel through a file the daemon writes and the
+    helper reads if they ever must, never through the D-Bus call.
+  - **Pass only `alpacabridge.service` to `dh_installsystemd`**
+    (`override_dh_installsystemd` in `debian/rules`). It otherwise generates
+    enable/start/restart snippets for EVERY non-template unit in the package,
+    `[Install]` section or not, and the new postinst would restart the helper
+    from inside the apt run the helper is executing.
+  - **A root helper never writes into a directory the service user owns.**
+    The transcript first went to the daemon's `LogsDirectory` (`/var/log/AlpacaBridge`,
+    owned by `alpacabridge`): root truncating and `chmod`-ing a path there
+    follows a symlink the service user planted, and no `[ -L ]` check in the
+    script closes the race (PR #745 review). Give the helper unit its own
+    `LogsDirectory=` (root:root 0755) and pin the path on both sides with a test
+    (`kUpdateLogPath` vs `LOG=` in the script).
+  - **The helper's transcript is the durable record**, not systemd's state: a
+    finished oneshot unit is garbage-collected and `LoadUnit` then reports it
+    as never run. The helper ends its log with a result marker the daemon
+    parses; `installer_state()` trusts systemd for "running" (active, or a
+    start job still queued), "failed" (`ActiveState=failed`) and
+    "unavailable" (`LoadState` not loaded), and resolves an inactive unit
+    from the transcript marker (`classify_installer_state()`).
+  - **Read unit state with `LoadUnit`, not `GetUnit`**: `GetUnit` answers
+    `NoSuchUnit` for a unit that is not loaded, which a never-started helper is.
+  - **Start the unit in a separate cgroup from the daemon** (any unit is) when
+    the operation restarts the daemon itself; a child process would die with it.
+  - **Inject the privileged half behind a seam** (`SoftwareUpdateBackend`) so
+    the policy (what may start, when, what the status means) is unit-tested
+    over a scripted backend; the sd-bus and libcurl code is validated on the
+    rig, where `polkitd` and the packaged rule exist.
+
 ## Vendor-Specific Notes
 
 Vendor notes contain **vendor specifics and deltas only** — general rules (concurrency,

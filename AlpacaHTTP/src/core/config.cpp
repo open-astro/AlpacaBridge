@@ -240,6 +240,14 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
                     // Unparseable: keep the default.
                 }
+            } else if (key == "update_packages_url") {
+                // Software update check (docs/software-update.md). An
+                // explicit empty string disables the check.
+                update_packages_url_ = value;
+            } else if (key == "update_release_notes_url") {
+                update_release_notes_url_ = value;
+            } else if (key == "update_release_url") {
+                update_release_url_ = value;
             }
         }
     }
@@ -375,6 +383,18 @@ void Config::apply_environment_overrides() {
         } catch (...) {  // NOLINT(bugprone-empty-catch)
             // Unparseable: keep whatever the file (or the default) set.
         }
+    }
+
+    const char* packages_url_env = std::getenv("ALPACAHTTP_UPDATE_PACKAGES_URL");
+    if (packages_url_env) {
+        // Empty disables the check, so an explicitly empty variable counts.
+        update_packages_url_ = packages_url_env;
+    }
+    if (const char* v = std::getenv("ALPACAHTTP_UPDATE_RELEASE_NOTES_URL")) {
+        update_release_notes_url_ = v;
+    }
+    if (const char* v = std::getenv("ALPACAHTTP_UPDATE_RELEASE_URL")) {
+        update_release_url_ = v;
     }
 
     const char* log_dir_env = std::getenv("ALPACAHTTP_LOG_DIRECTORY");
