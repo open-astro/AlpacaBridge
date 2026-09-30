@@ -91,6 +91,8 @@ sudo apt update && sudo apt upgrade alpacabridge   # update
 sudo apt remove alpacabridge                       # uninstall
 ```
 
+Or from the web UI: **Server Info** > **Software Update** > **Check for Updates**, then **Install Update**. It runs the same apt upgrade and restarts the service; see [docs/software-update.md](docs/software-update.md).
+
 </details>
 
 ## In the news

@@ -842,7 +842,7 @@ jobs:
             esac
             scripts+=("$f")
           done < <(git ls-files '*.sh')
-          for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm; do
+          for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm debian/alpacabridge-software-update; do
             [ -f "$f" ] && scripts+=("$f")
           done
           echo "Linting: ${scripts[*]}"

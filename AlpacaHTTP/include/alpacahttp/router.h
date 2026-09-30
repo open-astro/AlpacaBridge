@@ -28,6 +28,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/motion_policy.h>
+#include <alpacahttp/software_update.h>
 
 #include <atomic>
 #include <chrono>
@@ -161,6 +162,12 @@ public:
     // lock-order edge).
     void run_motion_watchdogs(std::chrono::steady_clock::time_point now);
 
+    // Software update (docs/software-update.md): the manager behind
+    // /management/v1/update/*. Server installs one over the production
+    // backend; tests inject one over a scripted backend. Without it the
+    // endpoints answer NOT_IMPLEMENTED, like restart without its callback.
+    void set_software_update_manager(std::unique_ptr<util::SoftwareUpdateManager> manager);
+
     // Set shutdown callback (called when shutdown endpoint is requested)
     void set_shutdown_callback(std::function<void()> callback);
     // Set restart callback (called when restart endpoint is requested)
@@ -189,6 +196,10 @@ private:
     std::mutex wifi_manager_init_mutex_;
     util::WifiManager& wifi_manager();
 
+    // Set once at construction by Server (or a test), read by every
+    // /management/v1/update/* request; the manager serializes internally.
+    std::unique_ptr<util::SoftwareUpdateManager> software_update_;
+
     // Parse route from path
     RouteMatch parse_route(const std::string& path);
 
@@ -214,6 +225,9 @@ private:
     // carries the sub-endpoint (status/scan/profiles/connect/ap/country/radio)
     // and, for profile deletes, the UUID.
     Response handle_wifi(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id);
+    // Software update (docs/software-update.md); match.method_name carries
+    // the sub-endpoint (status/check/install).
+    Response handle_software_update(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id);
     Response handle_log_level(const Request& request, std::uint32_t server_tx_id);
     Response handle_logs(const Request& request, std::uint32_t server_tx_id);
     Response handle_log_files_list(const Request& request, std::uint32_t server_tx_id);

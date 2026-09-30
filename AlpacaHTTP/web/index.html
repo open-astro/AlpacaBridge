@@ -19,7 +19,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=31">
+    <link rel="stylesheet" href="/web/style.css?v=32">
 </head>
 <body>
     <div class="container">
@@ -1705,6 +1705,40 @@
                     <p id="server-info-status" class="server-status"></p>
                 </div>
             </div>
+            <div id="update-section" class="section-card collapsed">
+                <div class="section-card-header">
+                    <h3>Software Update</h3>
+                    <span id="update-summary" class="server-clock" title="Update state"></span>
+                    <button class="section-toggle" type="button" aria-expanded="false">
+                        <span class="section-toggle-icon" aria-hidden="true"></span>
+                        <span class="section-toggle-label">Details</span>
+                    </button>
+                </div>
+                <div class="section-card-body">
+                    <div class="update-row">
+                        <div class="wifi-row-label">
+                            <span>Installed version <strong id="update-installed">...</strong></span>
+                            <small id="update-status-line">Not checked yet.</small>
+                        </div>
+                        <div class="update-actions">
+                            <button id="update-check" class="btn btn-secondary" type="button" onclick="updateCheckClicked()">Check for Updates</button>
+                            <button id="update-install" class="btn btn-primary" type="button" onclick="updateInstallClicked()" hidden>Install Update</button>
+                        </div>
+                    </div>
+                    <p class="wifi-hint">Checks the OpenAstro repository for a newer release. Installing runs the same upgrade as <code>apt</code> and restarts the server for a few seconds, so do it between exposures.<button class="info-btn" type="button" aria-label="About software updates" data-info-title="Software Update" data-info-text="Check for Updates reads the newest AlpacaBridge version from apt.openastro.net and compares it with the running one. Install Update asks the system to upgrade the alpacabridge package through apt, exactly as 'sudo apt install --only-upgrade alpacabridge' would, so the download is signature-checked. The server restarts at the end and every connected client is disconnected for a few seconds. Nothing updates on its own.">i</button></p>
+                    <div id="update-notes" class="update-notes hidden">
+                        <div class="update-notes-header">
+                            <h4 id="update-notes-title">What's new</h4>
+                            <a id="update-release-link" href="#" target="_blank" rel="noopener" hidden>Full release notes</a>
+                        </div>
+                        <div id="update-notes-body" class="update-notes-body"></div>
+                        <p id="update-notes-missing" class="wifi-substatus" hidden></p>
+                    </div>
+                    <p id="update-installer-line" class="wifi-substatus"></p>
+                    <pre id="update-log" class="log-file-viewer-body update-log hidden"></pre>
+                    <p id="update-message" class="wifi-substatus"></p>
+                </div>
+            </div>
             <div id="wifi-section" class="section-card collapsed">
                 <div class="section-card-header">
                     <h3>WiFi</h3>
@@ -1822,7 +1856,7 @@
         </div>
     </div>
 
-    <script src="/web/format.js?v=5"></script>
-    <script src="/web/app.js?v=38"></script>
+    <script src="/web/format.js?v=6"></script>
+    <script src="/web/app.js?v=39"></script>
 </body>
 </html>

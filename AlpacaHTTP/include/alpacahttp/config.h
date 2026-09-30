@@ -14,6 +14,7 @@
 
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/motion_policy.h>
+#include <alpacahttp/software_update.h>
 
 #include <cstdint>
 #include <optional>
@@ -62,6 +63,16 @@ public:
     // AlpacaCore's kClientSilenceStopInterval (util/motion_policy.h), the
     // shared home for this and open-astro#521's relink window.
     int motion_watchdog_seconds() const { return motion_watchdog_seconds_; }
+    // Software update (docs/software-update.md): the APT Packages index the
+    // web UI's "Check for Updates" reads. Only the CHECK uses it; the install
+    // always goes through the host's own apt sources. Empty disables the
+    // check (the card then says so).
+    const std::string& update_packages_url() const { return update_packages_url_; }
+    // Templates with "{version}" for the newer version's plain-language notes
+    // (Markdown, shown in the card) and its release page (linked). Empty
+    // disables each.
+    const std::string& update_release_notes_url() const { return update_release_notes_url_; }
+    const std::string& update_release_url() const { return update_release_url_; }
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
     int log_retention_days() const { return log_retention_days_; }
@@ -109,6 +120,9 @@ public:
         if (seconds < 0) seconds = 0;
         motion_watchdog_seconds_ = seconds;
     }
+    void set_update_packages_url(const std::string& url) { update_packages_url_ = url; }
+    void set_update_release_notes_url(const std::string& url) { update_release_notes_url_ = url; }
+    void set_update_release_url(const std::string& url) { update_release_url_ = url; }
     void set_log_directory(const std::string& dir) { log_directory_ = dir; }
     void set_file_logging_enabled(bool enabled) { file_logging_enabled_ = enabled; }
     void set_log_retention_days(int days) { log_retention_days_ = days; }
@@ -146,6 +160,9 @@ private:
     int rtc_probe_interval_seconds_ = kDefaultRtcProbeIntervalSeconds;
     // open-astro#547.
     int motion_watchdog_seconds_ = static_cast<int>(alpacacore::util::kClientSilenceStopInterval.count());
+    std::string update_packages_url_ = util::kDefaultPackagesUrl;
+    std::string update_release_notes_url_ = util::kDefaultReleaseNotesUrl;
+    std::string update_release_url_ = util::kDefaultReleaseUrl;
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever

@@ -351,6 +351,7 @@ The Debian package is built from the `debian/` directory. It installs:
 - Vendor libraries under `/usr/lib/alpacabridge`
 - Configuration under `/etc/alpacabridge`
 - Systemd unit `alpacabridge.service` running as the `alpacabridge` system user
+- The software-update helper: root-owned oneshot unit `alpacabridge-update.service`, its script `/usr/libexec/alpacabridge/software-update`, and the polkit rule `/usr/share/polkit-1/rules.d/50-alpacabridge-update.rules` that lets the service user start that one unit (see [software-update.md](software-update.md)). `debian/rules` passes only `alpacabridge.service` to `dh_installsystemd` so the helper never gets enable/start/restart snippets.
 
 ## Releases
 

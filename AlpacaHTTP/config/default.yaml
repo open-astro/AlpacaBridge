@@ -24,6 +24,9 @@ server:
   profile_name: ""  # Friendly profile name shown in the web UI header and exposed via the management API. Env: ALPACAHTTP_PROFILE_NAME
   sync_system_clock_from_clients: true  # On an NTP-less host, step the system clock from a client's Telescope.UTCDate write. Never touches an NTP-disciplined clock.
   motion_watchdog_seconds: 30  # While a goto or MoveAxis is running, stop the mount if no Alpaca request has reached the telescope for this long (client crashed, host asleep, network gone). Never fires on a tracking- or guiding-only mount. Connected stays true. 0 disables. Env: ALPACAHTTP_MOTION_WATCHDOG_SECONDS
+  update_packages_url: https://apt.openastro.net/dists/trixie/main/binary-arm64/Packages  # APT Packages index the web UI's "Check for Updates" reads to find the newest alpacabridge release. Only the check uses it; "Install Update" runs apt against the host's own configured sources. Empty disables the check. Env: ALPACAHTTP_UPDATE_PACKAGES_URL
+  update_release_notes_url: https://raw.githubusercontent.com/open-astro/AlpacaBridge/v{version}/docs/releases/{version}.md  # Plain-language notes for the newer release, shown in the card before you install ({version} is replaced). Empty disables. Env: ALPACAHTTP_UPDATE_RELEASE_NOTES_URL
+  update_release_url: https://github.com/open-astro/AlpacaBridge/releases/tag/v{version}  # The release page the card links to. Empty disables. Env: ALPACAHTTP_UPDATE_RELEASE_URL
 
 # Device enable/disable (optional)
 # devices:

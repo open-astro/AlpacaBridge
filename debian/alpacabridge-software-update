@@ -1,0 +1,65 @@
+#!/bin/bash
+# AlpacaBridge software update helper (docs/software-update.md).
+#
+# Runs as root under alpacabridge-update.service, which the daemon starts over
+# D-Bus when the operator clicks "Install Update" in the web UI. It upgrades
+# the one package this host already has installed from the apt sources the
+# host already trusts; nothing here is parameterised by the daemon.
+#
+# The transcript goes to /var/log/alpacabridge-update/update.log, the helper
+# unit's own LogsDirectory= (root:root 0755, so the non-root daemon can read
+# it and nothing but root can write there). It must never move into
+# /var/log/AlpacaBridge: that directory is owned by the alpacabridge user, and
+# this script truncates and chmods LOG as root, which would follow a symlink
+# planted there (PR #745 review). The daemon reads the same fixed path
+# (kUpdateLogPath in AlpacaHTTP/include/alpacahttp/software_update.h) and
+# test_software_update checks the two agree. The transcript ends with one of
+# two markers the daemon parses:
+#   === RESULT: success ...
+#   === RESULT: failure ...
+# A transcript without a marker means the run was killed or the host rebooted
+# mid-upgrade.
+
+set -u
+
+PACKAGE=alpacabridge
+LOG=/var/log/alpacabridge-update/update.log
+APT_OPTS=(-y -o DPkg::Lock::Timeout=120 -o Dpkg::Options::=--force-confold)
+
+export DEBIAN_FRONTEND=noninteractive
+
+# The directory is the unit's LogsDirectory=; no mkdir here, so a run outside
+# the unit cannot create it with the wrong owner or mode.
+: > "$LOG"
+chmod 0644 "$LOG"
+exec >>"$LOG" 2>&1
+
+stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+echo "=== AlpacaBridge software update started $(stamp)"
+echo "=== installed: $(dpkg-query -W -f='${Version}' "$PACKAGE" 2>/dev/null || echo unknown)"
+
+# Refresh the package lists. A failing unrelated source prints a warning and
+# apt-get still returns 0; a hard failure (an unsigned or unreachable
+# OpenAstro source) is reported by the install step below, so the update's
+# exit status is logged but not fatal on its own.
+echo "=== apt-get update"
+apt-get update -o DPkg::Lock::Timeout=120
+echo "=== apt-get update exit $?"
+
+# What apt will actually pick from THIS host's sources and pinning, which can
+# differ from the version the web UI's check saw on the repository index.
+echo "=== apt-cache policy $PACKAGE"
+apt-cache policy "$PACKAGE"
+
+echo "=== apt-get install --only-upgrade $PACKAGE"
+apt-get install --only-upgrade "${APT_OPTS[@]}" "$PACKAGE"
+rc=$?
+
+installed="$(dpkg-query -W -f='${Version}' "$PACKAGE" 2>/dev/null || echo unknown)"
+if [ "$rc" -eq 0 ]; then
+    echo "=== RESULT: success $(stamp) installed $installed"
+else
+    echo "=== RESULT: failure $(stamp) exit $rc installed $installed"
+fi
+exit "$rc"
