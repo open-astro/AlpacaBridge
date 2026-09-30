@@ -143,6 +143,31 @@ public:
         }
     }
 
+    /// Closes every live connection from the mount's side and waits until
+    /// each handler has closed its fd, so the driver's next writes go to a
+    /// closed peer: the first may still succeed (it is what draws the RST),
+    /// the ones after it fail. The listener stays up. Returns false if a
+    /// handler has not closed within `timeout`.
+    bool drop_connections(std::chrono::milliseconds timeout = std::chrono::milliseconds(2000)) {
+        {
+            std::lock_guard<std::mutex> lock(conn_mutex_);
+            for (const int fd : conn_fds_) {
+                ::shutdown(fd, SHUT_RDWR);
+            }
+        }
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::lock_guard<std::mutex> lock(conn_mutex_);
+                if (conn_fds_.empty()) {
+                    return true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    }
+
     /// Replies "0#" to anything: valid terminator for every '#'-framed
     /// protocol in the family; per-command parse failures are tolerated by
     /// the drivers (and swallowed by the stress harness).
@@ -193,12 +218,12 @@ private:
                 static_cast<void>(::send(fd, reply.data(), reply.size(), MSG_NOSIGNAL));
             }
         }
-        // Deregister before close so the destructor can never shutdown() a
-        // recycled fd number; the storm churns hundreds of short connections.
-        {
-            std::lock_guard<std::mutex> lock(conn_mutex_);
-            conn_fds_.erase(std::remove(conn_fds_.begin(), conn_fds_.end(), fd), conn_fds_.end());
-        }
+        // Deregister and close under one lock so the destructor can never
+        // shutdown() a recycled fd number (the storm churns hundreds of short
+        // connections), and an empty conn_fds_ means every fd is closed
+        // (drop_connections() waits on that).
+        std::lock_guard<std::mutex> lock(conn_mutex_);
+        conn_fds_.erase(std::remove(conn_fds_.begin(), conn_fds_.end(), fd), conn_fds_.end());
         ::close(fd);
     }
 
