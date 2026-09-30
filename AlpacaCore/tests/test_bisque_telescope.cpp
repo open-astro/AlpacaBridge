@@ -15,10 +15,13 @@
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
 #include <limits>
+#include <thread>
 
 #include "catch2_compat.h"
+#include "fake_mount_server.h"
 
 using alpacacore::DeviceType;
 
@@ -32,6 +35,16 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
         REQUIRE(ex.error_code() == expected_code);
     }
 }
+
+alpacacore::vendor::bisque::ConnectionInfo loopback(int port) {
+    alpacacore::vendor::bisque::ConnectionInfo info;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    info.response_timeout_ms = 300;
+    return info;
+}
+
+std::string answer_one(const std::string&) { return "1#"; }
 
 } // namespace
 
@@ -366,4 +379,45 @@ TEST_CASE("Bisque Telescope Driver - non-finite input is rejected", "[bisque][te
         require_alpaca_error([&]() { driver->set_guide_rate({0.004, -inf}); }, alpacacore::AlpacaError::InvalidValue);
         CHECK(driver->get_guide_rate().dec == before.dec);
     }
+}
+
+// open-astro#727: a TheSkyX that accepts the TCP connect but never answers the handshake
+// must not leave the shared wrapper connected, or every later connect is refused.
+TEST_CASE("Bisque Telescope Driver - handshake timeout releases the wrapper", "[bisque][telescope][unit][connect]") {
+    alpacacore::test::FakeMountServer silent([](const std::string&) { return std::string(); });
+    alpacacore::test::FakeMountServer healthy(answer_one);
+    REQUIRE(silent.ok());
+    REQUIRE(healthy.ok());
+
+    auto stuck = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(silent.port()));
+    CHECK_THROWS_AS(stuck->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(stuck->get_connected());
+
+    auto retry = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(healthy.port()));
+    CHECK_NOTHROW(retry->set_connected(true));
+    CHECK(retry->get_connected());
+    retry->set_connected(false);
+}
+
+TEST_CASE("Bisque Telescope Driver - async handshake timeout releases the wrapper",
+          "[bisque][telescope][unit][connect]") {
+    alpacacore::test::FakeMountServer silent([](const std::string&) { return std::string(); });
+    alpacacore::test::FakeMountServer healthy(answer_one);
+    REQUIRE(silent.ok());
+    REQUIRE(healthy.ok());
+
+    auto stuck = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(silent.port()));
+    stuck->connect();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (stuck->get_connecting() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(stuck->get_connecting());
+    CHECK_FALSE(stuck->get_connected());
+    CHECK(stuck->get_last_connect_error().find("TheSkyX") != std::string::npos);
+
+    auto retry = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(healthy.port()));
+    CHECK_NOTHROW(retry->set_connected(true));
+    CHECK(retry->get_connected());
+    retry->set_connected(false);
 }
