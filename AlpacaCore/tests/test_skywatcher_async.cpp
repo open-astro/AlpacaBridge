@@ -132,21 +132,17 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatch
 }
 
 // One step of virtual time, taken only once a driver thread is parked on the
-// clock (false when none is within kRendezvous). After a step that woke
-// waiters, gives each of them a short real grace to leave its wait and park
-// again, or finish, before the next step: a task caught between two waits by
-// an advance() would otherwise stamp its next deadline from a later now than
-// the mount saw, and the mount's motion is what the cases measure.
+// clock (false when none is within kRendezvous). After the step, waits until
+// every task it woke has parked again or finished (false when one has not
+// within kRendezvous): a task caught between two waits by the next advance()
+// would stamp its next deadline from a later now than the mount saw, and the
+// mount's motion is what the cases measure.
 bool step_clock(FakeTaskClock& clock, std::chrono::milliseconds step) {
     if (!clock.wait_for_waiters(1, kRendezvous)) {
         return false;
     }
-    const std::uint64_t registrations = clock.wait_count();
-    const std::size_t woken = clock.advance(step);
-    if (woken > 0) {
-        clock.wait_for_wait_count(registrations + woken, std::chrono::milliseconds(100));
-    }
-    return true;
+    clock.advance(step);
+    return clock.wait_for_woken_settled(kRendezvous);
 }
 
 // Moves virtual time forward by `total` through step_clock(); false when a
@@ -179,7 +175,9 @@ bool run_clock_until(FakeTaskClock& clock, const std::function<bool()>& pred, st
         if (pred()) {
             return true;
         }
-        step_clock(clock, kClockStep);
+        if (!step_clock(clock, kClockStep)) {
+            return pred();
+        }
     }
     // The last step's waiter may still be reacting.
     return wait_until(pred, 200);

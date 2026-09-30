@@ -20,8 +20,11 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace alpacacore::test {
@@ -76,10 +79,10 @@ public:
     }
 
     /// The number of waits (wait_for and sleep_for) registered so far, in
-    /// total: a count that only grows, unlike waiter_count(). A test that
-    /// must not advance() past a task between one wait and the next takes
-    /// it before the advance and waits for it to grow by the number of
-    /// waiters that advance() reported woken (open-astro#743).
+    /// total: a count that only grows, unlike waiter_count(). It cannot tell
+    /// a woken task that exited from one still between two waits; a test
+    /// that must not advance() past the latter uses wait_for_woken_settled()
+    /// (open-astro#743).
     std::uint64_t wait_count() const {
         std::lock_guard<std::mutex> guard(mutex_);
         return wait_count_;
@@ -126,8 +129,9 @@ public:
             std::lock_guard<std::mutex> guard(mutex_);
             deadline = saturating_deadline(timeout);
             id = next_id_++;
-            waiters_.emplace(id, Entry{deadline, lock.mutex(), &cv});
+            waiters_.emplace(id, Entry{deadline, lock.mutex(), &cv, std::this_thread::get_id()});
             ++wait_count_;
+            note_registered();
             count_cv_.notify_all();
         }
         while (!pred() && !reached(deadline)) {
@@ -159,8 +163,9 @@ public:
         }
         const auto deadline = saturating_deadline(duration);
         const auto id = next_id_++;
-        waiters_.emplace(id, Entry{deadline, nullptr, nullptr});
+        waiters_.emplace(id, Entry{deadline, nullptr, nullptr, std::this_thread::get_id()});
         ++wait_count_;
+        note_registered();
         count_cv_.notify_all();
         sleep_cv_.wait(guard, [this, deadline] { return now_ >= deadline; });
         waiters_.erase(id);
@@ -170,9 +175,12 @@ public:
      * Moves virtual time forward by `d` (zero or positive; a negative `d`
      * throws std::invalid_argument), then wakes every waiter whose deadline
      * is at or before the new time (due when now() >= deadline), and only
-     * those. Returns how many wait_for waiters it woke (sleepers are not
-     * counted), so a test can wait for each of them to park again before
-     * the next advance (see wait_count()).
+     * those. Returns how many wait_for waiters it notified (sleepers are not
+     * counted); a due waiter that left its wait before advance() reached it
+     * is not notified and not counted. The thread of every due waiter,
+     * sleepers and such a waiter included, is tracked from the time step
+     * until it registers its next wait or exits (see
+     * wait_for_woken_settled()).
      *
      * For each due wait_for waiter it takes that waiter's mutex, calls
      * notify_all() on its cv, and releases the mutex, so the notify cannot
@@ -192,13 +200,19 @@ public:
             std::lock_guard<std::mutex> guard(mutex_);
             now_ += d;
             for (const auto& [id, entry] : waiters_) {
-                if (entry.mutex != nullptr && now_ >= entry.deadline) {
-                    due.emplace_back(id, entry);
+                if (now_ >= entry.deadline) {
+                    // Tracked from the moment it is due, not from its visit
+                    // below: a waiter may leave on its own before that visit.
+                    note_woken(entry.thread);
+                    if (entry.mutex != nullptr) {
+                        due.emplace_back(id, entry);
+                    }
                 }
             }
             // Sleepers wait on mutex_ itself, so this notify cannot be lost.
             sleep_cv_.notify_all();
         }
+        std::size_t notified = 0;
         for (const auto& [id, entry] : due) {
             std::lock_guard<std::mutex> waiter_lock(*entry.mutex);
             bool registered = false;
@@ -208,9 +222,23 @@ public:
             }
             if (registered) {
                 entry.cv->notify_all();
+                ++notified;
             }
         }
-        return due.size();
+        return notified;
+    }
+
+    /// Blocks the test thread until every thread that advance() woke has
+    /// registered its next wait on this clock or exited, or until
+    /// `real_timeout` of real time passes; returns whether that happened.
+    /// A test that steps a task through consecutive waits calls it after
+    /// each advance(), so the next advance() never lands while a task is
+    /// between two waits and stamps its next deadline from a later now
+    /// (open-astro#743). A woken thread that blocks on something other than
+    /// this clock keeps it false until the bound.
+    bool wait_for_woken_settled(std::chrono::milliseconds real_timeout) {
+        std::unique_lock<std::mutex> guard(tracker_->mutex);
+        return tracker_->cv.wait_for(guard, real_timeout, [this] { return tracker_->woken.empty(); });
     }
 
     /// Blocks the test thread until at least `n` waiters (wait_for and
@@ -233,7 +261,59 @@ private:
         clock::time_point deadline;
         std::mutex* mutex;            // the caller's mutex; null for a sleep_for waiter
         std::condition_variable* cv;  // the caller's cv; null for a sleep_for waiter
+        std::thread::id thread;       // the thread that registered it
     };
+
+    // The threads advance() woke that have not yet registered their next
+    // wait or exited. Shared with a thread_local exit hook in each waiting
+    // thread, which may outlive the clock. Lock order: mutex_, then this.
+    struct WokenTracker {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::set<std::thread::id> woken;
+    };
+
+    // Erases the thread from every live tracker it waited on when it exits.
+    struct ExitHook {
+        std::thread::id thread = std::this_thread::get_id();
+        std::vector<std::weak_ptr<WokenTracker>> trackers;
+        ExitHook() = default;
+        ExitHook(const ExitHook&) = delete;
+        ExitHook& operator=(const ExitHook&) = delete;
+        ~ExitHook() {
+            for (const auto& weak : trackers) {
+                if (const auto tracker = weak.lock()) {
+                    std::lock_guard<std::mutex> guard(tracker->mutex);
+                    tracker->woken.erase(thread);
+                    tracker->cv.notify_all();
+                }
+            }
+        }
+    };
+
+    // Caller holds mutex_. The calling thread has registered a wait: it is
+    // no longer between waits, and its exit is hooked.
+    void note_registered() {
+        thread_local ExitHook hook;
+        std::erase_if(hook.trackers, [](const auto& weak) { return weak.expired(); });
+        bool hooked = false;
+        for (const auto& weak : hook.trackers) {
+            hooked = hooked || (!weak.owner_before(tracker_) && !tracker_.owner_before(weak));
+        }
+        if (!hooked) {
+            hook.trackers.push_back(tracker_);
+        }
+        std::lock_guard<std::mutex> guard(tracker_->mutex);
+        if (tracker_->woken.erase(std::this_thread::get_id()) != 0) {
+            tracker_->cv.notify_all();
+        }
+    }
+
+    // Caller holds mutex_.
+    void note_woken(std::thread::id thread) {
+        std::lock_guard<std::mutex> guard(tracker_->mutex);
+        tracker_->woken.insert(thread);
+    }
 
     // Caller holds mutex_. Clamps instead of overflowing on a huge timeout.
     clock::time_point saturating_deadline(std::chrono::nanoseconds timeout) const {
@@ -257,6 +337,7 @@ private:
     std::uint64_t wait_count_ = 0;
     std::uint64_t next_id_ = 0;
     std::map<std::uint64_t, Entry> waiters_;
+    std::shared_ptr<WokenTracker> tracker_ = std::make_shared<WokenTracker>();
 };
 
 }  // namespace alpacacore::test
