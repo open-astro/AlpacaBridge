@@ -311,6 +311,150 @@ TEST_CASE("iOptron Telescope Driver - the two target properties are independent"
     driver->set_connected(false);
 }
 
+// open-astro#728: the fault latch counted every failed read over the whole
+// session, so three transient failures spread over a night latched it, and the
+// latch then refused AbortSlew too. SyncToCoordinates is the probe because it
+// forces a fresh :GEP position read on every call; the connect grace would
+// serve every other getter from cache.
+namespace {
+
+constexpr const char* kReadFailure = "Failed to refresh mount position";
+constexpr const char* kLatched = "Mount communications compromised";
+
+// The DriverException message of one forced position read, or "" on success.
+std::string sync_failure(alpacacore::TelescopeDriver& driver) {
+    try {
+        driver.sync_to_coordinates(12.0, 20.0);
+        return "";
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        return ex.what();
+    }
+}
+
+bool contains(const std::string& text, std::string_view part) { return text.find(part) != std::string::npos; }
+
+}  // namespace
+
+TEST_CASE("iOptron Telescope Driver - failures separated by a successful read never latch (#728)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.set_fail_reads(true);
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    mount.set_fail_reads(false);
+    CHECK(sync_failure(*driver).empty());
+
+    // Two more failures: four in the session, never three in a row.
+    mount.set_fail_reads(true);
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    mount.set_fail_reads(false);
+    CHECK(sync_failure(*driver).empty());
+    CHECK_NOTHROW(driver->get_right_ascension());
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - three consecutive failed reads latch the fault (#728)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // An earlier failure followed by a success does not count toward the run.
+    mount.set_fail_reads(true);
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    mount.set_fail_reads(false);
+    CHECK(sync_failure(*driver).empty());
+
+    mount.set_fail_reads(true);
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    CHECK(contains(sync_failure(*driver), kReadFailure));  // the third in a row latches
+
+    // Latched: members that run the connection check refuse with the same message, even once the link answers.
+    mount.set_fail_reads(false);
+    CHECK(contains(sync_failure(*driver), kLatched));
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::DriverException);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - AbortSlew sends the stop on a latched fault and clears it (#728)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(contains(sync_failure(*driver), kReadFailure));
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+
+    // Reads still fail and the cached status says "not slewing": the stop
+    // must go out anyway, with no status read in front of it.
+    const auto before = mount.commands().size();
+    REQUIRE_NOTHROW(driver->abort_slew());
+    const auto commands = mount.commands();
+    int stops = 0;
+    int status_reads = 0;
+    for (auto i = before; i < commands.size(); ++i) {
+        stops += commands[i] == ":Q#" ? 1 : 0;
+        status_reads += commands[i] == ":GLS#" ? 1 : 0;
+    }
+    CHECK(stops == 1);
+    CHECK(status_reads == 0);
+
+    // The stop was sent, so the latch is gone.
+    mount.set_fail_reads(false);
+    CHECK_NOTHROW(driver->get_right_ascension());
+    CHECK(sync_failure(*driver).empty());
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - AbortSlew whose stop fails on a latched fault keeps the latch (#728)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(contains(sync_failure(*driver), kReadFailure));
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+
+    // The link is gone, so the blind :Q# cannot be written: the stop was not
+    // sent, AbortSlew must say so, and the latch must stay set.
+    mount.reset_link();
+    try {
+        driver->abort_slew();
+        FAIL("AbortSlew succeeded on a reset link");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(ex.what(), "AbortSlew failed"));
+    }
+    CHECK(contains(sync_failure(*driver), kLatched));
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
+
+    driver->set_connected(false);
+}
+
 #endif  // !_WIN32
 
 #ifndef _WIN32

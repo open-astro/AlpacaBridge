@@ -15,6 +15,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/motion_limits.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 
 #include <chrono>
@@ -90,12 +91,16 @@ bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronize
 
 // `motion_limits` (open-astro#436): per-device altitude floor and meridian
 // limit, both off by default; see <alpacacore/util/motion_limits.h>.
+/// `clock` is the TaskClock the driver's task waits and deadlines run on
+/// (open-astro#743, decision 0005): real by default, a FakeTaskClock in tests.
+/// It must outlive the driver. Pointing time stays on the host clock.
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
                                                              std::optional<double> site_latitude_deg = std::nullopt,
                                                              std::optional<double> site_longitude_deg = std::nullopt,
                                                              std::optional<double> site_elevation_m = std::nullopt,
                                                              std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {},
-                                                             util::MotionLimits motion_limits = {});
+                                                             util::MotionLimits motion_limits = {},
+                                                             util::TaskClock& clock = util::default_task_clock());
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
@@ -103,7 +108,8 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg = std::nullopt, std::optional<double> site_longitude_deg = std::nullopt,
     std::optional<double> site_elevation_m = std::nullopt, std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {},
-    util::MotionLimits motion_limits = {});
+    util::MotionLimits motion_limits = {},
+    util::TaskClock& clock = util::default_task_clock());
 
 /// The scan behind create_skywatcher_telescope_auto(): serial ports first, then
 /// Wi-Fi discovery (UDP 11880); throws when nothing answers.

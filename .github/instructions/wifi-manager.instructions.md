@@ -4,6 +4,8 @@ applyTo: "AlpacaHTTP/**,docs/wifi-*.md"
 
 ### WiFi manager (AlpacaHTTP, 3.4.0)
 
+Related decision: [LAN surface threat model](../../docs/decisions/0007-lan-surface-threat-model.md) (who may reach the Wi-Fi API and what it can change).
+
 - NM D-Bus property types matter: `ActiveConnection`, `Ip4Config`, and
   `ActiveAccessPoint` are object paths ("o"), not strings — reading them
   with `sd_bus_get_property_string` fails sd-bus's type check silently

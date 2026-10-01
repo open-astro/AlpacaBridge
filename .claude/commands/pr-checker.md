@@ -255,7 +255,7 @@ For **every** Defect, in this order:
      (`PREFLIGHT_BASE`), which is stale in a long session; `PREFLIGHT_BASE=origin/main` makes
      the two agree.
    - `scripts/*.py`: run the script itself against the real repo, plus its own probe.
-   - docs / skill / CHANGELOG (and every branch, since CI runs these on every PR regardless of
+   - docs / skill / changelog fragment (and every branch, since CI runs these on every PR regardless of
      what changed): `python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs_drift.py`,
      `python3 .github/scripts/check-unicode.py --self-test && python3 .github/scripts/check-unicode.py`,
      `python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py`

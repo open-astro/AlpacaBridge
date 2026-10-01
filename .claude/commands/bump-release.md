@@ -4,13 +4,13 @@ allowed-tools: Read, Edit, Write, Bash, Grep, Glob
 ---
 
 You are the release assistant for the AlpacaBridge project. `/bump-release` turns the current
-`## [X.Y.Z] - UNRELEASED` CHANGELOG section into a shipped release. It does the whole job in one
+changelog fragments (`changelog.d/`) into a shipped release. It does the whole job in one
 run: version files, plain-language release notes, the release PR through the review bot, the tag,
 and a check that the GitHub Release published with the right notes. The user reads the CHANGELOG
 for technical detail; the GitHub Release is written for someone standing at a telescope.
 
-The user may pass a version (`/bump-release 4.0.0`). Without one, the version is the `[X.Y.Z]` in
-the CHANGELOG `UNRELEASED` heading.
+The user may pass a version (`/bump-release 4.0.0`). Without one, the version is the one
+`python3 scripts/changelog_fragments.py --bump` proposes from the fragments.
 
 ## Step 1 — Preconditions
 
@@ -19,6 +19,7 @@ git branch --show-current
 git status --porcelain
 git fetch origin main --quiet && git log --oneline HEAD..origin/main | head
 grep -n '^## \[' CHANGELOG.md | head -2
+ls changelog.d
 cat VERSION
 gh release list --limit 1
 ```
@@ -27,12 +28,15 @@ gh release list --limit 1
 - Releases are cut from an up-to-date `main`. If on `main`, pull first. If on another branch,
   ask whether to release from `main` (the normal case) — never cut a release from a stale or
   half-merged branch.
-- The top CHANGELOG heading must be `## [X.Y.Z] - UNRELEASED`. If it is already dated, the
+- `changelog.d/` must hold at least one fragment besides `README.md` (or `CHANGELOG.md` a legacy
+  `## [X.Y.Z] - UNRELEASED` section). If neither exists and the top heading is already dated, the
   release has been cut; go to Step 6 (tag) if no tag exists, otherwise report and stop.
-- `X.Y.Z` must be greater than the latest release tag. Check the bump size against the SemVer
-  rule in AGENTS.md ("Version bump policy"): a new driver in the section means at least a minor
-  bump, a "Breaking changes" subsection means a major bump. If the heading undershoots, STOP and
-  tell the user — do not release a misnumbered version.
+- Run `python3 scripts/changelog_fragments.py --check` (it must pass), then
+  `python3 scripts/changelog_fragments.py --bump`: it prints the proposed `X.Y.Z` from the latest
+  dated release (a legacy UNRELEASED label is a floor) per the SemVer rule in AGENTS.md ("Version
+  bump policy"): a `Breaking changes` subsection means major, an unqualified `Added` means minor,
+  otherwise patch. `X.Y.Z` must be greater than the latest release tag; use the proposal unless
+  the user names a higher one. `--preview` prints the section that Step 2 will write.
 - **Never commit on `main`.** Create `release/X.Y.Z` before any edit.
 
 ```bash
@@ -46,9 +50,10 @@ Today's date in `YYYY-MM-DD` (UTC is fine). Then:
 1. `printf '%s\n' X.Y.Z > VERSION`
 2. README badge line: `#### [X.Y.Z] - YYYY-MM-DD &middot; [Changelog](CHANGELOG.md)`.
    `scripts/check_docs_drift.py` check 4 requires it to match `VERSION` exactly.
-3. CHANGELOG heading: `## [X.Y.Z] - UNRELEASED` → `## [X.Y.Z] - YYYY-MM-DD`. Do **not** collapse
-   the section into `<details>`; the newest release stays expanded, and the next `UNRELEASED`
-   section is what collapses it later.
+3. CHANGELOG: `python3 scripts/changelog_fragments.py --release X.Y.Z --date YYYY-MM-DD`. It writes
+   the expanded `## [X.Y.Z] - YYYY-MM-DD` section under the intro, collapses the previous release
+   into `<details>`, merges any legacy `UNRELEASED` section, and deletes the fragments (commit
+   those deletions). The newest release stays expanded.
 4. README headline count: `- **N validated devices. M brands. One server.** <brand list>`.
    Recount rather than trust the old number — the line was three releases stale at 4.0.0. The
    script that gates the line (check 15, issue #684) also prints its numbers, so there is one
@@ -84,7 +89,7 @@ Verify with `python3 scripts/check_docs_drift.py` before moving on.
 Create `docs/releases/X.Y.Z.md`. `release.yml` uses this file as the GitHub Release body when it
 exists, with a link to the CHANGELOG section appended; the CHANGELOG stays the technical record.
 
-Read the whole `## [X.Y.Z]` CHANGELOG section (`python3 scripts/changelog_section.py X.Y.Z`) and
+Read the whole, now dated, `## [X.Y.Z]` CHANGELOG section (`python3 scripts/changelog_section.py X.Y.Z`) and
 translate it. Rules for the file:
 
 - **Audience**: an amateur astronomer deciding whether to `apt upgrade` tonight. No issue numbers,
@@ -151,7 +156,7 @@ gh release view vX.Y.Z --json name,body --jq '.name, (.body | .[0:400])'
 ```
 
 The body must start with the plain-language notes, not the CHANGELOG bullets. If the workflow
-failed (tag/VERSION mismatch, UNRELEASED heading), fix the cause on a new PR, delete and re-push
+failed (tag/VERSION mismatch, an undated CHANGELOG section), fix the cause on a new PR, delete and re-push
 the tag after it merges (`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`), and verify
 again. If the workflow never ran, the tag landed on a commit without `release.yml`; create the
 Release by hand with `gh release create vX.Y.Z --notes-file docs/releases/X.Y.Z.md --verify-tag`.
@@ -161,5 +166,5 @@ Release by hand with `gh release create vX.Y.Z --notes-file docs/releases/X.Y.Z.
 - Delete the local `release/X.Y.Z` branch (origin deletes the remote one on merge).
 - Report: the version, the PR number, the tag, the Release URL, and the apt publish reminder
   (apt.openastro.net is published outside this repo; the Release is not the install channel).
-- The next feature PR starts a new `## [X.Y.Z+1] - UNRELEASED` section and collapses this one
-  into `<details>`; `/commit` handles that.
+- The next feature PR adds its own `changelog.d/` fragment; the next release collapses this
+  section into `<details>`.

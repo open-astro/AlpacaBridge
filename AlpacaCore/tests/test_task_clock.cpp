@@ -110,6 +110,10 @@ public:
     }
     bool result() { return future_.get(); }
 
+    // The mutex the waiter passes to wait_for, for a case that must hold
+    // advance() out of its visit to this waiter.
+    std::mutex& mutex() { return mutex_; }
+
 private:
     std::mutex mutex_;
     std::condition_variable cv_;
@@ -222,7 +226,7 @@ TEST_CASE("TaskClock fake - cancel wins", "[util][taskclock][unit]") {
 
     SECTION("a predicate already true returns true without registering") {
         std::atomic<bool> hook_called{false};
-        fake.before_block = [&hook_called] { hook_called = true; };
+        fake.set_before_block([&hook_called](const std::function<bool()>&) { hook_called = true; });
         auto result = std::async(std::launch::async, [&clock, &fake] {
             std::mutex mutex;
             std::condition_variable cv;
@@ -238,7 +242,7 @@ TEST_CASE("TaskClock fake - cancel wins", "[util][taskclock][unit]") {
         CHECK(result.get());
         CHECK_FALSE(hook_called.load());
         CHECK(fake.waiter_count() == 0);
-        fake.before_block = nullptr;
+        fake.set_before_block(nullptr);
     }
 
     SECTION("a timeout of zero or less evaluates the predicate once and returns") {
@@ -327,6 +331,215 @@ TEST_CASE("TaskClock fake - sleep_for and the waiter rendezvous", "[util][taskcl
     }
 }
 
+TEST_CASE("TaskClock fake - wait_count grows per registration and advance reports the waiters it woke",
+          "[util][taskclock][unit]") {
+    // open-astro#743: wait_count() is the cumulative registration count;
+    // advance() says how many wait_for waiters it notified. A later case
+    // pins wait_for_woken_settled(), which a test stepping a driver through
+    // consecutive waits uses instead of the two.
+    FakeTaskClock clock;
+    CHECK(clock.wait_count() == 0);
+    CHECK(clock.advance(1s) == 0);
+
+    Waiter first(clock, 100ms);
+    REQUIRE(clock.wait_for_wait_count(1, kBound));
+    Waiter second(clock, 300ms);
+    REQUIRE(clock.wait_for_wait_count(2, kBound));
+    CHECK(clock.waiter_count() == 2);
+
+    CHECK(clock.advance(100ms) == 1);  // only the first is due
+    REQUIRE(first.finished_within(kBound));
+    CHECK_FALSE(first.result());
+    CHECK(clock.wait_count() == 2);  // a wake is not a registration
+    CHECK(clock.advance(200ms) == 1);
+    REQUIRE(second.finished_within(kBound));
+    CHECK_FALSE(second.result());
+    CHECK(clock.advance(1s) == 0);
+
+    // A sleeper counts as a registration too.
+    std::thread sleeper([&] { clock.sleep_for(10ms); });
+    REQUIRE(clock.wait_for_wait_count(3, kBound));
+    CHECK(clock.advance(10ms) == 0);  // sleepers are not reported
+    sleeper.join();
+    CHECK_FALSE(clock.wait_for_wait_count(4, 50ms));
+}
+
+TEST_CASE("TaskClock fake - advance does not count a due waiter that left before it was notified",
+          "[util][taskclock][unit]") {
+    // advance() lists the due waiters under its own mutex, then visits each
+    // under that waiter's mutex. A waiter cancelled in between is skipped,
+    // and a caller that waits for the reported number of re-registrations
+    // must not wait for it (open-astro#743).
+    FakeTaskClock fake;
+    TaskClock& clock = fake;
+    Waiter first(clock, 100ms);  // registered first, so visited first
+    REQUIRE(fake.wait_for_waiters(1, kBound));
+    Waiter second(clock, 100ms);
+    REQUIRE(fake.wait_for_waiters(2, kBound));
+
+    std::future<std::size_t> woken;
+    {
+        // Holding the first waiter's mutex parks advance() at its first
+        // visit, after it has moved the time and listed both waiters.
+        std::unique_lock<std::mutex> hold(first.mutex());
+        woken = std::async(std::launch::async, [&fake] { return fake.advance(100ms); });
+        const auto give_up = std::chrono::steady_clock::now() + kBound;
+        while (clock.now() == TaskClock::clock::time_point{} && std::chrono::steady_clock::now() < give_up) {
+            std::this_thread::sleep_for(1ms);
+        }
+        REQUIRE(clock.now() == TaskClock::clock::time_point{} + 100ms);
+        second.cancel(true);
+        REQUIRE(second.finished_within(kBound));
+        CHECK(second.result());
+    }
+    REQUIRE(woken.wait_for(kBound) == std::future_status::ready);
+    CHECK(woken.get() == 1);  // the second left before its visit
+    REQUIRE(first.finished_within(kBound));
+    CHECK_FALSE(first.result());
+}
+
+TEST_CASE("TaskClock fake - advance counts a waiter it catches between registration and block",
+          "[util][taskclock][unit]") {
+    // open-astro#743: wait_for_waiters() returns once a waiter has
+    // registered, which is before it blocks. An advance() that moves the
+    // time in that gap must still notify and count the waiter, or a test
+    // that rendezvoused and then checked advance()'s count fails whenever
+    // the waiter is slow to reach its block (the ASan runner). The
+    // predicate's second evaluation, the first after registration, holds
+    // the waiter in that gap until the time has moved.
+    FakeTaskClock fake;
+    TaskClock& clock = fake;
+    const auto moved = TaskClock::clock::time_point{} + 100ms;
+    auto result = std::async(std::launch::async, [&clock, &fake, moved] {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::unique_lock<std::mutex> lock(mutex);
+        int evaluations = 0;
+        return clock.wait_for(lock, cv, 100ms, [&] {
+            if (++evaluations == 2) {
+                const auto give_up = std::chrono::steady_clock::now() + kBound;
+                while (fake.now() < moved && std::chrono::steady_clock::now() < give_up) {
+                    std::this_thread::yield();
+                }
+            }
+            return false;
+        });
+    });
+    REQUIRE(fake.wait_for_wait_count(1, kBound));
+    CHECK(fake.advance(100ms) == 1);
+    REQUIRE(result.wait_for(kBound) == std::future_status::ready);
+    CHECK_FALSE(result.get());
+    CHECK(fake.waiter_count() == 0);
+}
+
+TEST_CASE("TaskClock fake - wait_for_woken_settled waits until each woken thread waits again or exits",
+          "[util][taskclock][unit]") {
+    // open-astro#743: a test stepping a task through consecutive waits must
+    // not advance() again while the task it woke is between two waits.
+    FakeTaskClock fake;
+    TaskClock& clock = fake;
+    CHECK(fake.wait_for_woken_settled(0ms));  // nothing woken yet
+
+    std::promise<void> release;
+    std::shared_future<void> between = release.get_future().share();
+    auto wait_once = [&clock] {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::unique_lock<std::mutex> lock(mutex);
+        clock.wait_for(lock, cv, 100ms, [] { return false; });
+    };
+
+    SECTION("a woken thread that waits again") {
+        std::thread task([&] {
+            wait_once();
+            between.wait();  // between its two waits
+            wait_once();
+        });
+        REQUIRE(fake.wait_for_waiters(1, kBound));
+        CHECK(fake.advance(100ms) == 1);
+        CHECK_FALSE(fake.wait_for_woken_settled(50ms));
+        release.set_value();
+        CHECK(fake.wait_for_woken_settled(kBound));
+        CHECK(fake.wait_for_waiters(1, kBound));
+        fake.advance(100ms);
+        task.join();
+    }
+
+    SECTION("a woken thread that exits") {
+        std::thread task([&] {
+            wait_once();
+            between.wait();
+        });
+        REQUIRE(fake.wait_for_waiters(1, kBound));
+        CHECK(fake.advance(100ms) == 1);
+        CHECK_FALSE(fake.wait_for_woken_settled(50ms));
+        release.set_value();
+        CHECK(fake.wait_for_woken_settled(kBound));
+        task.join();
+    }
+
+    SECTION("a woken sleeper that exits") {
+        std::thread task([&] {
+            clock.sleep_for(10ms);
+            between.wait();
+        });
+        REQUIRE(fake.wait_for_waiters(1, kBound));
+        CHECK(fake.advance(10ms) == 0);  // sleepers are not counted, but are tracked
+        CHECK_FALSE(fake.wait_for_woken_settled(50ms));
+        release.set_value();
+        CHECK(fake.wait_for_woken_settled(kBound));
+        task.join();
+    }
+
+    SECTION("a due waiter that leaves before advance() reaches it") {
+        // advance() moves the time, then visits the due waiters one by one.
+        // A waiter that leaves on its own in between is not notified, but it
+        // is still between two waits and must be tracked.
+        Waiter first(clock, 100ms);  // registered first, so visited first
+        REQUIRE(fake.wait_for_waiters(1, kBound));
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::atomic<bool> left{false};
+        std::thread task([&] {
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                clock.wait_for(lock, cv, 100ms, [] { return false; });
+            }
+            left = true;
+            between.wait();
+        });
+        REQUIRE(fake.wait_for_waiters(2, kBound));
+
+        std::future<std::size_t> woken;
+        {
+            // Holding the first waiter's mutex parks advance() at its first
+            // visit, after it has moved the time.
+            std::unique_lock<std::mutex> hold(first.mutex());
+            woken = std::async(std::launch::async, [&fake] { return fake.advance(100ms); });
+            const auto give_up = std::chrono::steady_clock::now() + kBound;
+            while (clock.now() == TaskClock::clock::time_point{} && std::chrono::steady_clock::now() < give_up) {
+                std::this_thread::sleep_for(1ms);
+            }
+            REQUIRE(clock.now() == TaskClock::clock::time_point{} + 100ms);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                cv.notify_all();  // the task sees its deadline reached and leaves
+            }
+            while (!left && std::chrono::steady_clock::now() < give_up) {
+                std::this_thread::sleep_for(1ms);
+            }
+            REQUIRE(left);
+        }
+        REQUIRE(woken.wait_for(kBound) == std::future_status::ready);
+        CHECK(woken.get() == 1);  // only the first was notified
+        REQUIRE(first.finished_within(kBound));
+        CHECK_FALSE(fake.wait_for_woken_settled(50ms));  // the task is between waits
+        release.set_value();
+        CHECK(fake.wait_for_woken_settled(kBound));
+        task.join();
+    }
+}
+
 TEST_CASE("TaskClock fake - advance cannot lose a wakeup between check and block", "[util][taskclock][stress-guard]") {
     FakeTaskClock fake;
     TaskClock& clock = fake;
@@ -340,12 +553,12 @@ TEST_CASE("TaskClock fake - advance cannot lose a wakeup between check and block
         // waiter is really blocked.
         std::promise<void> in_window;
         std::atomic<bool> fired{false};
-        fake.before_block = [&in_window, &fired] {
+        fake.set_before_block([&in_window, &fired](const std::function<bool()>&) {
             if (!fired.exchange(true)) {
                 in_window.set_value();
                 std::this_thread::sleep_for(50ms);
             }
-        };
+        });
         {
             Waiter waiter(clock, 100ms);
             REQUIRE(in_window.get_future().wait_for(kBound) == std::future_status::ready);
@@ -356,7 +569,7 @@ TEST_CASE("TaskClock fake - advance cannot lose a wakeup between check and block
                 CHECK_FALSE(waiter.result());
             }
         }  // ~Waiter cancels and joins, so a red run still tears down
-        fake.before_block = nullptr;
+        fake.set_before_block(nullptr);
     }
 
     SECTION("1000 advances raced against a fresh waiter") {

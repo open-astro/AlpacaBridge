@@ -59,6 +59,8 @@ Other Rockchip and Orange Pi arm64 boards running Debian 13 work with the standa
 
 Three commands from the [OpenAstro APT repository](https://apt.openastro.net), and it stays current with `apt upgrade`.
 
+AlpacaBridge is built for a single-purpose appliance: its udev rules let any local user open a supported device. Do not install it on a shared machine. See [the LAN surface threat model](docs/decisions/0007-lan-surface-threat-model.md).
+
 **1. Add the OpenAstro signing key**
 
 ```sh
@@ -81,7 +83,7 @@ sudo apt update
 sudo apt install alpacabridge
 ```
 
-The service starts automatically and runs as the `alpacabridge` system user. Then open **http://localhost:6800/** (or your server's hostname from any machine on the network) and set up your devices.
+The service starts automatically and runs as the `alpacabridge` system user. Then open **http://localhost:6800/** (or your server's IP address, hostname or `<hostname>.local` from any machine on the network) and set up your devices. A name your router's DNS adds, such as `astropi.lan` or `astropi.fritz.box`, gets HTTP 403 until you add it to `http.allowed_hosts`; see [docs/troubleshooting.md](docs/troubleshooting.md#the-web-ui-or-api-answers-http-403-host--is-not-allowed).
 
 <details>
 <summary>Updating and uninstalling</summary>

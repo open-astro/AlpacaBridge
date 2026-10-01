@@ -53,6 +53,7 @@ Server::Server(const Config& config)
     router_.set_config_path(config_.config_path());
     router_.set_sync_system_clock_from_clients(config_.sync_system_clock_from_clients());
     router_.set_motion_watchdog_interval(std::chrono::seconds(config_.motion_watchdog_seconds()));
+    router_.set_allowed_hosts(config_.allowed_hosts());
     // Software update (docs/software-update.md): the helper unit writes its
     // transcript to a root-owned directory of its own, never the daemon's log
     // directory (software_update.h explains why), so the path is fixed.

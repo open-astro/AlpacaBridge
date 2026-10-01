@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace alpacahttp {
 
@@ -73,6 +74,13 @@ public:
     // disables each.
     const std::string& update_release_notes_url() const { return update_release_notes_url_; }
     const std::string& update_release_url() const { return update_release_url_; }
+    // open-astro#392: extra names the router accepts as a request's Host, on
+    // top of the built-in ones (IP literals, localhost, the machine's own
+    // name, *.local, *.home.arpa, *.internal). An entry with a leading dot is
+    // a suffix (".lan" = "lan" and every "*.lan"). Trimmed, empty entries
+    // dropped; the router normalizes case, port and trailing dot. Read from
+    // the file and the environment only: nothing writes it at runtime.
+    const std::vector<std::string>& allowed_hosts() const { return allowed_hosts_; }
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
     int log_retention_days() const { return log_retention_days_; }
@@ -163,6 +171,7 @@ private:
     std::string update_packages_url_ = util::kDefaultPackagesUrl;
     std::string update_release_notes_url_ = util::kDefaultReleaseNotesUrl;
     std::string update_release_url_ = util::kDefaultReleaseUrl;
+    std::vector<std::string> allowed_hosts_;
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever

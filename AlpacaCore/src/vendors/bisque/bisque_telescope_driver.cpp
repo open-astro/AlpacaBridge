@@ -92,6 +92,27 @@ double shortest_ra_delta_hours(double a, double b) {
 
 } // namespace
 
+namespace detail {
+
+void validate_ra_dec(double ra, double dec) {
+    if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
+        throw AlpacaException("RA out of range [0, 24)", AlpacaError::InvalidValue);
+    }
+    if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
+        throw AlpacaException("Dec out of range [-90, 90]", AlpacaError::InvalidValue);
+    }
+}
+
+void validate_move_axis_rate(double rate) {
+    // A NaN rate fails the |rate| < 1e-9 stop test and would reach
+    // rate_to_speed_index().
+    if (!std::isfinite(rate)) {
+        throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
+    }
+}
+
+}  // namespace detail
+
 class BisqueTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
@@ -665,10 +686,11 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        // #627: argument validation precedes the connection check.
+        detail::validate_ra_dec(ra, dec);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinates");
-        validate_ra_dec(ra, dec);
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -687,10 +709,11 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        // #627: argument validation precedes the connection check.
+        detail::validate_ra_dec(ra, dec);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinatesAsync");
-        validate_ra_dec(ra, dec);
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -720,10 +743,11 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        // #627: argument validation precedes the connection check.
+        detail::validate_ra_dec(ra, dec);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SyncToCoordinates");
-        validate_ra_dec(ra, dec);
 
         auto& protocol = BisqueProtocolWrapper::instance();
         protocol.sync_to_coordinates(ra, dec);
@@ -762,13 +786,15 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked("MoveAxis");
-
+        // #627: argument validation precedes the connection check.
         if (axis < 0 || axis > 1) {
             throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
         }
+        detail::validate_move_axis_rate(rate);
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        check_not_parked("MoveAxis");
 
         auto& protocol = BisqueProtocolWrapper::instance();
 
@@ -841,15 +867,6 @@ private:
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
-        }
-    }
-
-    static void validate_ra_dec(double ra, double dec) {
-        if (ra < 0.0 || ra >= 24.0) {
-            throw AlpacaException("RA out of range [0, 24)", AlpacaError::InvalidValue);
-        }
-        if (dec < -90.0 || dec > 90.0) {
-            throw AlpacaException("Dec out of range [-90, 90]", AlpacaError::InvalidValue);
         }
     }
 

@@ -57,13 +57,17 @@ datagrams before each send so replies cannot get off-by-one.
   `connectionType`, which has no value to carry forward — it returns `"serial"` for a persisted
   config, never `"auto"`, so the connect fails on the port path instead of auto-probing and
   attaching to whatever mount answers. Use them rather than an inline `return false`; the
-  `portPath`, `host` and `connectionType` checks in every telescope branch do.
+  `portPath`, `host` and `connectionType` checks in every telescope branch do. Since #744 the
+  Sky-Watcher direct driver has no router branch: its device-catalog descriptor
+  (`AlpacaCore/src/vendors/skywatcher/skywatcher_schema.cpp`) applies the same source rule in
+  `Schema::normalize`, and the factory (`skywatcher_catalog.cpp`) logs the missing-site WARN.
   Both coordinates are also **range-checked** (#398), inclusive of ±90/±180 since the poles and
   the antimeridian are real places, and rejecting NaN and the infinities: presence alone let a
   config carry latitude 200, which reads as northern to `hemisphere_south_locked()`, while the
   ASCOM setters have always refused exactly that at runtime — a validation a client cannot bypass
   but a config can is not a validation. The reads and the check live in one shared
-  `read_site_coordinates()` used by all seven vendor branches that take a site, and on the
+  `read_site_coordinates()` used by the six router branches that take a site (for Sky-Watcher
+  the catalog's per-field min/max applies the same range since #744), and on the
   persisted path the offending coordinate is **cleared** so the driver's unset handling covers it. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
   run northern pointing math: the #432 sky frame (both the `a1` term and dec), the RA

@@ -21,7 +21,9 @@
 // index is far beyond any bus.
 
 #include <alpacacore/catalog/builtin_catalog.h>
+#include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_io.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -32,11 +34,14 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -494,3 +499,592 @@ TEST_CASE("Builtin catalog - the WeeWX factory passes pollIntervalSeconds throug
 }
 
 #endif  // ALPACACORE_ENABLE_WEEWX
+
+// ---------------------------------------------------------------------------
+// Sky-Watcher direct (motor controller) telescope (open-astro#744). The first
+// telescope descriptor and the first with source-dependent cross-field rules:
+// Schema::normalize rejects a config from the API and warns about (or leaves
+// alone) a saved one, exactly as the router arm it replaces did (#274, #380,
+// #398, #508). The schema cases run in every build; the factory cases need the
+// driver and construct without a scan (#659/#660): a nonexistent serial node
+// refuses the connect, an auto config is only constructed, never connected.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const DeviceKey kSkyWatcherKey{"skywatcher", DeviceType::Telescope};
+
+// Rule 4 (#274): the arm's kMissingSite text, byte for byte.
+const std::string kSkyWatcherMissingSite =
+    "Site latitude and longitude are required for the Sky-Watcher direct driver: this mount stores no site of its "
+    "own, and tracking direction, guide sign and pier side are all hemisphere-dependent";
+
+std::string string_at(const DeviceConfig& config, std::string_view key) {
+    const ConfigValue* v = config.find_value(key);
+    REQUIRE(v != nullptr);
+    REQUIRE(std::holds_alternative<std::string>(*v));
+    return std::get<std::string>(*v);
+}
+
+// Scalar defaults compared by alternative and value (ConfigValue has no
+// operator==: a DeviceConfig record list is not comparable).
+bool same_scalar(const ConfigValue& a, const ConfigValue& b) {
+    if (a.index() != b.index()) return false;
+    if (const auto* s = std::get_if<std::string>(&a)) return *s == std::get<std::string>(b);
+    if (const auto* i = std::get_if<std::int64_t>(&a)) return *i == std::get<std::int64_t>(b);
+    if (const auto* d = std::get_if<double>(&a)) return *d == std::get<double>(b);
+    if (const auto* f = std::get_if<bool>(&a)) return *f == std::get<bool>(b);
+    return false;
+}
+
+bool any_contains(const std::vector<std::string>& messages, std::string_view fragment) {
+    for (const std::string& m : messages) {
+        if (m.find(fragment) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// A serial config with a site: the smallest config every rule accepts.
+DeviceConfig skywatcher_serial_with_site() {
+    DeviceConfig config;
+    config.set("connectionType", std::string{"serial"});
+    config.set("portPath", std::string{"/dev/ttyUSB8"});
+    config.set("baudRate", std::int64_t{9600});
+    config.set("siteLatitude", 39.7392);
+    config.set("siteLongitude", -104.9903);
+    return config;
+}
+
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher telescope in every build",
+          "[catalog][skywatcher][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kSkyWatcherKey);
+    REQUIRE(v != nullptr);
+    // Rule 1: the first word is exactly "SkyWatcher" so vendor_label() keeps
+    // "SkyWatcher support not enabled" and "Registered SkyWatcher telescope".
+    CHECK(v->display_name == "SkyWatcher direct (motor controller)");
+    CHECK(v->build_option == "ALPACACORE_ENABLE_SKYWATCHER");
+    CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+
+    // Rule 3: the twelve fields the arm read, in this order, with its defaults.
+    const std::vector<std::string_view> expected_keys{
+        "connectionType", "mountIndex",    "portPath",          "baudRate",
+        "host",           "udpPort",       "responseTimeoutMs", "siteLatitude",
+        "siteLongitude",  "siteElevation", "apertureDiameter",  "focalLength"};
+    REQUIRE(v->fields.size() == expected_keys.size());
+    for (std::size_t i = 0; i < expected_keys.size(); ++i) {
+        CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
+    }
+
+    struct Expect {
+        std::string_view key;
+        FieldRef::Kind kind;
+        Role role;
+        std::optional<std::string_view> applies_to;  // connectionType value, when applies_when is set
+        ConfigValue default_value;
+        std::optional<double> min;
+        std::optional<double> max;
+    };
+    const std::vector<Expect> expectations{
+        {"connectionType", FieldRef::Kind::String, Role::Discriminator, std::nullopt, std::string{"auto"}, {}, {}},
+        {"mountIndex", FieldRef::Kind::Int, Role::EnumerationIndex, std::nullopt, std::int64_t{0}, {}, {}},
+        {"portPath", FieldRef::Kind::String, Role::PortPath, "serial", std::string{}, {}, {}},
+        {"baudRate", FieldRef::Kind::Int, Role::Plain, "serial", std::int64_t{9600}, {}, {}},
+        {"host", FieldRef::Kind::String, Role::Host, "network", std::string{}, {}, {}},
+        {"udpPort", FieldRef::Kind::Int, Role::Plain, "network", std::int64_t{11880}, {}, {}},
+        {"responseTimeoutMs", FieldRef::Kind::Int, Role::Plain, std::nullopt, std::int64_t{1000}, {}, {}},
+        {"siteLatitude", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, -90.0, 90.0},
+        {"siteLongitude", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, -180.0, 180.0},
+        {"siteElevation", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, {}, {}},
+        {"apertureDiameter", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, {}, {}},
+        {"focalLength", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, {}, {}},
+    };
+    for (const Expect& e : expectations) {
+        INFO(e.key);
+        const FieldRef* f = find_field(v->fields, e.key);
+        REQUIRE(f != nullptr);
+        CHECK(f->kind == e.kind);
+        CHECK(f->role == e.role);
+        CHECK_FALSE(f->required);          // rule 3: nothing is required; rule 4 is a cross-field rule
+        CHECK(f->allowed_values.empty());  // rule 5: connectionType has NO allowed_values
+        CHECK(same_scalar(f->default_value, e.default_value));
+        CHECK(f->min == e.min);
+        CHECK(f->max == e.max);
+        if (e.applies_to) {
+            REQUIRE(f->applies_when.has_value());
+            CHECK(std::string_view(f->applies_when->discriminator_key) == "connectionType");
+            CHECK(std::string_view(f->applies_when->value) == *e.applies_to);
+        } else {
+            CHECK_FALSE(f->applies_when.has_value());
+        }
+    }
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the SkyWatcher telescope available only when built",
+          "[catalog][skywatcher][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kSkyWatcherKey);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+    CHECK(v->available);
+#else
+    CHECK_FALSE(v->available);
+    CHECK_THROWS_AS(catalog.create(kSkyWatcherKey, skywatcher_serial_with_site(), 0), std::runtime_error);
+    try {
+        (void)catalog.create(kSkyWatcherKey, skywatcher_serial_with_site(), 0);
+    } catch (const std::runtime_error& e) {
+        CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_SKYWATCHER") != std::string::npos);
+    }
+#endif
+}
+
+TEST_CASE("Builtin catalog - SkyWatcher normalize requires a site from the API and leaves a saved config alone (#274)",
+          "[catalog][skywatcher][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    // Rule 4, Api: neither, latitude only, longitude only -> the exact kMissingSite text.
+    for (const char* keep : {"", "siteLatitude", "siteLongitude"}) {
+        INFO(std::string("keeping ") + keep);
+        DeviceConfig config = skywatcher_serial_with_site();
+        if (std::string_view(keep) != "siteLatitude") config.erase("siteLatitude");
+        if (std::string_view(keep) != "siteLongitude") config.erase("siteLongitude");
+        const auto api = catalog.normalize(kSkyWatcherKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == kSkyWatcherMissingSite);
+
+        // Rule 4, Persisted: no warning, no rejection, the config as it is. The
+        // factory (not the schema) logs the WARNING, since only a saved config
+        // reaches it with a coordinate missing.
+        const auto persisted = catalog.normalize(kSkyWatcherKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        CHECK(persisted.warnings.empty());
+        CHECK(persisted.config.has("siteLatitude") == config.has("siteLatitude"));
+        CHECK(persisted.config.has("siteLongitude") == config.has("siteLongitude"));
+        CHECK(string_at(persisted.config, "connectionType") == "serial");
+        CHECK(string_at(persisted.config, "portPath") == "/dev/ttyUSB8");
+    }
+
+    // Null island is a real place: the rule is about presence, not value.
+    DeviceConfig null_island = skywatcher_serial_with_site();
+    null_island.set("siteLatitude", 0.0);
+    null_island.set("siteLongitude", 0.0);
+    CHECK_FALSE(catalog.normalize(kSkyWatcherKey, null_island, Source::Api).rejection.has_value());
+
+    // The site check comes first among the cross-field rules, as in the arm:
+    // a config missing its site AND carrying a bad connection type or an empty
+    // endpoint is refused for the site.
+    DeviceConfig no_site_bad_type;
+    no_site_bad_type.set("connectionType", std::string{"carrier-pigeon"});
+    no_site_bad_type.set("portPath", std::string{"/dev/ttyUSB9"});
+    const auto bad_type = catalog.normalize(kSkyWatcherKey, no_site_bad_type, Source::Api);
+    REQUIRE(bad_type.rejection.has_value());
+    CHECK(*bad_type.rejection == kSkyWatcherMissingSite);
+    DeviceConfig no_site_no_port;
+    no_site_no_port.set("connectionType", std::string{"serial"});
+    const auto no_port = catalog.normalize(kSkyWatcherKey, no_site_no_port, Source::Api);
+    REQUIRE(no_port.rejection.has_value());
+    CHECK(*no_port.rejection == kSkyWatcherMissingSite);
+}
+
+TEST_CASE(
+    "Builtin catalog - SkyWatcher normalize accepts four connection types and reads any other as serial when saved",
+    "[catalog][skywatcher][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    // Rule 5: "", "auto", "serial" and "network" are accepted from both
+    // sources and left exactly as given ("" stays "", it is not rewritten to "auto").
+    for (const char* type : {"", "auto", "serial", "network"}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig config = skywatcher_serial_with_site();
+        config.set("connectionType", std::string{type});
+        config.set("host", std::string{"192.168.4.1"});
+        config.set("mountIndex", std::int64_t{2});
+        const auto api = catalog.normalize(kSkyWatcherKey, config, Source::Api);
+        CHECK_FALSE(api.rejection.has_value());
+        CHECK(string_at(api.config, "connectionType") == type);
+        const auto persisted = catalog.normalize(kSkyWatcherKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        CHECK(persisted.warnings.empty());
+        CHECK(string_at(persisted.config, "connectionType") == type);
+    }
+
+    // Any other value: the API gets the arm's exact text; a saved one is read
+    // as "serial" (never "auto", #380: a saved unknown type must not
+    // auto-probe) with a warning that keeps the arm's two fragments, which
+    // the router wraps as "... config normalized: <warning>. ...".
+    for (const char* type : {"carrier-pigeon", "Network", "SERIAL"}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig config = skywatcher_serial_with_site();
+        config.set("connectionType", std::string{type});
+        const auto api = catalog.normalize(kSkyWatcherKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "Invalid connection type. Use 'auto', 'serial', or 'network'");
+        // A rejection returns the config as given.
+        CHECK(string_at(api.config, "connectionType") == type);
+
+        const auto persisted = catalog.normalize(kSkyWatcherKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        CHECK(string_at(persisted.config, "connectionType") == "serial");
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0].find(std::string("has connectionType \"") + type + "\"") != std::string::npos);
+        CHECK(persisted.warnings[0].find("treating it as \"serial\"") != std::string::npos);
+        CHECK(persisted.warnings[0].find("\"auto\"") == std::string::npos);
+    }
+
+    // The substitution feeds rule 6: a saved unknown type with no port path is
+    // read as serial AND warned about for the missing port, as the arm did.
+    DeviceConfig no_port;
+    no_port.set("connectionType", std::string{"carrier-pigeon"});
+    no_port.set("siteLatitude", 39.7392);
+    no_port.set("siteLongitude", -104.9903);
+    const auto persisted = catalog.normalize(kSkyWatcherKey, no_port, Source::Persisted);
+    CHECK_FALSE(persisted.rejection.has_value());
+    CHECK(any_contains(persisted.warnings, "has connectionType \"carrier-pigeon\""));
+    CHECK(any_contains(persisted.warnings, "Serial port path is required"));
+}
+
+TEST_CASE("Builtin catalog - SkyWatcher normalize refuses an empty endpoint and the catalog warns for a saved one",
+          "[catalog][skywatcher][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct Case {
+        const char* type;
+        const char* endpoint_key;
+        bool set_empty;  // true: key present and ""; false: key absent
+        const char* text;
+    };
+    const Case cases[]{
+        {"serial", "portPath", true, "Serial port path is required"},
+        {"serial", "portPath", false, "Serial port path is required"},
+        {"network", "host", true, "Host IP address is required"},
+        {"network", "host", false, "Host IP address is required"},
+    };
+    for (const Case& c : cases) {
+        INFO(std::string(c.type) + " with " + (c.set_empty ? "empty " : "absent ") + c.endpoint_key);
+        DeviceConfig config;
+        config.set("connectionType", std::string{c.type});
+        if (c.set_empty) config.set(c.endpoint_key, std::string{});
+        config.set("siteLatitude", 39.7392);
+        config.set("siteLongitude", -104.9903);
+
+        // Rule 6, Api: the arm's exact text.
+        const auto api = catalog.normalize(kSkyWatcherKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == c.text);
+
+        // Rule 6, Persisted: the schema's rejection becomes a catalog warning
+        // (device_catalog.cpp turns a persisted cross-field rejection into a
+        // warning and keeps the per-field result), so the device registers.
+        const auto persisted = catalog.normalize(kSkyWatcherKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == c.text);
+        CHECK(string_at(persisted.config, "connectionType") == c.type);
+        CHECK(persisted.config.has(c.endpoint_key) == c.set_empty);
+    }
+
+    // The other endpoint is not consulted: a serial config with no host and a
+    // network config with no port path are both fine.
+    DeviceConfig serial = skywatcher_serial_with_site();
+    CHECK_FALSE(catalog.normalize(kSkyWatcherKey, serial, Source::Api).rejection.has_value());
+    DeviceConfig network;
+    network.set("connectionType", std::string{"network"});
+    network.set("host", std::string{"192.168.4.1"});
+    network.set("siteLatitude", -33.87);
+    network.set("siteLongitude", 151.21);
+    CHECK_FALSE(catalog.normalize(kSkyWatcherKey, network, Source::Api).rejection.has_value());
+    // Auto never needs an endpoint.
+    DeviceConfig automatic;
+    automatic.set("connectionType", std::string{"auto"});
+    automatic.set("siteLatitude", -33.87);
+    automatic.set("siteLongitude", 151.21);
+    CHECK_FALSE(catalog.normalize(kSkyWatcherKey, automatic, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - SkyWatcher site range is per-field and precedes the missing-site rule (#398, #508 item 5)",
+          "[catalog][skywatcher][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    // Rule 7, Api: the per-field range message (the catalog's wording, which
+    // replaces read_site_coordinates()' "200.000000 ... degrees" text) wins over
+    // the cross-field missing-site rule, because per-field rules run first.
+    struct Bad {
+        const char* key;
+        double value;
+        const char* message;
+    };
+    const Bad bad[]{
+        {"siteLatitude", 200.0, "siteLatitude is out of range (min -90) (max 90)"},
+        {"siteLatitude", -90.5, "siteLatitude is out of range (min -90) (max 90)"},
+        {"siteLongitude", 999.0, "siteLongitude is out of range (min -180) (max 180)"},
+        {"siteLongitude", -180.5, "siteLongitude is out of range (min -180) (max 180)"},
+        {"siteLatitude", std::numeric_limits<double>::quiet_NaN(), "siteLatitude is out of range (min -90) (max 90)"},
+    };
+    for (const Bad& b : bad) {
+        INFO(std::string(b.key) + " = " + std::to_string(b.value));
+        DeviceConfig config = skywatcher_serial_with_site();
+        config.set(b.key, b.value);
+        const auto api = catalog.normalize(kSkyWatcherKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == b.message);
+
+        // Persisted: the value is dropped to unset with that one warning, and
+        // rule 4 adds NO missing-site warning of its own -- the factory logs
+        // it when it builds the driver (see the factory case below).
+        const auto persisted = catalog.normalize(kSkyWatcherKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == b.message);
+        CHECK_FALSE(persisted.config.has(b.key));
+        CHECK(persisted.config.has(std::string_view(b.key) == "siteLatitude" ? "siteLongitude" : "siteLatitude"));
+        CHECK_FALSE(any_contains(persisted.warnings, "Site latitude and longitude are required"));
+    }
+
+    // The limits are inclusive: the poles and the antimeridian are real places.
+    for (const auto& [key, value] : std::vector<std::pair<const char*, double>>{
+             {"siteLatitude", 90.0}, {"siteLatitude", -90.0}, {"siteLongitude", 180.0}, {"siteLongitude", -180.0}}) {
+        INFO(std::string(key) + " = " + std::to_string(value));
+        DeviceConfig config = skywatcher_serial_with_site();
+        config.set(key, value);
+        CHECK_FALSE(catalog.normalize(kSkyWatcherKey, config, Source::Api).rejection.has_value());
+    }
+
+    // An integer literal in a double field is a valid double (device_catalog.cpp
+    // widens it before the range check): {"siteLatitude": 40} is not a type error.
+    DeviceConfig whole = skywatcher_serial_with_site();
+    whole.set("siteLatitude", std::int64_t{40});
+    const auto widened = catalog.normalize(kSkyWatcherKey, whole, Source::Api);
+    CHECK_FALSE(widened.rejection.has_value());
+    const ConfigValue* lat = widened.config.find_value("siteLatitude");
+    REQUIRE(lat != nullptr);
+    REQUIRE(std::holds_alternative<double>(*lat));
+    CHECK(std::get<double>(*lat) == 40.0);
+}
+
+TEST_CASE("Builtin catalog - SkyWatcher sanitize keeps every declared field whatever the connection type (ADR 0004)",
+          "[catalog][skywatcher][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    // Rule 8: "Sanitize keeps every declared non-secret field; only the UI
+    // honours applies_when". The arm kept portPath/baudRate only for "serial"
+    // and host/udpPort only for "network"; the catalog keeps all four either
+    // way. tcpPort is not a Sky-Watcher field and still drops.
+    for (const char* type : {"serial", "network", "auto", ""}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig config;
+        config.set("connectionType", std::string{type});
+        config.set("mountIndex", std::int64_t{1});
+        config.set("portPath", std::string{"/dev/ttyUSB6"});
+        config.set("baudRate", std::int64_t{9600});
+        config.set("host", std::string{"192.168.4.1"});
+        config.set("udpPort", std::int64_t{11880});
+        config.set("responseTimeoutMs", std::int64_t{4000});
+        config.set("siteLatitude", 39.7392);
+        config.set("siteLongitude", -104.9903);
+        config.set("siteElevation", 1609.0);
+        config.set("apertureDiameter", 0.2);
+        config.set("focalLength", 1.0);
+        config.set("tcpPort", std::int64_t{1});
+        config.set("junk", true);
+        const DeviceConfig sanitized = catalog.sanitize(kSkyWatcherKey, config);
+        for (const char* key :
+             {"connectionType", "mountIndex", "portPath", "baudRate", "host", "udpPort", "responseTimeoutMs",
+              "siteLatitude", "siteLongitude", "siteElevation", "apertureDiameter", "focalLength"}) {
+            INFO(key);
+            CHECK(sanitized.has(key));
+        }
+        CHECK_FALSE(sanitized.has("tcpPort"));
+        CHECK_FALSE(sanitized.has("junk"));
+        CHECK(sanitized.entries().size() == 12);
+    }
+}
+
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+
+namespace {
+
+// Every WARN the block logs, by message (the component is not part of the contract).
+struct WarnCapture {
+    std::vector<std::string> messages;
+    alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+    WarnCapture() {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn) messages.emplace_back(message);
+            });
+    }
+    ~WarnCapture() { alpacacore::logging::set_log_sink(previous); }
+    WarnCapture(const WarnCapture&) = delete;
+    WarnCapture& operator=(const WarnCapture&) = delete;
+};
+
+}  // namespace
+
+TEST_CASE("Builtin catalog - the SkyWatcher factory passes the values through and constructs without a scan",
+          "[catalog][skywatcher][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+
+    // Rule 9, serial: create_skywatcher_telescope with the endpoint and site;
+    // apertureDiameter and focalLength applied because they are > 0.
+    {
+        const std::string path = "/dev/ttyUSB-skywatcher-none";
+        DeviceConfig config;
+        config.set("connectionType", std::string{"serial"});
+        config.set("portPath", path);
+        config.set("baudRate", std::int64_t{115200});
+        config.set("responseTimeoutMs", std::int64_t{250});
+        config.set("siteLatitude", -33.87);
+        config.set("siteLongitude", 151.21);
+        config.set("siteElevation", 42.0);
+        config.set("apertureDiameter", 0.2);
+        config.set("focalLength", 1.0);
+        WarnCapture warns;
+        std::unique_ptr<AlpacaDriver> driver;
+        REQUIRE_NOTHROW(driver = catalog.create(kSkyWatcherKey, config, 7));
+        REQUIRE(driver != nullptr);
+        CHECK(driver->get_device_type() == DeviceType::Telescope);
+        CHECK(driver->get_device_number() == 7);
+        CHECK_FALSE(driver->get_connected());
+        auto* telescope = dynamic_cast<TelescopeDriver*>(driver.get());
+        REQUIRE(telescope != nullptr);
+        // The site getters return the stored value under the mutex with no
+        // connection check (the #398 test_routing case relies on the same).
+        CHECK(telescope->get_site_latitude() == -33.87);
+        CHECK(telescope->get_site_longitude() == 151.21);
+        CHECK(telescope->get_site_elevation() == 42.0);
+        CHECK(telescope->get_aperture_diameter() == 0.2);
+        CHECK(telescope->get_focal_length() == 1.0);
+        // A complete saved config logs nothing (rule 4's WARNING is for a missing site only).
+        CHECK(warns.messages.empty());
+        // The node does not exist: the connect is refused, and by the serial
+        // path, not by the auto-detect scan.
+        try {
+            driver->set_connected(true);
+            FAIL("set_connected(true) must throw with no motor controller on " + path);
+        } catch (const AlpacaException& e) {
+            INFO(e.what());
+            CHECK_FALSE(driver->get_connected());
+            CHECK(std::string(e.what()).find("auto-detect") == std::string::npos);
+            CHECK(std::string(e.what()).find("Site latitude and longitude must be set") == std::string::npos);
+        }
+    }
+
+    // Rule 9, the arm's "applied only when > 0": zero and absent leave the
+    // driver's own defaults (the setters would accept 0.0, so this is the
+    // factory's choice, not the driver's).
+    {
+        DeviceConfig defaults = skywatcher_serial_with_site();
+        defaults.set("apertureDiameter", 0.0);
+        std::unique_ptr<AlpacaDriver> zero = catalog.create(kSkyWatcherKey, defaults, 8);
+        DeviceConfig absent = skywatcher_serial_with_site();
+        std::unique_ptr<AlpacaDriver> untouched = catalog.create(kSkyWatcherKey, absent, 9);
+        auto* a = dynamic_cast<TelescopeDriver*>(zero.get());
+        auto* b = dynamic_cast<TelescopeDriver*>(untouched.get());
+        REQUIRE(a != nullptr);
+        REQUIRE(b != nullptr);
+        CHECK(a->get_aperture_diameter() == b->get_aperture_diameter());
+        CHECK(a->get_focal_length() == b->get_focal_length());
+    }
+
+    // Rule 9, network: create_skywatcher_telescope with the host; constructs
+    // without touching the network.
+    {
+        DeviceConfig config;
+        config.set("connectionType", std::string{"network"});
+        config.set("host", std::string{"192.0.2.1"});  // TEST-NET-1: never routable
+        config.set("udpPort", std::int64_t{11880});
+        config.set("siteLatitude", 39.7392);
+        config.set("siteLongitude", -104.9903);
+        std::unique_ptr<AlpacaDriver> driver;
+        REQUIRE_NOTHROW(driver = catalog.create(kSkyWatcherKey, config, 10));
+        REQUIRE(driver != nullptr);
+        CHECK_FALSE(driver->get_connected());
+    }
+
+    // Rule 9, auto ("" and "auto"): create_skywatcher_telescope_auto. The
+    // #659/#660 contract: construction must not scan. A scan here with no
+    // hardware would throw "nothing answered the auto-detect probe"; the
+    // resolver runs only inside Connected=true, which this case never issues
+    // (a real scan DTR-resets every CP210x/CH340 on the box).
+    for (const char* type : {"", "auto"}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig config;
+        config.set("connectionType", std::string{type});
+        config.set("mountIndex", std::int64_t{3});
+        config.set("siteLatitude", 39.7392);
+        config.set("siteLongitude", -104.9903);
+        config.set("siteElevation", 1609.0);
+        std::unique_ptr<AlpacaDriver> driver;
+        REQUIRE_NOTHROW(driver = catalog.create(kSkyWatcherKey, config, 11));
+        REQUIRE(driver != nullptr);
+        CHECK(driver->get_device_type() == DeviceType::Telescope);
+        CHECK_FALSE(driver->get_connected());
+        auto* telescope = dynamic_cast<TelescopeDriver*>(driver.get());
+        REQUIRE(telescope != nullptr);
+        CHECK(telescope->get_site_latitude() == 39.7392);
+        CHECK(telescope->get_site_longitude() == -104.9903);
+        CHECK(telescope->get_site_elevation() == 1609.0);
+    }
+}
+
+TEST_CASE("Builtin catalog - the SkyWatcher factory warns about a saved config with no site and still builds it (#274)",
+          "[catalog][skywatcher][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+
+    // Rule 4: only a saved config reaches the factory with a coordinate
+    // missing (the API is refused in normalize). The factory logs the arm's
+    // exact WARNING, names the missing half, and builds the driver, which
+    // refuses the connect itself.
+    struct Case {
+        bool latitude;
+        bool longitude;
+        const char* missing;
+    };
+    const Case cases[]{
+        {false, false, "site coordinates"},
+        {true, false, "site longitude"},
+        {false, true, "site latitude"},
+    };
+    int device_number = 20;
+    for (const Case& c : cases) {
+        INFO(c.missing);
+        DeviceConfig config;
+        config.set("connectionType", std::string{"serial"});
+        config.set("portPath", std::string{"/dev/ttyUSB-skywatcher-none"});
+        if (c.latitude) config.set("siteLatitude", 39.7392);
+        if (c.longitude) config.set("siteLongitude", -104.9903);
+        const int number = device_number++;
+        const std::string expected = "Persisted Sky-Watcher telescope " + std::to_string(number) + " has no " +
+                                     c.missing + " and will refuse to connect. " + kSkyWatcherMissingSite;
+
+        WarnCapture warns;
+        std::unique_ptr<AlpacaDriver> driver;
+        REQUIRE_NOTHROW(driver = catalog.create(kSkyWatcherKey, config, number));
+        REQUIRE(driver != nullptr);
+        REQUIRE(warns.messages.size() == 1);
+        CHECK(warns.messages[0] == expected);
+
+        CHECK_FALSE(driver->get_connected());
+        try {
+            driver->set_connected(true);
+            FAIL("set_connected(true) must be refused without a site (#274)");
+        } catch (const AlpacaException& e) {
+            INFO(e.what());
+            CHECK_FALSE(driver->get_connected());
+            CHECK(std::string(e.what()).find("Site latitude and longitude must be set before connecting") !=
+                  std::string::npos);
+        }
+    }
+}
+
+#endif  // ALPACACORE_ENABLE_SKYWATCHER

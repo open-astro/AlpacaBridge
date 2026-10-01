@@ -8,6 +8,7 @@ if(ALPACACORE_ENABLE_SKYWATCHER)
     set(SKYWATCHER_SOURCES
         skywatcher_protocol_wrapper.cpp
         skywatcher_telescope_driver.cpp
+        skywatcher_catalog.cpp
     )
 
     add_library(alpacacore_skywatcher STATIC ${SKYWATCHER_SOURCES})

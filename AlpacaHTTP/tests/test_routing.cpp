@@ -38,6 +38,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -70,6 +71,38 @@ alpacahttp::Response route_request(alpacahttp::Router& router, const std::string
 
     EXPECT(request.parse(raw.str()));
     return router.route(request, 1);
+}
+
+// open-astro#392: route_request() with a chosen Host header, or none at all
+// when `host` is std::nullopt (an empty string sends an empty Host header).
+alpacahttp::Response route_with_host(alpacahttp::Router& router, const std::string& method, const std::string& path,
+                                     const std::optional<std::string>& host, const std::string& body = std::string()) {
+    alpacahttp::Request request;
+    std::ostringstream raw;
+    raw << method << " " << path << " HTTP/1.1\r\n";
+    if (host) {
+        raw << "Host: " << *host << "\r\n";
+    }
+    if (!body.empty()) {
+        raw << "Content-Type: application/json\r\n";
+        raw << "Content-Length: " << body.size() << "\r\n";
+    }
+    raw << "\r\n";
+    raw << body;
+
+    EXPECT(request.parse(raw.str()));
+    return router.route(request, 1);
+}
+
+// True when the response is the open-astro#392 Host refusal for `host`.
+bool is_host_refusal(const alpacahttp::Response& response, const std::string& host) {
+    if (response.status_code() != 403) {
+        return false;
+    }
+    const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+    return !json.is_discarded() && json.value("ErrorNumber", 0) == 0x401 &&
+           json.value("ErrorMessage", "") ==
+               "Host '" + host + "' is not allowed; add it to http.allowed_hosts or use the IP address";
 }
 
 // Issue #102 back-fill helper: POST a device config, then read it back from
@@ -796,6 +829,54 @@ int main() {
         EXPECT(resp.status_code() == 400);
         EXPECT(nlohmann::json::parse(resp.body()).value("ErrorNumber", 0) != 0);
     }
+
+    // open-astro#740: a setup path the regex rejects is client input, so its
+    // log line is DEBUG, not WARNING, and the path in it is cut to 256 bytes
+    // plus "... (<N> bytes)". The 404 response is unchanged.
+    {
+        struct CapturedLine {
+            alpacacore::logging::LogLevel level;
+            std::string message;
+        };
+        std::vector<CapturedLine> captured;
+        std::mutex captured_mutex;
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.push_back({level, std::string(message)});
+            });
+
+        const std::string prefix = "/setup/v1/nonsense";
+        const std::string path = prefix + std::string(1000 - prefix.size(), 'x');
+        EXPECT(path.size() == 1000);
+        const auto resp = route_request(router, "GET", path);
+        EXPECT(resp.status_code() == 404);
+        EXPECT(resp.body().find("Endpoint not found: " + path) != std::string::npos);
+
+        const std::string tag = "Setup endpoint regex did not match: ";
+        const std::string expected = tag + path.substr(0, 256) + "... (1000 bytes)";
+        std::lock_guard<std::mutex> lock(captured_mutex);
+        int matched = 0;
+        for (const auto& line : captured) {
+            EXPECT(line.level != alpacacore::logging::LogLevel::Warn);
+            EXPECT(line.level != alpacacore::logging::LogLevel::Error);
+            if (line.message.find(tag) != std::string::npos) {
+                ++matched;
+                EXPECT(line.level == alpacacore::logging::LogLevel::Debug);
+                EXPECT(line.message == expected);
+            }
+        }
+        EXPECT(matched == 1);
+    }
     alpacahttp::Request request;
 
     // Test management endpoint parsing
@@ -1011,6 +1092,27 @@ int main() {
             const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
         }
+
+        // 4. #627: a valid uint32 device number above INT_MAX names no device
+        // (the registry keys devices by int). It gets the ordinary not-found
+        // reply naming the number as sent, never a lookup of the negative int
+        // a narrowing cast would give (4294967295 -> -1, 2147483648 ->
+        // INT_MIN). Stubs sit at both negative numbers, so the old cast
+        // found one and answered 200.
+        EXPECT(registry.register_device(std::make_shared<TelescopeClockStubDriver>(-1)));
+        EXPECT(registry.register_device(std::make_shared<TelescopeClockStubDriver>(std::numeric_limits<int>::min())));
+        EXPECT(registry.get_device(alpacacore::DeviceType::Telescope, -1) != nullptr);
+        EXPECT(registry.get_device(alpacacore::DeviceType::Telescope, std::numeric_limits<int>::min()) != nullptr);
+        for (const std::string number : {"4294967295", "2147483648"}) {
+            const auto resp = route_request(router, "GET", "/api/v1/telescope/" + number + "/connected");
+            EXPECT(resp.status_code() == 400);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(!json.is_discarded() &&
+                   json.value("ErrorMessage", std::string()) == "Device not found: telescope #" + number);
+        }
+        registry.unregister_device(alpacacore::DeviceType::Telescope, -1);
+        registry.unregister_device(alpacacore::DeviceType::Telescope, std::numeric_limits<int>::min());
     }
 
 #ifdef ALPACACORE_ENABLE_ZWO
@@ -3966,16 +4068,21 @@ int main() {
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
         // Site coordinates are mandatory for this vendor from the API (#274).
+        // open-astro#744 rule 8: the catalog's sanitize keeps every declared
+        // non-secret field whatever the connection type (ADR 0004; only the UI
+        // honours applies_when), so a serial config now keeps host/udpPort
+        // and a network config keeps portPath. tcpPort is not a Sky-Watcher
+        // field and still drops.
         add("skywatcher", "telescope", "Telescope", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600,"siteLatitude":39.7392,)"
             R"("siteLongitude":-104.9903,"siteElevation":1609.0,"mountIndex":1,"host":"h","udpPort":1})",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600,"siteLatitude":39.7392,)"
-            R"("siteLongitude":-104.9903,"siteElevation":1609.0,"mountIndex":1})");
+            R"("siteLongitude":-104.9903,"siteElevation":1609.0,"mountIndex":1,"host":"h","udpPort":1})");
         add("skywatcher", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.4.1","udpPort":11880,"siteLatitude":-33.87,)"
             R"("siteLongitude":151.21,"portPath":"/dev/x","tcpPort":1})",
             R"({"connectionType":"network","host":"192.168.4.1","udpPort":11880,"siteLatitude":-33.87,)"
-            R"("siteLongitude":151.21})");
+            R"("siteLongitude":151.21,"portPath":"/dev/x"})");
         add("skywatcher", "telescope", "Telescope", "auto",
             R"({"connectionType":"auto","mountIndex":1,"siteLatitude":39.7392,"siteLongitude":-104.9903})",
             R"({"connectionType":"auto","mountIndex":1,"siteLatitude":39.7392,"siteLongitude":-104.9903})");  // #659
@@ -4155,27 +4262,35 @@ int main() {
             const char* bad_type_message;  // the arm's own literal, they differ
             const char* site;              // mandatory from the API for this vendor (#274)
             bool empty_type_is_auto;       // zwo is the odd one out (#508 item 3)
+            // open-astro#744: registered through the device catalog rather than
+            // a router arm. Two observable differences, pinned per case below:
+            // sanitize keeps every declared field (ADR 0004: portPath / host
+            // survive whatever the connection type), and a saved config's
+            // cross-field refusal is logged through the catalog's "config
+            // normalized" wrapper, not reject_invalid_config()'s "will refuse
+            // to connect" text.
+            bool catalog;
         };
         std::vector<Mount> mounts;
         const char* const kSite = R"("siteLatitude":39.7392,"siteLongitude":-104.9903)";
         const char* const kAutoOrSerialOrNetwork = "Invalid connection type. Use 'auto', 'serial', or 'network'";
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true, false});
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true, false});
 #endif
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
-        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true});
+        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true, true});
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true, false});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true});
+        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true, false});
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", false});
+        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", false, false});
 #endif
         for (const auto& m : mounts) {
             const std::string site = m.site;
@@ -4188,9 +4303,13 @@ int main() {
             // instead of auto-probing), stays listed, and configureddevices
             // still shows the raw value: sanitize_device_config copies the file
             // value verbatim and only the registration sees the fallback.
+            // A catalog vendor keeps the port path in the entry too (rule 8 of
+            // open-astro#744): sanitize no longer tests == "serial".
             pin("connectionType \"carrier-pigeon\" (#380/#353)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site}), m.bad_type_message, "{}",
-                true, obj({R"("connectionType":"carrier-pigeon")", site}),
+                true,
+                m.catalog ? obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site})
+                          : obj({R"("connectionType":"carrier-pigeon")", site}),
                 {"has connectionType \"carrier-pigeon\"", warned_serial}, {"Skipping persisted device"});
 
             // #508 item 2: connectionType is not case-folded. "Network" is
@@ -4199,17 +4318,26 @@ int main() {
             // keeps the raw "Network".
             pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"Network","host":"192.168.1.60")", site}), m.bad_type_message, "{}", true,
-                obj({R"("connectionType":"Network")", site}), {"has connectionType \"Network\"", warned_serial},
-                {"Skipping persisted device"});
+                m.catalog ? obj({R"("connectionType":"Network","host":"192.168.1.60")", site})
+                          : obj({R"("connectionType":"Network")", site}),
+                {"has connectionType \"Network\"", warned_serial}, {"Skipping persisted device"});
 
             // #508 item 1 (the six mount arms that go through
             // reject_invalid_config): an empty portPath on serial is rejected
             // by the API and, from a saved config, WARNED about and registered
             // anyway. Contrast the arms further down that drop the entry.
+            // open-astro#744 rule 6: for a catalog vendor the saved config is
+            // still registered, but the WARN is the catalog's wrapper
+            // ("Persisted <vendor> telescope N config normalized: Serial port
+            // path is required. The saved value is not used: ..."), not
+            // reject_invalid_config()'s "will refuse to connect" text.
             pin("serial with empty portPath (#508 item 1, mount arm)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"serial","portPath":"")", site}), "Serial port path is required", "{}", true,
                 obj({R"("connectionType":"serial","portPath":"")", site}),
-                {"will refuse to connect: Serial port path is required"}, {"Skipping persisted device"});
+                m.catalog ? std::vector<std::string>{"config normalized: Serial port path is required"}
+                          : std::vector<std::string>{"will refuse to connect: Serial port path is required"},
+                m.catalog ? std::vector<std::string>{"Skipping persisted device", "will refuse to connect"}
+                          : std::vector<std::string>{"Skipping persisted device"});
 
             // #508 item 3: an empty connectionType. zwo treats "" as
             // unrecognised: the API rejects it, a saved one is normalised to
@@ -4247,11 +4375,20 @@ int main() {
         // one is WARNED about and ignored by the driver (the #398 test above
         // reads the driver back), but the file entry keeps it: configureddevices
         // still shows 200.0, and the next save writes it back.
+        // open-astro#744 rule 7: the range is the catalog's per-field rule, so
+        // the API text is the catalog's ("siteLatitude is out of range (min
+        // -90) (max 90)"; it was read_site_coordinates()' "siteLatitude
+        // 200.000000 is out of range: must be between -90.000000 and 90.000000
+        // degrees"). A saved value is dropped to unset with the catalog's
+        // wrapped warning, so the factory then logs the #274 missing-site
+        // WARNING as well: two WARNs, the persisted outcome unchanged.
         pin("siteLatitude 200 (#508 item 5)", "skywatcher", "telescope", "Telescope",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
-            "siteLatitude 200.000000 is out of range: must be between -90.000000 and 90.000000 degrees", "{}", true,
+            "siteLatitude is out of range (min -90) (max 90)", "{}", true,
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
-            {"siteLatitude 200.000000 is out of range", "The coordinate is ignored"}, {"Skipping persisted device"});
+            {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted Sky-Watcher telescope",
+             "has no site latitude and will refuse to connect"},
+            {"Skipping persisted device", "The coordinate is ignored", "200.000000"});
 #endif
 
         // #508 item 1, the arms that DROP a saved entry on an empty portPath
@@ -5999,6 +6136,35 @@ int main() {
             remove_device(router, "skywatcher", "telescope", device);
         }
     }
+
+    // open-astro#744: an Int field takes an integer or a whole-number float
+    // (9600 or 9600.0); a fractional value is a wrong-type refusal naming the
+    // field, as for every catalog vendor (catalog_json.cpp whole_number()).
+    // The arm's config_get<int>() read 9600.5 as 9600 without a word. The
+    // catalog rule wins; the PR body quotes the change.
+    {
+        alpacahttp::Router router;
+        const auto fractional = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
+                                  R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600.5,)"
+                                  R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+            "Telescope");
+        EXPECT(!fractional.ok);
+        EXPECT(fractional.message.find("baudRate") != std::string::npos);
+        EXPECT(fractional.message.find("wrong type") != std::string::npos);
+        EXPECT(listed_entry(router, "Telescope", 9259).is_null());
+
+        const auto whole = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
+                                  R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600.0,)"
+                                  R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+            "Telescope");
+        EXPECT(whole.ok);
+        EXPECT(whole.config.value("baudRate", -1) == 9600);
+        remove_device(router, "skywatcher", "telescope", 9259);
+    }
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
 
     // Issue #348: every state-changing management endpoint carries the
@@ -6250,8 +6416,8 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and WeeWX descriptors plus the "zzz" test descriptor, schema only, so its
-    // `available` is false.
+    // and the SkyWatcher (open-astro#744) and WeeWX descriptors plus the "zzz"
+    // test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema(router.catalog());
@@ -6261,7 +6427,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 3);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 4);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -6269,6 +6435,13 @@ int main() {
         for (auto& entry : fixture) {
             if (entry.value("vendor", "") == "astroasis") {
 #ifdef ALPACACORE_ENABLE_ASTROASIS
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "skywatcher") {
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -6442,6 +6615,112 @@ int main() {
         EXPECT(listed_entry(router, "Focuser", 9257).is_null());
     }
 #endif
+
+#ifndef ALPACACORE_ENABLE_SKYWATCHER
+    // open-astro#744 rule 1 / test 3: with the vendor built out, the catalog
+    // path reports the deleted arm's exact text through vendor_label() (the
+    // display name's first word is "SkyWatcher"). Green before the arm is
+    // deleted; it pins the client-facing and web-UI text across the move. The
+    // site is supplied because the catalog validates (rule 4) before it
+    // answers "not enabled", where the arm answered first.
+    {
+        alpacahttp::Router router;
+        const auto off = api_attempt(router,
+                                     nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope",)"
+                                                           R"("deviceNumber":9258,"connectionType":"serial",)"
+                                                           R"("portPath":"/dev/ttyUSB6","siteLatitude":39.7392,)"
+                                                           R"("siteLongitude":-104.9903})"),
+                                     "Telescope");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "SkyWatcher support not enabled. Rebuild with -DALPACACORE_ENABLE_SKYWATCHER=ON");
+        EXPECT(listed_entry(router, "Telescope", 9258).is_null());
+    }
+#endif
+
+    // open-astro#392: Host allowlist against DNS rebinding. After a rebind
+    // the browser sends the attacker's name as Host (and as Origin), so the
+    // Origin==Host guard passes; route() now refuses any Host that is not an
+    // IP literal, a reserved local name, the machine's own name or a
+    // configured one, for every method and path.
+    {
+        alpacahttp::Router router;
+        const std::string apiversions = "/management/apiversions";
+
+        char hostname_buffer[256] = {};
+        EXPECT(::gethostname(hostname_buffer, sizeof(hostname_buffer) - 1) == 0);
+        std::string hostname = hostname_buffer;
+        std::transform(hostname.begin(), hostname.end(), hostname.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        const std::vector<std::optional<std::string>> allowed = {
+            "192.168.1.20",     "192.168.1.20:6800", "[::1]",       "[fe80::1]:6800", "localhost",   "LOCALHOST.",
+            hostname,           hostname + ".local", "astro.local", "foo.home.arpa",  "pi.internal", "x.localhost",
+            "Astro.Local:6800", std::nullopt,
+        };
+        for (const auto& host : allowed) {
+            const auto response = route_with_host(router, "GET", apiversions, host);
+            if (response.status_code() != 200) {
+                std::cerr << "Host allowlist: refused " << host.value_or("<no Host>") << "\n";
+            }
+            EXPECT(response.status_code() == 200);
+        }
+
+        // Refused on a GET management route, a PUT device method and a
+        // static file alike: the check runs before any of them.
+        EXPECT(is_host_refusal(route_with_host(router, "GET", "/management/v1/configureddevices", "attacker.example"),
+                               "attacker.example"));
+        EXPECT(is_host_refusal(route_with_host(router, "PUT", "/api/v1/telescope/0/tracking", "attacker.example"),
+                               "attacker.example"));
+        EXPECT(
+            is_host_refusal(route_with_host(router, "GET", "/web/index.html", "attacker.example"), "attacker.example"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", "/", "attacker.example:6800"), "attacker.example:6800"));
+        // IP-literal tests parse, they do not pattern-match.
+        for (const std::string host :
+             {"1.2.3.4.evil.example", "0x7f.1", "::1", "fe80::1:6800", "evil.local.example.com",
+              "localhost.evil.example", "[::1].evil.example", "[not-an-ip]", "local"}) {
+            const auto response = route_with_host(router, "GET", apiversions, host);
+            if (!is_host_refusal(response, host)) {
+                std::cerr << "Host allowlist: allowed " << host << "\n";
+            }
+            EXPECT(is_host_refusal(response, host));
+        }
+        // The echoed name is cut to 255 bytes.
+        {
+            const std::string long_host(300, 'a');
+            EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, long_host), long_host.substr(0, 255)));
+        }
+
+        // The 403 echoes ClientTransactionID: the query string's, else the
+        // JSON body's (open-astro#384, #509).
+        {
+            const auto query_response =
+                route_with_host(router, "GET", apiversions + "?ClientTransactionID=4242", "attacker.example");
+            EXPECT(is_host_refusal(query_response, "attacker.example"));
+            const auto from_query = nlohmann::json::parse(query_response.body(), nullptr, false);
+            EXPECT(!from_query.is_discarded() && from_query.value("ClientTransactionID", 0) == 4242);
+            const auto body_response =
+                route_with_host(router, "PUT", "/api/v1/telescope/0/tracking", "attacker.example",
+                                R"({"Tracking": true, "ClientTransactionID": 777})");
+            EXPECT(is_host_refusal(body_response, "attacker.example"));
+            const auto from_body = nlohmann::json::parse(body_response.body(), nullptr, false);
+            EXPECT(!from_body.is_discarded() && from_body.value("ClientTransactionID", 0) == 777);
+        }
+
+        // A leading dot is a suffix entry; no dot matches only that name.
+        // Entries are normalized like the request host.
+        router.set_allowed_hosts({".LAN.", "astropi.home", " ", ""});
+        EXPECT(route_with_host(router, "GET", apiversions, "pi.lan").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", apiversions, "lan").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", apiversions, "Pi.Lan:6800").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", apiversions, "astropi.home").status_code() == 200);
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "lan.evil.example"), "lan.evil.example"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "evillan"), "evillan"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "x.astropi.home"), "x.astropi.home"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "attacker.example"), "attacker.example"));
+        // Replacing the list drops the old entries.
+        router.set_allowed_hosts({});
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "pi.lan"), "pi.lan"));
+    }
 
 #ifdef ALPACACORE_ENABLE_WEEWX
     // open-astro#731: the WeeWX refusals keep the router arm's exact text on

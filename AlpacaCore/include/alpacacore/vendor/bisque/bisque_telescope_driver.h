@@ -19,6 +19,16 @@
 
 namespace alpacacore::vendor::bisque {
 
+namespace detail {
+// open-astro#627: the argument checks the coordinate slew/sync forms and
+// MoveAxis run before the connection check and any TheSkyX call. Free
+// functions so a test can call them without constructing a driver.
+// Throws InvalidValue for a non-finite or out-of-range RA (checked first) or Dec.
+void validate_ra_dec(double ra, double dec);
+// Throws InvalidValue for a non-finite MoveAxis rate.
+void validate_move_axis_rate(double rate);
+}  // namespace detail
+
 std::unique_ptr<TelescopeDriver> create_bisque_telescope(
     int device_number,
     const ConnectionInfo& connection_info);

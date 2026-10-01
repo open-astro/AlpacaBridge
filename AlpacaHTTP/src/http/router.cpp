@@ -25,6 +25,8 @@
 #include <alpacahttp/util/host_timezone.h>
 #include <alpacahttp/util/logging_adapter.h>
 #include <alpacahttp/version.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 #include <zlib.h>
 
 #include <algorithm>
@@ -62,9 +64,6 @@
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_SKYWATCHER
-#include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
@@ -1391,6 +1390,134 @@ std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
 // path today is under 100 bytes; 2048 stays far below the crash depth.
 constexpr std::size_t kMaxRequestPathBytes = 2048;
 
+// open-astro#392: the host part of a Host header or an http.allowed_hosts
+// entry: port removed, lowercased, one trailing dot removed. A bracketed IPv6
+// literal keeps its brackets. std::nullopt when the value cannot name a host:
+// an unbracketed name with two or more colons (a bare IPv6 literal, which a
+// browser never sends), an unclosed bracket, or text after the bracket that is
+// not a port.
+std::optional<std::string> normalize_host(std::string_view value) {
+    std::string_view name = value;
+    if (!name.empty() && name.front() == '[') {
+        const auto close = name.find(']');
+        if (close == std::string_view::npos) {
+            return std::nullopt;
+        }
+        const auto rest = name.substr(close + 1);
+        if (!rest.empty() && rest.front() != ':') {
+            return std::nullopt;
+        }
+        name = name.substr(0, close + 1);
+    } else if (const auto colon = name.find(':'); colon != std::string_view::npos) {
+        if (name.find(':', colon + 1) != std::string_view::npos) {
+            return std::nullopt;
+        }
+        name = name.substr(0, colon);
+    }
+    std::string normalized(name);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (!normalized.empty() && normalized.back() == '.') {
+        normalized.pop_back();
+    }
+    return normalized;
+}
+
+// `suffix` starts with a dot; the name must have at least one character
+// before it, so ".local" alone is not a .local name.
+bool has_label_suffix(std::string_view name, std::string_view suffix) {
+    return name.size() > suffix.size() && name.substr(name.size() - suffix.size()) == suffix;
+}
+
+// A parser, not a pattern: "1.2.3.4.evil.example" and "0x7f.1" are names.
+bool is_ip_literal(const std::string& name) {
+    if (name.size() > 2 && name.front() == '[' && name.back() == ']') {
+        in6_addr v6{};
+        return ::inet_pton(AF_INET6, name.substr(1, name.size() - 2).c_str(), &v6) == 1;
+    }
+    in_addr v4{};
+    return ::inet_pton(AF_INET, name.c_str(), &v4) == 1;
+}
+
+// `name` is normalized and non-empty. The reserved suffixes never resolve
+// through public DNS (RFC 6761 .localhost, RFC 6762 .local, RFC 8375
+// .home.arpa, ICANN 2024 .internal), so a rebinding attacker cannot use them.
+bool host_allowed(const std::string& name, const std::vector<std::string>& allowed_hosts,
+                  const std::string& machine_hostname) {
+    if (is_ip_literal(name) || name == "localhost" || has_label_suffix(name, ".localhost")) {
+        return true;
+    }
+    if (!machine_hostname.empty() && (name == machine_hostname || name == machine_hostname + ".local")) {
+        return true;
+    }
+    for (const std::string_view suffix : {".local", ".home.arpa", ".internal"}) {
+        if (has_label_suffix(name, suffix)) {
+            return true;
+        }
+    }
+    for (const auto& entry : allowed_hosts) {
+        if (entry.front() == '.') {
+            if (name == std::string_view(entry).substr(1) || has_label_suffix(name, entry)) {
+                return true;
+            }
+        } else if (name == entry) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string read_machine_hostname() {
+    std::array<char, 256> buffer{};
+    if (::gethostname(buffer.data(), buffer.size() - 1) != 0) {
+        return {};
+    }
+    return normalize_host(buffer.data()).value_or(std::string());
+}
+
+// open-astro#392: DNS rebinding. After a rebind the browser addresses this
+// server by the attacker's name, sends it as Host (and as Origin, so the
+// Origin==Host guard below passes), and treats the server as same-origin.
+// Refuse any Host that is not allowed, for every method and path. A missing or
+// empty Host is allowed: HTTP/1.0 clients omit it, a browser never does.
+// Logged at DEBUG only: a page under attack repeats the request.
+std::optional<Response> reject_disallowed_host(const Request& request, std::uint32_t server_tx_id,
+                                               const std::vector<std::string>& allowed_hosts,
+                                               const std::string& machine_hostname) {
+    const std::string host = request.get_header("Host");
+    if (host.empty()) {
+        return std::nullopt;
+    }
+    const auto name = normalize_host(host);
+    if (name && !name->empty() && host_allowed(*name, allowed_hosts, machine_hostname)) {
+        return std::nullopt;
+    }
+    // The header is client text: cut it to 255 bytes and replace anything
+    // but printable ASCII, so the JSON body always serializes.
+    std::string shown = host.substr(0, 255);
+    std::replace_if(shown.begin(), shown.end(), [](unsigned char c) { return c < 0x20 || c > 0x7e; }, '?');
+    util::log_debug("Refused request for Host '" + shown + "'");
+    // Same ClientTransactionID precedence as reject_cross_origin_request():
+    // the query string's, else the JSON body's (open-astro#384, #509).
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+    if (client_tx_id == 0 && !request.body().empty()) {
+        if (auto json_opt = parse_json(request.body())) {
+            client_tx_id = extract_client_transaction_id(*json_opt);
+        }
+    }
+    AlpacaResponse alpaca_response =
+        make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                            "Host '" + shown + "' is not allowed; add it to http.allowed_hosts or use the IP address");
+    Response resp;
+    resp.set_content_type("application/json");
+    resp.set_status(403, "Forbidden");
+    resp.set_body(alpaca_response);
+    return resp;
+}
+
 // Defined further down with the management guards, but declared here because
 // every state-changing management handler needs it and handle_description()
 // is the first of them in file order. Also used by the four device setters
@@ -1406,7 +1533,7 @@ std::optional<Response> reject_cross_origin_request(const Request& request, std:
 
 Router::Router() : Router(CatalogExtension{}) {}
 
-Router::Router(const CatalogExtension& extend_catalog) {
+Router::Router(const CatalogExtension& extend_catalog) : machine_hostname_(read_machine_hostname()) {
     alpacacore::catalog::register_builtin_schemas(catalog_);
     alpacacore::catalog::register_builtin_factories(catalog_);
     if (extend_catalog) {
@@ -1459,6 +1586,22 @@ void Router::set_server_info(std::string server_name, std::string manufacturer, 
     manufacturer_version_ = std::move(manufacturer_version);
     location_ = std::move(location);
     profile_name_ = std::move(profile_name);
+}
+
+void Router::set_allowed_hosts(const std::vector<std::string>& hosts) {
+    auto normalized = std::make_shared<std::vector<std::string>>();
+    for (const auto& entry : hosts) {
+        const auto first = entry.find_first_not_of(" \t");
+        if (first == std::string::npos) {
+            continue;
+        }
+        auto name = normalize_host(std::string_view(entry).substr(first, entry.find_last_not_of(" \t") - first + 1));
+        if (name && !name->empty() && *name != ".") {
+            normalized->push_back(std::move(*name));
+        }
+    }
+    std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
+    allowed_hosts_ = std::move(normalized);
 }
 
 void Router::set_config_path(std::string config_path) {
@@ -1529,6 +1672,19 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
                                         " bytes; the limit is " + std::to_string(kMaxRequestPathBytes) + " bytes");
             response.set_body(alpaca_response);
             return response;
+        }
+
+        // open-astro#392: before static files, setup pages and routing.
+        {
+            std::shared_ptr<const std::vector<std::string>> allowed_hosts;
+            {
+                std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
+                allowed_hosts = allowed_hosts_;
+            }
+            if (auto refused =
+                    reject_disallowed_host(request, server_transaction_id, *allowed_hosts, machine_hostname_)) {
+                return *refused;
+            }
         }
 
         // Handle static file requests (web UI)
@@ -2280,8 +2436,14 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
 
         // Get device from registry
         auto& registry = alpacacore::management::DeviceRegistry::instance();
-        auto device = registry.get_device(device_type, static_cast<int>(match.device_number));
-        
+        // #627: the registry keys devices by int, so a valid uint32 number
+        // above INT_MAX names no device; it takes the not-found reply below
+        // instead of a narrowing cast (4294967295 would look up -1).
+        std::shared_ptr<alpacacore::AlpacaDriver> device;
+        if (match.device_number <= static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+            device = registry.get_device(device_type, static_cast<int>(match.device_number));
+        }
+
         if (!device) {
             response.set_status(400, "Bad Request");
             AlpacaResponse alpaca_response = make_error_response(
@@ -6391,7 +6553,14 @@ Response Router::handle_setup(const Request& request, std::uint32_t server_tx_id
     std::smatch matches;
 
     if (!std::regex_match(request.path(), matches, setup_regex)) {
-        util::log_warning("Setup endpoint regex did not match: " + request.path());
+        // Client input, so DEBUG, and the path is cut to its first 256 bytes (#740).
+        constexpr std::size_t kLoggedPathBytes = 256;
+        const std::string& path = request.path();
+        std::string logged_path = path.substr(0, kLoggedPathBytes);
+        if (path.size() > kLoggedPathBytes) {
+            logged_path += "... (" + std::to_string(path.size()) + " bytes)";
+        }
+        util::log_debug("Setup endpoint regex did not match: " + logged_path);
         // Not a valid setup path; return 404 as Alpaca error.
         response.set_status(404, "Not Found");
         AlpacaResponse alpaca_response = make_error_response(
@@ -8210,119 +8379,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "skywatcher" && device_type_str == "telescope") {
-#ifdef ALPACACORE_ENABLE_SKYWATCHER
-        std::string conn_type = config_get(config, "connectionType", "auto");
-        // Issue #380: an unrecognised connectionType on a persisted config is
-        // normalised to "serial" rather than dropping the device, so it stays
-        // listed and editable in the web UI and its connect fails on the port
-        // path instead of auto-probing and attaching to whatever answers. The
-        // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
-                                                        device_type_str, device_number);
-
-        std::optional<double> site_latitude;
-        std::optional<double> site_longitude;
-        std::optional<double> site_elevation;
-
-        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
-            return false;
-        }
-        if (config_has(config, "siteElevation")) {
-            site_elevation = config_get(config, "siteElevation", 0.0);
-        }
-
-        // open-astro#274: /management/v1/configuredevice is a first-class REST
-        // API independent of the web UI, and used to accept a skywatcher
-        // config with no coordinates at all. The mount stores no site of its
-        // own, so both would then collapse to 0.0 and a southern rig would run
-        // northern pointing math -- silently undoing #250, #253 and #261.
-        // This check follows the SAME source rule as the
-        // portPath/host/connectionType checks below (reject the API, warn and
-        // register a persisted config), but it is spelled out inline rather
-        // than delegated to reject_invalid_config() because it needs the
-        // which-coordinate-is-missing detail in its WARN, and because
-        // normalize_persisted_connection_type()'s trick of substituting a safe
-        // value has no equivalent here: 0.0 is a real place that reads as
-        // northern, so there is nothing to carry forward.
-        if (!site_latitude.has_value() || !site_longitude.has_value()) {
-            static constexpr const char* kMissingSite =
-                "Site latitude and longitude are required for the Sky-Watcher direct driver: this mount stores no "
-                "site of its own, and tracking direction, guide sign and pier side are all hemisphere-dependent";
-            if (source == ConfigSource::Api) {
-                error_message = kMissingSite;
-                return false;
-            }
-            // Already on disk from before this rule existed. Register it so it
-            // keeps appearing in configureddevices and stays editable in the
-            // web UI; the driver refuses the connect until it is fixed.
-            const char* missing = (!site_latitude.has_value() && !site_longitude.has_value()) ? "site coordinates"
-                                  : !site_latitude.has_value()                                ? "site latitude"
-                                                                                              : "site longitude";
-            util::log_warning("Persisted Sky-Watcher telescope " + std::to_string(device_number) + " has no " +
-                              missing + " and will refuse to connect. " + kMissingSite);
-        }
-
-        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
-
-        if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config_get(config, "mountIndex", 0);
-            telescope = alpacacore::vendor::skywatcher::create_skywatcher_telescope_auto(
-                device_number, mount_index, site_latitude, site_longitude, site_elevation);
-        } else {
-            alpacacore::vendor::skywatcher::ConnectionInfo conn_info;
-
-            if (conn_type == "serial") {
-                conn_info.type = alpacacore::vendor::skywatcher::ConnectionType::Serial;
-                conn_info.port_path = config_get(config, "portPath", "");
-                conn_info.baud_rate = config_get(config, "baudRate", 9600);
-
-                if (conn_info.port_path.empty() &&
-                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
-                                          device_number, error_message)) {
-                    return false;
-                }
-            } else if (conn_type == "network") {
-                conn_info.type = alpacacore::vendor::skywatcher::ConnectionType::Network;
-                conn_info.host = config_get(config, "host", "");
-                conn_info.udp_port = config_get(config, "udpPort", conn_info.udp_port);
-
-                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
-                                                                    device_type_str, device_number, error_message)) {
-                    return false;
-                }
-            } else {
-                error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
-                return false;
-            }
-
-            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
-
-            telescope = alpacacore::vendor::skywatcher::create_skywatcher_telescope(
-                device_number, conn_info, site_latitude, site_longitude, site_elevation);
-        }
-
-        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
-            telescope->set_aperture_diameter(aperture);
-        }
-        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
-            telescope->set_focal_length(focal);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
-            util::log_info("Registered SkyWatcher telescope");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "SkyWatcher support not enabled. Rebuild with -DALPACACORE_ENABLE_SKYWATCHER=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "onstep" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_ONSTEP
         std::string conn_type = config_get(config, "connectionType", "auto");
@@ -9770,20 +9826,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         } else if (connection_type == "network") {
             copy_if_present("host");
             copy_if_present("tcpPort");
-        }
-    } else if (vendor == "skywatcher") {
-        copy_if_present("connectionType");
-        copy_if_present("mountIndex");  // same issue-#102 gap as ioptron above
-        copy_if_present("siteLatitude");
-        copy_if_present("siteLongitude");
-        copy_if_present("siteElevation");
-        std::string connection_type = config_get(config, "connectionType", "");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
-        } else if (connection_type == "network") {
-            copy_if_present("host");
-            copy_if_present("udpPort");
         }
     } else if (vendor == "onstep") {
         // OnStep is USB-serial only — no "network" branch (see the

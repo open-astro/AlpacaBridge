@@ -105,51 +105,53 @@ Review the branch contents and warn the user about anything that's missing:
 
 - [ ] **Unit tests**: Does the branch include Catch2 tests? (required for all driver code)
 - [ ] **ConformU results**: If this is a driver PR, is an arm64 ConformU report included AND clean (verified in Step 1 — errors=0, issues=0, timing issues=0)?
-- [ ] **CHANGELOG.md**: Is there an entry under `## [x.x.x] - UNRELEASED`, and does the version match the **Versioning policy** below for everything on this branch?
+- [ ] **Changelog fragment**: Does the branch add `changelog.d/<branch-slug>.md` (and leave `CHANGELOG.md` alone), with categories that match the **Versioning policy** below for everything on this branch?
 - [ ] **SUPPORTED-DRIVERS.md**: If this adds or validates a driver, is the table updated?
 - [ ] **AGENTS.md**: Were lessons learned captured?
 - [ ] **AGPL license headers**: `check_docs_drift.py` check 9 fails CI on any first-party source file without the current header, so this is only a reminder to run it (the pre-flight does).
 - [ ] **SDK cleanup**: If SDK files were added under `external/`, have Windows/macOS/32-bit/demo files been removed?
 
-Present the checklist to the user with pass/fail status. If critical items are missing (tests, CHANGELOG), recommend fixing before submitting but let the user decide.
+Present the checklist to the user with pass/fail status. If critical items are missing (tests, changelog fragment), recommend fixing before submitting but let the user decide.
 
-### Verify the UNRELEASED version (Versioning policy)
+### Verify the changelog fragment and its version (Versioning policy)
 
-Look at everything this branch adds/changes (from the diff above) and confirm the
-`## [x.x.x] - UNRELEASED` heading in `CHANGELOG.md` reflects the **highest-severity** change.
+Look at everything this branch adds/changes (from the diff above) and confirm the branch's
+fragment, `changelog.d/<branch-slug>.md`, files each change under the category the release turns
+into the right version bump. The release derives the version from the fragments
+(`python3 scripts/changelog_fragments.py --bump`); a fragment carries none.
 AlpacaBridge is an end-user appliance, so "breaking" means breaks an existing user's install/
 setup. Bump relative to the last **released** version:
 
 - **MAJOR** `x.0.0` — breaks an existing user (drop a platform, remove a driver, config-format
-  change needing migration, change a default that alters behavior).
+  change needing migration, change a default that alters behavior): `### Breaking changes`.
 - **MINOR** `x.Y.0` — new backward-compatible capability: **a new driver**, new device/model
-  support, a new optional feature/flag. Resets patch to 0.
+  support, a new optional feature/flag. Resets patch to 0: an unqualified `### Added`.
 - **PATCH** `x.y.Z` — no new capability: bug fix to an existing driver, ConformU re-validation,
-  packaging fix, docs/skill/spec changes.
+  packaging fix, docs/skill/spec changes: any other category, `### Added (tests)` included.
 
-A branch that adds a new driver MUST be a minor bump, never a patch. If the UNRELEASED heading
-undershoots (e.g. it says `2.0.1` but the branch adds a driver, so it should be `2.1.0`), flag
-it and recommend running `/commit` to correct the heading before opening the PR — don't open a
-PR with a version that misrepresents the change.
+A branch that adds a new driver MUST have an unqualified `### Added` entry, never only a
+`Fixed`/`Changed` one. If the fragment undershoots, flag it and recommend running `/commit` to
+correct it before opening the PR — don't open a PR whose fragment misrepresents the change. The
+branch must not edit `CHANGELOG.md`; run `python3 scripts/changelog_fragments.py --check`.
 
 ### Release version bump (ask the user — MANDATORY, every run)
 
-Most PRs leave the version as `UNRELEASED` and the actual release is cut separately. On **every**
+Most PRs leave the version alone and the actual release is cut separately. On **every**
 run of this skill, before pushing, ask the user whether this PR is cutting the release — never
 skip or assume the answer:
 
-> "Is this PR cutting the `<UNRELEASED version>` release? If so I can update the `VERSION` file
-> and the `README.md` version badge to `<UNRELEASED version>` (and date the CHANGELOG entry) so
-> they're ready for release. Otherwise I'll leave everything as UNRELEASED."
+> "Is this PR cutting the `<next version>` release? If so I can update the `VERSION` file
+> and the `README.md` version badge to `<next version>` and assemble the changelog fragments into
+> a dated CHANGELOG section so they're ready for release. Otherwise I'll leave everything alone."
 
 - **If NO** (default for feature / driver / fix PRs) — leave the `VERSION` file, the `README.md`
-  badge, and the CHANGELOG `UNRELEASED` heading untouched. Proceed to Step 4.
-- **If YES** — finalize the version (the `[x.x.x]` from the CHANGELOG UNRELEASED heading):
+  badge, `CHANGELOG.md` and the fragments untouched. Proceed to Step 4.
+- **If YES** — finalize the version (`python3 scripts/changelog_fragments.py --bump` proposes it):
   1. Write the bare version (e.g. `2.1.0`) into the `VERSION` file — `printf '%s\n' <version> > VERSION`.
   2. Update the README badge line `#### [x.x.x] - YYYY-MM-DD &middot; [Changelog](CHANGELOG.md)`
      to the new version and **today's date**.
-  3. Change the CHANGELOG heading `## [x.x.x] - UNRELEASED` to `## [x.x.x] - YYYY-MM-DD` (today),
-     so `VERSION`, the README badge, and the CHANGELOG agree.
+  3. Assemble the fragments: `python3 scripts/changelog_fragments.py --release x.x.x --date YYYY-MM-DD`
+     (today; it writes the dated section and deletes the fragments), so `VERSION`, the README badge, and the CHANGELOG agree.
   4. These are now uncommitted changes (Step 1 required a clean tree). Show the user the diff and
      a commit message (e.g. `Release <version>`) for approval, commit them on this branch
      following the project's commit conventions, then continue to the Step 4 pre-flight and push.
@@ -229,7 +231,7 @@ Group by component using bold tags:
 - **Vendor Unit Tests**: test count and assertion count
 - **Vendor SDK**: version and location
 - **ConformU Validation**: platforms tested, results
-- **Documentation**: CHANGELOG, SUPPORTED-DRIVERS.md, AGENTS.md updates
+- **Documentation**: changelog fragment, SUPPORTED-DRIVERS.md, AGENTS.md updates
 
 ## Test plan
 - [ ] Local CI pre-flight green: `run_all_tests.sh` (vendors OFF + ON), clang-format, unicode scan, and (when installed) clang-tidy/cppcheck
