@@ -49,18 +49,34 @@ namespace alpacacore::test {
  */
 class FakeTaskClock final : public util::TaskClock {
 public:
-    /// Test-only hook, null by default. Called inside wait_for() after the
-    /// predicate and deadline checks and before each block, with the
-    /// caller's mutex held. It exists only for the lost-wakeup case in
-    /// test_task_clock.cpp, the same shape as FakeQHYSDK::before_call. Read
-    /// with no synchronisation: set it before the waiter starts, and clear it
-    /// after the waiter has returned and before the clock is destroyed.
-    std::function<void()> before_block;
+    /// Test-only hook, null by default, the same shape as
+    /// FakeQHYSDK::before_call. Called inside wait_for() after the predicate
+    /// and deadline checks and before each block, with the caller's mutex
+    /// held, and passed the caller's predicate so a hook can hold the waiter
+    /// in that window until the predicate turns true. Two cases use it: the
+    /// lost-wakeup case in test_task_clock.cpp, and the SkyWatcher case "a
+    /// reaper's cancel is not lost between a parked task's check and its
+    /// block (#743)", on a clock a connected driver and a fake mount share.
+    using BeforeBlock = std::function<void(const std::function<bool()>& pred)>;
 
     FakeTaskClock() = default;
     FakeTaskClock(const FakeTaskClock&) = delete;
     FakeTaskClock& operator=(const FakeTaskClock&) = delete;
     ~FakeTaskClock() = default;
+
+    /// Sets the before_block hook, or clears it with nullptr. The hook is
+    /// stored and read under the fake's mutex, so it may be set while other
+    /// threads are inside wait_for(): a thread already past its hook check
+    /// does not call a hook set later. A call in progress runs on its own
+    /// copy, so clearing the hook does not wait for it: what the hook
+    /// captures must outlive every call, so clear it (and destroy those
+    /// captures) only once no thread can still be inside wait_for() on this
+    /// clock, for a driver after it is destroyed.
+    void set_before_block(BeforeBlock hook) {
+        auto stored = hook ? std::make_shared<const BeforeBlock>(std::move(hook)) : nullptr;
+        std::lock_guard<std::mutex> guard(mutex_);
+        before_block_ = std::move(stored);
+    }
 
     /// The virtual time. Each call is counted (now_calls()) under the same
     /// lock that reads the time, so a call counted after an advance() has
@@ -134,15 +150,26 @@ public:
             note_registered();
             count_cv_.notify_all();
         }
-        while (!pred() && !reached(deadline)) {
-            if (before_block) {
-                before_block();
+        // The deadline is not checked before the first block. It can only be
+        // reached by then through an advance() that ran after the
+        // registration above, and that advance() listed this entry and
+        // notifies it under the caller's mutex, which is held until cv.wait
+        // releases it: the waiter blocks, is notified and counted. Leaving
+        // at once instead made advance() find the entry gone and report it
+        // as not notified, so a test that rendezvoused through
+        // wait_for_waiters() and then counted advance()'s wakes raced the
+        // waiter's way from registration to its block (open-astro#743).
+        bool blocked = false;
+        while (!pred() && !(blocked && reached(deadline))) {
+            if (const auto hook = hook_copy()) {
+                (*hook)(pred);
             }
             // Nothing can fall between the checks above and this block:
             // advance() notifies a wait_for waiter only while holding the
             // caller's mutex, which is held from the checks until cv.wait
             // releases it.
             cv.wait(lock);
+            blocked = true;
         }
         {
             // Removed under the caller's mutex (still held) before return, so
@@ -324,6 +351,11 @@ private:
         return now_ + std::chrono::duration_cast<clock::duration>(timeout);
     }
 
+    std::shared_ptr<const BeforeBlock> hook_copy() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return before_block_;
+    }
+
     bool reached(clock::time_point deadline) const {
         std::lock_guard<std::mutex> guard(mutex_);
         return now_ >= deadline;
@@ -338,6 +370,7 @@ private:
     std::uint64_t next_id_ = 0;
     std::map<std::uint64_t, Entry> waiters_;
     std::shared_ptr<WokenTracker> tracker_ = std::make_shared<WokenTracker>();
+    std::shared_ptr<const BeforeBlock> before_block_;  // guarded by mutex_
 };
 
 }  // namespace alpacacore::test

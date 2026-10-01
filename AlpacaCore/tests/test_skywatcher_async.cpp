@@ -633,11 +633,6 @@ struct WatchdogLogGuard {
 };
 }  // namespace
 
-// open-astro#547: the client-silence motion watchdog. Written RED FIRST
-// against unmodified code -- before TelescopeDriver grew
-// note_client_activity()/stop_motion_if_client_silent(), this case (and the
-// three below it) failed to COMPILE (no such member on TelescopeDriver),
-// which is the compile-time form of red for a seam that does not exist yet.
 // open-astro#743 rules 2 and 3: the MoveAxis(axis, 0) stop task polls the
 // board's braking ramp through task_wait_for and gives up at kAxisStopTimeout
 // (5 s), both on the injected clock. The fake's ramp is on the same clock, so
@@ -691,12 +686,16 @@ TEST_CASE("SkyWatcher async - MoveAxis stop polls the ramp and times out on the 
 // condition_variable::wait_for hid that behind its timeout (the task woke at
 // the deadline and saw the flag); the fake clock has no deadline of its own,
 // so the task stays parked until the next advance() and the reaper's join
-// hangs with it. FakeTaskClock::before_block holds the task in exactly that
-// window while the reaper runs.
+// hangs with it. FakeTaskClock's before_block hook holds the task in exactly that
+// window while the reaper runs: it holds the task there until the task's
+// own predicate sees the reaper's cancel store. The reaper's notify is the
+// statement after that store, so with the fix the reaper is then blocked on
+// task_mutex_ until the task blocks, and without it the notify goes by while
+// the task is still outside its wait.
 TEST_CASE("SkyWatcher async - a reaper's cancel is not lost between a parked task's check and its block (#743)",
           "[skywatcher][async][pulseguide]") {
     std::atomic<bool> at_window{false};
-    std::atomic<bool> release{false};
+    std::atomic<bool> saw_cancel{false};
     std::atomic<int> fired{0};
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
@@ -705,14 +704,19 @@ TEST_CASE("SkyWatcher async - a reaper's cancel is not lost between a parked tas
     driver->set_tracking(true);
     mount.jump_axis_degrees(2, 45.0);
 
-    clock.before_block = [&] {
+    // Nothing is parked on the clock yet, so the pulse task below is the
+    // first thread to reach the hook.
+    REQUIRE(clock.waiter_count() == 0);
+    clock.set_before_block([&](const std::function<bool()>& pred) {
         if (fired.fetch_add(1) == 0) {
             at_window.store(true);
-            while (!release.load()) {
+            const auto give_up = std::chrono::steady_clock::now() + kRendezvous;
+            while (!pred() && std::chrono::steady_clock::now() < give_up) {
                 std::this_thread::yield();
             }
+            saw_cancel.store(pred());
         }
-    };
+    });
     driver->pulse_guide(0, 2000);  // North: its hold parks on the clock
     REQUIRE(wait_until([&] { return at_window.load(); }, 3000));
 
@@ -722,12 +726,8 @@ TEST_CASE("SkyWatcher async - a reaper's cancel is not lost between a parked tas
         driver->pulse_guide(0, 300);
         reaped.store(true);
     });
-    // Scheduling grace for the reaper to reach its cancel, not a driver
-    // timer: with the fix it is blocked on task_mutex_ here, without it the
-    // store and notify have already gone by.
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    release.store(true);
     CHECK(wait_until([&] { return reaped.load(); }, 2000));
+    CHECK(saw_cancel.load());
 
     // Whatever happened, reaching the hold's deadline wakes it, so the case
     // ends cleanly instead of hanging in a join.
@@ -736,9 +736,14 @@ TEST_CASE("SkyWatcher async - a reaper's cancel is not lost between a parked tas
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(1000)));
     driver->set_connected(false);
     driver.reset();
-    clock.before_block = nullptr;
+    clock.set_before_block(nullptr);
 }
 
+// open-astro#547: the client-silence motion watchdog. Written RED FIRST
+// against unmodified code -- before TelescopeDriver grew
+// note_client_activity()/stop_motion_if_client_silent(), this case (and the
+// three below it) failed to COMPILE (no such member on TelescopeDriver),
+// which is the compile-time form of red for a seam that does not exist yet.
 TEST_CASE("SkyWatcher async - client-silence watchdog stops a moving axis after the interval",
           "[skywatcher][async][watchdog]") {
     FakeSkyWatcherMount mount;
