@@ -38,6 +38,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "catch2_compat.h"
 #include "fake_skywatcher_mount.h"
@@ -195,6 +196,100 @@ TEST_CASE("SkyWatcher limits - a refused goto leaves a goto in flight running", 
     require_alpaca_error([&] { driver->slew_to_coordinates_async(low_ra, -60.0); },
                          alpacacore::AlpacaError::InvalidValue);
     CHECK(driver->get_slewing());
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
+    CHECK(std::abs(driver->get_declination() - kNearPoleDec) < 0.05);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - a legal goto during a park in flight is refused and the park completes",
+          "[skywatcher][telescope][limits]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, floor_deg(15.0));
+    mount.jump_axis_degrees(1, 30.0);
+    mount.jump_axis_degrees(2, 20.0);
+    driver->park();
+    REQUIRE(driver->get_slewing());
+    REQUIRE(wait_until([&] { return mount.frames_seen('J') >= 2; }, 5000));
+    const auto before = MotionFrames::snapshot(mount);
+
+    // Above the floor, so only the parking gate can refuse it. Refusing before
+    // the reap is what keeps the park running; a reap first would cancel it.
+    const double ra = near_pole_ra(*driver);
+    require_alpaca_error([&] { driver->slew_to_coordinates(ra, kNearPoleDec); },
+                         alpacacore::AlpacaError::InvalidWhileParked);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(ra, kNearPoleDec); },
+                         alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(driver->get_slewing());
+    CHECK(MotionFrames::snapshot(mount) == before);
+    REQUIRE(wait_until([&] { return driver->get_at_park(); }, 30000));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - a below-floor goto during a park in flight leaves the park running",
+          "[skywatcher][telescope][limits]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, floor_deg(15.0));
+    mount.jump_axis_degrees(1, 30.0);
+    mount.jump_axis_degrees(2, 20.0);
+    driver->park();
+    REQUIRE(wait_until([&] { return mount.frames_seen('J') >= 2; }, 5000));
+    const auto before = MotionFrames::snapshot(mount);
+
+    require_alpaca_error([&] { driver->slew_to_coordinates(near_pole_ra(*driver), -60.0); },
+                         alpacacore::AlpacaError::InvalidWhileParked);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(near_pole_ra(*driver), -60.0); },
+                         alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(MotionFrames::snapshot(mount) == before);
+    REQUIRE(wait_until([&] { return driver->get_at_park(); }, 30000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - a refused goto leaves a pulse guide in flight running",
+          "[skywatcher][telescope][limits]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, floor_deg(15.0));
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->pulse_guide(0, 3000);
+    REQUIRE(driver->get_is_pulse_guiding());
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
+    const auto before = MotionFrames::snapshot(mount);
+
+    const double ra = near_pole_ra(*driver);
+    require_alpaca_error([&] { driver->slew_to_coordinates(ra, -60.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(ra, -60.0); }, alpacacore::AlpacaError::InvalidValue);
+    // A reap would have stopped the pulse early and written stop frames.
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(mount.axis_running(2));
+    CHECK(MotionFrames::snapshot(mount) == before);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - an out-of-range goto leaves a slew in flight running",
+          "[skywatcher][telescope][limits]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, floor_deg(15.0));
+    const double ra = near_pole_ra(*driver);
+    driver->slew_to_coordinates_async(ra, kNearPoleDec);
+    REQUIRE(driver->get_slewing());
+    REQUIRE(wait_until([&] { return mount.frames_seen('J') >= 2; }, 5000));
+    const auto before = MotionFrames::snapshot(mount);
+
+    for (const auto& bad : {std::pair<double, double>{24.5, 10.0}, std::pair<double, double>{-1.0, 10.0},
+                            std::pair<double, double>{ra, 95.0}, std::pair<double, double>{ra, -95.0}}) {
+        require_alpaca_error([&] { driver->slew_to_coordinates(bad.first, bad.second); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&] { driver->slew_to_coordinates_async(bad.first, bad.second); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    CHECK(driver->get_slewing());
+    CHECK(MotionFrames::snapshot(mount) == before);
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
     CHECK(std::abs(driver->get_declination() - kNearPoleDec) < 0.05);
     driver->set_connected(false);
