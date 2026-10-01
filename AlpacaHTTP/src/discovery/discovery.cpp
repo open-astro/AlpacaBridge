@@ -176,7 +176,8 @@ void Discovery::handle_probe(const std::string& probe_data, const std::string& s
                             std::to_string(sender_port) + " - " + util::socket_error_message(err));
         }
     } else {
-        util::log_warning("Discovery: Received non-Alpaca probe from " + sender_address + ":" + std::to_string(sender_port));
+        util::log_debug("Discovery: Received non-Alpaca probe from " + sender_address + ":" +
+                        std::to_string(sender_port));
     }
 }
 
