@@ -7,6 +7,7 @@ applyTo: "AlpacaHTTP/**"
 Related decisions and failures — read when changing the behavior they explain:
 
 - [Server-thread ownership decision](../../docs/decisions/0002-server-thread-ownership.md)
+- [LAN surface threat model](../../docs/decisions/0007-lan-surface-threat-model.md): trust statement, per-surface bounds and the reviewer check for a new route or persisted config field
 - [Failed-bind thread failure](../../docs/failures/0005-server-failed-bind-thread.md)
 - [Release-build assertion failure](../../docs/failures/0004-ndebug-disabled-http-assertions.md)
 
