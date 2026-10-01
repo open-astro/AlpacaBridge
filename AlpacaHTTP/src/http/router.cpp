@@ -65,9 +65,6 @@
 #ifdef ALPACACORE_ENABLE_SYNSCAN
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_SKYWATCHER
-#include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
@@ -8382,119 +8379,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "skywatcher" && device_type_str == "telescope") {
-#ifdef ALPACACORE_ENABLE_SKYWATCHER
-        std::string conn_type = config_get(config, "connectionType", "auto");
-        // Issue #380: an unrecognised connectionType on a persisted config is
-        // normalised to "serial" rather than dropping the device, so it stays
-        // listed and editable in the web UI and its connect fails on the port
-        // path instead of auto-probing and attaching to whatever answers. The
-        // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
-                                                        device_type_str, device_number);
-
-        std::optional<double> site_latitude;
-        std::optional<double> site_longitude;
-        std::optional<double> site_elevation;
-
-        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
-            return false;
-        }
-        if (config_has(config, "siteElevation")) {
-            site_elevation = config_get(config, "siteElevation", 0.0);
-        }
-
-        // open-astro#274: /management/v1/configuredevice is a first-class REST
-        // API independent of the web UI, and used to accept a skywatcher
-        // config with no coordinates at all. The mount stores no site of its
-        // own, so both would then collapse to 0.0 and a southern rig would run
-        // northern pointing math -- silently undoing #250, #253 and #261.
-        // This check follows the SAME source rule as the
-        // portPath/host/connectionType checks below (reject the API, warn and
-        // register a persisted config), but it is spelled out inline rather
-        // than delegated to reject_invalid_config() because it needs the
-        // which-coordinate-is-missing detail in its WARN, and because
-        // normalize_persisted_connection_type()'s trick of substituting a safe
-        // value has no equivalent here: 0.0 is a real place that reads as
-        // northern, so there is nothing to carry forward.
-        if (!site_latitude.has_value() || !site_longitude.has_value()) {
-            static constexpr const char* kMissingSite =
-                "Site latitude and longitude are required for the Sky-Watcher direct driver: this mount stores no "
-                "site of its own, and tracking direction, guide sign and pier side are all hemisphere-dependent";
-            if (source == ConfigSource::Api) {
-                error_message = kMissingSite;
-                return false;
-            }
-            // Already on disk from before this rule existed. Register it so it
-            // keeps appearing in configureddevices and stays editable in the
-            // web UI; the driver refuses the connect until it is fixed.
-            const char* missing = (!site_latitude.has_value() && !site_longitude.has_value()) ? "site coordinates"
-                                  : !site_latitude.has_value()                                ? "site latitude"
-                                                                                              : "site longitude";
-            util::log_warning("Persisted Sky-Watcher telescope " + std::to_string(device_number) + " has no " +
-                              missing + " and will refuse to connect. " + kMissingSite);
-        }
-
-        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
-
-        if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config_get(config, "mountIndex", 0);
-            telescope = alpacacore::vendor::skywatcher::create_skywatcher_telescope_auto(
-                device_number, mount_index, site_latitude, site_longitude, site_elevation);
-        } else {
-            alpacacore::vendor::skywatcher::ConnectionInfo conn_info;
-
-            if (conn_type == "serial") {
-                conn_info.type = alpacacore::vendor::skywatcher::ConnectionType::Serial;
-                conn_info.port_path = config_get(config, "portPath", "");
-                conn_info.baud_rate = config_get(config, "baudRate", 9600);
-
-                if (conn_info.port_path.empty() &&
-                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
-                                          device_number, error_message)) {
-                    return false;
-                }
-            } else if (conn_type == "network") {
-                conn_info.type = alpacacore::vendor::skywatcher::ConnectionType::Network;
-                conn_info.host = config_get(config, "host", "");
-                conn_info.udp_port = config_get(config, "udpPort", conn_info.udp_port);
-
-                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
-                                                                    device_type_str, device_number, error_message)) {
-                    return false;
-                }
-            } else {
-                error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
-                return false;
-            }
-
-            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
-
-            telescope = alpacacore::vendor::skywatcher::create_skywatcher_telescope(
-                device_number, conn_info, site_latitude, site_longitude, site_elevation);
-        }
-
-        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
-            telescope->set_aperture_diameter(aperture);
-        }
-        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
-            telescope->set_focal_length(focal);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
-            util::log_info("Registered SkyWatcher telescope");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "SkyWatcher support not enabled. Rebuild with -DALPACACORE_ENABLE_SKYWATCHER=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "onstep" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_ONSTEP
         std::string conn_type = config_get(config, "connectionType", "auto");
@@ -9942,20 +9826,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         } else if (connection_type == "network") {
             copy_if_present("host");
             copy_if_present("tcpPort");
-        }
-    } else if (vendor == "skywatcher") {
-        copy_if_present("connectionType");
-        copy_if_present("mountIndex");  // same issue-#102 gap as ioptron above
-        copy_if_present("siteLatitude");
-        copy_if_present("siteLongitude");
-        copy_if_present("siteElevation");
-        std::string connection_type = config_get(config, "connectionType", "");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
-        } else if (connection_type == "network") {
-            copy_if_present("host");
-            copy_if_present("udpPort");
         }
     } else if (vendor == "onstep") {
         // OnStep is USB-serial only — no "network" branch (see the

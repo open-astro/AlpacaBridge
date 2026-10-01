@@ -897,7 +897,7 @@ vendor that ignores either ships a silently broken form:
 ## Debian Packaging
 
 - Package files live in `debian/` (control, rules, copyright, service file, maintainer scripts).
-- **`debian/changelog` is generated, never edited.** It is untracked/gitignored and derived from the root `CHANGELOG.md` by `scripts/changelog_to_deb.py` (same design as the OpenAstro Guider). Build the package with `scripts/build_deb.sh`, which generates the changelog (version from the `VERSION` file, validated with `dpkg-parsechangelog`) and then runs `dpkg-buildpackage -us -uc -b`. Do not run `dpkg-buildpackage` directly on a fresh checkout — it will fail on the missing `debian/changelog`. The in-progress CHANGELOG section uses this repo's `## [X.Y.Z] - UNRELEASED` convention; the generator synthesizes an `UNRELEASED` stanza from it when `VERSION` has not been released yet, and warns when `VERSION` and the section label disagree.
+- **`debian/changelog` is generated, never edited.** It is untracked/gitignored and derived from the root `CHANGELOG.md` by `scripts/changelog_to_deb.py` (same design as the OpenAstro Guider). Build the package with `scripts/build_deb.sh`, which generates the changelog (version from the `VERSION` file, validated with `dpkg-parsechangelog`) and then runs `dpkg-buildpackage -us -uc -b`. Do not run `dpkg-buildpackage` directly on a fresh checkout — it will fail on the missing `debian/changelog`. In-progress work is the `changelog.d/` fragments (see the changelog rule below) plus any legacy `## [X.Y.Z] - UNRELEASED` section still in `CHANGELOG.md`; the generator synthesizes an `UNRELEASED` stanza from them when `VERSION` has not been released yet, and warns when `VERSION` and a legacy section label disagree.
 - The `.deb` installs to:
   - `/usr/bin/alpacabridge` — server binary.
   - `/usr/lib/alpacabridge/` — vendor shared libraries (e.g. `libqhyccd.so`, `libASICamera2.so`).
@@ -907,19 +907,28 @@ vendor that ignores either ships a silently broken form:
   - `/usr/sbin/fxload` — QHY firmware loader.
   - `/etc/alpacabridge/` — default config (`registered_devices.json`).
 - When adding a new vendor with shared libraries, update `debian/rules` `override_dh_auto_install` to copy them into `$(STAGING)/usr/lib/alpacabridge/`.
-- To cut a release, run `/bump-release` (`.claude/commands/bump-release.md`): it bumps the `VERSION` file, dates the `## [X.Y.Z]` CHANGELOG.md heading, updates the README badge and device count, writes the plain-language notes in `docs/releases/<version>.md` that become the GitHub Release body, and tags the merge — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
+- To cut a release, run `/bump-release` (`.claude/commands/bump-release.md`): it bumps the `VERSION` file, assembles the `changelog.d/` fragments into the dated `## [X.Y.Z]` CHANGELOG.md section (`scripts/changelog_fragments.py --release`), updates the README badge and device count, writes the plain-language notes in `docs/releases/<version>.md` that become the GitHub Release body, and tags the merge — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
 
 ### Version bump policy (SemVer)
 
-The `## [X.Y.Z] - UNRELEASED` CHANGELOG heading carries the NEXT version, per
-SemVer; `VERSION` and the README badge stay at the last release until `/bump-release`
-Step 2 writes them (check 4 ties `VERSION` to the dated badge line, so bumping it early
-would date a release that has not happened). The bump size rule: **new driver/feature = minor bump; fix- or docs-only = patch; breaking change
-(dropped platform, config-schema break) = major.** The UNRELEASED section carries
-forward cumulatively until release — if it already sits at a minor bump and another
-driver lands, the number stays; a feature landing on a patch-level UNRELEASED raises
-it to the next minor. `/commit` and `/submit-pr` enforce this; it is documented here
-so a driver-building agent bumps correctly without them.
+The release derives the NEXT version from the `changelog.d/` fragments
+(`python3 scripts/changelog_fragments.py --bump`); a PR never sets one. `VERSION` and the README
+badge stay at the last release until `/bump-release` Step 2 writes them (check 4 ties `VERSION`
+to the dated badge line, so bumping it early would date a release that has not happened). The
+bump size rule: **new driver/feature (an unqualified `### Added` fragment entry) = minor bump;
+fix- or docs-only = patch; breaking change (dropped platform, config-schema break, a
+`### Breaking changes` entry) = major.** The bump is the highest severity across all fragments
+since the last release, and a legacy `## [X.Y.Z] - UNRELEASED` heading still in `CHANGELOG.md` is a
+floor. `/commit` and `/submit-pr` check the fragment's categories.
+
+### Changelog fragments (one file per PR)
+
+Every PR that changes code, tests, scripts, CI or docs adds `changelog.d/<branch-slug>.md` (the
+branch name after its last `/`) and **never edits `CHANGELOG.md`**: parallel PRs that all edited
+its one UNRELEASED section conflicted on every merge to main. Format, categories and commands are
+in [`changelog.d/README.md`](changelog.d/README.md). `scripts/changelog_fragments.py --check`
+validates every fragment (the `docs-drift` CI job and pre-flight run it with `--self-test`), and
+only `/bump-release` writes `CHANGELOG.md`, through `--release`.
 
 ## Testing Requirements
 

@@ -69,14 +69,14 @@ Runs ConformU against a connected AlpacaBridge device and processes the results:
 - Assesses the working tree, reviews diffs, flags red flags (SDK bloat, secrets, build artifacts)
 - Hard-blocks committing failing ConformU reports
 - Updates SUPPORTED-DRIVERS.md and `docs/architecture.md` if driver or ConformU changes are present
-- Updates CHANGELOG.md under the UNRELEASED version, applying the SemVer policy (driver = minor, fix/docs = patch, breaking = major)
+- Adds the PR's changelog fragment (`changelog.d/<branch-slug>.md`, never `CHANGELOG.md`); the release derives the SemVer bump from it (new driver = minor, fix/docs = patch, breaking = major)
 - Writes verb-first commit messages with vendor/device specificity
 
 ### `/submit-pr` — pull request submission
 
 - Safety checks: refuses to PR from `main`, blocks on uncommitted changes and failing ConformU reports
 - Auto-detects direct contributor vs fork and handles both flows
-- Runs the pre-submission checklist (tests, ConformU, CHANGELOG, SUPPORTED-DRIVERS, AGENTS.md, license headers, SDK cleanup)
+- Runs the pre-submission checklist (tests, ConformU, changelog fragment, SUPPORTED-DRIVERS, AGENTS.md, license headers, SDK cleanup)
 - Reproduces CI locally via `scripts/ci_preflight.sh` before pushing, so PRs never open red
 - Builds the PR title and body with component-tagged changes and a test plan, then creates the PR via `gh`
 - Watches for the automated review verdict and batches fixes into single pushes (every push restarts a full fresh review)
@@ -360,9 +360,9 @@ The only install channel is the OpenAstro APT repository ([apt.openastro.net](ht
 - A git tag `vX.Y.Z` on the merge commit that carried the release (the `VERSION` file, the README badge, and the dated CHANGELOG heading all agree at that commit).
 - A GitHub Release for that tag, created automatically by `.github/workflows/release.yml`. Its notes are the plain-language `docs/releases/X.Y.Z.md` (falling back to the version's CHANGELOG section) and its only assets are the source archives GitHub attaches itself. No `.deb` is attached; use apt.
 
-To cut a release, run `/bump-release` (Claude Code skill, `.claude/commands/bump-release.md`). It does the whole flow: writes `VERSION`, updates the README badge and device count, dates the CHANGELOG heading, writes plain-language notes to `docs/releases/X.Y.Z.md`, opens and merges the release PR, tags the merge commit, and verifies the Release. By hand the same steps are:
+To cut a release, run `/bump-release` (Claude Code skill, `.claude/commands/bump-release.md`). It does the whole flow: writes `VERSION`, updates the README badge and device count, assembles the changelog fragments into a dated CHANGELOG section, writes plain-language notes to `docs/releases/X.Y.Z.md`, opens and merges the release PR, tags the merge commit, and verifies the Release. By hand the same steps are:
 
-1. On a `release/X.Y.Z` branch: write `VERSION`, update the README badge line, change `## [X.Y.Z] - UNRELEASED` to today's date, and write `docs/releases/X.Y.Z.md` for the people who will not read the CHANGELOG (what changed, what to do, no issue numbers or code names).
+1. On a `release/X.Y.Z` branch: write `VERSION`, update the README badge line, run `python3 scripts/changelog_fragments.py --release X.Y.Z --date <today>` (it writes the dated CHANGELOG section and deletes the `changelog.d/` fragments), and write `docs/releases/X.Y.Z.md` for the people who will not read the CHANGELOG (what changed, what to do, no issue numbers or code names).
 2. Merge the PR.
 3. Tag the merge commit and push the tag:
 
@@ -372,7 +372,7 @@ git tag -a vX.Y.Z -m "Release X.Y.Z"
 git push origin vX.Y.Z
 ```
 
-The Release body is `docs/releases/X.Y.Z.md` with a link to the CHANGELOG section appended; when no notes file exists the CHANGELOG section itself is used. The workflow refuses a tag whose version does not match `VERSION`, or whose CHANGELOG section is still `UNRELEASED`, so a tag can never publish notes for an uncut release. Preview the CHANGELOG notes locally with `scripts/changelog_section.py X.Y.Z`.
+The Release body is `docs/releases/X.Y.Z.md` with a link to the CHANGELOG section appended; when no notes file exists the CHANGELOG section itself is used. The workflow refuses a tag whose version does not match `VERSION`, or whose CHANGELOG section is missing or still `UNRELEASED`, so a tag can never publish notes for an uncut release. Preview the CHANGELOG notes locally with `scripts/changelog_section.py X.Y.Z`.
 
 Testers who need an unreleased build still build from source or use `/deploy-remote-test`; commits between tags report the last released version.
 

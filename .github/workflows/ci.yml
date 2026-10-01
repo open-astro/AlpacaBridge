@@ -700,6 +700,16 @@ jobs:
         # instead of blocking the release.
         run: python3 scripts/changelog_section.py --self-test
 
+      - name: Validate changelog fragments
+        # A PR adds changelog.d/<branch-slug>.md instead of editing
+        # CHANGELOG.md; a malformed fragment would break the release step.
+        run: python3 scripts/changelog_fragments.py --self-test && python3 scripts/changelog_fragments.py --check
+
+      - name: Self-test the debian/changelog generator
+        # build_deb.sh feeds the fragments into the .deb changelog through
+        # this script; nothing else exercises that path.
+        run: python3 scripts/changelog_to_deb.py --self-test
+
   connect-error-hook:
     name: Connect-error hook
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent

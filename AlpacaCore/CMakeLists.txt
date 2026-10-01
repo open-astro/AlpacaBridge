@@ -125,6 +125,7 @@ add_library(AlpacaCore::alpacacore ALIAS alpacacore)
 add_library(alpacacore_builtins STATIC
     src/catalog/builtin_catalog.cpp
     src/vendors/astroasis/astroasis_schema.cpp
+    src/vendors/skywatcher/skywatcher_schema.cpp
     src/vendors/weewx/weewx_schema.cpp
 )
 target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
@@ -165,6 +166,9 @@ if(ALPACACORE_ENABLE_SKYWATCHER)
     add_subdirectory(src/vendors/skywatcher)
     if(TARGET alpacacore_skywatcher)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_skywatcher)
+        # Guards the Sky-Watcher factory registration in register_builtin_factories(),
+        # as for Astroasis below.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_SKYWATCHER)
     endif()
 endif()
 
