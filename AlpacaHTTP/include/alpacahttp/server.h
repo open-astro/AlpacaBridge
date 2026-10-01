@@ -87,8 +87,14 @@ public:
     // getsockname(). Differs from config's http_port() when that was 0 ("let
     // the OS pick an ephemeral port") -- callers that asked for an ephemeral
     // port need this to learn what was actually chosen. Returns 0 when not
-    // currently listening.
+    // currently listening. Not authoritative from another thread: see the
+    // definition for the fd-reuse window it narrows but does not close.
     std::uint16_t bound_port() const;
+
+    // Test-only (#562): the current listening descriptor, or -1 when there is
+    // none, so a test can close it behind the server and drive the
+    // descriptor-loss rebind in run_server().
+    int listener_fd_for_test() const { return static_cast<int>(server_fd_.load()); }
 
     // Wait for server to stop
     void wait();
@@ -108,6 +114,9 @@ public:
     Router& router_for_test() { return router_; }
 
 private:
+    // getsockname() port of a listening socket, 0 if `fd` is not one.
+    static std::uint16_t listening_port(util::SocketHandle fd);
+
     Config config_;
     Router router_;
     std::atomic<bool> running_{false};

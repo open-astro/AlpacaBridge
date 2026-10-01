@@ -1836,6 +1836,45 @@ int main() {
     }
 
     {
+        // (#562) With http_port 0, the descriptor-loss recovery must come back
+        // on the port it had, not a new ephemeral one: clients and discovery
+        // already hold that port. Close the listener behind the server; its
+        // next select() fails EBADF and run_server() rebinds.
+        alpacahttp::Config config;
+        config.set_http_port(0);
+        config.set_discovery_enabled(false);
+        config.set_server_name("TestServerRebind");
+
+        alpacahttp::Server server(config);
+        server.start_async();
+        const std::uint16_t before = server.is_running() ? wait_for_bound_port(server, 2000) : 0;
+        if (before == 0) {
+            std::cerr << "WARNING: rebind case SKIPPED -- could not bind an ephemeral port\n";
+        } else {
+            const int listener = server.listener_fd_for_test();
+            EXPECT(listener >= 0);
+            ::close(listener);
+
+            // bound_port() reads 0 while the closed number is not a listening
+            // socket; the rebind (which may reuse the same number) lands within
+            // one 500 ms select() timeout.
+            const std::uint16_t after = wait_for_bound_port(server, 10000);
+            if (after != before) {
+                std::cerr << "rebind moved the listener: " << before << " -> " << after << "\n";
+            }
+            EXPECT(after == before);
+
+            int fd = connect_local(after);
+            EXPECT(fd >= 0);
+            std::string carry;
+            send_all(fd, "GET /management/apiversions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            EXPECT(read_one_response(fd, carry).rfind("HTTP/1.1 200", 0) == 0);
+            ::close(fd);
+        }
+        server.stop();
+    }
+
+    {
         // (issue #561, case a2) join_or_abandon()'s fallback is unreachable
         // from a real Server through ordinary testing -- nothing can make
         // join_server_thread()'s join() throw. ScopedJoinHooksForTest makes

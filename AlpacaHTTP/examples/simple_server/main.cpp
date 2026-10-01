@@ -105,8 +105,20 @@ int main(int argc, char* argv[]) {
     
     server.start_async();
 
+    // With http_port 0 the OS picks the port, and discovery stays silent
+    // until it is told which one (#562). bound_port() reads 0 until the
+    // listener is up, so keep trying from the wait loop below.
+    bool advertised = !discovery || config.http_port() != 0;
+
     // Wait for shutdown signal
     while (g_running && server.is_running()) {
+        if (!advertised) {
+            if (const std::uint16_t port = server.bound_port(); port != 0) {
+                discovery->set_advertised_port(port);
+                alpacahttp::util::log_info("Discovery advertising HTTP port " + std::to_string(port));
+                advertised = true;
+            }
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 

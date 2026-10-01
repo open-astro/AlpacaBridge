@@ -13,15 +13,14 @@
 #include <alpacahttp/discovery.h>
 #include <alpacahttp/util/logging_adapter.h>
 #include <alpacahttp/util/socket_utils.h>
+
 #include <cstring>
 #include <sstream>
+#include <string_view>
 
 namespace alpacahttp {
 
-Discovery::Discovery(const Config& config)
-    : config_(config)
-{
-}
+Discovery::Discovery(const Config& config) : config_(config), advertised_port_(config.http_port()) {}
 
 Discovery::~Discovery() {
     stop();
@@ -52,10 +51,21 @@ void Discovery::run_discovery() {
         return;
     }
 
-    // Set socket options for multicast
+    // Share UDP 32227 with other Alpaca processes on this host: Linux and
+    // macOS need SO_REUSEPORT as well as SO_REUSEADDR for that. A failed
+    // option is logged and the bind still tried; it may succeed alone.
     int reuse = 1;
     const char* reuse_ptr = reinterpret_cast<const char*>(&reuse);
-    setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEADDR, reuse_ptr, sizeof(reuse));
+    if (setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEADDR, reuse_ptr, sizeof(reuse)) < 0) {
+        util::log_warning("Discovery: failed to set SO_REUSEADDR: " +
+                          util::socket_error_message(util::socket_get_last_error()));
+    }
+#ifdef SO_REUSEPORT
+    if (setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEPORT, reuse_ptr, sizeof(reuse)) < 0) {
+        util::log_warning("Discovery: failed to set SO_REUSEPORT: " +
+                          util::socket_error_message(util::socket_get_last_error()));
+    }
+#endif
 
     // Bind to discovery port
     struct sockaddr_in addr;
@@ -65,7 +75,10 @@ void Discovery::run_discovery() {
     addr.sin_port = htons(ALPACA_DISCOVERY_PORT);
 
     if (bind(socket_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-        util::log_error("Failed to bind discovery socket");
+        // Read errno before socket_close() can overwrite it.
+        const int err = util::socket_get_last_error();
+        util::log_error("Failed to bind discovery socket on UDP port " + std::to_string(ALPACA_DISCOVERY_PORT) + ": " +
+                        util::socket_error_message(err) + "; discovery is disabled");
         util::socket_close(socket_fd_);
         socket_fd_ = util::kInvalidSocket;
         running_ = false;
@@ -146,15 +159,33 @@ void Discovery::run_discovery() {
     util::log_info("Discovery service stopped");
 }
 
+bool Discovery::is_discovery_probe(const std::string& datagram) {
+    // Discovery v1 defines the request as exactly the 16 ASCII bytes
+    // "alpacadiscovery1". Trailing CR, LF, NUL or space is tolerated as well:
+    // no client is known to send one, and refusing it would silently hide
+    // this server from such a client. Anything else is not a probe (#562).
+    static constexpr std::string_view kProbe = "alpacadiscovery1";
+    std::string_view data(datagram);
+    const auto last = data.find_last_not_of(std::string_view("\r\n\0 ", 4));
+    data = last == std::string_view::npos ? std::string_view() : data.substr(0, last + 1);
+    return data == kProbe;
+}
+
 void Discovery::handle_probe(const std::string& probe_data, const std::string& sender_address, std::uint16_t sender_port) {
     // Alpaca discovery protocol: respond to "alpacadiscovery1" probe
     util::log_info("Discovery: Received probe from " + sender_address + ":" + std::to_string(sender_port));
-    
-    if (probe_data.find("alpacadiscovery1") != std::string::npos) {
+
+    if (is_discovery_probe(probe_data)) {
+        // With http_port 0 the port is unknown until the embedder hands over
+        // the one the server bound: no reply beats telling a client port 0.
+        const std::uint16_t port = advertised_port_.load();
+        if (port == 0) {
+            return;
+        }
         // Modern Alpaca spec: Send JSON format with AlpacaPort
         // This is what NINA and other modern clients expect
         std::ostringstream json_oss;
-        json_oss << "{\"AlpacaPort\":" << config_.http_port() << "}";
+        json_oss << "{\"AlpacaPort\":" << port << "}";
         std::string json_response = json_oss.str();
         
         struct sockaddr_in target_addr;
@@ -168,8 +199,8 @@ void Discovery::handle_probe(const std::string& probe_data, const std::string& s
                                            reinterpret_cast<struct sockaddr*>(&target_addr), sizeof(target_addr)));
 
         if (sent > 0) {
-            util::log_info("Discovery: Sent JSON response to " + sender_address + ":" + std::to_string(sender_port) + 
-                          " (AlpacaPort=" + std::to_string(config_.http_port()) + ", " + std::to_string(sent) + " bytes)");
+            util::log_info("Discovery: Sent JSON response to " + sender_address + ":" + std::to_string(sender_port) +
+                           " (AlpacaPort=" + std::to_string(port) + ", " + std::to_string(sent) + " bytes)");
         } else {
             int err = util::socket_get_last_error();
             util::log_error("Discovery: Failed to send response to " + sender_address + ":" +

@@ -36,15 +36,23 @@ public:
     // Check if discovery is running
     bool is_running() const { return running_; }
 
+    // The HTTP port a probe reply advertises. Starts at config.http_port();
+    // an embedder whose http_port is 0 sets the port the server actually
+    // bound once it is known. While it is 0 the responder does not answer.
+    // Safe to call from any thread, before or after start().
+    void set_advertised_port(std::uint16_t port) { advertised_port_.store(port); }
+
 private:
     Config config_;
     std::atomic<bool> running_{false};
+    std::atomic<std::uint16_t> advertised_port_;
     std::thread discovery_thread_;
     util::SocketHandle socket_fd_ = util::kInvalidSocket;
 
     void run_discovery();
     void handle_probe(const std::string& probe_data, const std::string& sender_address, std::uint16_t sender_port);
     std::string build_response() const;
+    static bool is_discovery_probe(const std::string& datagram);
 
     static constexpr std::uint16_t ALPACA_DISCOVERY_PORT = 32227;
     static constexpr const char* ALPACA_DISCOVERY_MULTICAST_GROUP = "239.12.255.254";
