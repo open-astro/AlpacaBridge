@@ -4340,7 +4340,8 @@ private:
     // Passing through task_mutex_ first publishes the store to a waiter that has
     // read its flag as false but not yet blocked: without it the notify is lost,
     // and the waiter sleeps out its whole wait (on a FakeTaskClock, until the next
-    // advance()), holding up the reaper's join.
+    // advance()), holding up the reaper's join. The caller must not hold
+    // task_mutex_ (it is not recursive).
     void notify_task_waiters() {
         { std::lock_guard<std::mutex> publish(task_mutex_); }
         task_cv_.notify_all();

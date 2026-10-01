@@ -680,9 +680,9 @@ TEST_CASE("SkyWatcher async - MoveAxis stop polls the ramp and times out on the 
 }
 
 // open-astro#743 (assumption in the plan): a reaper publishes its cancel
-// under task_mutex_, the mutex task_wait_for() checks the flag under. Every
-// reaper today stores the flag and notifies without it; a task between its
-// predicate check and its block then misses the notify. The real
+// under task_mutex_, the mutex task_wait_for() checks the flag under. Before
+// #743 every reaper stored the flag and notified without it; a task between its
+// predicate check and its block then missed the notify. The real
 // condition_variable::wait_for hid that behind its timeout (the task woke at
 // the deadline and saw the flag); the fake clock has no deadline of its own,
 // so the task stays parked until the next advance() and the reaper's join
