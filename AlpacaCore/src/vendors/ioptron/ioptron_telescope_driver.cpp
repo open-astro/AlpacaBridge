@@ -1319,7 +1319,8 @@ public:
         // open-astro#728: a latched fault must not stop a client stopping the
         // mount. Skip the latch check, the parked check (a status read) and the
         // cached slewing flag, none of which can be trusted on a faulted link,
-        // and send the stop; a sent stop clears the latch.
+        // and send the stop; a sent stop clears the latch. A parked mount is
+        // sent the stop too: InvalidWhileParked is not raised while latched.
         const bool faulted = connected_ && device_faulted_;
         if (!faulted) {
             check_connected();
@@ -1829,7 +1830,8 @@ private:
 
     // open-astro#728: a successful read ends the run of failures, so only
     // consecutive failures reach the threshold. It does not clear a latch that
-    // has already tripped; only Park, Unpark and AbortSlew do.
+    // has already tripped; only AbortSlew or a reconnect does (Park and Unpark
+    // also clear it on success, but check_connected() refuses them while it is set).
     void note_device_read_ok_locked() const { device_fault_count_ = 0; }
 
     void prefetch_mount_state_locked() {
