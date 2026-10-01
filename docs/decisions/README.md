@@ -20,3 +20,4 @@ A record is referred to by its slug until it is written, and numbered then.
 - [Device catalog](0004-device-catalog.md)
 - [Task clock](0005-task-clock.md)
 - [Async operation ownership](0006-async-operation-ownership.md)
+- [LAN surface threat model](0007-lan-surface-threat-model.md)

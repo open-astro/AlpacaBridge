@@ -59,6 +59,8 @@ Other Rockchip and Orange Pi arm64 boards running Debian 13 work with the standa
 
 Three commands from the [OpenAstro APT repository](https://apt.openastro.net), and it stays current with `apt upgrade`.
 
+AlpacaBridge is built for a single-purpose appliance: its udev rules let any local user open a supported device. Do not install it on a shared machine. See [the LAN surface threat model](docs/decisions/0007-lan-surface-threat-model.md).
+
 **1. Add the OpenAstro signing key**
 
 ```sh
