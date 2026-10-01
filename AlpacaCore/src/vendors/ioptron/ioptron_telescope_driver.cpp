@@ -1316,14 +1316,22 @@ public:
 
     void abort_slew() override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        ensure_not_parked_locked("AbortSlew");
+        // open-astro#728: a latched fault must not stop a client stopping the
+        // mount. Skip the latch check, the parked check (a status read) and the
+        // cached slewing flag, none of which can be trusted on a faulted link,
+        // and send the stop; a sent stop clears the latch. A parked mount is
+        // sent the stop too: InvalidWhileParked is not raised while latched.
+        const bool faulted = connected_ && device_faulted_;
+        if (!faulted) {
+            check_connected();
+            ensure_not_parked_locked("AbortSlew");
+        }
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next Slewing
         // read must answer normally again. Clear unconditionally, before the
         // early-return below (a soft-failed goto never set is_slewing).
         last_slew_error_.clear();
-        if (!cached_status_.is_slewing) {
+        if (!faulted && !cached_status_.is_slewing) {
             restore_altitude_limit_locked("AbortSlew");
             restore_meridian_treatment_locked("AbortSlew");
             return;
@@ -1796,9 +1804,9 @@ private:
     }
 
     // A single transient timeout must not brick the whole session: only latch
-    // device_faulted_ (which makes every subsequent call throw) after several
-    // CONSECUTIVE failures. Any subsequent successful command clears the count
-    // via clear_device_fault_locked().
+    // device_faulted_ (which makes every call through check_connected() throw)
+    // after several CONSECUTIVE failures. A successful read resets the count
+    // via note_device_read_ok_locked().
     static constexpr int kDeviceFaultThreshold = 3;
 
     void record_device_fault_locked(const char* context, const std::string& detail) const {
@@ -1819,6 +1827,12 @@ private:
         device_faulted_ = false;
         last_device_error_.clear();
     }
+
+    // open-astro#728: a successful read ends the run of failures, so only
+    // consecutive failures reach the threshold. It does not clear a latch that
+    // has already tripped; only AbortSlew or a reconnect does (Park and Unpark
+    // also clear it on success, but check_connected() refuses them while it is set).
+    void note_device_read_ok_locked() const { device_fault_count_ = 0; }
 
     void prefetch_mount_state_locked() {
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -2102,6 +2116,7 @@ private:
             cached_side_of_pier_ = pos.side_of_pier;
             position_cache_valid_ = true;
             last_position_update_ = now;
+            note_device_read_ok_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("Position", e.what());
             throw AlpacaException(std::string("Failed to refresh mount position: ") + e.what(),
@@ -2125,6 +2140,7 @@ private:
             cached_az_degrees_ = altaz.azimuth_degrees;
             altaz_cache_valid_ = true;
             last_altaz_update_ = now;
+            note_device_read_ok_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("AltAz", e.what());
             throw AlpacaException(std::string("Failed to refresh mount Alt/Az: ") + e.what(),
@@ -2146,6 +2162,7 @@ private:
             cached_status_ = protocol.get_status();
             status_cache_valid_ = true;
             last_status_update_ = now;
+            note_device_read_ok_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("Status", e.what());
             throw AlpacaException(std::string("Failed to refresh mount status: ") + e.what(),
@@ -2223,6 +2240,7 @@ private:
             dst_observed_ = site.dst_observed;
             site_info_valid_ = true;
             last_site_info_fetch_ = now;
+            note_device_read_ok_locked();
         } catch (const std::exception& e) {
             if (site_info_valid_) {
                 ALPACA_LOG_WARN("iOptron", std::string("Failed to read site info; using cached values: ") + e.what());
