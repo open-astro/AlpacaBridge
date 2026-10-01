@@ -36,7 +36,7 @@ For each changed file, briefly note what was modified. Group changes by category
 - **HTTP/Web UI** (AlpacaHTTP src, web/)
 - **Tests** (AlpacaCore/tests, AlpacaHTTP/tests)
 - **Build system** (CMakeLists.txt, debian/, build scripts)
-- **Documentation** (CHANGELOG.md, SUPPORTED-DRIVERS.md, AGENTS.md, README)
+- **Documentation** (changelog.d/ fragment, SUPPORTED-DRIVERS.md, AGENTS.md, README)
 - **ConformU results** (AlpacaCore/conformu/)
 - **SDK files** (AlpacaCore/external/)
 
@@ -158,29 +158,29 @@ existing vendor, a new/updated vendor SDK, or a new wrapper).
    `## Step 4 — Update SUPPORTED-DRIVERS.md` section above — they describe the same drivers
    from different angles and must not disagree about which device types a vendor supports.
 
-## Step 5 — Update CHANGELOG.md
+## Step 5 — Add a changelog fragment
 
-Every commit that changes code or adds features should have a corresponding `CHANGELOG.md` entry. The project uses [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
+Every commit that changes code, tests, scripts, CI or docs needs a changelog entry. **Do not edit
+`CHANGELOG.md`**: every PR used to edit its one UNRELEASED section, so each merge to main put every
+other open branch in conflict. A PR adds **one file**, `changelog.d/<branch-slug>.md`, and only the
+release step (`/bump-release`) writes `CHANGELOG.md`. The format is in `changelog.d/README.md`; the
+project uses [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) categories.
 
-1. Read the current `CHANGELOG.md` to find the active UNRELEASED section
-2. Set the UNRELEASED version per the **Versioning policy** below.
-   - If no UNRELEASED section exists, create one at the top (below the header):
-     ```
-     ## [x.x.x] - UNRELEASED
-     ```
-     with the version computed from the last **released** version + this change's bump level.
-     The previous top section is now a dated, released version and is no longer current, so
-     **collapse it** into a `<details>` block per "Collapsible version sections" below.
-   - If an UNRELEASED section already exists, ensure its version is **at least** the bump this
-     change warrants — **upgrade, never downgrade**. (e.g. UNRELEASED is `[2.0.1]` from earlier
-     docs changes and you're now committing a new driver → relabel the heading to `[2.1.0]`.)
-3. Add entries under the appropriate subsection within the UNRELEASED block:
+1. `<branch-slug>` is the branch name after its last `/` (`git branch --show-current`); allowed
+   characters `[a-z0-9][a-z0-9._-]*`. If the file already exists on this branch, update it rather
+   than adding a second one.
+2. The body is one or more `### <Category>` subsections, each with at least one `- ` bullet:
    - `### Added` — new drivers, new features, new files
    - `### Changed` — modifications to existing functionality
    - `### Fixed` — bug fixes
    - `### Removed` — removed features or files
+   - also `Breaking changes`, `Deprecated`, `Security`, and any category followed by a qualifier in
+     parentheses (`Added (tests)`, `Fixed (tooling)`)
+3. No `#`/`##` heading, no version, no date: the release derives the version from the fragments
+   (`python3 scripts/changelog_fragments.py --bump`).
+4. Validate: `python3 scripts/changelog_fragments.py --check`.
 
-### CHANGELOG entry format
+### Fragment entry format
 
 Use component-tagged bullet points matching the project style:
 
@@ -199,20 +199,23 @@ Use component-tagged bullet points matching the project style:
 
 ### Rules
 
-- **Always use the UNRELEASED version** — never commit with a release date; that happens at release time
-- **Be specific**: include vendor name, device model, and technical details
+- **Never write a release date or a version** in a fragment; that happens at release time
+- **Be specific**: include vendor name, device model, and technical details, and name the upstream
+  issue (`issue #N`)
 - **Group related changes** under one bullet with sub-points for complex entries (see existing entries for style)
-- **Don't duplicate**: if an entry for this driver/feature already exists in UNRELEASED, update it rather than adding a new one
-- If the current UNRELEASED section already has the right version number, add to it — don't create a new one
+- **Don't duplicate**: if this branch's fragment already has an entry for the driver/feature, update it
+- A legacy `## [X.Y.Z] - UNRELEASED` section may still sit in `CHANGELOG.md`; leave it alone, the
+  release merges it with the fragments
 
 ### Collapsible version sections
 
 `CHANGELOG.md` keeps every version section collapsible so the file folds to a scannable list of
-versions (same `<details>`/`<summary>` pattern as `SUPPORTED-DRIVERS.md`). The rule:
+versions (same `<details>`/`<summary>` pattern as `SUPPORTED-DRIVERS.md`). The release step
+(`scripts/changelog_fragments.py --release`) writes the new section as a plain `##` heading
+directly under the intro and collapses the previous one; nothing a contributor does touches this.
 
-- **The current section stays expanded** — the top section (the `## [x.x.x] - UNRELEASED`
-  heading, or the latest dated release when there's no UNRELEASED yet) is a plain `##` markdown
-  heading, NOT wrapped in `<details>`. This is the section `/commit` edits; leave it expanded.
+- **The top section stays expanded** — the latest dated release is a plain `## [x.x.x] - date`
+  heading, NOT wrapped in `<details>`.
 - **Every older, released version is collapsed.** Each is wrapped like:
   ```
   <details>
@@ -224,41 +227,32 @@ versions (same `<details>`/`<summary>` pattern as `SUPPORTED-DRIVERS.md`). The r
   </details>
   ```
   Note the blank line after `</summary>` and before `</details>` (GitHub needs it to render the
-  markdown inside). The version + date go in `<summary><strong>…</strong></summary>`, replacing
-  the `## [x.x.x] - date` heading.
+  markdown inside).
 
-When you open a **new** UNRELEASED section at the top (step 2), collapse the section it displaces
-— the now-released top version — into this `<details>` form so only the current one stays open.
-Don't touch the already-collapsed older sections.
-
-`scripts/changelog_to_deb.py` parses both the `## [..]` heading and the collapsed `<summary>`
-form, so Debian changelog generation is unaffected by collapsing — no need to special-case it.
+`scripts/changelog_to_deb.py` parses both forms and the fragments, so Debian changelog generation
+is unaffected.
 
 ### Versioning policy (Semantic Versioning)
 
-AlpacaBridge is an end-user appliance, so "breaking" means **breaks an existing user's install/
-setup**, not a code-API break. Bump relative to the last **released** version:
+The release derives the next version; a contributor does not set it. AlpacaBridge is an end-user
+appliance, so "breaking" means **breaks an existing user's install/setup**, not a code-API break.
+`--bump` applies this to the fragments, relative to the last **released** version:
 
-| Bump | When | Examples |
-|------|------|----------|
-| **MAJOR** `x.0.0` | Breaks an existing user | Drop a platform (amd64 → 2.0.0), remove a driver, config-format change needing migration, change a default that alters behavior |
-| **MINOR** `x.Y.0` | New backward-compatible capability (resets patch to 0) | **A new driver**, new device/model support, a new optional feature/flag |
-| **PATCH** `x.y.Z` | No new capability | Bug fix to an existing driver, ConformU re-validation, packaging fix, docs/skill/spec changes |
+| Bump | When | Fragment category | Examples |
+|------|------|-------------------|----------|
+| **MAJOR** `x.0.0` | Breaks an existing user | `Breaking changes` | Drop a platform (amd64 → 2.0.0), remove a driver, config-format change needing migration, change a default that alters behavior |
+| **MINOR** `x.Y.0` | New backward-compatible capability (resets patch to 0) | `Added` | **A new driver**, new device/model support, a new optional feature/flag |
+| **PATCH** `x.y.Z` | No new capability | anything else, `Added (tests)` included | Bug fix to an existing driver, ConformU re-validation, packaging fix, docs/skill/spec changes |
 
-Quick test: **broke** an existing user → major; **added** something new → minor; **fixed/
-polished** what already existed → patch.
+Quick test: **broke** an existing user → put it under `Breaking changes`; **added** something new
+→ `Added`; **fixed/polished** what already existed → `Fixed` or `Changed`. A new driver MUST be
+under an unqualified `### Added`, or the release undershoots the version.
 
-**Cumulative carry-forward.** The UNRELEASED version reflects the **highest-severity** change
-accumulated since the last release. A new driver is always a minor bump, never a patch —
-e.g. `2.0.0` → docs `2.0.1` → (later) driver `2.1.0` (minor resets patch, not `2.0.2`) → docs
-`2.1.1`. Within one UNRELEASED cycle, only ever raise the version, never lower it.
-
-**`/commit` touches only `CHANGELOG.md` for versioning** — it sets the `UNRELEASED` heading and
-nothing else. Do **not** modify the `VERSION` file or the `#### [x.x.x] - …` version badge in
-`README.md` in this flow. Those are release actions: `/submit-pr` asks whether to bump them when
-a release is being cut. `VERSION` is the canonical version read by `scripts/build_deb.sh`. If you
-notice `VERSION` or the README badge disagrees with what a release should be, flag it for the
-user — don't silently edit it here.
+**`/commit` adds only the fragment for the changelog.** Do **not** modify `CHANGELOG.md`, the
+`VERSION` file or the `#### [x.x.x] - …` version badge in `README.md` in this flow. Those are
+release actions: `/submit-pr` asks whether to bump them when a release is being cut. `VERSION` is
+the canonical version read by `scripts/build_deb.sh`. If you notice `VERSION` or the README badge
+disagrees with what a release should be, flag it for the user — don't silently edit it here.
 
 ## Step 6 — Stage the right files
 
@@ -273,7 +267,7 @@ If changes span multiple logical units (e.g., driver code + ConformU results + d
 1. **Driver implementation** — driver code + protocol/SDK wrapper + tests + CMake
 2. **ConformU validation** — ConformU result files + SUPPORTED-DRIVERS.md updates
 3. **HTTP/Web UI integration** — router + web UI + routing tests
-4. **Documentation** — CHANGELOG, AGENTS.md, SUPPORTED-DRIVERS.md
+4. **Documentation** — changelog.d/ fragment, AGENTS.md, SUPPORTED-DRIVERS.md
 5. **SDK addition** — external/ SDK files (often a large commit on its own)
 
 ## Step 7 — Write the commit message

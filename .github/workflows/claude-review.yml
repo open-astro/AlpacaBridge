@@ -129,8 +129,8 @@ jobs:
             DEFECTS block the merge. Only these count:
             - The changed code gives a wrong result on a realistic input.
             - A changed behaviour that is testable has no test that would fail
-              without the change (workflow YAML, docs and CHANGELOG have no
-              test surface; do not report this for them).
+              without the change (workflow YAML, docs, CHANGELOG.md and changelog.d/
+              fragments have no test surface; do not report this for them).
             - A security hole or a leaked secret in the changed lines.
             - A test, CI gate, doc or skill line, changed by the PR or not,
               that no longer says what the changed code does.
