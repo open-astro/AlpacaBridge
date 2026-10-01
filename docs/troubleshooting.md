@@ -70,6 +70,23 @@ Add `catch2` to build the tests. [development.md](development.md#prerequisites) 
 
 See [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) for driver-specific notes.
 
+### The web UI or API answers HTTP 403 "Host '...' is not allowed"
+
+**Why**: the server refuses a request whose `Host` header names something it does not know (issue #392), so a hostile web page cannot reach it through a DNS-rebinding name. It always allows an IPv4 address or a bracketed IPv6 address, `localhost` and `*.localhost`, the machine's own hostname and `<hostname>.local`, and any `*.local`, `*.home.arpa` or `*.internal` name. A name your router's DNS adds (`astropi.lan`, `astropi.fritz.box`) is not on that list.
+
+**Fix**: use the IP address, or add the name to `allowed_hosts` under `http:` in the server config file (comma-separated; a leading dot allows a domain and every name under it), then restart the service:
+
+```yaml
+http:
+  allowed_hosts: ".lan, astropi.fritz.box"
+```
+
+On a package install the file is `/var/lib/alpacabridge/config/default.yaml`; edit it as the `alpacabridge` user (see [the motion watchdog section](#the-mount-stopped-by-itself-mid-slew-and-the-log-says-client-silence-motion-watchdog) for why). The environment variable `ALPACAHTTP_ALLOWED_HOSTS` replaces the key, for example in a systemd drop-in for `alpacabridge.service`. No web UI page or HTTP endpoint changes the list.
+
+**Notes**:
+- The server reads the machine's hostname once, at start-up. After you rename the machine, restart the service, or the new name gets 403 and the old one is still allowed.
+- A bracketed IPv6 address with a zone id (`[fe80::1%25eth0]`) is refused: the address check does not accept zone ids. Use the hostname, `<hostname>.local`, or the IPv4 address instead.
+
 ### Permission denied
 
 **Solution**:
