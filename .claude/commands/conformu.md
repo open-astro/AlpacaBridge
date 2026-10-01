@@ -40,7 +40,7 @@ Ask the following **one at a time**, waiting for each answer before moving on. I
    - If the device only supports one transport, omit the suffix — file is `Linux-arm64.txt`.
    - If the device supports multiple and this run only tests one, use the suffix — file is `Linux-arm64-<transport>.txt`. Existing reports already exist for the same device — those other transports stay untouched.
 
-5. **Test SBC host** — defaults to `openastro.lan` (see the rig identity above; if that does not resolve, `nmap -sn 192.168.1.0/24 | grep -i openastro` finds a suffixed name). ConformU itself runs on the SBC against `http://localhost:6800`; the pre-flight `curl` checks below run from the dev machine against `http://<host>:6800`. Those checks need `.lan` allowed as a `Host` on the rig: the server answers HTTP 403 to a `Host` that is not an IP address, `localhost`, its own hostname, a `*.local`, `*.home.arpa` or `*.internal` name, or listed in `http.allowed_hosts` (issue #392), and `/deploy-test` Step 4 installs the systemd drop-in that sets `ALPACAHTTP_ALLOWED_HOSTS=.lan`. Only ask when the user names a different rig.
+5. **Test SBC host** — defaults to `openastro.lan` (see the rig identity above; if that does not resolve, `nmap -sn 192.168.1.0/24 | grep -i openastro` finds a suffixed name). ConformU itself runs on the SBC against `http://localhost:6800`; the pre-flight `curl` checks below run from the dev machine against `http://<host>:6800`. Those checks need `.lan` allowed as a `Host` on the rig only when the Host check is enabled (`http.host_check_enabled`, off by default): then the server answers HTTP 403 to a `Host` that is not an IP address, `localhost`, its own hostname, a `*.local`, `*.home.arpa` or `*.internal` name, or listed in `http.allowed_hosts` (issue #392), and `/deploy-test` Step 4 installs the systemd drop-in that sets `ALPACAHTTP_ALLOWED_HOSTS=.lan`. Only ask when the user names a different rig.
 
 6. **Device number** — defaults to `0`. Most single-device setups stay at 0.
 
@@ -81,7 +81,7 @@ Expect a JSON response containing `ServerName` or `Manufacturer`. If the request
 
 > "AlpacaBridge is not reachable at `http://<host>:<port>`. Start it (`./build_and_run.sh`) and re-run `/conformu`."
 
-If it answers HTTP 403 with `Host '<host>:<port>' is not allowed`, the rig lacks the `ALPACAHTTP_ALLOWED_HOSTS=.lan` drop-in: run the two `/deploy-test` Step 4 commands (drop-in, then restart), or use the rig's IP address as `<host>`. Every `curl` below needs the same fix.
+If it answers HTTP 403 with `Host '<host>:<port>' is not allowed` (only with the Host check enabled), the rig lacks the `ALPACAHTTP_ALLOWED_HOSTS=.lan` drop-in: run the two `/deploy-test` Step 4 commands (drop-in, then restart), or use the rig's IP address as `<host>`. Every `curl` below needs the same fix.
 
 ### 2b. Device is configured
 

@@ -160,6 +160,12 @@ public:
     // so a rebound page cannot add its own name.
     void set_allowed_hosts(const std::vector<std::string>& hosts);
 
+    // http.host_check_enabled: whether route() applies the Host allowlist at
+    // all. Off by default, so a request is not refused for its Host name; the
+    // Origin==Host cross-origin guard does not depend on it. Lock-free, so it
+    // may be flipped while requests run; the next request sees the new value.
+    void set_host_check_enabled(bool enabled) { host_check_enabled_.store(enabled, std::memory_order_release); }
+
     // open-astro#547: check every registered telescope for client silence
     // during motion and stop any that have gone quiet past the configured
     // interval. Called once a second from the server's existing low-
@@ -198,6 +204,7 @@ private:
     // pointer copy. machine_hostname_ is set once in the constructor.
     std::shared_ptr<const std::vector<std::string>> allowed_hosts_ = std::make_shared<const std::vector<std::string>>();
     mutable std::mutex allowed_hosts_mutex_;
+    std::atomic<bool> host_check_enabled_{false};
     std::string machine_hostname_;
 
     // open-astro#547.

@@ -14,7 +14,7 @@ The user invoked this command with: $ARGUMENTS
 
 - First argument (if present) is the target host (e.g. `openastro.lan`), second is the SSH user.
 - **Standard rig (do not re-ask):** host `openastro.lan` (future images may be `openastro-XXXX.lan` with a 4-hex MAC suffix; the name always starts with `openastro`), user `astro`, password `astro`, sudo needs the password (`echo astro | sudo -S ...`). `astro.lan` is the old hostname and no longer resolves.
-- **`.lan` must be an allowed Host on the rig.** The server refuses a `Host` header it does not allow with HTTP 403 (issue #392); it allows its own hostname (`openastro`) and `openastro.local`, but not the router's `openastro.lan`. Step 4 installs a systemd drop-in that sets `ALPACAHTTP_ALLOWED_HOSTS=.lan` before the restart, so the `curl` checks here and in `/conformu` and the web UI link reach the server by `<host>`.
+- **`.lan` must be an allowed Host on the rig only when the Host check is enabled** (`http.host_check_enabled`, off by default). With it on, the server refuses a `Host` header it does not allow with HTTP 403 (issue #392); it allows its own hostname (`openastro`) and `openastro.local`, but not the router's `openastro.lan`. Step 4 installs a systemd drop-in that sets `ALPACAHTTP_ALLOWED_HOSTS=.lan` before the restart, so the `curl` checks here and in `/conformu` and the web UI link reach the server by `<host>`.
 - Anything not provided is asked for in Step 1.
 
 ## Step 1 — Gather session inputs
@@ -102,7 +102,7 @@ ssh -- "<user>@<host>" "dpkg-query -W -f='\${Status} \${Version}\n' alpacabridge
 - `apt-get -f install` only runs if `dpkg -i` reported unmet dependencies.
 - **Gate:** the `dpkg-query` line must print `install ok installed <VERSION>` (the version just built). If the status is anything else (`half-configured`, `unpacked`, an older version), **STOP** — do NOT restart the service. Show the dpkg/apt output, leave the currently-running (old but working) service untouched, and tell the user the install failed.
 
-Only after the gate passes, make sure the rig allows `*.lan` as a `Host` (the drop-in is not part of the package, so it survives upgrades; rewriting it is harmless), then restart:
+Only after the gate passes, and only when the rig has the Host check enabled, make sure it allows `*.lan` as a `Host` (the drop-in is not part of the package, so it survives upgrades; rewriting it is harmless), then restart:
 
 ```bash
 ssh -- "<user>@<host>" 'echo astro | sudo -S sh -c "mkdir -p /etc/systemd/system/alpacabridge.service.d && printf %s\\\\n \"[Service]\" Environment=ALPACAHTTP_ALLOWED_HOSTS=.lan > /etc/systemd/system/alpacabridge.service.d/allowed-hosts.conf && systemctl daemon-reload"'

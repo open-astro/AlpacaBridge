@@ -15,18 +15,18 @@ Five surfaces: (1) Device API `/api/v1/<type>/<n>/...`; (2) Management API `/man
 ### Trust statement
 
 - **A LAN host is trusted to operate and configure the server.** Alpaca has no login, so a peer that can open a TCP connection may drive devices, register or remove them, set the log level and the clock, join or leave a Wi-Fi network, stop or restart the service, and start a software update. The limit of that trust is the process: a LAN host is not trusted to make the server unresponsive for other clients (held sockets, oversized input, unbounded work) and cannot reach anything beyond the service privileges.
-- **A browser page is not trusted.** A page the operator opens elsewhere can send requests to the board from the operator browser. It is held by `reject_cross_origin_request` (`AlpacaHTTP/src/http/router.cpp:7487`), a Host allowlist against DNS rebinding (`reject_disallowed_host`, `router.cpp:1487`, called from `Router::route()` at `1687`; NS-02, issue #392) and framing headers against clickjacking (NS-08, not landed).
+- **A browser page is not trusted.** A page the operator opens elsewhere can send requests to the board from the operator browser. It is held by `reject_cross_origin_request` (`AlpacaHTTP/src/http/router.cpp:7487`), an opt-in Host allowlist against DNS rebinding, off by default (`http.host_check_enabled`; `reject_disallowed_host`, `router.cpp:1487`, called from `Router::route()` at `1687`; NS-02, issue #392) and framing headers against clickjacking (NS-08, not landed).
 - **A device in radio range is not trusted.** On an open hotspot anyone in range is on the LAN. The hotspot must carry a passphrase by default (NS-06); until then radio range equals LAN trust.
 - **Localhost gets no extra trust**: a local browser is still a browser.
 
-The guard compares `Origin` with `Host` as strings. It passes every GET and every request with no `Origin` header (curl, NINA, ConformU). That is intended: a browser always sends `Origin` on a cross-origin POST or PUT, and a non-browser client is a LAN host and trusted anyway. It is an origin check, not authentication, and on its own DNS rebinding defeats it, because the rebound page is same-origin under the attacker name; the Host allowlist (`reject_disallowed_host`, applied in `Router::route()` to every method and path before routing; `server.cpp:56` passes it `http.allowed_hosts`) refuses that request first.
+The guard compares `Origin` with `Host` as strings. It passes every GET and every request with no `Origin` header (curl, NINA, ConformU). That is intended: a browser always sends `Origin` on a cross-origin POST or PUT, and a non-browser client is a LAN host and trusted anyway. It is an origin check, not authentication, and on its own DNS rebinding defeats it, because the rebound page is same-origin under the attacker name; the Host allowlist (`reject_disallowed_host`, applied in `Router::route()` to every method and path before routing when `http.host_check_enabled` is on; `server.cpp:56` passes it `http.allowed_hosts`) refuses that request first. The allowlist is off by default (see Guard coverage).
 
 ### Surface 1: Device API
 
 - **Who can reach it.** Any LAN host; a browser page only through the CORS rules below.
 - **What it can do.** Read every property, move hardware (slew, `MoveAxis`, pulse guide, focuser and rotator moves, dome and cover commands), start and abort exposures, set switches (power ports), call `Action` and `CommandBlind`/`CommandBool`/`CommandString` where a driver implements them, read image data.
 - **What is trusted and why.** The caller is trusted to operate the device. Parameters are not: each driver validates its ranges and throws `InvalidValue`. The device number is bounded at parse time (`parse_route`, `router.cpp:1746`).
-- **Guard coverage.** The verb check (`router.cpp:2415-2438`, guard call at `2429`) calls the origin guard only for a request whose verb the method does not accept, so a forged POST gets 403. A well-formed PUT that reaches a driver is not passed through the guard; only `UTCDate` (`router.cpp:3729`) and the `Site*` PUTs (`3936`, `3957`, `3978`) are. A browser cannot deliver such a PUT cross-origin: PUT needs a CORS preflight and the server never answers one (no `Access-Control-*` header and no OPTIONS handling anywhere under `AlpacaHTTP/`). That protection is absent-by-omission. The Host allowlist (NS-02, issue #392) closes the DNS-rebinding path to it, because a rebound page is refused with 403 before any routing. The gap is listed under Known gaps.
+- **Guard coverage.** The verb check (`router.cpp:2415-2438`, guard call at `2429`) calls the origin guard only for a request whose verb the method does not accept, so a forged POST gets 403. A well-formed PUT that reaches a driver is not passed through the guard; only `UTCDate` (`router.cpp:3729`) and the `Site*` PUTs (`3936`, `3957`, `3978`) are. A browser cannot deliver such a PUT cross-origin: PUT needs a CORS preflight and the server never answers one (no `Access-Control-*` header and no OPTIONS handling anywhere under `AlpacaHTTP/`). That protection is absent-by-omission. The Host allowlist (NS-02, issue #392) closes the DNS-rebinding path to it when it is enabled, because a rebound page is refused with 403 before any routing. It is opt-in and off by default (`http.host_check_enabled`, so a router name such as `astropi.lan` is not locked out after an upgrade), so by default the DNS-rebinding path to the unguarded device PUTs is open. The gap is listed under Known gaps.
 - **Resource budget.** Header block at most 64 KiB (`kMaxHeaderBytes`, `server.cpp:861`). Body at most 64 KiB (`Request::kMaxBodyBytes`, `AlpacaHTTP/include/alpacahttp/request.h:38`, issue #741): a larger Content-Length is answered `413` from the headers alone, before any body byte is read (`server.cpp:1059-1060`), and refused by `Request::parse()` (`AlpacaHTTP/src/core/request.cpp:127`). URL path at most 2048 bytes (`kMaxRequestPathBytes`, `router.cpp:1394`), refused before any regex (`router.cpp:1666`, issue #711). Worker pool 32 threads and 512 open connections (`AlpacaHTTP/include/alpacahttp/config.h:147`, `154`), 1000 requests per connection (`server.cpp:844`), a total-request deadline, a per-recv timeout and an idle keep-alive deadline (`server.cpp:804`, `960-963`, `1254`). There is no per-host cap, so one host can hold every slot (NS-03+05).
 
 ### Surface 2: Management API
@@ -89,7 +89,7 @@ A change passes only when every line holds, or the exception is written in the c
 
 - No framing or CSP headers (NS-08).
 - No per-host connection cap (NS-03+05).
-- Driver-reaching device PUTs are not origin-guarded; safe while no CORS preflight is answered, and the Host allowlist (NS-02) closes the DNS-rebinding path; the reviewer check holds the rest.
+- Driver-reaching device PUTs are not origin-guarded; safe while no CORS preflight is answered. The DNS-rebinding path to them is open by default: the Host allowlist (NS-02) closes it only when `http.host_check_enabled` is on. The reviewer check holds the rest.
 - Unbounded detached threads per shutdown and restart request; tracked with the NS-14 low-severity items.
 - 28 unaudited `innerHTML`-class sinks in `app.js`; tracked with the NS-14 items (web UI item).
 
@@ -98,7 +98,7 @@ A change passes only when every line holds, or the exception is written in the c
 | Finding | Surface | Status | Where handled |
 | --- | --- | --- | --- |
 | NS-01 | Management API | fixed | landed on main |
-| NS-02 | Device API, Management API, Web UI | fixed | Host allowlist against DNS rebinding (issue #392): `reject_disallowed_host` in `Router::route()`, extra names from `http.allowed_hosts` / `ALPACAHTTP_ALLOWED_HOSTS` (`AlpacaHTTP/src/core/config.cpp`, `AlpacaHTTP/include/alpacahttp/config.h:83`); closes the rebinding half of the unguarded device PUT gap |
+| NS-02 | Device API, Management API, Web UI | opt-in, off by default | Host allowlist against DNS rebinding (issue #392), applied only when `http.host_check_enabled` / `ALPACAHTTP_HOST_CHECK` is true: `reject_disallowed_host` in `Router::route()`, extra names from `http.allowed_hosts` / `ALPACAHTTP_ALLOWED_HOSTS` (`AlpacaHTTP/src/core/config.cpp`, `AlpacaHTTP/include/alpacahttp/config.h:83`); closes the rebinding half of the unguarded device PUT gap when enabled; with the default (off) that half is open |
 | NS-03+05 | all HTTP surfaces | open | per-host connection cap |
 | NS-04 | all HTTP surfaces | fixed | request body cap lowered from 10 MiB to 64 KiB (issue #741) |
 | NS-06 | Wi-Fi API | open | hotspot passphrase by default |
@@ -118,7 +118,7 @@ When a finding lands, set its row to `fixed` in the same change.
 - **Add authentication.** Alpaca defines none; NINA, ConformU and every client would stop working. A shared secret over plain HTTP on an open hotspot protects nothing against the radio-range attacker anyway.
 - **Bind to localhost or one interface.** The server is used from another machine by design and the LAN address changes with the hotspot.
 - **Require a preflight or custom header on every state change.** It breaks non-browser clients that send no `Origin`.
-- **Treat the Origin check as the whole browser defence.** It compares two attacker-influenced strings under DNS rebinding; it needs the Host allowlist beside it.
+- **Treat the Origin check as the whole browser defence.** It compares two attacker-influenced strings under DNS rebinding; it needs the Host allowlist beside it (enable `http.host_check_enabled`; it is off by default).
 - **Fix R1 to R4 now.** R1, R2 and R4 need policy the LAN model lacks (a reachable-host allowlist, a proxy-aware parser); R3 is the price of the shared libraries.
 
 ## Consequences
