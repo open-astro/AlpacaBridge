@@ -1764,6 +1764,15 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        {
+            // A refused goto must not cancel a goto, park or pulse in flight,
+            // so gate BEFORE reaping (the copies below re-check after it).
+            std::lock_guard<std::mutex> gate(mutex_);
+            check_connected();
+            check_not_parked_locked("SlewToCoordinates");
+            validate_ra_dec(ra, dec, "SlewToCoordinates");
+            check_target_altitude_locked(ra, dec, "SlewToCoordinates");
+        }
         reap_slew_task();  // also clears a leftover AbortSlew cancellation
         reap_pulse_task();
         std::unique_lock<std::mutex> lock(mutex_);
@@ -1814,6 +1823,8 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
+            validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+            check_target_altitude_locked(ra, dec, "SlewToCoordinatesAsync");
         }
         // Cancel + join any previous slew or pulse task first (without mutex_):
         // a stale pulse timer firing mid-goto corrupts the slew.

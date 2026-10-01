@@ -117,6 +117,15 @@ std::string require_below_floor_refusal(const std::function<void()>& fn) {
     return {};
 }
 
+void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected an AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == expected_code);
+    }
+}
+
 }  // namespace
 
 TEST_CASE("SkyWatcher limits - a synchronous goto below the floor is refused and nothing reaches the board",
@@ -140,8 +149,8 @@ TEST_CASE("SkyWatcher limits - a synchronous goto below the floor is refused and
     // And no driver state either: Slewing stays false and the target
     // properties were not seeded by the refused call.
     CHECK_FALSE(driver->get_slewing());
-    CHECK_THROWS_AS(driver->get_target_right_ascension(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_target_declination(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
     driver->set_connected(false);
 }
 
@@ -165,8 +174,40 @@ TEST_CASE("SkyWatcher limits - an asynchronous goto below the floor is refused a
     CHECK_FALSE(mount.axis_running(1));
     CHECK_FALSE(mount.axis_running(2));
     CHECK_FALSE(driver->get_slewing());
-    CHECK_THROWS_AS(driver->get_target_right_ascension(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->get_target_declination(), alpacacore::AlpacaException);
+    require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - a refused goto leaves a goto in flight running", "[skywatcher][telescope][limits]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, floor_deg(15.0));
+    const double ra = near_pole_ra(*driver);
+    driver->slew_to_coordinates_async(ra, kNearPoleDec);
+    REQUIRE(driver->get_slewing());
+    REQUIRE(wait_until([&] { return mount.frames_seen('J') >= 2; }, 5000));
+
+    // Dec -60 peaks at about -10 deg altitude at this latitude, so it is
+    // below the floor at any time of day.
+    const double low_ra = ra;
+    require_alpaca_error([&] { driver->slew_to_coordinates(low_ra, -60.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(low_ra, -60.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_slewing());
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
+    CHECK(std::abs(driver->get_declination() - kNearPoleDec) < 0.05);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - Sync and MoveAxis are exempt from the floor", "[skywatcher][telescope][limits]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, floor_deg(90.0));
+    const double ra = near_pole_ra(*driver);
+    CHECK_NOTHROW(driver->sync_to_coordinates(ra, kNearPoleDec));
+    CHECK_NOTHROW(driver->move_axis(0, 0.5));
+    CHECK_NOTHROW(driver->move_axis(0, 0.0));
     driver->set_connected(false);
 }
 
