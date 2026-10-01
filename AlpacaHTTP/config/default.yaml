@@ -4,6 +4,7 @@
 http:
   port: 6800
   thread_pool_size: 32  # Number of concurrent request handlers (increase for more devices/clients). Env: ALPACAHTTP_THREAD_POOL_SIZE (1-256)
+  allowed_hosts: ""  # Extra names the web UI and API accept as the request's Host header (DNS-rebinding guard), comma-separated. Always allowed: IP addresses, localhost and *.localhost, this machine's hostname, *.local, *.home.arpa and *.internal. A leading dot allows a domain and every name under it (.lan allows pi.lan). Other names get HTTP 403. Env: ALPACAHTTP_ALLOWED_HOSTS
 
 # Discovery settings
 discovery:

@@ -25,6 +25,8 @@
 #include <alpacahttp/util/host_timezone.h>
 #include <alpacahttp/util/logging_adapter.h>
 #include <alpacahttp/version.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 #include <zlib.h>
 
 #include <algorithm>
@@ -1391,6 +1393,134 @@ std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
 // path today is under 100 bytes; 2048 stays far below the crash depth.
 constexpr std::size_t kMaxRequestPathBytes = 2048;
 
+// open-astro#392: the host part of a Host header or an http.allowed_hosts
+// entry: port removed, lowercased, one trailing dot removed. A bracketed IPv6
+// literal keeps its brackets. std::nullopt when the value cannot name a host:
+// an unbracketed name with two or more colons (a bare IPv6 literal, which a
+// browser never sends), an unclosed bracket, or text after the bracket that is
+// not a port.
+std::optional<std::string> normalize_host(std::string_view value) {
+    std::string_view name = value;
+    if (!name.empty() && name.front() == '[') {
+        const auto close = name.find(']');
+        if (close == std::string_view::npos) {
+            return std::nullopt;
+        }
+        const auto rest = name.substr(close + 1);
+        if (!rest.empty() && rest.front() != ':') {
+            return std::nullopt;
+        }
+        name = name.substr(0, close + 1);
+    } else if (const auto colon = name.find(':'); colon != std::string_view::npos) {
+        if (name.find(':', colon + 1) != std::string_view::npos) {
+            return std::nullopt;
+        }
+        name = name.substr(0, colon);
+    }
+    std::string normalized(name);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (!normalized.empty() && normalized.back() == '.') {
+        normalized.pop_back();
+    }
+    return normalized;
+}
+
+// `suffix` starts with a dot; the name must have at least one character
+// before it, so ".local" alone is not a .local name.
+bool has_label_suffix(std::string_view name, std::string_view suffix) {
+    return name.size() > suffix.size() && name.substr(name.size() - suffix.size()) == suffix;
+}
+
+// A parser, not a pattern: "1.2.3.4.evil.example" and "0x7f.1" are names.
+bool is_ip_literal(const std::string& name) {
+    if (name.size() > 2 && name.front() == '[' && name.back() == ']') {
+        in6_addr v6{};
+        return ::inet_pton(AF_INET6, name.substr(1, name.size() - 2).c_str(), &v6) == 1;
+    }
+    in_addr v4{};
+    return ::inet_pton(AF_INET, name.c_str(), &v4) == 1;
+}
+
+// `name` is normalized and non-empty. The reserved suffixes never resolve
+// through public DNS (RFC 6761 .localhost, RFC 6762 .local, RFC 8375
+// .home.arpa, ICANN 2024 .internal), so a rebinding attacker cannot use them.
+bool host_allowed(const std::string& name, const std::vector<std::string>& allowed_hosts,
+                  const std::string& machine_hostname) {
+    if (is_ip_literal(name) || name == "localhost" || has_label_suffix(name, ".localhost")) {
+        return true;
+    }
+    if (!machine_hostname.empty() && (name == machine_hostname || name == machine_hostname + ".local")) {
+        return true;
+    }
+    for (const std::string_view suffix : {".local", ".home.arpa", ".internal"}) {
+        if (has_label_suffix(name, suffix)) {
+            return true;
+        }
+    }
+    for (const auto& entry : allowed_hosts) {
+        if (entry.front() == '.') {
+            if (name == std::string_view(entry).substr(1) || has_label_suffix(name, entry)) {
+                return true;
+            }
+        } else if (name == entry) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string read_machine_hostname() {
+    std::array<char, 256> buffer{};
+    if (::gethostname(buffer.data(), buffer.size() - 1) != 0) {
+        return {};
+    }
+    return normalize_host(buffer.data()).value_or(std::string());
+}
+
+// open-astro#392: DNS rebinding. After a rebind the browser addresses this
+// server by the attacker's name, sends it as Host (and as Origin, so the
+// Origin==Host guard below passes), and treats the server as same-origin.
+// Refuse any Host that is not allowed, for every method and path. A missing or
+// empty Host is allowed: HTTP/1.0 clients omit it, a browser never does.
+// Logged at DEBUG only: a page under attack repeats the request.
+std::optional<Response> reject_disallowed_host(const Request& request, std::uint32_t server_tx_id,
+                                               const std::vector<std::string>& allowed_hosts,
+                                               const std::string& machine_hostname) {
+    const std::string host = request.get_header("Host");
+    if (host.empty()) {
+        return std::nullopt;
+    }
+    const auto name = normalize_host(host);
+    if (name && !name->empty() && host_allowed(*name, allowed_hosts, machine_hostname)) {
+        return std::nullopt;
+    }
+    // The header is client text: cut it to 255 bytes and replace anything
+    // but printable ASCII, so the JSON body always serializes.
+    std::string shown = host.substr(0, 255);
+    std::replace_if(shown.begin(), shown.end(), [](unsigned char c) { return c < 0x20 || c > 0x7e; }, '?');
+    util::log_debug("Refused request for Host '" + shown + "'");
+    // Same ClientTransactionID precedence as reject_cross_origin_request():
+    // the query string's, else the JSON body's (open-astro#384, #509).
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+    if (client_tx_id == 0 && !request.body().empty()) {
+        if (auto json_opt = parse_json(request.body())) {
+            client_tx_id = extract_client_transaction_id(*json_opt);
+        }
+    }
+    AlpacaResponse alpaca_response =
+        make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                            "Host '" + shown + "' is not allowed; add it to http.allowed_hosts or use the IP address");
+    Response resp;
+    resp.set_content_type("application/json");
+    resp.set_status(403, "Forbidden");
+    resp.set_body(alpaca_response);
+    return resp;
+}
+
 // Defined further down with the management guards, but declared here because
 // every state-changing management handler needs it and handle_description()
 // is the first of them in file order. Also used by the four device setters
@@ -1406,7 +1536,7 @@ std::optional<Response> reject_cross_origin_request(const Request& request, std:
 
 Router::Router() : Router(CatalogExtension{}) {}
 
-Router::Router(const CatalogExtension& extend_catalog) {
+Router::Router(const CatalogExtension& extend_catalog) : machine_hostname_(read_machine_hostname()) {
     alpacacore::catalog::register_builtin_schemas(catalog_);
     alpacacore::catalog::register_builtin_factories(catalog_);
     if (extend_catalog) {
@@ -1459,6 +1589,22 @@ void Router::set_server_info(std::string server_name, std::string manufacturer, 
     manufacturer_version_ = std::move(manufacturer_version);
     location_ = std::move(location);
     profile_name_ = std::move(profile_name);
+}
+
+void Router::set_allowed_hosts(const std::vector<std::string>& hosts) {
+    auto normalized = std::make_shared<std::vector<std::string>>();
+    for (const auto& entry : hosts) {
+        const auto first = entry.find_first_not_of(" \t");
+        if (first == std::string::npos) {
+            continue;
+        }
+        auto name = normalize_host(std::string_view(entry).substr(first, entry.find_last_not_of(" \t") - first + 1));
+        if (name && !name->empty() && *name != ".") {
+            normalized->push_back(std::move(*name));
+        }
+    }
+    std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
+    allowed_hosts_ = std::move(normalized);
 }
 
 void Router::set_config_path(std::string config_path) {
@@ -1529,6 +1675,19 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
                                         " bytes; the limit is " + std::to_string(kMaxRequestPathBytes) + " bytes");
             response.set_body(alpaca_response);
             return response;
+        }
+
+        // open-astro#392: before static files, setup pages and routing.
+        {
+            std::shared_ptr<const std::vector<std::string>> allowed_hosts;
+            {
+                std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
+                allowed_hosts = allowed_hosts_;
+            }
+            if (auto refused =
+                    reject_disallowed_host(request, server_transaction_id, *allowed_hosts, machine_hostname_)) {
+                return *refused;
+            }
         }
 
         // Handle static file requests (web UI)

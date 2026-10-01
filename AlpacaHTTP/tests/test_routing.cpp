@@ -73,6 +73,38 @@ alpacahttp::Response route_request(alpacahttp::Router& router, const std::string
     return router.route(request, 1);
 }
 
+// open-astro#392: route_request() with a chosen Host header, or none at all
+// when `host` is std::nullopt (an empty string sends an empty Host header).
+alpacahttp::Response route_with_host(alpacahttp::Router& router, const std::string& method, const std::string& path,
+                                     const std::optional<std::string>& host, const std::string& body = std::string()) {
+    alpacahttp::Request request;
+    std::ostringstream raw;
+    raw << method << " " << path << " HTTP/1.1\r\n";
+    if (host) {
+        raw << "Host: " << *host << "\r\n";
+    }
+    if (!body.empty()) {
+        raw << "Content-Type: application/json\r\n";
+        raw << "Content-Length: " << body.size() << "\r\n";
+    }
+    raw << "\r\n";
+    raw << body;
+
+    EXPECT(request.parse(raw.str()));
+    return router.route(request, 1);
+}
+
+// True when the response is the open-astro#392 Host refusal for `host`.
+bool is_host_refusal(const alpacahttp::Response& response, const std::string& host) {
+    if (response.status_code() != 403) {
+        return false;
+    }
+    const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+    return !json.is_discarded() && json.value("ErrorNumber", 0) == 0x401 &&
+           json.value("ErrorMessage", "") ==
+               "Host '" + host + "' is not allowed; add it to http.allowed_hosts or use the IP address";
+}
+
 // Issue #102 back-fill helper: POST a device config, then read it back from
 // configureddevices. Returns the round-tripped Config object for
 // (device_type, device_number), or a null json if configuration failed or the
@@ -6453,6 +6485,91 @@ int main() {
         EXPECT(listed_entry(router, "Focuser", 9257).is_null());
     }
 #endif
+
+    // open-astro#392: Host allowlist against DNS rebinding. After a rebind
+    // the browser sends the attacker's name as Host (and as Origin), so the
+    // Origin==Host guard passes; route() now refuses any Host that is not an
+    // IP literal, a reserved local name, the machine's own name or a
+    // configured one, for every method and path.
+    {
+        alpacahttp::Router router;
+        const std::string apiversions = "/management/apiversions";
+
+        char hostname_buffer[256] = {};
+        EXPECT(::gethostname(hostname_buffer, sizeof(hostname_buffer) - 1) == 0);
+        std::string hostname = hostname_buffer;
+        std::transform(hostname.begin(), hostname.end(), hostname.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        const std::vector<std::optional<std::string>> allowed = {
+            "192.168.1.20",     "192.168.1.20:6800", "[::1]",       "[fe80::1]:6800", "localhost",   "LOCALHOST.",
+            hostname,           hostname + ".local", "astro.local", "foo.home.arpa",  "pi.internal", "x.localhost",
+            "Astro.Local:6800", std::nullopt,
+        };
+        for (const auto& host : allowed) {
+            const auto response = route_with_host(router, "GET", apiversions, host);
+            if (response.status_code() != 200) {
+                std::cerr << "Host allowlist: refused " << host.value_or("<no Host>") << "\n";
+            }
+            EXPECT(response.status_code() == 200);
+        }
+
+        // Refused on a GET management route, a PUT device method and a
+        // static file alike: the check runs before any of them.
+        EXPECT(is_host_refusal(route_with_host(router, "GET", "/management/v1/configureddevices", "attacker.example"),
+                               "attacker.example"));
+        EXPECT(is_host_refusal(route_with_host(router, "PUT", "/api/v1/telescope/0/tracking", "attacker.example"),
+                               "attacker.example"));
+        EXPECT(
+            is_host_refusal(route_with_host(router, "GET", "/web/index.html", "attacker.example"), "attacker.example"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", "/", "attacker.example:6800"), "attacker.example:6800"));
+        // IP-literal tests parse, they do not pattern-match.
+        for (const std::string host :
+             {"1.2.3.4.evil.example", "0x7f.1", "::1", "fe80::1:6800", "evil.local.example.com",
+              "localhost.evil.example", "[::1].evil.example", "[not-an-ip]", "local"}) {
+            const auto response = route_with_host(router, "GET", apiversions, host);
+            if (!is_host_refusal(response, host)) {
+                std::cerr << "Host allowlist: allowed " << host << "\n";
+            }
+            EXPECT(is_host_refusal(response, host));
+        }
+        // The echoed name is cut to 255 bytes.
+        {
+            const std::string long_host(300, 'a');
+            EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, long_host), long_host.substr(0, 255)));
+        }
+
+        // The 403 echoes ClientTransactionID: the query string's, else the
+        // JSON body's (open-astro#384, #509).
+        {
+            const auto query_response =
+                route_with_host(router, "GET", apiversions + "?ClientTransactionID=4242", "attacker.example");
+            EXPECT(is_host_refusal(query_response, "attacker.example"));
+            const auto from_query = nlohmann::json::parse(query_response.body(), nullptr, false);
+            EXPECT(!from_query.is_discarded() && from_query.value("ClientTransactionID", 0) == 4242);
+            const auto body_response =
+                route_with_host(router, "PUT", "/api/v1/telescope/0/tracking", "attacker.example",
+                                R"({"Tracking": true, "ClientTransactionID": 777})");
+            EXPECT(is_host_refusal(body_response, "attacker.example"));
+            const auto from_body = nlohmann::json::parse(body_response.body(), nullptr, false);
+            EXPECT(!from_body.is_discarded() && from_body.value("ClientTransactionID", 0) == 777);
+        }
+
+        // A leading dot is a suffix entry; no dot matches only that name.
+        // Entries are normalized like the request host.
+        router.set_allowed_hosts({".LAN.", "astropi.home", " ", ""});
+        EXPECT(route_with_host(router, "GET", apiversions, "pi.lan").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", apiversions, "lan").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", apiversions, "Pi.Lan:6800").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", apiversions, "astropi.home").status_code() == 200);
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "lan.evil.example"), "lan.evil.example"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "evillan"), "evillan"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "x.astropi.home"), "x.astropi.home"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "attacker.example"), "attacker.example"));
+        // Replacing the list drops the old entries.
+        router.set_allowed_hosts({});
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "pi.lan"), "pi.lan"));
+    }
 
 #ifdef ALPACACORE_ENABLE_WEEWX
     // open-astro#731: the WeeWX refusals keep the router arm's exact text on
