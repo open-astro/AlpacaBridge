@@ -797,6 +797,54 @@ int main() {
         EXPECT(resp.status_code() == 400);
         EXPECT(nlohmann::json::parse(resp.body()).value("ErrorNumber", 0) != 0);
     }
+
+    // open-astro#740: a setup path the regex rejects is client input, so its
+    // log line is DEBUG, not WARNING, and the path in it is cut to 256 bytes
+    // plus "... (<N> bytes)". The 404 response is unchanged.
+    {
+        struct CapturedLine {
+            alpacacore::logging::LogLevel level;
+            std::string message;
+        };
+        std::vector<CapturedLine> captured;
+        std::mutex captured_mutex;
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.push_back({level, std::string(message)});
+            });
+
+        const std::string prefix = "/setup/v1/nonsense";
+        const std::string path = prefix + std::string(1000 - prefix.size(), 'x');
+        EXPECT(path.size() == 1000);
+        const auto resp = route_request(router, "GET", path);
+        EXPECT(resp.status_code() == 404);
+        EXPECT(resp.body().find("Endpoint not found: " + path) != std::string::npos);
+
+        const std::string tag = "Setup endpoint regex did not match: ";
+        const std::string expected = tag + path.substr(0, 256) + "... (1000 bytes)";
+        std::lock_guard<std::mutex> lock(captured_mutex);
+        int matched = 0;
+        for (const auto& line : captured) {
+            EXPECT(line.level != alpacacore::logging::LogLevel::Warn);
+            EXPECT(line.level != alpacacore::logging::LogLevel::Error);
+            if (line.message.find(tag) != std::string::npos) {
+                ++matched;
+                EXPECT(line.level == alpacacore::logging::LogLevel::Debug);
+                EXPECT(line.message == expected);
+            }
+        }
+        EXPECT(matched == 1);
+    }
     alpacahttp::Request request;
 
     // Test management endpoint parsing

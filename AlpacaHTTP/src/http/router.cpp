@@ -6397,7 +6397,14 @@ Response Router::handle_setup(const Request& request, std::uint32_t server_tx_id
     std::smatch matches;
 
     if (!std::regex_match(request.path(), matches, setup_regex)) {
-        util::log_warning("Setup endpoint regex did not match: " + request.path());
+        // Client input, so DEBUG, and the path is cut to its first 256 bytes (#740).
+        constexpr std::size_t kLoggedPathBytes = 256;
+        const std::string& path = request.path();
+        std::string logged_path = path.substr(0, kLoggedPathBytes);
+        if (path.size() > kLoggedPathBytes) {
+            logged_path += "... (" + std::to_string(path.size()) + " bytes)";
+        }
+        util::log_debug("Setup endpoint regex did not match: " + logged_path);
         // Not a valid setup path; return 404 as Alpaca error.
         response.set_status(404, "Not Found");
         AlpacaResponse alpaca_response = make_error_response(
