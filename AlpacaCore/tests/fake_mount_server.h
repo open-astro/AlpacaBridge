@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <mutex>
@@ -118,6 +119,29 @@ public:
 
     bool ok() const { return listen_fd_ >= 0 && port_ > 0; }
     int port() const { return port_; }
+
+    /// Resets every accepted connection (an RST, not a FIN, so the client's next send fails at once) and returns
+    /// once each handler has closed its socket, or after 2 s. The listener stays open, so a reconnect is served.
+    void reset_connections() {
+        {
+            std::lock_guard<std::mutex> lock(conn_mutex_);
+            const linger abort_on_close{1, 0};
+            for (const int fd : conn_fds_) {
+                ::setsockopt(fd, SOL_SOCKET, SO_LINGER, &abort_on_close, sizeof(abort_on_close));
+                ::shutdown(fd, SHUT_RD);  // wakes the handler's recv(); its close() then sends the RST
+            }
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::lock_guard<std::mutex> lock(conn_mutex_);
+                if (conn_fds_.empty()) {
+                    return;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
 
     /// Replies "0#" to anything: valid terminator for every '#'-framed
     /// protocol in the family; per-command parse failures are tolerated by

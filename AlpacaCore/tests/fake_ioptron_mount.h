@@ -51,6 +51,13 @@ public:
     /// firmware does for a target below the altitude limit) instead of "1".
     void set_reject_goto(bool reject) { reject_goto_.store(reject); }
 
+    /// open-astro#728: answer the position, Alt/Az and status reads (":GEP", ":GAC", ":GLS") with a short "0#" the
+    /// driver cannot parse, so every such read fails until this is cleared. Commands are still acknowledged.
+    void set_fail_reads(bool fail) { fail_reads_.store(fail); }
+
+    /// open-astro#728: reset the driver's connection, so its next send (a blind ":Q#" included) fails.
+    void reset_link() { server_.reset_connections(); }
+
     /// One shot, then spent: the reply to the next chunk received (one recv, which may carry several commands)
     /// is held for @p delay. A connect waiting on that reply stays open that long; used by the contract sweep to
     /// make Connecting observable.
@@ -110,6 +117,9 @@ private:
         if (cmd == ":MountInfo#") {
             return model_code_;  // 4 bytes, no '#', as the real firmware
         }
+        if (fail_reads_.load() && (cmd == ":GEP#" || cmd == ":GAC#" || cmd == ":GLS#")) {
+            return "0#";
+        }
         if (cmd == ":GLS#") {
             // sign + 16 digits (site), then 6 status digits: GPS, system
             // status (1 = tracking, 2 = slewing), rate, speed, time source,
@@ -160,6 +170,7 @@ private:
     std::atomic<long long> ra_units_{0};
     std::atomic<long long> dec_units_{0};
     std::atomic<bool> reject_goto_{false};
+    std::atomic<bool> fail_reads_{false};
     FakeMountServer server_;
 };
 
