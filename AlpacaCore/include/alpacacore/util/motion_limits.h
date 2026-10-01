@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -61,7 +62,7 @@ struct MotionSample {
     double counterweight_up_deg = 0.0;
 };
 
-enum class LimitCrossing { None, AltitudeFloor, Meridian };
+enum class LimitCrossing : std::uint8_t { None, AltitudeFloor, Meridian };
 
 // Goto target check. Returns a disengaged optional when the target is allowed
 // (limits off, or altitude at or above the floor), otherwise the operator-

@@ -85,14 +85,16 @@ TEST_CASE("MotionLimits - check_target refuses a target below the floor and name
     REQUIRE(refusal.has_value());
     // The operator reads this in NINA, standing at the mount: it names the
     // setting to change, not internal state (#358 message rule).
-    CHECK(*refusal == "target altitude 12.3 deg is below the Minimum altitude limit (15 deg) set in the device settings");
+    CHECK(*refusal ==
+          "target altitude 12.3 deg is below the Minimum altitude limit (15 deg) set in the device settings");
 }
 
 TEST_CASE("MotionLimits - check_target formats the altitude to one decimal and drops a trailing .0 on the limit",
           "[util][limits][unit]") {
     const auto rounded = check_target(floor_only(15.0), 12.34, 0.0);
     REQUIRE(rounded.has_value());
-    CHECK(*rounded == "target altitude 12.3 deg is below the Minimum altitude limit (15 deg) set in the device settings");
+    CHECK(*rounded ==
+          "target altitude 12.3 deg is below the Minimum altitude limit (15 deg) set in the device settings");
 
     const auto fractional_limit = check_target(floor_only(12.5), 3.0, 0.0);
     REQUIRE(fractional_limit.has_value());
@@ -101,7 +103,8 @@ TEST_CASE("MotionLimits - check_target formats the altitude to one decimal and d
 
     const auto negative = check_target(floor_only(0.0), -5.25, 0.0);
     REQUIRE(negative.has_value());
-    CHECK(*negative == "target altitude -5.3 deg is below the Minimum altitude limit (0 deg) set in the device settings");
+    CHECK(*negative ==
+          "target altitude -5.3 deg is below the Minimum altitude limit (0 deg) set in the device settings");
 }
 
 TEST_CASE("MotionLimits - check_target allows a target at or above the floor", "[util][limits][unit]") {

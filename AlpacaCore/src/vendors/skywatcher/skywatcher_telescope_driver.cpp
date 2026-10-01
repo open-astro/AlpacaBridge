@@ -4805,11 +4805,10 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, 
                                                              std::optional<double> site_longitude_deg,
                                                              std::optional<double> site_elevation_m,
                                                              std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-                                                             util::MotionLimits motion_limits,
-                                                             util::TaskClock& clock) {
-    return std::make_unique<SkyWatcherTelescopeDriver>(device_number, connection_info, site_latitude_deg,
-                                                       site_longitude_deg, site_elevation_m, std::move(protocol),
-                                                       util::ConnectionResolver<ConnectionInfo>{}, motion_limits, clock);
+                                                             util::MotionLimits motion_limits, util::TaskClock& clock) {
+    return std::make_unique<SkyWatcherTelescopeDriver>(
+        device_number, connection_info, site_latitude_deg, site_longitude_deg, site_elevation_m, std::move(protocol),
+        util::ConnectionResolver<ConnectionInfo>{}, motion_limits, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(

@@ -60,8 +60,8 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
         const std::string type = config.get(kSkyWatcherConnectionType);
         if (type.empty() || type == "auto") {
             const int mount_index = static_cast<int>(config.get(kSkyWatcherMountIndex));
-            telescope = vendor::skywatcher::create_skywatcher_telescope_auto(
-                device_number, mount_index, latitude, longitude, elevation, limits);
+            telescope = vendor::skywatcher::create_skywatcher_telescope_auto(device_number, mount_index, latitude,
+                                                                             longitude, elevation, limits);
         } else {
             // normalize has left "serial" or "network" here; anything else is
             // read as serial, never auto (#380).
