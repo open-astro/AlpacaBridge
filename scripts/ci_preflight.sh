@@ -293,7 +293,8 @@ section "Docs drift check"
 if python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs_drift.py \
    && python3 scripts/changelog_section.py --self-test \
    && python3 scripts/changelog_fragments.py --self-test \
-   && python3 scripts/changelog_fragments.py --check; then
+   && python3 scripts/changelog_fragments.py --check \
+   && python3 scripts/changelog_to_deb.py --self-test; then
   record PASS "docs drift check"
 else
   record FAIL "docs drift check"

@@ -12,7 +12,8 @@ only by the release step (`/bump-release`, which runs
 last `/` (branch `fix/fix-741-request-body-cap` gives
 `changelog.d/fix-741-request-body-cap.md`). Allowed characters:
 `[a-z0-9][a-z0-9._-]*`. One fragment per PR; a later commit on the same PR edits
-the same file.
+the same file. Every file in `changelog.d/` other than this README is treated as a
+fragment, so keep scratch files elsewhere.
 
 ## Body
 

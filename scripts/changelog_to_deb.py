@@ -142,7 +142,69 @@ def section_date(section):
     return datetime.datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
 
+def self_test():
+    """Drive main() over fixture trees: the fragment bullets and the warning."""
+    import contextlib
+    import io
+    import tempfile
+
+    released = "## [1.0.0] - 2026-01-01\n\n### Added\n- **old**\n"
+    fragment = "### Fixed\n- **a**\n  more\n"
+
+    def run(version, changelog, fragments):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+            if fragments:
+                (root / "changelog.d").mkdir()
+                for name, text in fragments.items():
+                    (root / "changelog.d" / name).write_text(text, encoding="utf-8")
+            out = root / "changelog"
+            argv, err = sys.argv, io.StringIO()
+            sys.argv = [
+                "changelog_to_deb.py", "--changelog", str(root / "CHANGELOG.md"),
+                "--out", str(out), "--package", "pkg", "--version", version,
+                "--maintainer", "T <t@example.com>",
+            ]
+            try:
+                with contextlib.redirect_stderr(err):
+                    main()
+            finally:
+                sys.argv = argv
+            return out.read_text(encoding="utf-8"), err.getvalue()
+
+    failures = []
+
+    def check(name, ok):
+        if not ok:
+            failures.append(name)
+
+    # A fragment alone feeds the synthesized UNRELEASED stanza of a new version.
+    text, err = run("1.0.1", released, {"x.md": fragment})
+    check("stanza", "pkg (1.0.1) UNRELEASED; urgency=low" in text)
+    check("bullet", "  * Fixed: a more\n" in text)
+    check("released stanza kept", "pkg (1.0.0) stable; urgency=low" in text)
+    check("no warning for a new version", err == "")
+
+    # No fragments: the stanza falls back to the placeholder bullet.
+    text, err = run("1.0.1", released, {})
+    check("empty stanza", "  * See CHANGELOG.md for release notes.\n" in text.split("pkg (1.0.0)")[0])
+
+    # A fragment against an already released version warns, and adds no stanza.
+    text, err = run("1.0.0", released, {"x.md": fragment})
+    check("warning", "already released" in err and "UNRELEASED section" in err)
+    check("no bullet in released stanza", "Fixed: a more" not in text)
+
+    if failures:
+        print("changelog_to_deb self-test FAILED: %s" % ", ".join(failures), file=sys.stderr)
+        return 1
+    print("changelog_to_deb self-test passed")
+    return 0
+
+
 def main():
+    if "--self-test" in sys.argv[1:] and len(sys.argv) == 2:
+        sys.exit(self_test())
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--changelog", required=True, help="path to CHANGELOG.md")
     ap.add_argument("--out", required=True, help="path to debian/changelog to write")
