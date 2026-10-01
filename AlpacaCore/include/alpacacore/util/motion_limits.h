@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -72,10 +73,12 @@ inline std::optional<std::string> check_target(const MotionLimits& limits, doubl
     const std::optional<double> floor = limits.min_altitude(azimuth_deg);
     if (!floor || !(altitude_deg < *floor)) return std::nullopt;
 
+    // Ties round away from zero (printf alone rounds -5.25 to -5.2).
+    const auto one_decimal = [](double v) { return std::round(v * 10.0) / 10.0; };
     char altitude[32];
-    std::snprintf(altitude, sizeof altitude, "%.1f", altitude_deg);
+    std::snprintf(altitude, sizeof altitude, "%.1f", one_decimal(altitude_deg));
     char limit[32];
-    std::snprintf(limit, sizeof limit, "%.1f", *floor);
+    std::snprintf(limit, sizeof limit, "%.1f", one_decimal(*floor));
     std::string limit_text = limit;
     if (limit_text.size() > 2 && limit_text.compare(limit_text.size() - 2, 2, ".0") == 0) {
         limit_text.resize(limit_text.size() - 2);

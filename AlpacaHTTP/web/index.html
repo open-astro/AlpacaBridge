@@ -480,6 +480,16 @@
                         </label>
                         <small>Keep a site latitude, longitude or elevation written by a client (an app with GPS, a planetarium program) as this device's saved site, so it survives a restart. Untick to protect a surveyed position.</small>
                     </div>
+                    <div class="form-group">
+                        <label for="skywatcher-min-altitude">Minimum altitude limit (deg):</label>
+                        <input type="number" id="skywatcher-min-altitude" name="skywatcherMinAltitudeDeg" min="-90" max="90" step="0.1" placeholder="off">
+                        <small>Optional. Leave blank for no limit. A goto to a target below this altitude is refused. It is a soft limit: set it at least 3 degrees above the real clearance of your tube and tripod.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="skywatcher-meridian-limit">Meridian limit (minutes past the meridian):</label>
+                        <input type="number" id="skywatcher-meridian-limit" name="skywatcherMeridianLimitMinutes" min="0" max="360" step="1" placeholder="off">
+                        <small>Optional. Leave blank for no limit. Stored for the motion guard; gotos are not checked against it.</small>
+                    </div>
                 </div>
 
                 <!-- OnStep Telescope Configuration -->

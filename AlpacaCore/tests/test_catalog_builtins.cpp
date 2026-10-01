@@ -570,11 +570,22 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
     CHECK(v->build_option == "ALPACACORE_ENABLE_SKYWATCHER");
     CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
 
-    // Rule 3: the twelve fields the arm read, in this order, with its defaults.
-    const std::vector<std::string_view> expected_keys{
-        "connectionType", "mountIndex",    "portPath",          "baudRate",
-        "host",           "udpPort",       "responseTimeoutMs", "siteLatitude",
-        "siteLongitude",  "siteElevation", "apertureDiameter",  "focalLength"};
+    // Rule 3: the twelve fields the arm read, in this order, with its defaults,
+    // then the two motion limits (#436).
+    const std::vector<std::string_view> expected_keys{"connectionType",
+                                                      "mountIndex",
+                                                      "portPath",
+                                                      "baudRate",
+                                                      "host",
+                                                      "udpPort",
+                                                      "responseTimeoutMs",
+                                                      "siteLatitude",
+                                                      "siteLongitude",
+                                                      "siteElevation",
+                                                      "apertureDiameter",
+                                                      "focalLength",
+                                                      "minAltitudeDeg",
+                                                      "meridianLimitMinutes"};
     REQUIRE(v->fields.size() == expected_keys.size());
     for (std::size_t i = 0; i < expected_keys.size(); ++i) {
         CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
@@ -602,6 +613,8 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
         {"siteElevation", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, {}, {}},
         {"apertureDiameter", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, {}, {}},
         {"focalLength", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, {}, {}},
+        {"minAltitudeDeg", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, -90.0, 90.0},
+        {"meridianLimitMinutes", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, 0.0, 360.0},
     };
     for (const Expect& e : expectations) {
         INFO(e.key);
