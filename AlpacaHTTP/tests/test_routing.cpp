@@ -74,7 +74,7 @@ alpacahttp::Response route_request(alpacahttp::Router& router, const std::string
 }
 
 // open-astro#392: route_request() with a chosen Host header, or none at all
-// when `host` is empty.
+// when `host` is std::nullopt (an empty string sends an empty Host header).
 alpacahttp::Response route_with_host(alpacahttp::Router& router, const std::string& method, const std::string& path,
                                      const std::optional<std::string>& host, const std::string& body = std::string()) {
     alpacahttp::Request request;

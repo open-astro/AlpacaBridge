@@ -105,7 +105,7 @@ ssh -- "<user>@<host>" "dpkg-query -W -f='\${Status} \${Version}\n' alpacabridge
 Only after the gate passes, make sure the rig allows `*.lan` as a `Host` (the drop-in is not part of the package, so it survives upgrades; rewriting it is harmless), then restart:
 
 ```bash
-ssh -- "<user>@<host>" 'echo astro | sudo -S sh -c "mkdir -p /etc/systemd/system/alpacabridge.service.d && printf %s\\\\n [Service] Environment=ALPACAHTTP_ALLOWED_HOSTS=.lan > /etc/systemd/system/alpacabridge.service.d/allowed-hosts.conf && systemctl daemon-reload"'
+ssh -- "<user>@<host>" 'echo astro | sudo -S sh -c "mkdir -p /etc/systemd/system/alpacabridge.service.d && printf %s\\\\n \"[Service]\" Environment=ALPACAHTTP_ALLOWED_HOSTS=.lan > /etc/systemd/system/alpacabridge.service.d/allowed-hosts.conf && systemctl daemon-reload"'
 ssh -- "<user>@<host>" "echo astro | sudo -S systemctl restart alpacabridge && rm -f /tmp/alpacabridge_${VERSION}_arm64.deb"
 ```
 
