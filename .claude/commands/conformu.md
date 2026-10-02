@@ -149,6 +149,8 @@ ssh astro@<host> 'chronyc tracking | grep -E "System time|Frequency|Update inter
 
 Require a `System time` offset in the low-millisecond range and a non-zero `Update interval`. On a Lima VM also confirm the host agent is not stepping: `grep "guest clock adjusted" ~/.lima/<vm>/ha.stderr.log | tail -3` must show nothing within the last few minutes, and re-check it after the run -- a step inside the run window invalidates the affected measurements even if ConformU passed. Skip for non-telescope devices.
 
+**Motion limits off.** Run the Sky-Watcher direct driver with `minAltitudeDeg` and `meridianLimitMinutes` unset (the default): ConformU slews to arbitrary targets, and a goto below the altitude floor is refused with `InvalidValue` (open-astro#436). Clear both fields in the device config before the run and restore them afterwards.
+
 **The ConformU host's clock too.** Since #301 the Sky-Watcher direct driver ignores a client-supplied `UTCDate` for pointing whenever the SBC's kernel reports its clock NTP-disciplined, so ConformU can no longer make the driver agree with a wrong clock of its own by writing `UTCDate`. If a run flags `SiderealTime`, check the clock on the machine running ConformU before suspecting the driver (issue #412): a ConformU host more than a few minutes off produces exactly that finding against a correct driver.
 
 (Note: the earlier PR #221 "clock slew" diagnosis was wrong — the RightAscensionRate +0.0033 s/s failure was the driver re-anchoring on hardware counts inside the rate setter, fixed in the driver. Keep this check anyway; it is cheap.)

@@ -861,6 +861,9 @@ function startEditDevice(device) {
         setFormValue('skywatcher-site-latitude', config.siteLatitude);
         setFormValue('skywatcher-site-longitude', config.siteLongitude);
         setFormValue('skywatcher-site-elevation', config.siteElevation);
+        // open-astro#436: absent or null = limit off = blank field.
+        setFormValue('skywatcher-min-altitude', config.minAltitudeDeg ?? '');
+        setFormValue('skywatcher-meridian-limit', config.meridianLimitMinutes ?? '');
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             skywatcherLearnSite.checked = config.learnSiteFromClient !== false;
@@ -3796,6 +3799,9 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (skywatcherSiteElevation !== null) {
             deviceData.siteElevation = skywatcherSiteElevation;
         }
+        // open-astro#436: blank = off, sent as null so an edit can clear a limit.
+        deviceData.minAltitudeDeg = readOptionalNumber(formData, 'skywatcherMinAltitudeDeg');
+        deviceData.meridianLimitMinutes = readOptionalNumber(formData, 'skywatcherMeridianLimitMinutes');
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             deviceData.learnSiteFromClient = skywatcherLearnSite.checked;  // open-astro#444

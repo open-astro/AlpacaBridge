@@ -262,11 +262,13 @@ public:
                               std::optional<double> site_elevation_m,
                               std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
                               util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
+                              util::MotionLimits motion_limits = {},
                               util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("SkyWatcher"),
           device_number_(device_number),
           connection_info_(connection_info),
           connection_resolver_(std::move(connection_resolver)),
+          motion_limits_(motion_limits),
           protocol_(protocol ? std::move(protocol) : std::make_unique<SkyWatcherProtocolWrapper>()),
           clock_(clock),
           site_latitude_(site_latitude_deg.value_or(0.0)),
@@ -1762,12 +1764,22 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        {
+            // A refused goto must not cancel a goto, park or pulse in flight,
+            // so gate BEFORE reaping (the copies below re-check after it).
+            std::lock_guard<std::mutex> gate(mutex_);
+            check_connected();
+            check_not_parked_locked("SlewToCoordinates");
+            validate_ra_dec(ra, dec, "SlewToCoordinates");
+            check_target_altitude_locked(ra, dec, "SlewToCoordinates");
+        }
         reap_slew_task();  // also clears a leftover AbortSlew cancellation
         reap_pulse_task();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SlewToCoordinates");
         validate_ra_dec(ra, dec, "SlewToCoordinates");
+        check_target_altitude_locked(ra, dec, "SlewToCoordinates");
         goto_in_progress_ = true;
         try {
             do_slew_to_ra_dec_locked(lock, ra, dec);
@@ -1811,6 +1823,8 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
+            validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+            check_target_altitude_locked(ra, dec, "SlewToCoordinatesAsync");
         }
         // Cancel + join any previous slew or pulse task first (without mutex_):
         // a stale pulse timer firing mid-goto corrupts the slew.
@@ -1822,6 +1836,7 @@ public:
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+            check_target_altitude_locked(ra, dec, "SlewToCoordinatesAsync");
             invalidate_position_cache_locked();
             slewing_cached_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
@@ -2818,12 +2833,12 @@ private:
     // here.
     void remember_command_branch_locked(double commanded_a2) { pointing_branch_ = std::signbit(commanded_a2) ? -1 : 1; }
 
-    std::pair<double, double> compute_alt_az_locked() const {
-        auto [ra, dec] = compute_ra_dec_locked();
-        double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
+    // Pure RA/Dec to Alt/Az for a site and sidereal time; shared by the position
+    // getters and the goto target check.
+    static std::pair<double, double> alt_az_from_ra_dec(double ra, double dec, double lst, double latitude_deg) {
         double ha_rad = wrap_hour_angle(lst - ra) * kHoursToDegrees * std::numbers::pi / 180.0;
         double dec_rad = dec * std::numbers::pi / 180.0;
-        double lat_rad = site_latitude_ * std::numbers::pi / 180.0;
+        double lat_rad = latitude_deg * std::numbers::pi / 180.0;
         double sin_alt =
             std::sin(dec_rad) * std::sin(lat_rad) + std::cos(dec_rad) * std::cos(lat_rad) * std::cos(ha_rad);
         sin_alt = std::clamp(sin_alt, -1.0, 1.0);
@@ -2836,6 +2851,24 @@ private:
             az_deg = 360.0 - az_deg;
         }
         return {alt_rad * 180.0 / std::numbers::pi, wrap_degrees(az_deg)};
+    }
+
+    std::pair<double, double> compute_alt_az_locked() const {
+        auto [ra, dec] = compute_ra_dec_locked();
+        double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
+        return alt_az_from_ra_dec(ra, dec, lst, site_latitude_);
+    }
+
+    // open-astro#436: refuse a goto whose target sits below the configured
+    // altitude floor. Goto entry points only; Park, FindHome, MoveAxis and Sync
+    // are exempt.
+    void check_target_altitude_locked(double ra, double dec, const char* context) const {
+        if (!motion_limits_.altitude_limit_enabled()) return;
+        double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
+        auto [alt, az] = alt_az_from_ra_dec(ra, dec, lst, site_latitude_);
+        if (auto refusal = util::check_target(motion_limits_, alt, az)) {
+            throw AlpacaException(std::string(context) + ": " + *refusal, AlpacaError::InvalidValue);
+        }
     }
 
     // ── Position cache ──────────────────────────────────────────────────────
@@ -4522,6 +4555,8 @@ private:
     // connection_resolved_ is true once a connect has run the resolver, so a
     // later connect retries that endpoint before scanning again (#659).
     util::ConnectionResolver<ConnectionInfo> connection_resolver_;
+    // open-astro#436: per-device limits, off by default.
+    util::MotionLimits motion_limits_;
     bool connection_resolved_ = false;
     std::unique_ptr<SkyWatcherProtocolWrapper> protocol_;
     // The clock every task wait and deadline runs on (open-astro#743,
@@ -4781,23 +4816,23 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, 
                                                              std::optional<double> site_longitude_deg,
                                                              std::optional<double> site_elevation_m,
                                                              std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-                                                             util::TaskClock& clock) {
-    return std::make_unique<SkyWatcherTelescopeDriver>(device_number, connection_info, site_latitude_deg,
-                                                       site_longitude_deg, site_elevation_m, std::move(protocol),
-                                                       util::ConnectionResolver<ConnectionInfo>{}, clock);
+                                                             util::MotionLimits motion_limits, util::TaskClock& clock) {
+    return std::make_unique<SkyWatcherTelescopeDriver>(
+        device_number, connection_info, site_latitude_deg, site_longitude_deg, site_elevation_m, std::move(protocol),
+        util::ConnectionResolver<ConnectionInfo>{}, motion_limits, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
     std::optional<double> site_elevation_m, std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-    util::TaskClock& clock) {
+    util::MotionLimits motion_limits, util::TaskClock& clock) {
     if (!connection_resolver) {
         throw AlpacaException("Sky-Watcher telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<SkyWatcherTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
                                                        site_longitude_deg, site_elevation_m, std::move(protocol),
-                                                       std::move(connection_resolver), clock);
+                                                       std::move(connection_resolver), motion_limits, clock);
 }
 
 ConnectionInfo resolve_skywatcher_auto(int mount_index) {
@@ -4841,11 +4876,12 @@ ConnectionInfo resolve_skywatcher_auto(int mount_index) {
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_number, int mount_index,
                                                                   std::optional<double> site_latitude_deg,
                                                                   std::optional<double> site_longitude_deg,
-                                                                  std::optional<double> site_elevation_m) {
+                                                                  std::optional<double> site_elevation_m,
+                                                                  util::MotionLimits motion_limits) {
     // The serial scan and UDP discovery run at connect time (#659), not here.
-    return create_skywatcher_telescope_deferred(device_number,
-                                                [mount_index] { return resolve_skywatcher_auto(mount_index); },
-                                                site_latitude_deg, site_longitude_deg, site_elevation_m, {});
+    return create_skywatcher_telescope_deferred(
+        device_number, [mount_index] { return resolve_skywatcher_auto(mount_index); }, site_latitude_deg,
+        site_longitude_deg, site_elevation_m, {}, motion_limits);
 }
 
 }  // namespace alpacacore::vendor::skywatcher

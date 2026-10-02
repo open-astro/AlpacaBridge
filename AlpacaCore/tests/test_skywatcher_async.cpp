@@ -126,7 +126,7 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatch
                                                               double site_longitude_deg = -104.9903,
                                                               double site_elevation_m = 1609.0) {
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site_latitude_deg, site_longitude_deg,
-                                                  site_elevation_m, {}, clock);
+                                                  site_elevation_m, {}, {}, clock);
     driver->set_connected(true);
     return driver;
 }

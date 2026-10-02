@@ -141,6 +141,7 @@ datagrams before each send so replies cannot get off-by-one.
   axis positions and reading the tube's real direction off the mount (2026-09-12); those
   rows are in the driver comment and asserted in `test_skywatcher_pointing.cpp`. Extend
   that file with a new hardware row for any change here.
+- **Motion limits (#436) are off by default and soft.** `minAltitudeDeg` and `meridianLimitMinutes` live in the catalog descriptor (`skywatcher_fields.h`); `util::MotionLimits` (`util/motion_limits.h`) is the pure decision. Only `SlewToCoordinates[Async]` (and so `SlewToTarget[Async]`) check the altitude floor, throwing `InvalidValue`; Park, FindHome, MoveAxis, Sync and PulseGuide are exempt. ConformU runs with both limits off.
 - **Sync** uses the controller's own `:E` set-position command (motors must be fully
   stopped — the driver pauses tracking around the write), never a driver-side offset.
 - **Pulse guiding**: RA pulses while tracking are done by changing the RA step period

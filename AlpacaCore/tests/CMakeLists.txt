@@ -31,6 +31,7 @@ set(TEST_SOURCES
     test_error_handling.cpp
     test_fake_pty_write.cpp
     test_host_clock.cpp
+    test_motion_limits.cpp
     test_poll_settle.cpp
     test_task_clock.cpp
     test_async_operation.cpp
@@ -93,6 +94,9 @@ if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
         test_skywatcher_async.cpp test_skywatcher_serial.cpp
         test_skywatcher_pointing.cpp)
+    # Altitude floor / meridian limit: goto target check over the fake mount
+    # (open-astro#436).
+    list(APPEND TEST_SOURCES test_skywatcher_motion_limits.cpp)
     # Telescope [stress] coverage over the loopback UDP fake (issue #271).
     list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).

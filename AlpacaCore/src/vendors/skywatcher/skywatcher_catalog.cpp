@@ -39,6 +39,11 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
         const std::optional<double> longitude = config.find(kSkyWatcherSiteLongitude);
         const std::optional<double> elevation = config.find(kSkyWatcherSiteElevation);
 
+        // #436: off unless set; find() reads an absent or null value as unset.
+        util::MotionLimits limits;
+        limits.min_altitude_deg = config.find(kSkyWatcherMinAltitudeDeg);
+        limits.meridian_limit_minutes = config.find(kSkyWatcherMeridianLimitMinutes);
+
         // #274: normalize refuses a config from the API with no site, so only a
         // saved one gets here without it. Register it so it stays listed and
         // editable in the web UI; the driver refuses the connect until it is fixed.
@@ -56,7 +61,7 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
         if (type.empty() || type == "auto") {
             const int mount_index = static_cast<int>(config.get(kSkyWatcherMountIndex));
             telescope = vendor::skywatcher::create_skywatcher_telescope_auto(device_number, mount_index, latitude,
-                                                                             longitude, elevation);
+                                                                             longitude, elevation, limits);
         } else {
             // normalize has left "serial" or "network" here; anything else is
             // read as serial, never auto (#380).
@@ -71,8 +76,8 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
                 info.baud_rate = static_cast<int>(config.get(kSkyWatcherBaudRate));
             }
             info.response_timeout_ms = static_cast<int>(config.get(kSkyWatcherResponseTimeoutMs));
-            telescope =
-                vendor::skywatcher::create_skywatcher_telescope(device_number, info, latitude, longitude, elevation);
+            telescope = vendor::skywatcher::create_skywatcher_telescope(device_number, info, latitude, longitude,
+                                                                        elevation, {}, limits);
         }
 
         if (const double aperture = config.get(kSkyWatcherApertureDiameter); aperture > 0.0) {

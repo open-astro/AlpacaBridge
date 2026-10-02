@@ -70,6 +70,12 @@ inline const Field<double> kSkyWatcherSiteElevation{.key = "siteElevation", .def
 // Applied only when > 0, as the router arm did.
 inline const Field<double> kSkyWatcherApertureDiameter{.key = "apertureDiameter", .default_value = 0.0};
 inline const Field<double> kSkyWatcherFocalLength{.key = "focalLength", .default_value = 0.0};
+// Motion limits (#436). Both are off unless set: the factory reads them with
+// find(), so an absent or null value is "off" and the 0 defaults are not limits.
+inline const Field<double> kSkyWatcherMinAltitudeDeg{
+    .key = "minAltitudeDeg", .default_value = 0.0, .min = -90.0, .max = 90.0};
+inline const Field<double> kSkyWatcherMeridianLimitMinutes{
+    .key = "meridianLimitMinutes", .default_value = 0.0, .min = 0.0, .max = 360.0};
 
 inline const std::vector<FieldRef>& skywatcher_telescope_fields() {
     static const std::vector<FieldRef> fields{kSkyWatcherConnectionType.ref(),
@@ -83,7 +89,9 @@ inline const std::vector<FieldRef>& skywatcher_telescope_fields() {
                                               kSkyWatcherSiteLongitude.ref(),
                                               kSkyWatcherSiteElevation.ref(),
                                               kSkyWatcherApertureDiameter.ref(),
-                                              kSkyWatcherFocalLength.ref()};
+                                              kSkyWatcherFocalLength.ref(),
+                                              kSkyWatcherMinAltitudeDeg.ref(),
+                                              kSkyWatcherMeridianLimitMinutes.ref()};
     return fields;
 }
 

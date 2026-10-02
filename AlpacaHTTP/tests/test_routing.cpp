@@ -2838,6 +2838,93 @@ int main() {
         remove_device(router, "skywatcher", "telescope", 9618);
     }
     {
+        // open-astro#436: the two motion limits are persisted per device and
+        // must survive the sanitize round-trip (Required Test Case 9). Both
+        // are OFF by default: absent or null reads back as absent-or-null,
+        // never as 0, because 0 is a real floor (the horizon) and a real
+        // meridian limit (stop at the meridian).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "skywatcher"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9662},
+                                           {"connectionType", "network"},
+                                           {"host", "192.168.4.1"},
+                                           {"udpPort", 11880},
+                                           {"siteLatitude", 39.7392},
+                                           {"siteLongitude", -104.9903},
+                                           {"minAltitudeDeg", 15.0},
+                                           {"meridianLimitMinutes", 30.0}},
+                                          "Telescope", 9662);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("minAltitudeDeg", -1.0) == 15.0);
+        EXPECT(cfg.value("meridianLimitMinutes", -1.0) == 30.0);
+        remove_device(router, "skywatcher", "telescope", 9662);
+
+        // null = off, and the web UI sends null for a blank field: the config
+        // is accepted, the device registers, and the field reads back as
+        // absent or null (either means off) rather than a number.
+        const auto off = roundtrip_config(router,
+                                          {{"vendor", "skywatcher"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9663},
+                                           {"connectionType", "network"},
+                                           {"host", "192.168.4.1"},
+                                           {"udpPort", 11880},
+                                           {"siteLatitude", 39.7392},
+                                           {"siteLongitude", -104.9903},
+                                           {"minAltitudeDeg", nullptr},
+                                           {"meridianLimitMinutes", nullptr}},
+                                          "Telescope", 9663);
+        EXPECT(off.is_object() && !off.empty());
+        EXPECT(!off.contains("minAltitudeDeg") || off["minAltitudeDeg"].is_null());
+        EXPECT(!off.contains("meridianLimitMinutes") || off["meridianLimitMinutes"].is_null());
+        remove_device(router, "skywatcher", "telescope", 9663);
+
+        // One limit set, the other left out: only the set one is persisted.
+        const auto one = roundtrip_config(router,
+                                          {{"vendor", "skywatcher"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9664},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB6"},
+                                           {"siteLatitude", 39.7392},
+                                           {"siteLongitude", -104.9903},
+                                           {"minAltitudeDeg", 12.5}},
+                                          "Telescope", 9664);
+        EXPECT(one.is_object() && !one.empty());
+        EXPECT(one.value("minAltitudeDeg", -1.0) == 12.5);
+        EXPECT(!one.contains("meridianLimitMinutes") || one["meridianLimitMinutes"].is_null());
+        remove_device(router, "skywatcher", "telescope", 9664);
+
+        // Range: the API (not only the form) rejects a floor outside
+        // -90..90 and a meridian limit outside 0..360, and takes the bounds.
+        const auto limits_body = [](int number, const char* key, double value) {
+            return nlohmann::json{{"vendor", "skywatcher"},      {"deviceType", "telescope"},  {"deviceNumber", number},
+                                  {"connectionType", "network"}, {"host", "192.168.4.1"},      {"udpPort", 11880},
+                                  {"siteLatitude", 39.7392},     {"siteLongitude", -104.9903}, {key, value}};
+        };
+        const auto rejected = [&](int number, const char* key, double value) {
+            const auto response =
+                route_request(router, "POST", "/management/v1/configuredevice", limits_body(number, key, value).dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        };
+        rejected(9665, "minAltitudeDeg", 95.0);
+        rejected(9665, "minAltitudeDeg", -91.0);
+        rejected(9665, "meridianLimitMinutes", -1.0);
+        rejected(9665, "meridianLimitMinutes", 361.0);
+        const auto accepted = [&](int number, const char* key, double value) {
+            const auto cfg = roundtrip_config(router, limits_body(number, key, value), "Telescope", number);
+            EXPECT(cfg.is_object() && !cfg.empty());
+            EXPECT(cfg.value(key, -1000.0) == value);
+            remove_device(router, "skywatcher", "telescope", number);
+        };
+        accepted(9666, "minAltitudeDeg", -90.0);
+        accepted(9666, "minAltitudeDeg", 90.0);
+        accepted(9666, "meridianLimitMinutes", 0.0);
+        accepted(9666, "meridianLimitMinutes", 360.0);
+    }
+    {
         // issue #274: configuredevice is a first-class REST API independent of
         // the web UI, and used to accept a skywatcher config with no
         // coordinates at all. Both would then collapse to 0.0 in the driver,
