@@ -1,0 +1,3 @@
+### Fixed
+
+- **Wi-Fi scan no longer fails when a nearby SSID is not valid UTF-8** (AlpacaHTTP, issue #764; `response.cpp`): `Response::set_body(const AlpacaResponse&)` serialised with the strict UTF-8 handler, so one non-UTF-8 SSID from NetworkManager made `json.dump()` throw `type_error.316` and `/wifi/scan` (and `/wifi/status`, `/wifi/profiles`) returned an error with no networks. The sink now uses `error_handler_t::replace`, so invalid bytes are shown as U+FFFD and every valid network is listed; such an SSID displays with the replacement character and cannot be joined by that displayed name. Covered by `test_response_utf8.cpp`.
