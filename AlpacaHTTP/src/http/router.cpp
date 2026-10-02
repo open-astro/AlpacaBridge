@@ -307,6 +307,7 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
     std::size_t current = sections.size();
     std::vector<bool> section_found(sections.size(), false);
     std::vector<std::vector<bool>> written;
+    written.reserve(sections.size());
     for (const auto& section : sections) {
         written.emplace_back(section.second.size(), false);
     }
