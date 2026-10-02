@@ -1,0 +1,2 @@
+### Changed
+- **The Host check's HTTP 403 message now points to the web UI field** (AlpacaHTTP, issue #392): a request refused for its `Host` name used to say `add it to http.allowed_hosts or use the IP address`, naming only the config-file key. It now reads `Host '<name>' is not allowed; open the web UI by IP address and add it under Allowed host names, or add it to http.allowed_hosts`, since the web UI field (#784) is the quicker fix and the IP address is always allowed. Status code, error number and the `Host '<name>' is not allowed` prefix are unchanged.

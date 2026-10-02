@@ -1632,7 +1632,9 @@ std::optional<Response> reject_disallowed_host(const Request& request, std::uint
     }
     AlpacaResponse alpaca_response =
         make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                            "Host '" + shown + "' is not allowed; add it to http.allowed_hosts or use the IP address");
+                            "Host '" + shown +
+                                "' is not allowed; open the web UI by IP address and add it under Allowed host "
+                                "names, or add it to http.allowed_hosts");
     Response resp;
     resp.set_content_type("application/json");
     resp.set_status(403, "Forbidden");

@@ -95,7 +95,9 @@ alpacahttp::Response route_with_host(alpacahttp::Router& router, const std::stri
     return router.route(request, 1);
 }
 
-// True when the response is the open-astro#392 Host refusal for `host`.
+// True when the response is the open-astro#392 Host refusal for `host`. The
+// message names the web UI field first: a browser refused by name is where a
+// person meets it, and the IP address is always allowed.
 bool is_host_refusal(const alpacahttp::Response& response, const std::string& host) {
     if (response.status_code() != 403) {
         return false;
@@ -103,7 +105,9 @@ bool is_host_refusal(const alpacahttp::Response& response, const std::string& ho
     const auto json = nlohmann::json::parse(response.body(), nullptr, false);
     return !json.is_discarded() && json.value("ErrorNumber", 0) == 0x401 &&
            json.value("ErrorMessage", "") ==
-               "Host '" + host + "' is not allowed; add it to http.allowed_hosts or use the IP address";
+               "Host '" + host +
+                   "' is not allowed; open the web UI by IP address and add it under Allowed host names, or add it "
+                   "to http.allowed_hosts";
 }
 
 // Issue #102 back-fill helper: POST a device config, then read it back from
