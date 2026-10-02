@@ -399,6 +399,63 @@ int main() {
         ::unlink(path.c_str());
     }
 
+    // The web UI may change the two Host check settings unless the
+    // environment fixes them. Config says which: ALPACAHTTP_ALLOWED_HOSTS
+    // fixes the list whenever it is set, even empty; ALPACAHTTP_HOST_CHECK
+    // fixes the flag only when it parses, since an unparseable value is
+    // ignored and the file's value stays in force.
+    {
+        ::unsetenv("ALPACAHTTP_HOST_CHECK");
+        ::unsetenv("ALPACAHTTP_ALLOWED_HOSTS");
+        alpacahttp::Config fresh;
+        EXPECT(!fresh.host_check_env_fixed());
+        EXPECT(!fresh.allowed_hosts_env_fixed());
+
+        char path_template[] = "/tmp/alpacahttp_test_host_env_fixed_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        ::close(fd);
+        {
+            // The quoted form the description PUT writes.
+            std::ofstream out(path);
+            out << "http:\n"
+                   "  host_check_enabled: \"true\"\n"
+                   "  allowed_hosts: \".lan, astropi.home\"\n";
+        }
+
+        alpacahttp::Config from_file;
+        EXPECT(from_file.load(path));
+        EXPECT(from_file.host_check_enabled());
+        EXPECT((from_file.allowed_hosts() == std::vector<std::string>{".lan", "astropi.home"}));
+        EXPECT(!from_file.host_check_env_fixed());
+        EXPECT(!from_file.allowed_hosts_env_fixed());
+
+        ::setenv("ALPACAHTTP_HOST_CHECK", "false", 1);
+        alpacahttp::Config flag_fixed;
+        EXPECT(flag_fixed.load(path));
+        EXPECT(!flag_fixed.host_check_enabled());
+        EXPECT(flag_fixed.host_check_env_fixed());
+        EXPECT(!flag_fixed.allowed_hosts_env_fixed());
+
+        ::setenv("ALPACAHTTP_HOST_CHECK", "maybe", 1);
+        alpacahttp::Config flag_unparseable;
+        EXPECT(flag_unparseable.load(path));
+        EXPECT(flag_unparseable.host_check_enabled());
+        EXPECT(!flag_unparseable.host_check_env_fixed());
+        ::unsetenv("ALPACAHTTP_HOST_CHECK");
+
+        ::setenv("ALPACAHTTP_ALLOWED_HOSTS", "", 1);
+        alpacahttp::Config list_fixed;
+        EXPECT(list_fixed.load(path));
+        EXPECT(list_fixed.allowed_hosts().empty());
+        EXPECT(list_fixed.allowed_hosts_env_fixed());
+        EXPECT(!list_fixed.host_check_env_fixed());
+        ::unsetenv("ALPACAHTTP_ALLOWED_HOSTS");
+
+        ::unlink(path.c_str());
+    }
+
     std::cout << "All configuration tests passed!\n";
     return 0;
 }

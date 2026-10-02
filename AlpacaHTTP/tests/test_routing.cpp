@@ -16,6 +16,7 @@
 #include <alpacacore/device_registry.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/logging.h>
+#include <alpacahttp/config.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
 #include <alpacahttp/software_update.h>
@@ -6778,6 +6779,349 @@ int main() {
         alpacahttp::Request request;
         EXPECT(request.parse(raw.str()));
         EXPECT(router.route(request, 1).status_code() == 403);
+    }
+
+    // The Host check is a server setting: PUT /management/v1/description takes
+    // HostCheckEnabled and AllowedHosts, writes them to the config file's
+    // http: section and applies them to the next request; GET reports them.
+    // A PUT whose own Host the resulting settings would refuse changes
+    // nothing, so the operator cannot lock the web UI out from the web UI.
+    {
+        ::unsetenv("ALPACAHTTP_HOST_CHECK");
+        ::unsetenv("ALPACAHTTP_ALLOWED_HOSTS");
+        const std::string description = "/management/v1/description";
+        const std::string apiversions = "/management/apiversions";
+
+        char path_template[] = "/tmp/alpacahttp_test_routing_hostcheck_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        const std::string original_file =
+            "# AlpacaHTTP\n"
+            "http:\n"
+            "  port: 6811\n"
+            "server:\n"
+            "  location: \"Backyard\"\n"
+            "  allowed_hosts: wrong.section\n"
+            "discovery:\n"
+            "  enabled: true\n";
+        {
+            std::ofstream out(config_path);
+            out << original_file;
+        }
+        const auto file_text = [&config_path]() {
+            std::ifstream in(config_path);
+            std::stringstream buf;
+            buf << in.rdbuf();
+            return buf.str();
+        };
+        const auto error_number = [](const alpacahttp::Response& response) {
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            return json.is_discarded() ? -1 : json.value("ErrorNumber", -1);
+        };
+        // HTTP 400 InvalidValue with exactly this message.
+        const auto is_refused_save = [](const alpacahttp::Response& response, const std::string& message) {
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            if (!json.is_discarded() && json.value("ErrorMessage", "") != message) {
+                std::cerr << "Host check settings: got '" << json.value("ErrorMessage", "") << "'\n";
+            }
+            return response.status_code() == 400 && !json.is_discarded() && json.value("ErrorNumber", 0) == 0x401 &&
+                   json.value("ErrorMessage", "") == message;
+        };
+        const auto lockout_message = [](const std::string& host) {
+            return "Host '" + host +
+                   "' would be refused by these settings; add it to AllowedHosts or use the IP address";
+        };
+        const auto settings = [&description](alpacahttp::Router& router, const std::optional<std::string>& host) {
+            const auto response = route_with_host(router, "GET", description, host);
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+            return json["Value"];
+        };
+
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+
+        // GET reports both values and whether the environment fixes each.
+        {
+            const auto v = settings(router, "astropi.lan");
+            EXPECT(v.contains("HostCheckEnabled") && v["HostCheckEnabled"].is_boolean());
+            EXPECT(v["HostCheckEnabled"].get<bool>() == false);
+            EXPECT(v.contains("AllowedHosts") && v["AllowedHosts"].is_string());
+            EXPECT(v["AllowedHosts"].get<std::string>().empty());
+            EXPECT(v.contains("HostCheckEnabledFixedByEnvironment") &&
+                   v["HostCheckEnabledFixedByEnvironment"].is_boolean());
+            EXPECT(v["HostCheckEnabledFixedByEnvironment"].get<bool>() == false);
+            EXPECT(v.contains("AllowedHostsFixedByEnvironment") && v["AllowedHostsFixedByEnvironment"].is_boolean());
+            EXPECT(v["AllowedHostsFixedByEnvironment"].get<bool>() == false);
+        }
+
+        // Turning the check on from a name the list does not hold: 400,
+        // nothing changes in memory or in the file.
+        EXPECT(
+            is_refused_save(route_with_host(router, "PUT", description, "astropi.lan", R"({"HostCheckEnabled": true})"),
+                            lockout_message("astropi.lan")));
+        EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+        EXPECT(settings(router, "astropi.lan").value("HostCheckEnabled", true) == false);
+        EXPECT(file_text() == original_file);
+        // The port is not part of the name, and the echoed Host keeps it.
+        EXPECT(is_refused_save(
+            route_with_host(router, "PUT", description, "AstroPi.lan:6800", R"({"HostCheckEnabled": true})"),
+            lockout_message("AstroPi.lan:6800")));
+        EXPECT(file_text() == original_file);
+
+        // Both fields in one PUT are judged together: the new list allows the
+        // request's Host, so the check turns on and the next request follows.
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "astropi.lan",
+                                   R"({"HostCheckEnabled": true, "AllowedHosts": ".LAN., astropi.home, ,"})")) == 0);
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "attacker.example"), "attacker.example"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", description, "attacker.example"), "attacker.example"));
+        EXPECT(route_with_host(router, "GET", apiversions, "pi.lan").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", apiversions, "astropi.home").status_code() == 200);
+        {
+            // AllowedHosts reads back as the normalized entries, ", " joined.
+            const auto v = settings(router, "astropi.lan");
+            EXPECT(v.value("HostCheckEnabled", false) == true);
+            EXPECT(v.value("AllowedHosts", "") == ".lan, astropi.home");
+        }
+        {
+            // Written under http:, not server:, and the rest of the file is
+            // kept. A fresh Config reads the same settings back.
+            const std::string text = file_text();
+            const auto http_at = text.find("http:\n");
+            const auto server_at = text.find("server:\n");
+            const auto flag_at = text.find("  host_check_enabled: \"true\"\n");
+            const auto list_at = text.find("  allowed_hosts: \".lan, astropi.home\"\n");
+            EXPECT(http_at != std::string::npos && server_at != std::string::npos);
+            EXPECT(flag_at != std::string::npos && flag_at > http_at && flag_at < server_at);
+            EXPECT(list_at != std::string::npos && list_at > http_at && list_at < server_at);
+            EXPECT(text.find("  allowed_hosts: wrong.section\n") > server_at);
+            EXPECT(text.find("  allowed_hosts: wrong.section\n") != std::string::npos);
+            EXPECT(text.find("# AlpacaHTTP\n") == 0);
+
+            alpacahttp::Config reloaded;
+            EXPECT(reloaded.load(config_path));
+            EXPECT(reloaded.host_check_enabled());
+            EXPECT((reloaded.allowed_hosts() == std::vector<std::string>{".lan", "astropi.home"}));
+            EXPECT(reloaded.http_port() == 6811);
+            EXPECT(reloaded.location() == "Backyard");
+            EXPECT(reloaded.discovery_enabled());
+        }
+
+        // AllowedHosts alone is judged against the current flag: the check is
+        // on, so a list that drops the request's own name is refused.
+        {
+            const std::string before = file_text();
+            EXPECT(is_refused_save(
+                route_with_host(router, "PUT", description, "pi.lan", R"({"AllowedHosts": "astropi.home"})"),
+                lockout_message("pi.lan")));
+            EXPECT(route_with_host(router, "GET", apiversions, "pi.lan").status_code() == 200);
+            EXPECT(settings(router, "pi.lan").value("AllowedHosts", "") == ".lan, astropi.home");
+            EXPECT(file_text() == before);
+            // A refused field refuses the whole request: the profile name
+            // that came with it is not applied either.
+            EXPECT(is_refused_save(route_with_host(router, "PUT", description, "pi.lan",
+                                                   R"({"ProfileName": "Lockout", "AllowedHosts": ""})"),
+                                   lockout_message("pi.lan")));
+            EXPECT(settings(router, "pi.lan").value("ProfileName", "") != "Lockout");
+            EXPECT(file_text() == before);
+        }
+        // The same list from an IP address, which is always allowed, is
+        // accepted; so is a request with no Host header at all.
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "192.168.1.20:6800", R"({"AllowedHosts": ""})")) == 0);
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "pi.lan"), "pi.lan"));
+        {
+            alpacahttp::Config reloaded;
+            EXPECT(reloaded.load(config_path));
+            EXPECT(reloaded.host_check_enabled());
+            EXPECT(reloaded.allowed_hosts().empty());
+        }
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, std::nullopt, R"({"allowed_hosts": ".lan"})")) == 0);
+        EXPECT(route_with_host(router, "GET", apiversions, "pi.lan").status_code() == 200);
+
+        // Wrong types are InvalidValue and change nothing.
+        EXPECT(error_number(route_with_host(router, "PUT", description, "pi.lan", R"({"HostCheckEnabled": 3})")) ==
+               0x401);
+        EXPECT(error_number(route_with_host(router, "PUT", description, "pi.lan", R"({"AllowedHosts": [".lan"]})")) ==
+               0x401);
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "pi.lan", R"({"HostCheckEnabled": "maybe"})")) == 0x401);
+        EXPECT(settings(router, "pi.lan").value("HostCheckEnabled", false) == true);
+        EXPECT(settings(router, "pi.lan").value("AllowedHosts", "") == ".lan");
+
+        // Off again (string form, camelCase key): every Host is served, the
+        // list is kept, and the file says so.
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "pi.lan", R"({"hostCheckEnabled": "false"})")) == 0);
+        EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+        {
+            alpacahttp::Config reloaded;
+            EXPECT(reloaded.load(config_path));
+            EXPECT(!reloaded.host_check_enabled());
+            EXPECT((reloaded.allowed_hosts() == std::vector<std::string>{".lan"}));
+            const std::string text = file_text();
+            EXPECT(text.find("host_check_enabled") == text.rfind("host_check_enabled"));  // replaced, not appended
+        }
+        // With the check off the list may be changed from any Host; turning
+        // the check on alone is then judged against that stored list.
+        EXPECT(error_number(route_with_host(router, "PUT", description, "astropi.lan",
+                                            R"({"AllowedHosts": "astropi.home"})")) == 0);
+        EXPECT(
+            is_refused_save(route_with_host(router, "PUT", description, "astropi.lan", R"({"HostCheckEnabled": true})"),
+                            lockout_message("astropi.lan")));
+        EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "astropi.home", R"({"HostCheckEnabled": true})")) == 0);
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "astropi.lan"), "astropi.lan"));
+
+        // A Host that cannot name a host is refused like route() refuses it.
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "astropi.home", R"({"HostCheckEnabled": false})")) == 0);
+        EXPECT(is_refused_save(
+            route_with_host(router, "PUT", description, "fe80::1:6800", R"({"HostCheckEnabled": true})"),
+            lockout_message("fe80::1:6800")));
+
+        // Cross-origin: 403 from the same guard as the other description
+        // fields, and the check stays off.
+        {
+            const std::string body = R"({"HostCheckEnabled": true})";
+            std::ostringstream raw;
+            raw << "PUT " << description << " HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n"
+                << "Content-Type: text/plain\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() == 403);
+            EXPECT(error_number(response) == 0x401);
+            EXPECT(settings(router, "localhost").value("HostCheckEnabled", true) == false);
+            EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+        }
+
+        // A body with none of the settable properties names all of them.
+        {
+            const auto response = route_with_host(router, "PUT", description, "localhost", R"({"Unrelated": 1})");
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x402);
+            EXPECT(json.value("ErrorMessage", "") ==
+                   "Request must include a 'Location', 'ProfileName', 'SyncSystemClockFromClients', "
+                   "'HostCheckEnabled' or 'AllowedHosts' property");
+        }
+        ::unlink(config_path.c_str());
+
+        // No file yet: the PUT creates it with both sections, each key under
+        // its own.
+        {
+            alpacahttp::Router created;
+            created.set_config_path(config_path);
+            EXPECT(error_number(route_with_host(
+                       created, "PUT", description, "pi.lan",
+                       R"({"Location": "Roof", "HostCheckEnabled": true, "AllowedHosts": ".lan"})")) == 0);
+            alpacahttp::Config reloaded;
+            EXPECT(reloaded.load(config_path));
+            EXPECT(reloaded.host_check_enabled());
+            EXPECT((reloaded.allowed_hosts() == std::vector<std::string>{".lan"}));
+            EXPECT(reloaded.location() == "Roof");
+            ::unlink(config_path.c_str());
+        }
+
+        // A file that cannot be written: the PUT fails and memory keeps the
+        // old settings.
+        {
+            alpacahttp::Router unwritable;
+            unwritable.set_config_path("/nonexistent-alpacahttp-test-dir/default.yaml");
+            const auto response = route_with_host(unwritable, "PUT", description, "localhost",
+                                                  R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})");
+            EXPECT(error_number(response) == 0x500);
+            EXPECT(route_with_host(unwritable, "GET", apiversions, "attacker.example").status_code() == 200);
+            EXPECT(settings(unwritable, "localhost").value("AllowedHosts", "x").empty());
+        }
+
+        // No config path (a Router built without a file): applied live, as
+        // the other description fields are.
+        {
+            alpacahttp::Router no_file;
+            EXPECT(error_number(route_with_host(no_file, "PUT", description, "localhost",
+                                                R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})")) == 0);
+            EXPECT(
+                is_host_refusal(route_with_host(no_file, "GET", apiversions, "attacker.example"), "attacker.example"));
+            EXPECT(route_with_host(no_file, "GET", apiversions, "pi.lan").status_code() == 200);
+        }
+
+        // Fixed by the environment (ALPACAHTTP_HOST_CHECK /
+        // ALPACAHTTP_ALLOWED_HOSTS; Server passes Config's answer on): GET
+        // says so, a PUT that changes the field gets 400 and changes nothing,
+        // and a fixed field is never written to the file.
+        {
+            const std::string fixed_path = config_path + ".fixed";
+            const std::string fixed_file = "http:\n  port: 6811\n";
+            {
+                std::ofstream out(fixed_path);
+                out << fixed_file;
+            }
+            const auto fixed_text = [&fixed_path]() {
+                std::ifstream in(fixed_path);
+                std::stringstream buf;
+                buf << in.rdbuf();
+                return buf.str();
+            };
+            const std::string flag_fixed =
+                "HostCheckEnabled is fixed by the ALPACAHTTP_HOST_CHECK environment variable";
+            const std::string list_fixed = "AllowedHosts is fixed by the ALPACAHTTP_ALLOWED_HOSTS environment variable";
+
+            alpacahttp::Router fixed;
+            fixed.set_config_path(fixed_path);
+            fixed.set_allowed_hosts({".lan"});
+            fixed.set_host_check_enabled(true);
+            fixed.set_host_settings_env_fixed(true, true);
+            {
+                const auto v = settings(fixed, "pi.lan");
+                EXPECT(v.value("HostCheckEnabled", false) == true);
+                EXPECT(v.value("AllowedHosts", "") == ".lan");
+                EXPECT(v.value("HostCheckEnabledFixedByEnvironment", false) == true);
+                EXPECT(v.value("AllowedHostsFixedByEnvironment", false) == true);
+            }
+            EXPECT(is_refused_save(
+                route_with_host(fixed, "PUT", description, "pi.lan", R"({"HostCheckEnabled": false})"), flag_fixed));
+            EXPECT(is_refused_save(
+                route_with_host(fixed, "PUT", description, "pi.lan", R"({"AllowedHosts": ".lan, x.example"})"),
+                list_fixed));
+            // The fixed field refuses the whole request.
+            EXPECT(is_refused_save(route_with_host(fixed, "PUT", description, "pi.lan",
+                                                   R"({"ProfileName": "Fixed", "HostCheckEnabled": false})"),
+                                   flag_fixed));
+            EXPECT(settings(fixed, "pi.lan").value("ProfileName", "") != "Fixed");
+            EXPECT(is_host_refusal(route_with_host(fixed, "GET", apiversions, "attacker.example"), "attacker.example"));
+            EXPECT(settings(fixed, "pi.lan").value("AllowedHosts", "") == ".lan");
+            EXPECT(fixed_text() == fixed_file);
+            // The value it already has is not a change: accepted, and still
+            // not written to the file.
+            EXPECT(error_number(route_with_host(fixed, "PUT", description, "pi.lan",
+                                                R"({"HostCheckEnabled": true, "AllowedHosts": " .LAN "})")) == 0);
+            EXPECT(fixed_text() == fixed_file);
+
+            // Only the flag fixed: the list is still editable, still judged
+            // against the fixed flag, and only the list reaches the file.
+            fixed.set_host_settings_env_fixed(true, false);
+            EXPECT(settings(fixed, "pi.lan").value("AllowedHostsFixedByEnvironment", true) == false);
+            EXPECT(is_refused_save(
+                route_with_host(fixed, "PUT", description, "pi.lan", R"({"AllowedHosts": ".fritz.box"})"),
+                lockout_message("pi.lan")));
+            EXPECT(error_number(route_with_host(fixed, "PUT", description, "pi.lan",
+                                                R"({"AllowedHosts": ".lan, .fritz.box"})")) == 0);
+            EXPECT(route_with_host(fixed, "GET", apiversions, "astropi.fritz.box").status_code() == 200);
+            EXPECT(fixed_text().find("  allowed_hosts: \".lan, .fritz.box\"\n") != std::string::npos);
+            EXPECT(fixed_text().find("host_check_enabled") == std::string::npos);
+            ::unlink(fixed_path.c_str());
+        }
     }
 
 #ifdef ALPACACORE_ENABLE_WEEWX
