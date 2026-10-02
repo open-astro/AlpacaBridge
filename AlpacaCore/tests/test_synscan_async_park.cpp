@@ -19,6 +19,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
@@ -26,6 +27,8 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -40,6 +43,11 @@ struct FakeSynScanState {
     std::atomic<bool> goto_seen{false};
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
+    // #742: with `hold_goto` set the next GOTO goes unanswered and sets
+    // `goto_held`, which is the test's cue to drop the connection before the
+    // GOTO's read times out.
+    std::atomic<bool> hold_goto{false};
+    std::atomic<bool> goto_held{false};
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (!goto_seen.load()) return false;
@@ -63,6 +71,10 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
             case 'R':
             case 'b':
             case 'B':
+                if (st->hold_goto.load()) {
+                    st->goto_held.store(true);
+                    return "";
+                }
                 st->goto_started.store(Clock::now().time_since_epoch().count());
                 st->goto_seen.store(true);
                 st->goto_count.fetch_add(1);
@@ -373,6 +385,85 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
     driver->park();
     driver->set_connected(false);
     REQUIRE_FALSE(driver->get_connected());
+}
+
+// #742: the three stops Unpark sends to cancel a park in flight (cancel GOTO,
+// then both axes to rate 0) sat in one empty catch, and Unpark then set
+// Slewing false and returned success. The SynScan stops are blind sends, so a
+// silent handset cannot fail them; the fake resets the link instead (every stop
+// after that fails).
+// Unpark must throw once the park task is joined, and Slewing must not read
+// false: the park slew may still be running.
+TEST_CASE("SynScan async - Unpark reports stops it could not send", "[synscan][telescope][async]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    driver->park();
+    REQUIRE(driver->get_slewing());
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the park slew is on the wire
+    REQUIRE(server.drop_connections());
+
+    try {
+        driver->unpark();
+        FAIL("Unpark returned success although the stops could not be sent");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).rfind("Unpark could not stop the park slew: ", 0) == 0);
+    }
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(driver->get_slewing());  // the hardware poll fails too, so the cached state stands
+
+    driver->set_connected(false);
+}
+
+// #742: when the park task fails (here the GOTO goes unanswered and the link
+// drops) it stops the mount; those stops were swallowed and Slewing set false.
+// A stop that fails must be logged at ERROR, and Slewing must not read false
+// while the mount cannot be reached.
+TEST_CASE("SynScan async - a failed park logs the stops it could not send", "[synscan][telescope][async]") {
+    std::atomic<int> stop_errors{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Error && component == "SynScan" &&
+                message.find("stop after park failure failed: ") != std::string_view::npos &&
+                message.find("the mount may still be moving") != std::string_view::npos) {
+                ++stop_errors;
+            }
+        });
+
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    // A long reply timeout leaves the test ample time to drop the link while
+    // the driver still waits on the GOTO, so the stops always meet a closed
+    // peer.
+    auto info = endpoint(server.port());
+    info.response_timeout_ms = 2000;
+    auto driver =
+        alpacacore::vendor::synscan::create_synscan_telescope(0, info, alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->hold_goto.store(true);
+    driver->park();
+    // No driver call until the link is down: the park task holds the driver
+    // mutex while it waits on the GOTO, so a getter here would block until
+    // the GOTO failed and the stops had already gone out on a live link.
+    REQUIRE(wait_until([&] { return st->goto_held.load(); }, 5000));
+    REQUIRE(server.drop_connections());
+    REQUIRE(wait_until([&] { return stop_errors.load() > 0; }, 10000));
+    CHECK(stop_errors.load() == 1);
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(driver->get_slewing());
+
+    driver->set_connected(false);
 }
 
 #endif  // !_WIN32

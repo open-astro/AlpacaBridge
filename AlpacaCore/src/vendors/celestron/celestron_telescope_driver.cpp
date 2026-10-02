@@ -1176,19 +1176,45 @@ public:
         });
     }
 
+    // Stop a park slew: cancel the GOTO, then both axes to rate 0. Each stop
+    // is tried on its own so one failure does not skip the others. Returns
+    // the first failure's message, or an empty string when every stop was
+    // answered (#742). mutex_ must be held.
+    std::string stop_park_slew_locked() {
+        auto& protocol = CelestronProtocolWrapper::instance();
+        std::string first_error;
+        const auto try_stop = [&first_error](auto&& stop) {
+            try {
+                stop();
+            } catch (const std::exception& ex) {
+                if (first_error.empty()) {
+                    first_error = ex.what();
+                }
+            } catch (...) {
+                if (first_error.empty()) {
+                    first_error = "unknown exception";
+                }
+            }
+        };
+        try_stop([&protocol] { protocol.cancel_goto(); });
+        try_stop([&protocol] { protocol.move_axis_fixed_rate(0, 0); });
+        try_stop([&protocol] { protocol.move_axis_fixed_rate(1, 0); });
+        return first_error;
+    }
+
     // Park task failure path: stop the hardware so the reported idle state
     // (Slewing false, AtPark false) matches reality, then drop the parking
-    // state so the caller can retry. mutex_ must be held.
+    // state so the caller can retry. When a stop fails the mount may still
+    // be moving, so Slewing keeps its cached value. mutex_ must be held.
     void fail_park_locked(const std::string& message) {
-        try {
-            auto& protocol = CelestronProtocolWrapper::instance();
-            protocol.cancel_goto();
-            protocol.move_axis_fixed_rate(0, 0);
-            protocol.move_axis_fixed_rate(1, 0);
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
-        }
+        const std::string stop_error = stop_park_slew_locked();
         parking_ = false;
-        slewing_cached_ = false;
+        if (stop_error.empty()) {
+            slewing_cached_ = false;
+        } else {
+            ALPACA_LOG_ERROR("Celestron",
+                             "stop after park failure failed: " + stop_error + "; the mount may still be moving");
+        }
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         flip_in_progress_ = false;
@@ -1607,6 +1633,7 @@ public:
 
     void unpark() override {
         bool was_parking = false;
+        std::string stop_error;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1614,16 +1641,14 @@ public:
             was_parking = parking_;
             if (was_parking) {
                 // Unpark during a park wins the race: stop the park slew and
-                // drop the parking state; the task below is then joined.
+                // drop the parking state; the task below is then joined. A
+                // failed stop leaves Slewing at its cached value, since the
+                // park slew may still be running.
                 parking_ = false;
-                auto& protocol = CelestronProtocolWrapper::instance();
-                try {
-                    protocol.cancel_goto();
-                    protocol.move_axis_fixed_rate(0, 0);
-                    protocol.move_axis_fixed_rate(1, 0);
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                stop_error = stop_park_slew_locked();
+                if (stop_error.empty()) {
+                    slewing_cached_ = false;
                 }
-                slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
                 flip_in_progress_ = false;
@@ -1631,6 +1656,9 @@ public:
         }
         if (was_parking) {
             reap_slew_task();  // without mutex_ held
+        }
+        if (!stop_error.empty()) {
+            throw AlpacaException("Unpark could not stop the park slew: " + stop_error, AlpacaError::DriverException);
         }
     }
 

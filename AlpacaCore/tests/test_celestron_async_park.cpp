@@ -19,6 +19,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 
@@ -26,6 +27,8 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -40,6 +43,11 @@ struct FakeCelestronState {
     std::atomic<bool> goto_seen{false};
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
+    // #742: `silent` makes the handset answer nothing (every command times
+    // out, the stops included); `silent_from_goto` flips it on at the next
+    // GOTO, which then goes unanswered too, so a park dispatch fails.
+    std::atomic<bool> silent{false};
+    std::atomic<bool> silent_from_goto{false};
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (!goto_seen.load()) return false;
@@ -50,6 +58,7 @@ struct FakeCelestronState {
 
 alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr<FakeCelestronState> st) {
     return [st](const std::string& chunk) -> std::string {
+        if (st->silent.load()) return "";
         if (chunk.empty()) return "0#";
         switch (chunk[0]) {
             case 'e':
@@ -61,6 +70,10 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
             case 'R':
             case 'b':
             case 'B':
+                if (st->silent_from_goto.load()) {
+                    st->silent.store(true);
+                    return "";
+                }
                 st->goto_started.store(Clock::now().time_since_epoch().count());
                 st->goto_seen.store(true);
                 st->goto_count.fetch_add(1);
@@ -77,6 +90,10 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
             case 'P': {  // AUX passthrough: P len dev op ...
                 const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
                 if (op == 0x02 || op == 0x17) {  // MC_GOTO_FAST / MC_GOTO_SLOW
+                    if (st->silent_from_goto.load()) {
+                        st->silent.store(true);
+                        return "";
+                    }
                     st->goto_started.store(Clock::now().time_since_epoch().count());
                     st->goto_seen.store(true);
                     st->goto_count.fetch_add(1);
@@ -187,6 +204,74 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     driver->park();
     driver->set_connected(false);
     REQUIRE_FALSE(driver->get_connected());
+}
+
+// #742: the three stops Unpark sends to cancel a park in flight (cancel GOTO,
+// then both axes to rate 0) sat in one empty catch, and Unpark then set
+// Slewing false and returned success. With a handset that answers nothing,
+// Unpark must throw once the park task is joined, and Slewing must not read
+// false: the park slew may still be running.
+TEST_CASE("Celestron async - Unpark reports stops a silent handset never answered", "[celestron][telescope][async]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    driver->park();
+    REQUIRE(driver->get_slewing());
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the park slew is on the wire
+    st->silent.store(true);
+
+    try {
+        driver->unpark();
+        FAIL("Unpark returned success although no stop was answered");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).rfind("Unpark could not stop the park slew: ", 0) == 0);
+    }
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(driver->get_slewing());  // the hardware poll fails too, so the cached state stands
+
+    driver->set_connected(false);
+}
+
+// #742: when the park task fails (here the GOTO itself goes unanswered) it
+// stops the mount; those stops were swallowed and Slewing set false. A stop
+// that fails must be logged at ERROR, and Slewing must not read false while
+// the handset answers nothing.
+TEST_CASE("Celestron async - a failed park logs the stops a silent handset never answered",
+          "[celestron][telescope][async]") {
+    std::atomic<int> stop_errors{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Error && component == "Celestron" &&
+                message.find("stop after park failure failed: ") != std::string_view::npos &&
+                message.find("the mount may still be moving") != std::string_view::npos) {
+                ++stop_errors;
+            }
+        });
+
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->silent_from_goto.store(true);
+    driver->park();
+    REQUIRE(driver->get_slewing());
+    REQUIRE(wait_until([&] { return stop_errors.load() > 0; }, 10000));
+    CHECK(stop_errors.load() == 1);
+    CHECK(st->silent.load());  // the handset is still silent
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(driver->get_slewing());
+
+    driver->set_connected(false);
 }
 
 #endif  // !_WIN32

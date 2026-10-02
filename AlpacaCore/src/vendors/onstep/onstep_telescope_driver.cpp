@@ -917,13 +917,28 @@ public:
         if (!moving) {
             // Defensive dual-stop, matching the project's convention for
             // fixed-direction (rather than signed-rate) motion protocols.
-            try {
-                protocol.move_axis_stop(positive_dir);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
-            }
-            try {
-                protocol.move_axis_stop(negative_dir);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            // Both stops are always tried. The driver cannot tell which
+            // direction the mount needed stopped, so any failed stop may be
+            // the one that mattered: report it and keep the axis moving
+            // (#742).
+            std::string stop_error;
+            const auto try_stop = [&](int dir) {
+                try {
+                    protocol.move_axis_stop(dir);
+                } catch (const std::exception& ex) {
+                    if (stop_error.empty()) {
+                        stop_error = ex.what();
+                    }
+                } catch (...) {
+                    if (stop_error.empty()) {
+                        stop_error = "unknown exception";
+                    }
+                }
+            };
+            try_stop(positive_dir);
+            try_stop(negative_dir);
+            if (!stop_error.empty()) {
+                throw AlpacaException("MoveAxis stop failed: " + stop_error, AlpacaError::DriverException);
             }
         } else {
             protocol.move_axis_start(rate > 0.0 ? positive_dir : negative_dir, std::abs(rate));

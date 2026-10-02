@@ -474,4 +474,48 @@ TEST_CASE("OnStep Telescope Driver - non-finite slew and sync coordinates are re
     driver->set_connected(false);
 }
 
+// #742: MoveAxis(axis, 0) swallowed both direction stops and cleared the
+// manual-slew flag, so a stop lost on a dead link read as Slewing false while
+// the mount kept moving. The stops are blind sends, which a responder cannot
+// fail, so the fake resets the connection instead: every stop after that fails.
+TEST_CASE("OnStep Telescope Driver - MoveAxis at rate 0 reports a stop it could not send",
+          "[onstep][telescope][unit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) {
+        if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
+            return std::string("1");
+        }
+        // Status: not tracking, not slewing, not parked. The canned "0#"
+        // lacks the 'N' and so reads as a GOTO in progress, which would make
+        // Slewing true whatever MoveAxis did.
+        if (chunk.rfind(":GU", 0) == 0) {
+            return std::string("nNp#");
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    REQUIRE_FALSE(driver->get_slewing());  // only the axis move below makes it true
+    driver->move_axis(0, 1.0);
+    REQUIRE(driver->get_slewing());
+
+    REQUIRE(server.drop_connections());
+    try {
+        driver->move_axis(0, 0.0);
+        FAIL("MoveAxis(0, 0) returned success although the stop could not be sent");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).rfind("MoveAxis stop failed: ", 0) == 0);
+    }
+    CHECK(driver->get_slewing());  // the mount may still be moving
+
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
