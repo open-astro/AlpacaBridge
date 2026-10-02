@@ -1752,7 +1752,15 @@ async function saveHostCheckSettings(values) {
         error = e.message;
     }
     await loadServerInfo();
+    // A refused list stays in the field so it can be corrected, as the profile name does.
+    const typedHosts = document.getElementById('server-allowed-hosts-input');
+    if (error && typedHosts && typeof values.AllowedHosts === 'string') {
+        typedHosts.value = values.AllowedHosts;
+    }
     setServerInfoStatus(error ? 'Host name settings not saved: ' + error : 'Host name settings saved.', !!error);
+    if (error) {
+        document.getElementById('server-info-status')?.scrollIntoView({block: 'nearest'});
+    }
 }
 
 async function updateServerProfileName() {

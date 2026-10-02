@@ -7011,8 +7011,15 @@ int main() {
         {
             const std::string before_file = file_text();
             const std::string before_hosts = settings(router, "localhost")["AllowedHosts"].get<std::string>();
-            const std::vector<std::string> bad_lists = {
-                "a#b, .lan", "*.lan", "http://x.lan", "a b", std::string("a\x01.lan"), "a..lan", "[::zz]", "x.lan:abc"};
+            const std::vector<std::string> bad_lists = {"a#b, .lan",
+                                                        "*.lan",
+                                                        "http://x.lan",
+                                                        "a b",
+                                                        std::string("a\x01.lan"),
+                                                        "a..lan",
+                                                        "[::zz]",
+                                                        "x.lan:abc",
+                                                        std::string("[::1\0junk]", 10)};
             for (const auto& list : bad_lists) {
                 nlohmann::json body;
                 body["AllowedHosts"] = list;

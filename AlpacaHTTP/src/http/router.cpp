@@ -1470,8 +1470,13 @@ std::vector<std::string> normalize_host_list(const std::vector<std::string>& hos
 // (1..63 each, 253 in all), or a bracketed IPv6 literal.
 bool valid_host_entry(const std::string& entry) {
     if (entry.size() > 2 && entry.front() == '[' && entry.back() == ']') {
+        // inet_pton stops at a NUL, so refuse anything but address characters first.
+        const std::string inner = entry.substr(1, entry.size() - 2);
+        const bool chars_ok = std::all_of(inner.begin(), inner.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == ':' || c == '.';
+        });
         in6_addr addr{};
-        return inet_pton(AF_INET6, entry.substr(1, entry.size() - 2).c_str(), &addr) == 1;
+        return chars_ok && inet_pton(AF_INET6, inner.c_str(), &addr) == 1;
     }
     std::string_view rest = entry;
     if (!rest.empty() && rest.front() == '.') {
