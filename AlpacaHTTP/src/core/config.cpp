@@ -133,9 +133,8 @@ bool parse_size_value(const std::string& value, std::size_t& result) {
     }
 }
 
-// open-astro#392: http.allowed_hosts and ALPACAHTTP_ALLOWED_HOSTS are one
-// comma-separated string. Entries are trimmed and empty ones dropped; the
-// router normalizes the rest.
+} // namespace
+
 std::vector<std::string> split_host_list(std::string_view value) {
     std::vector<std::string> hosts;
     std::size_t start = 0;
@@ -152,8 +151,6 @@ std::vector<std::string> split_host_list(std::string_view value) {
     }
     return hosts;
 }
-
-} // namespace
 
 void Config::load_config_from_yaml(const std::string& config_path) {
     std::ifstream file(config_path);
@@ -415,11 +412,13 @@ void Config::apply_environment_overrides() {
     // open-astro#392: replaces the file's list; an empty variable clears it.
     if (const char* v = std::getenv("ALPACAHTTP_ALLOWED_HOSTS")) {
         allowed_hosts_ = split_host_list(v);
+        allowed_hosts_env_fixed_ = true;
     }
     if (const char* v = std::getenv("ALPACAHTTP_HOST_CHECK")) {
         bool enabled = host_check_enabled_;
         if (parse_bool_value(v, enabled)) {
             host_check_enabled_ = enabled;
+            host_check_env_fixed_ = true;
         }
     }
 

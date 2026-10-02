@@ -19,6 +19,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacahttp/config.h>
 #include <alpacahttp/json_utils.h>
 #include <alpacahttp/router.h>
 #include <alpacahttp/util/error_mapping.h>
@@ -227,17 +228,24 @@ std::string escape_yaml_string(const std::string& value) {
     return escaped;
 }
 
-// Update one or more keys under the config file's `server:` section in a
-// single read/rewrite pass, so a request that sets several values can never
-// leave the file with only some of them applied.
-bool update_server_values_in_config(const std::string& config_path,
-                                    const std::vector<std::pair<std::string, std::string>>& values,
-                                    std::string& error_message) {
+using ConfigKeyValues = std::vector<std::pair<std::string, std::string>>;
+// One top-level section and the keys to set under it, e.g. {"http", {...}}.
+using ConfigSectionValues = std::pair<std::string, ConfigKeyValues>;
+
+// Update keys under one or more top-level sections of the config file (the
+// `server:` and `http:` ones) in a single read/rewrite pass, so a request that
+// sets several values can never leave the file with only some of them
+// applied. An existing key is replaced in place, a missing key is appended to
+// its section, and a missing section is appended to the file.
+bool update_config_values(const std::string& config_path, const std::vector<ConfigSectionValues>& sections,
+                          std::string& error_message) {
     if (config_path.empty()) {
         error_message = "Config path not set";
         return false;
     }
-    if (values.empty()) {
+    const bool any_values =
+        std::any_of(sections.begin(), sections.end(), [](const auto& section) { return !section.second.empty(); });
+    if (!any_values) {
         return true;
     }
 
@@ -248,9 +256,14 @@ bool update_server_values_in_config(const std::string& config_path,
             error_message = "Unable to open config file for writing";
             return false;
         }
-        output << "server:\n";
-        for (const auto& [key, value] : values) {
-            output << "  " << key << ": \"" << escape_yaml_string(value) << "\"\n";
+        for (const auto& [section, values] : sections) {
+            if (values.empty()) {
+                continue;
+            }
+            output << section << ":\n";
+            for (const auto& [key, value] : values) {
+                output << "  " << key << ": \"" << escape_yaml_string(value) << "\"\n";
+            }
         }
         return true;
     }
@@ -289,28 +302,24 @@ bool update_server_values_in_config(const std::string& config_path,
         return text.substr(0, pos);
     };
 
-    bool in_server_section = false;
-    bool server_section_found = false;
-    std::vector<bool> written(values.size(), false);
-    std::size_t server_indent = 0;
+    // Index into `sections` of the section the current line sits in, or
+    // sections.size() outside every section we edit.
+    std::size_t current = sections.size();
+    std::vector<bool> section_found(sections.size(), false);
+    std::vector<std::vector<bool>> written;
+    for (const auto& section : sections) {
+        written.emplace_back(section.second.size(), false);
+    }
     std::vector<std::string> output;
-    output.reserve(lines.size() + values.size() + 1);
+    output.reserve(lines.size() + 8);
 
-    auto find_value_index = [&values](const std::string& key) -> std::size_t {
+    auto append_unwritten = [&](std::size_t section_index, std::size_t indent) {
+        const auto& values = sections[section_index].second;
         for (std::size_t i = 0; i < values.size(); ++i) {
-            if (values[i].first == key) {
-                return i;
-            }
-        }
-        return values.size();
-    };
-
-    auto append_unwritten = [&](std::size_t indent) {
-        for (std::size_t i = 0; i < values.size(); ++i) {
-            if (!written[i]) {
+            if (!written[section_index][i]) {
                 output.push_back(std::string(indent, ' ') + values[i].first + ": \"" +
                                  escape_yaml_string(values[i].second) + "\"");
-                written[i] = true;
+                written[section_index][i] = true;
             }
         }
     };
@@ -321,47 +330,56 @@ bool update_server_values_in_config(const std::string& config_path,
         std::size_t indent = leading_spaces(current_line);
 
         if (indent == 0) {
-            if (in_server_section) {
-                append_unwritten(server_indent + 2);
+            if (current < sections.size()) {
+                append_unwritten(current, 2);
             }
-            in_server_section = false;
-        }
-
-        if (indent == 0 && trimmed == "server:") {
-            in_server_section = true;
-            server_section_found = true;
-            server_indent = indent;
+            current = sections.size();
+            for (std::size_t i = 0; i < sections.size(); ++i) {
+                if (trimmed == sections[i].first + ":") {
+                    current = i;
+                    section_found[i] = true;
+                    break;
+                }
+            }
             output.push_back(current_line);
             continue;
         }
 
-        if (in_server_section && indent > server_indent && !trimmed.empty()) {
+        bool replaced = false;
+        if (current < sections.size() && !trimmed.empty()) {
             auto delimiter = trimmed.find(':');
             if (delimiter != std::string::npos) {
                 std::string key = trim_copy(trimmed.substr(0, delimiter));
-                std::size_t value_index = find_value_index(key);
-                if (value_index < values.size()) {
-                    output.push_back(std::string(indent, ' ') + key + ": \"" +
-                                     escape_yaml_string(values[value_index].second) + "\"");
-                    written[value_index] = true;
-                    continue;
+                const auto& values = sections[current].second;
+                for (std::size_t i = 0; i < values.size() && !replaced; ++i) {
+                    if (values[i].first == key) {
+                        output.push_back(std::string(indent, ' ') + key + ": \"" +
+                                         escape_yaml_string(values[i].second) + "\"");
+                        written[current][i] = true;
+                        replaced = true;
+                    }
                 }
             }
         }
 
-        output.push_back(current_line);
+        if (!replaced) {
+            output.push_back(current_line);
+        }
     }
 
-    if (in_server_section) {
-        append_unwritten(server_indent + 2);
+    if (current < sections.size()) {
+        append_unwritten(current, 2);
     }
 
-    if (!server_section_found) {
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        if (section_found[i] || sections[i].second.empty()) {
+            continue;
+        }
         if (!output.empty() && !output.back().empty()) {
             output.push_back("");
         }
-        output.push_back("server:");
-        append_unwritten(2);
+        output.push_back(sections[i].first + ":");
+        append_unwritten(i, 2);
     }
 
     std::ofstream output_file(config_path, std::ios::trunc);
@@ -369,11 +387,8 @@ bool update_server_values_in_config(const std::string& config_path,
         error_message = "Unable to open config file for writing";
         return false;
     }
-    for (std::size_t i = 0; i < output.size(); ++i) {
-        output_file << output[i];
-        if (i + 1 < output.size()) {
-            output_file << '\n';
-        }
+    for (const auto& output_line : output) {
+        output_file << output_line << '\n';
     }
 
     return true;
@@ -1423,6 +1438,35 @@ std::optional<std::string> normalize_host(std::string_view value) {
     return normalized;
 }
 
+// The entries set_allowed_hosts() stores: trimmed, normalized like a Host
+// header, empty and unusable ones dropped. The description PUT compares and
+// persists this form, so file, memory and the lockout check all see one list.
+std::vector<std::string> normalize_host_list(const std::vector<std::string>& hosts) {
+    std::vector<std::string> normalized;
+    for (const auto& entry : hosts) {
+        const auto first = entry.find_first_not_of(" \t");
+        if (first == std::string::npos) {
+            continue;
+        }
+        auto name = normalize_host(std::string_view(entry).substr(first, entry.find_last_not_of(" \t") - first + 1));
+        if (name && !name->empty() && *name != ".") {
+            normalized.push_back(std::move(*name));
+        }
+    }
+    return normalized;
+}
+
+std::string join_host_list(const std::vector<std::string>& hosts) {
+    std::string joined;
+    for (const auto& host : hosts) {
+        if (!joined.empty()) {
+            joined += ", ";
+        }
+        joined += host;
+    }
+    return joined;
+}
+
 // `suffix` starts with a dot; the name must have at least one character
 // before it, so ".local" alone is not a .local name.
 bool has_label_suffix(std::string_view name, std::string_view suffix) {
@@ -1589,17 +1633,7 @@ void Router::set_server_info(std::string server_name, std::string manufacturer, 
 }
 
 void Router::set_allowed_hosts(const std::vector<std::string>& hosts) {
-    auto normalized = std::make_shared<std::vector<std::string>>();
-    for (const auto& entry : hosts) {
-        const auto first = entry.find_first_not_of(" \t");
-        if (first == std::string::npos) {
-            continue;
-        }
-        auto name = normalize_host(std::string_view(entry).substr(first, entry.find_last_not_of(" \t") - first + 1));
-        if (name && !name->empty() && *name != ".") {
-            normalized->push_back(std::move(*name));
-        }
-    }
+    auto normalized = std::make_shared<std::vector<std::string>>(normalize_host_list(hosts));
     std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
     allowed_hosts_ = std::move(normalized);
 }
@@ -1937,6 +1971,20 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
 nlohmann::json Router::build_description_payload() const {
     nlohmann::json desc;
 
+    // open-astro#392: the Host check settings the web UI edits, and which of
+    // them the environment owns (read-only there).
+    auto add_host_check_fields = [this](nlohmann::json& target) {
+        std::shared_ptr<const std::vector<std::string>> hosts;
+        {
+            std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
+            hosts = allowed_hosts_;
+        }
+        target["HostCheckEnabled"] = host_check_enabled_.load(std::memory_order_acquire);
+        target["AllowedHosts"] = join_host_list(*hosts);
+        target["HostCheckEnabledFixedByEnvironment"] = host_check_env_fixed_.load(std::memory_order_acquire);
+        target["AllowedHostsFixedByEnvironment"] = allowed_hosts_env_fixed_.load(std::memory_order_acquire);
+    };
+
     if (management_driver_) {
         desc["ServerName"] = management_driver_->get_name();
         desc["Manufacturer"] = management_driver_->get_manufacturer();
@@ -1947,6 +1995,7 @@ nlohmann::json Router::build_description_payload() const {
             desc["ProfileName"] = profile_name_;
         }
         add_clock_fields(desc);
+        add_host_check_fields(desc);
         return desc;
     }
 
@@ -1970,6 +2019,7 @@ nlohmann::json Router::build_description_payload() const {
     desc["Location"] = location;
     desc["ProfileName"] = profile_name;
     add_clock_fields(desc);
+    add_host_check_fields(desc);
     return desc;
 }
 
@@ -2116,10 +2166,38 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     break;
                 }
             }
-            if (!new_location && !new_profile_name && !new_sync_clock) {
+
+            // open-astro#392: the Host check settings. Types are checked
+            // here, before anything is applied.
+            std::optional<bool> new_host_check;
+            for (const char* key : {"HostCheckEnabled", "hostCheckEnabled", "host_check_enabled"}) {
+                if (body.contains(key)) {
+                    const auto& v = body[key];
+                    if (v.is_boolean()) {
+                        new_host_check = v.get<bool>();
+                    } else if (v.is_string()) {
+                        new_host_check = parse_bool_value(v.get<std::string>(), key);
+                    } else {
+                        throw_invalid_value(std::string("Invalid value for ") + key);
+                    }
+                    break;
+                }
+            }
+            std::optional<std::vector<std::string>> new_allowed_hosts;
+            for (const char* key : {"AllowedHosts", "allowedHosts", "allowed_hosts"}) {
+                if (body.contains(key)) {
+                    if (!body[key].is_string()) {
+                        throw_invalid_value(std::string("Invalid value for ") + key);
+                    }
+                    new_allowed_hosts = normalize_host_list(split_host_list(body[key].get<std::string>()));
+                    break;
+                }
+            }
+            if (!new_location && !new_profile_name && !new_sync_clock && !new_host_check && !new_allowed_hosts) {
                 AlpacaResponse err = make_error_response(
                     client_tx_id, server_tx_id, util::ErrorCode::VALUE_NOT_SET,
-                    "Request must include a 'Location', 'ProfileName' or 'SyncSystemClockFromClients' property");
+                    "Request must include a 'Location', 'ProfileName', 'SyncSystemClockFromClients', "
+                    "'HostCheckEnabled' or 'AllowedHosts' property");
                 response.set_body(err);
                 return response;
             }
@@ -2132,6 +2210,61 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 return response;
             }
 
+            // open-astro#392: validate, persist and apply as one step.
+            std::lock_guard<std::mutex> write_lock(description_write_mutex_);
+
+            const auto refuse_with_400 = [&](const std::string& message) {
+                response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                                      message));
+                response.set_status(400, "Bad Request");
+                return response;
+            };
+
+            const bool host_settings_carried = new_host_check.has_value() || new_allowed_hosts.has_value();
+            std::vector<std::string> current_hosts;
+            {
+                std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
+                current_hosts = *allowed_hosts_;
+            }
+            const bool current_host_check = host_check_enabled_.load(std::memory_order_acquire);
+
+            // The environment owns a fixed field: a different value is
+            // refused, the same one is a no-op, and a fixed value is never
+            // written to the file (it would outlive the variable).
+            if (host_check_env_fixed_.load(std::memory_order_acquire) && new_host_check) {
+                if (*new_host_check != current_host_check) {
+                    return refuse_with_400("HostCheckEnabled is fixed by the ALPACAHTTP_HOST_CHECK environment variable");
+                }
+                new_host_check.reset();
+            }
+            if (allowed_hosts_env_fixed_.load(std::memory_order_acquire) && new_allowed_hosts) {
+                if (*new_allowed_hosts != current_hosts) {
+                    return refuse_with_400(
+                        "AllowedHosts is fixed by the ALPACAHTTP_ALLOWED_HOSTS environment variable");
+                }
+                new_allowed_hosts.reset();
+            }
+
+            // No self-lockout: the request that turns the check on, or edits
+            // the list while it is on, must itself pass the new settings.
+            // Same predicate as route().
+            const bool resulting_host_check = new_host_check.value_or(current_host_check);
+            const std::vector<std::string>& resulting_hosts = new_allowed_hosts ? *new_allowed_hosts : current_hosts;
+            if (host_settings_carried && resulting_host_check) {
+                const std::string host = request.get_header("Host");
+                if (!host.empty()) {
+                    const auto name = normalize_host(host);
+                    if (!name || name->empty() || !host_allowed(*name, resulting_hosts, machine_hostname_)) {
+                        std::string shown = host.substr(0, 255);
+                        std::replace_if(shown.begin(), shown.end(),
+                                        [](unsigned char c) { return c < 0x20 || c > 0x7e; }, '?');
+                        return refuse_with_400("Host '" + shown +
+                                               "' would be refused by these settings; add it to AllowedHosts or use the "
+                                               "IP address");
+                    }
+                }
+            }
+
             std::string config_path;
             {
                 std::lock_guard<std::mutex> lock(server_info_mutex_);
@@ -2140,6 +2273,13 @@ Response Router::handle_description(const Request& request, std::uint32_t server
 
             if (!config_path.empty()) {
                 std::vector<std::pair<std::string, std::string>> persist_values;
+                std::vector<std::pair<std::string, std::string>> persist_http_values;
+                if (new_host_check) {
+                    persist_http_values.emplace_back("host_check_enabled", *new_host_check ? "true" : "false");
+                }
+                if (new_allowed_hosts) {
+                    persist_http_values.emplace_back("allowed_hosts", join_host_list(*new_allowed_hosts));
+                }
                 if (new_location) {
                     persist_values.emplace_back("location", *new_location);
                 }
@@ -2150,7 +2290,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     persist_values.emplace_back("sync_system_clock_from_clients", *new_sync_clock ? "true" : "false");
                 }
                 std::string persist_error;
-                if (!update_server_values_in_config(config_path, persist_values, persist_error)) {
+                if (!update_config_values(config_path, {{"server", persist_values}, {"http", persist_http_values}},
+                                          persist_error)) {
                     AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
                                                              "Failed to persist server settings: " + persist_error);
                     response.set_body(err);
@@ -2171,6 +2312,22 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 host_clock_.set_enabled(*new_sync_clock);
                 util::log_info(std::string("syncSystemClockFromClients ") + (*new_sync_clock ? "enabled" : "disabled") +
                                " by " + request.remote_address());
+            }
+            // Never judge a request by the new flag with the old list: turn
+            // the check on after the list, off before it.
+            if (new_host_check && !*new_host_check) {
+                set_host_check_enabled(false);
+            }
+            if (new_allowed_hosts) {
+                set_allowed_hosts(*new_allowed_hosts);
+            }
+            if (new_host_check && *new_host_check) {
+                set_host_check_enabled(true);
+            }
+            if (new_host_check || new_allowed_hosts) {
+                util::log_info("Host check settings changed by " + request.remote_address() + ": enabled=" +
+                               (host_check_enabled_.load(std::memory_order_acquire) ? "true" : "false") +
+                               ", allowed hosts='" + join_host_list(resulting_hosts) + "'");
             }
         } else if (request.method() != HttpMethod::GET) {
             AlpacaResponse alpaca_response = make_error_response(

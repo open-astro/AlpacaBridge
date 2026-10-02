@@ -156,8 +156,10 @@ public:
     // *.local, *.home.arpa, *.internal). An entry with a leading dot is a
     // suffix (".lan" allows "lan" and every "*.lan"); entries are normalized
     // like the Host header and empty ones dropped. Replaces the previous list.
-    // Server sets it from Config at construction; no HTTP endpoint calls it,
-    // so a rebound page cannot add its own name.
+    // Server sets it from Config at construction; PUT /management/v1/description
+    // (AllowedHosts) calls it too, after the self-lockout, env-fixed and
+    // cross-origin checks: when the check is on, a rebound page cannot get a
+    // request past it, and cross-origin writes are refused with 403.
     void set_allowed_hosts(const std::vector<std::string>& hosts);
 
     // http.host_check_enabled: whether route() applies the Host allowlist at
@@ -165,6 +167,15 @@ public:
     // Origin==Host cross-origin guard does not depend on it. Lock-free, so it
     // may be flipped while requests run; the next request sees the new value.
     void set_host_check_enabled(bool enabled) { host_check_enabled_.store(enabled, std::memory_order_release); }
+
+    // Which of the two settings the environment owns (ALPACAHTTP_HOST_CHECK /
+    // ALPACAHTTP_ALLOWED_HOSTS, see Config::host_check_env_fixed()). A
+    // description PUT that would change a fixed one is refused with 400, and
+    // GET reports it. Server sets it from Config at construction.
+    void set_host_settings_env_fixed(bool host_check_fixed, bool allowed_hosts_fixed) {
+        host_check_env_fixed_.store(host_check_fixed, std::memory_order_release);
+        allowed_hosts_env_fixed_.store(allowed_hosts_fixed, std::memory_order_release);
+    }
 
     // open-astro#547: check every registered telescope for client silence
     // during motion and stop any that have gone quiet past the configured
@@ -205,6 +216,12 @@ private:
     std::shared_ptr<const std::vector<std::string>> allowed_hosts_ = std::make_shared<const std::vector<std::string>>();
     mutable std::mutex allowed_hosts_mutex_;
     std::atomic<bool> host_check_enabled_{false};
+    std::atomic<bool> host_check_env_fixed_{false};
+    std::atomic<bool> allowed_hosts_env_fixed_{false};
+    // Serializes a description PUT's validate, persist and apply, so two
+    // writes cannot interleave and leave the file and memory disagreeing.
+    // route() never takes it.
+    std::mutex description_write_mutex_;
     std::string machine_hostname_;
 
     // open-astro#547.
