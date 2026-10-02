@@ -74,14 +74,14 @@ See [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) for driver-specific notes.
 
 **Why**: this only happens when the Host check is turned on (`http.host_check_enabled: true`, or `ALPACAHTTP_HOST_CHECK=true`); it is off by default and every `Host` name is then served. With it on, the server refuses a request whose `Host` header names something it does not know (issue #392), so a hostile web page cannot reach it through a DNS-rebinding name. It then always allows an IPv4 address or a bracketed IPv6 address, `localhost` and `*.localhost`, the machine's own hostname and `<hostname>.local`, and any `*.local`, `*.home.arpa` or `*.internal` name. A name your router's DNS adds (`astropi.lan`, `astropi.fritz.box`) is not on that list.
 
-**Fix**: set `host_check_enabled: false` under `http:` (or remove the key) to turn the check off, use the IP address, or add the name to `allowed_hosts` under `http:` in the server config file (comma-separated; a leading dot allows a domain and every name under it), then restart the service:
+**Fix**: open the web UI by the IP address, then use the server settings area ("Restrict Host names" and "Allowed host names") to turn the check off or add the name to the list. The change applies at once and is saved to the config file. The server refuses a save that would lock out the browser you are using, and says which name to add. Or edit the server config file (comma-separated; a leading dot allows a domain and every name under it) and restart the service:
 
 ```yaml
 http:
   allowed_hosts: ".lan, astropi.fritz.box"
 ```
 
-On a package install the file is `/var/lib/alpacabridge/config/default.yaml`; edit it as the `alpacabridge` user (see [the motion watchdog section](#the-mount-stopped-by-itself-mid-slew-and-the-log-says-client-silence-motion-watchdog) for why). The environment variable `ALPACAHTTP_ALLOWED_HOSTS` replaces the key, for example in a systemd drop-in for `alpacabridge.service`. `ALPACAHTTP_HOST_CHECK` (`true` or `false`) overrides `host_check_enabled` the same way. `allowed_hosts` is read only while the check is on. No web UI page or HTTP endpoint changes the list.
+On a package install the file is `/var/lib/alpacabridge/config/default.yaml`; edit it as the `alpacabridge` user (see [the motion watchdog section](#the-mount-stopped-by-itself-mid-slew-and-the-log-says-client-silence-motion-watchdog) for why). The environment variable `ALPACAHTTP_ALLOWED_HOSTS` replaces the key, for example in a systemd drop-in for `alpacabridge.service`. `ALPACAHTTP_HOST_CHECK` (`true` or `false`) overrides `host_check_enabled` the same way. A field set by an environment variable is read-only in the web UI, and a save that changes it is refused. `allowed_hosts` is read only while the check is on. The web UI saves both settings through `PUT /management/v1/description` (`HostCheckEnabled`, `AllowedHosts`).
 
 **Notes**:
 - The server reads the machine's hostname once, at start-up. After you rename the machine, restart the service, or the new name gets 403 and the old one is still allowed.
