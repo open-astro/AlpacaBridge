@@ -1,0 +1,2 @@
+### Fixed (tooling)
+- **Layering gate now scans every CMake file under `AlpacaCore/` and `AlpacaHTTP/`** (`scripts/check_layering.py`, issue #723): rules L1-L3 read every `CMakeLists.txt` and `*.cmake` there (not `external/` or `build*` directories), not only `AlpacaCore/CMakeLists.txt` and the vendor files. L3 also fails on `target_sources(alpacacore ...)` naming a `src/vendors/` source, and L2 fails on a directory-scoped `ALPACACORE_ENABLE_` definition in `AlpacaHTTP/CMakeLists.txt` placed before its `add_subdirectory(../AlpacaCore ...)`.
