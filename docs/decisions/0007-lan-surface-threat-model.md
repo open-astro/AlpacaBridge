@@ -102,7 +102,7 @@ A change passes only when every line holds, or the exception is written in the c
 | NS-03+05 | all HTTP surfaces | open | per-host connection cap |
 | NS-04 | all HTTP surfaces | fixed | request body cap lowered from 10 MiB to 64 KiB (issue #741) |
 | NS-06 | Wi-Fi API | open | hotspot passphrase by default |
-| NS-07 | Device API, Management API | open | JSON output throws on non-UTF-8 input (`json.dump()` with no replace handler, `AlpacaHTTP/src/core/response.cpp:75`) |
+| NS-07 | Device API, Management API | fixed | JSON output replaces invalid UTF-8 with U+FFFD instead of throwing (`error_handler_t::replace` in `Response::set_body`, `AlpacaHTTP/src/core/response.cpp`, issue #764) |
 | NS-08 | Web UI | open | framing headers and CSP |
 | NS-09 | Device API | open | the iOptron telescope lowers the mount altitude limit to -89 degrees when a slew is refused, with no opt-in (`AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp:1872`) |
 | NS-10 | Management API | open | the WeeWX feed URL has no scheme allowlist, follows redirects and reads an unbounded body (`AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp:257-261`) |
@@ -124,9 +124,9 @@ When a finding lands, set its row to `fixed` in the same change.
 ## Consequences
 
 - Reviewers get one list for any new route or config field. The rule stays at the instruction owners; this record keeps the reason.
-- Gaps with a filed upstream issue name it in the finding map (NS-02 issue #392, NS-04 issue #741 and NS-13 issue #740, all three landed). The other open rows have a proposed fix and no owner or issue yet; this record does not promise one. The device PUT guard rests on the Host allowlist and the reviewer check; the detached threads and the `innerHTML` audit go with the NS-14 low-severity items.
+- Gaps with a filed upstream issue name it in the finding map (NS-02 issue #392, NS-04 issue #741, NS-07 issue #764 and NS-13 issue #740, all four landed). The other open rows have a proposed fix and no owner or issue yet; this record does not promise one. The device PUT guard rests on the Host allowlist and the reviewer check; the detached threads and the `innerHTML` audit go with the NS-14 low-severity items.
 - Accepted by the board on 2026-09-30 (R1 to R4 accepted as residual risk).
-- NS-07 and NS-09 to NS-14 are not decided here; each carrier decides its fix and must pass the reviewer check.
+- NS-09 to NS-14 are not decided here; each carrier decides its fix and must pass the reviewer check.
 - ConformU and other non-browser clients are unaffected by every control named here.
 
 ## Links
@@ -135,4 +135,4 @@ When a finding lands, set its row to `fixed` in the same change.
 - Discovery: `AlpacaHTTP/src/discovery/discovery.cpp`. Wi-Fi: `debian/alpacabridge.polkit-rules`, `debian/alpacabridge.service`, `docs/wifi-manager-design.md`.
 - Owners of the reviewer check: [AlpacaHTTP conformance](../../.github/instructions/alpaca-http-conformance.instructions.md), [WiFi manager](../../.github/instructions/wifi-manager.instructions.md).
 - Related: [Server thread ownership](0002-server-thread-ownership.md), [Device catalog](0004-device-catalog.md).
-- Upstream issues [#392](https://github.com/open-astro/AlpacaBridge/issues/392), [#711](https://github.com/open-astro/AlpacaBridge/issues/711), [#713](https://github.com/open-astro/AlpacaBridge/issues/713), [#740](https://github.com/open-astro/AlpacaBridge/issues/740) and [#741](https://github.com/open-astro/AlpacaBridge/issues/741).
+- Upstream issues [#392](https://github.com/open-astro/AlpacaBridge/issues/392), [#711](https://github.com/open-astro/AlpacaBridge/issues/711), [#713](https://github.com/open-astro/AlpacaBridge/issues/713), [#740](https://github.com/open-astro/AlpacaBridge/issues/740), [#741](https://github.com/open-astro/AlpacaBridge/issues/741) and [#764](https://github.com/open-astro/AlpacaBridge/issues/764).
