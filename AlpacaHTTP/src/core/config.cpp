@@ -133,7 +133,7 @@ bool parse_size_value(const std::string& value, std::size_t& result) {
     }
 }
 
-} // namespace
+}  // namespace
 
 std::vector<std::string> split_host_list(std::string_view value) {
     std::vector<std::string> hosts;

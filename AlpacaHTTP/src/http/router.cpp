@@ -2214,8 +2214,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
             std::lock_guard<std::mutex> write_lock(description_write_mutex_);
 
             const auto refuse_with_400 = [&](const std::string& message) {
-                response.set_body(make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                                                      message));
+                response.set_body(
+                    make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE, message));
                 response.set_status(400, "Bad Request");
                 return response;
             };
@@ -2233,7 +2233,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
             // written to the file (it would outlive the variable).
             if (host_check_env_fixed_.load(std::memory_order_acquire) && new_host_check) {
                 if (*new_host_check != current_host_check) {
-                    return refuse_with_400("HostCheckEnabled is fixed by the ALPACAHTTP_HOST_CHECK environment variable");
+                    return refuse_with_400(
+                        "HostCheckEnabled is fixed by the ALPACAHTTP_HOST_CHECK environment variable");
                 }
                 new_host_check.reset();
             }
@@ -2256,11 +2257,12 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     const auto name = normalize_host(host);
                     if (!name || name->empty() || !host_allowed(*name, resulting_hosts, machine_hostname_)) {
                         std::string shown = host.substr(0, 255);
-                        std::replace_if(shown.begin(), shown.end(),
-                                        [](unsigned char c) { return c < 0x20 || c > 0x7e; }, '?');
-                        return refuse_with_400("Host '" + shown +
-                                               "' would be refused by these settings; add it to AllowedHosts or use the "
-                                               "IP address");
+                        std::replace_if(
+                            shown.begin(), shown.end(), [](unsigned char c) { return c < 0x20 || c > 0x7e; }, '?');
+                        return refuse_with_400(
+                            "Host '" + shown +
+                            "' would be refused by these settings; add it to AllowedHosts or use the "
+                            "IP address");
                     }
                 }
             }
@@ -2325,8 +2327,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 set_host_check_enabled(true);
             }
             if (new_host_check || new_allowed_hosts) {
-                util::log_info("Host check settings changed by " + request.remote_address() + ": enabled=" +
-                               (host_check_enabled_.load(std::memory_order_acquire) ? "true" : "false") +
+                util::log_info("Host check settings changed by " + request.remote_address() +
+                               ": enabled=" + (host_check_enabled_.load(std::memory_order_acquire) ? "true" : "false") +
                                ", allowed hosts='" + join_host_list(resulting_hosts) + "'");
             }
         } else if (request.method() != HttpMethod::GET) {
