@@ -1,0 +1,2 @@
+### Changed (tooling)
+- **CodeQL no longer scans the vendored SDKs** (`.github/codeql/codeql-config.yml`): `paths-ignore` now skips `AlpacaCore/external/**`. The workflow's `build-mode: none` extracts every C/C++ file in the tree, so the ToupTek SDK's unbuilt sample programs raised 15 "high" `cpp/integer-multiplication-cast-to-long` alerts on every scan; nothing in the build references them, and the SDKs are kept as the vendor ships them. The drivers that call the SDKs (`AlpacaCore/src/vendors/`) are still scanned.

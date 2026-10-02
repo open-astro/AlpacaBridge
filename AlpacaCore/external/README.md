@@ -23,6 +23,7 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
 
 - **Vendor SDK files are typically NOT tracked in Git** - binaries, libraries, headers, and other SDK files are excluded from version control by default
 - **Vendored exceptions**: If a vendor license allows, a **minimal subset** (headers + platform libraries) may be committed under `external/` to make builds turnkey
+- **CodeQL does not scan this directory** (`paths-ignore` in `.github/codeql/codeql-config.yml`). Do not put first-party C/C++ here; it would go unanalysed
 - **Documentation files ARE tracked** - markdown files (`.md`), README files, and `.gitkeep` files in this directory are tracked in Git
 - The `.gitignore` file is configured to exclude SDK files while allowing documentation to be tracked, with explicit allowlists for vendored SDK subsets
 
