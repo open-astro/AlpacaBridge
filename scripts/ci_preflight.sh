@@ -194,7 +194,11 @@ if [[ "${BASE}" == */* ]] && git remote | grep -Fxq "${base_remote}"; then
     fi
   fi
 else
-  echo "WARNING: '${BASE}' is a local branch, not refreshed; run git fetch or set PREFLIGHT_BASE=<remote>/<branch>" >&2
+  local_note=""
+  if local_date="$(git log -1 --format=%cI "${BASE}" 2>/dev/null)" && [[ -n "${local_date}" ]]; then
+    local_note=" (cached ref from ${local_date})"
+  fi
+  echo "WARNING: '${BASE}' is a local branch, not refreshed${local_note}; run git fetch or set PREFLIGHT_BASE=<remote>/<branch>" >&2
 fi
 # Fail fast when the base cannot be resolved (issue #601): an empty diff would
 # make every change-scoped gate skip and the run end "Safe to push".
