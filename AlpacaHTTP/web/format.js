@@ -371,7 +371,48 @@ function renderReleaseNotes(markdown) {
 
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
+// open-astro#392: the Host check rows of the server settings area.
+// The names default.yaml says are always allowed (the text after "Always
+// allowed: ", no final dot); a test pins this to that file.
+const HOST_CHECK_ALWAYS_ALLOWED =
+    "IP addresses, localhost and *.localhost, this machine's hostname, *.local, *.home.arpa and *.internal";
+
+// What the two Host check rows render from the description Value. null when
+// the server does not report the setting (an older build), so no row shows a
+// toggle that reads as "off". A field is read-only only for a literal true.
+function hostCheckSettings(desc) {
+    if (!desc || typeof desc.HostCheckEnabled !== 'boolean') {
+        return null;
+    }
+    return {
+        enabled: desc.HostCheckEnabled,
+        hosts: typeof desc.AllowedHosts === 'string' ? desc.AllowedHosts : '',
+        enabledFixed: desc.HostCheckEnabledFixedByEnvironment === true,
+        hostsFixed: desc.AllowedHostsFixedByEnvironment === true,
+    };
+}
+
+// The message to show for a settings PUT, or '' when it saved. The server
+// refuses a lockout with HTTP 400 and the reason in ErrorMessage, so the body
+// is read before the status decides anything.
+function settingsSaveError(status, data) {
+    const ok = status >= 200 && status < 300;
+    const isEnvelope = data !== null && typeof data === 'object' && typeof data.ErrorNumber === 'number';
+    if (ok && isEnvelope && data.ErrorNumber === 0) {
+        return '';
+    }
+    const message = isEnvelope && typeof data.ErrorMessage === 'string' ? data.ErrorMessage.trim() : '';
+    if (message) {
+        return message;
+    }
+    if (!ok) {
+        return `HTTP error! status: ${status}`;
+    }
+    return isEnvelope ? `Server error ${data.ErrorNumber}` : 'Unknown server error';
+}
+
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
-                       updateStatusText, installerStateText, renderReleaseNotes };
+                       updateStatusText, installerStateText, renderReleaseNotes,
+                       HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError };
 }
