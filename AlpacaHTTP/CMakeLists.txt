@@ -432,6 +432,11 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_wifi_manager alpacahttp)
     add_test(NAME test_wifi_manager COMMAND test_wifi_manager)
 
+    # Issue #764: the JSON sink must not throw on non-UTF-8 bytes (Wi-Fi SSIDs).
+    add_executable(test_response_utf8 tests/test_response_utf8.cpp)
+    target_link_libraries(test_response_utf8 alpacahttp)
+    add_test(NAME test_response_utf8 COMMAND test_response_utf8)
+
     # Software update: dpkg version ordering, Packages index parsing and the
     # manager's policy over a scripted backend (docs/software-update.md).
     add_executable(test_software_update tests/test_software_update.cpp)
