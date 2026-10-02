@@ -46,11 +46,19 @@ std::string trim_copy(std::string_view input) {
 }
 
 std::string strip_inline_comment(const std::string& line) {
-    auto pos = line.find('#');
-    if (pos == std::string::npos) {
-        return line;
+    // A '#' inside a double-quoted value is data, not a comment.
+    bool quoted = false;
+    for (std::size_t i = 0; i < line.size(); ++i) {
+        const char c = line[i];
+        if (quoted && c == '\\') {
+            ++i;
+        } else if (c == '"') {
+            quoted = !quoted;
+        } else if (c == '#' && !quoted) {
+            return line.substr(0, i);
+        }
     }
-    return line.substr(0, pos);
+    return line;
 }
 
 std::string unquote_string(const std::string& value) {
@@ -418,8 +426,10 @@ void Config::apply_environment_overrides() {
         bool enabled = host_check_enabled_;
         if (parse_bool_value(v, enabled)) {
             host_check_enabled_ = enabled;
-            host_check_env_fixed_ = true;
         }
+        // A present variable owns the field even when its value is not a
+        // boolean; the file's value then stands.
+        host_check_env_fixed_ = true;
     }
 
     const char* packages_url_env = std::getenv("ALPACAHTTP_UPDATE_PACKAGES_URL");

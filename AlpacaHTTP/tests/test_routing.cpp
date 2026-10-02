@@ -6831,7 +6831,7 @@ int main() {
         };
         const auto lockout_message = [](const std::string& host) {
             return "Host '" + host +
-                   "' would be refused by these settings; add it to AllowedHosts or use the IP address";
+                   "' would be refused by these settings; add it to the allowed host names or use the IP address";
         };
         const auto settings = [&description](alpacahttp::Router& router, const std::optional<std::string>& host) {
             const auto response = route_with_host(router, "GET", description, host);
@@ -7004,6 +7004,50 @@ int main() {
             EXPECT(error_number(response) == 0x401);
             EXPECT(settings(router, "localhost").value("HostCheckEnabled", true) == false);
             EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+        }
+
+        // An entry that cannot match a Host header is refused, not dropped:
+        // 400, the file and GET unchanged.
+        {
+            const std::string before_file = file_text();
+            const std::string before_hosts = settings(router, "localhost")["AllowedHosts"].get<std::string>();
+            const std::vector<std::string> bad_lists = {
+                "a#b, .lan", "*.lan", "http://x.lan", "a b", std::string("a\x01.lan"), "a..lan", "[::zz]", "x.lan:abc"};
+            for (const auto& list : bad_lists) {
+                nlohmann::json body;
+                body["AllowedHosts"] = list;
+                const auto response = route_with_host(router, "PUT", description, "localhost", body.dump());
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(response.status_code() == 400);
+                EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x401);
+                EXPECT(file_text() == before_file);
+                EXPECT(settings(router, "localhost")["AllowedHosts"].get<std::string>() == before_hosts);
+            }
+            std::string many;
+            for (int i = 0; i < 65; ++i) {
+                many += "h" + std::to_string(i) + ".lan,";
+            }
+            nlohmann::json too_many;
+            too_many["AllowedHosts"] = many;
+            EXPECT(route_with_host(router, "PUT", description, "localhost", too_many.dump()).status_code() == 400);
+            EXPECT(file_text() == before_file);
+        }
+
+        // A valid list, and a location holding '#', survive write and reload.
+        {
+            EXPECT(error_number(route_with_host(
+                       router, "PUT", description, "localhost",
+                       R"({"AllowedHosts": ".LAN, astropi.home:8080, [::1], my_host-1.", "Location": "Obs #2"})")) ==
+                   0);
+            alpacahttp::Config reloaded;
+            EXPECT(reloaded.load(config_path));
+            EXPECT(
+                (reloaded.allowed_hosts() == std::vector<std::string>{".lan", "astropi.home", "[::1]", "my_host-1"}));
+            EXPECT(settings(router, "localhost")["AllowedHosts"].get<std::string>() ==
+                   ".lan, astropi.home, [::1], my_host-1");
+            EXPECT(reloaded.location() == "Obs #2");
+            EXPECT(error_number(route_with_host(router, "PUT", description, "localhost", R"({"AllowedHosts": ""})")) ==
+                   0);
         }
 
         // A body with none of the settable properties names all of them.

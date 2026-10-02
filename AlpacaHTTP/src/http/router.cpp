@@ -294,12 +294,20 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         return std::string(value.substr(start, end - start));
     };
 
+    // A '#' inside a double-quoted value is data (location "Obs #2").
     auto strip_comment = [](const std::string& text) {
-        auto pos = text.find('#');
-        if (pos == std::string::npos) {
-            return text;
+        bool quoted = false;
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            const char c = text[i];
+            if (quoted && c == '\\') {
+                ++i;
+            } else if (c == '"') {
+                quoted = !quoted;
+            } else if (c == '#' && !quoted) {
+                return text.substr(0, i);
+            }
         }
-        return text.substr(0, pos);
+        return text;
     };
 
     // Index into `sections` of the section the current line sits in, or
@@ -1457,6 +1465,70 @@ std::vector<std::string> normalize_host_list(const std::vector<std::string>& hos
     return normalized;
 }
 
+// open-astro#392: whether a normalized allowed-hosts entry can match a Host
+// header: an optional leading '.' and dot-separated labels of [a-z0-9_-]
+// (1..63 each, 253 in all), or a bracketed IPv6 literal.
+bool valid_host_entry(const std::string& entry) {
+    if (entry.size() > 2 && entry.front() == '[' && entry.back() == ']') {
+        in6_addr addr{};
+        return inet_pton(AF_INET6, entry.substr(1, entry.size() - 2).c_str(), &addr) == 1;
+    }
+    std::string_view rest = entry;
+    if (!rest.empty() && rest.front() == '.') {
+        rest.remove_prefix(1);
+    }
+    if (rest.empty() || rest.size() > 253) {
+        return false;
+    }
+    std::size_t label = 0;
+    for (const char c : rest) {
+        if (c == '.') {
+            if (label == 0) {
+                return false;
+            }
+            label = 0;
+            continue;
+        }
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        if (!ok || ++label > 63) {
+            return false;
+        }
+    }
+    return label != 0;
+}
+
+constexpr std::size_t kMaxAllowedHostEntries = 64;
+
+// The description PUT refuses a bad entry instead of dropping it. Fills
+// `normalized` and returns "" when the list is acceptable, else the message
+// for the first problem. A port suffix must be digits (normalize_host would
+// otherwise read "http://x.lan" as the host "http").
+std::string allowed_hosts_problem(const std::vector<std::string>& raw, std::vector<std::string>& normalized) {
+    if (raw.size() > kMaxAllowedHostEntries) {
+        return "AllowedHosts holds more than 64 entries";
+    }
+    normalized.clear();
+    for (const auto& entry : raw) {
+        auto name = normalize_host(entry);
+        bool ok = name && valid_host_entry(*name);
+        if (ok) {
+            const auto port_at = entry.find(':', entry.front() == '[' ? entry.find(']') : 0);
+            if (port_at != std::string::npos) {
+                const auto port = std::string_view(entry).substr(port_at + 1);
+                ok = !port.empty() && port.size() <= 5 &&
+                     std::all_of(port.begin(), port.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+            }
+        }
+        if (!ok) {
+            std::string shown = entry.substr(0, 80);
+            std::replace_if(shown.begin(), shown.end(), [](unsigned char c) { return c < 0x20 || c > 0x7e; }, '?');
+            return "AllowedHosts entry '" + shown + "' is not a host name";
+        }
+        normalized.push_back(std::move(*name));
+    }
+    return {};
+}
+
 std::string join_host_list(const std::vector<std::string>& hosts) {
     std::string joined;
     for (const auto& host : hosts) {
@@ -2190,7 +2262,16 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     if (!body[key].is_string()) {
                         throw_invalid_value(std::string("Invalid value for ") + key);
                     }
-                    new_allowed_hosts = normalize_host_list(split_host_list(body[key].get<std::string>()));
+                    std::vector<std::string> normalized_hosts;
+                    const auto problem =
+                        allowed_hosts_problem(split_host_list(body[key].get<std::string>()), normalized_hosts);
+                    if (!problem.empty()) {
+                        response.set_body(
+                            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE, problem));
+                        response.set_status(400, "Bad Request");
+                        return response;
+                    }
+                    new_allowed_hosts = std::move(normalized_hosts);
                     break;
                 }
             }
@@ -2262,7 +2343,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                             shown.begin(), shown.end(), [](unsigned char c) { return c < 0x20 || c > 0x7e; }, '?');
                         return refuse_with_400(
                             "Host '" + shown +
-                            "' would be refused by these settings; add it to AllowedHosts or use the "
+                            "' would be refused by these settings; add it to the allowed host names or use the "
                             "IP address");
                     }
                 }

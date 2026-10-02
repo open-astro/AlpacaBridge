@@ -402,8 +402,8 @@ int main() {
     // The web UI may change the two Host check settings unless the
     // environment fixes them. Config says which: ALPACAHTTP_ALLOWED_HOSTS
     // fixes the list whenever it is set, even empty; ALPACAHTTP_HOST_CHECK
-    // fixes the flag only when it parses, since an unparseable value is
-    // ignored and the file's value stays in force.
+    // fixes the flag whenever it is set; an unparseable value leaves the
+    // file's value in force but still keeps the web UI from changing it.
     {
         ::unsetenv("ALPACAHTTP_HOST_CHECK");
         ::unsetenv("ALPACAHTTP_ALLOWED_HOSTS");
@@ -442,7 +442,7 @@ int main() {
         alpacahttp::Config flag_unparseable;
         EXPECT(flag_unparseable.load(path));
         EXPECT(flag_unparseable.host_check_enabled());
-        EXPECT(!flag_unparseable.host_check_env_fixed());
+        EXPECT(flag_unparseable.host_check_env_fixed());
         ::unsetenv("ALPACAHTTP_HOST_CHECK");
 
         ::setenv("ALPACAHTTP_ALLOWED_HOSTS", "", 1);
@@ -453,6 +453,27 @@ int main() {
         EXPECT(!list_fixed.host_check_env_fixed());
         ::unsetenv("ALPACAHTTP_ALLOWED_HOSTS");
 
+        ::unlink(path.c_str());
+    }
+
+    // open-astro#392: a '#' inside a double-quoted value is data; one outside
+    // starts a comment.
+    {
+        ::unsetenv("ALPACAHTTP_HOST_CHECK");
+        ::unsetenv("ALPACAHTTP_ALLOWED_HOSTS");
+        char path_template[] = "/tmp/alpacahttp_test_hash_quoted_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string path = path_template;
+        {
+            std::ofstream out(path);
+            out << "http:\n"
+                   "  allowed_hosts: \"a#b, .lan\" # trailing comment\n";
+        }
+        alpacahttp::Config quoted;
+        EXPECT(quoted.load(path));
+        EXPECT((quoted.allowed_hosts() == std::vector<std::string>{"a#b", ".lan"}));
         ::unlink(path.c_str());
     }
 

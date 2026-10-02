@@ -76,7 +76,7 @@ test('a field fixed by the environment is marked read-only, each on its own', ()
 });
 
 test('a refused save shows the server message, not the status code', () => {
-    const refusal = "Host 'astropi.lan' would be refused by these settings; add it to AllowedHosts or use the IP address";
+    const refusal = "Host 'astropi.lan' would be refused by these settings; add it to the allowed host names or use the IP address";
     assert.strictEqual(settingsSaveError(400, { ErrorNumber: 1025, ErrorMessage: refusal }), refusal);
     assert.strictEqual(
         settingsSaveError(400, { ErrorNumber: 1025, ErrorMessage: '  AllowedHosts is fixed  ' }),

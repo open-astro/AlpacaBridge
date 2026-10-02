@@ -369,8 +369,6 @@ function renderReleaseNotes(markdown) {
     return html.join('\n');
 }
 
-// Browsers ignore this; `node --test` uses it. Guarded rather than a real
-// module so index.html can keep loading the file with a plain <script> tag.
 // open-astro#392: the Host check rows of the server settings area.
 // The names default.yaml says are always allowed (the text after "Always
 // allowed: ", no final dot); a test pins this to that file.
@@ -411,6 +409,8 @@ function settingsSaveError(status, data) {
     return isEnvelope ? `Server error ${data.ErrorNumber}` : 'Unknown server error';
 }
 
+// Browsers ignore this; `node --test` uses it. Guarded rather than a real
+// module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,

@@ -1420,9 +1420,9 @@ async function loadServerInfo() {
                     <span class="info-label">Allowed host names</span>
                     <div class="server-location">
                         <input id="server-allowed-hosts-input" type="text" placeholder="e.g. .lan, astropi.home" ${hostCheck.hostsFixed ? 'disabled' : ''}>
-                        <span class="info-note">Comma-separated; a leading dot allows a domain and every name under it. Always allowed: ${escapeHtml(HOST_CHECK_ALWAYS_ALLOWED)}.</span>
-                        ${hostCheck.hostsFixed ? '<span class="info-note">Fixed by the ALPACAHTTP_ALLOWED_HOSTS environment variable.</span>' : ''}
                     </div>
+                    <span class="info-note">Comma-separated; a leading dot allows a domain and every name under it. Always allowed: ${escapeHtml(HOST_CHECK_ALWAYS_ALLOWED)}.</span>
+                    ${hostCheck.hostsFixed ? '<span class="info-note">Fixed by the ALPACAHTTP_ALLOWED_HOSTS environment variable.</span>' : ''}
                     ${hostCheck.hostsFixed ? '' : '<button id="server-allowed-hosts-save" class="btn btn-secondary btn-small" type="button">Save</button>'}
                 </div>` : ''}
                 <div class="server-info-row">
