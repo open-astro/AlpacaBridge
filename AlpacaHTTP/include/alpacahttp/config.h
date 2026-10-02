@@ -81,6 +81,8 @@ public:
     // dropped; the router normalizes case, port and trailing dot. Read from
     // the file and the environment only: nothing writes it at runtime.
     const std::vector<std::string>& allowed_hosts() const { return allowed_hosts_; }
+    // http.host_check_enabled: apply the Host allowlist. Off unless set.
+    bool host_check_enabled() const { return host_check_enabled_; }
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
     int log_retention_days() const { return log_retention_days_; }
@@ -172,6 +174,7 @@ private:
     std::string update_release_notes_url_ = util::kDefaultReleaseNotesUrl;
     std::string update_release_url_ = util::kDefaultReleaseUrl;
     std::vector<std::string> allowed_hosts_;
+    bool host_check_enabled_ = false;
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever

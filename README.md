@@ -83,7 +83,7 @@ sudo apt update
 sudo apt install alpacabridge
 ```
 
-The service starts automatically and runs as the `alpacabridge` system user. Then open **http://localhost:6800/** (or your server's IP address, hostname or `<hostname>.local` from any machine on the network) and set up your devices. A name your router's DNS adds, such as `astropi.lan` or `astropi.fritz.box`, gets HTTP 403 until you add it to `http.allowed_hosts`; see [docs/troubleshooting.md](docs/troubleshooting.md#the-web-ui-or-api-answers-http-403-host--is-not-allowed).
+The service starts automatically and runs as the `alpacabridge` system user. Then open **http://localhost:6800/** (or your server's IP address, hostname or `<hostname>.local` from any machine on the network) and set up your devices. A name your router's DNS adds, such as `astropi.lan` or `astropi.fritz.box`, works too: the Host-name check (`http.host_check_enabled`) is off by default, and with it on such a name gets HTTP 403 until you add it to `http.allowed_hosts`; see [docs/troubleshooting.md](docs/troubleshooting.md#the-web-ui-or-api-answers-http-403-host--is-not-allowed).
 
 <details>
 <summary>Updating and uninstalling</summary>

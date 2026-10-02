@@ -209,6 +209,11 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 }
             } else if (key == "allowed_hosts") {
                 allowed_hosts_ = split_host_list(value);
+            } else if (key == "host_check_enabled") {
+                bool enabled = host_check_enabled_;
+                if (parse_bool_value(value, enabled)) {
+                    host_check_enabled_ = enabled;
+                }
             }
         } else if (current_section == "discovery") {
             if (key == "enabled") {
@@ -410,6 +415,12 @@ void Config::apply_environment_overrides() {
     // open-astro#392: replaces the file's list; an empty variable clears it.
     if (const char* v = std::getenv("ALPACAHTTP_ALLOWED_HOSTS")) {
         allowed_hosts_ = split_host_list(v);
+    }
+    if (const char* v = std::getenv("ALPACAHTTP_HOST_CHECK")) {
+        bool enabled = host_check_enabled_;
+        if (parse_bool_value(v, enabled)) {
+            host_check_enabled_ = enabled;
+        }
     }
 
     const char* packages_url_env = std::getenv("ALPACAHTTP_UPDATE_PACKAGES_URL");

@@ -6669,9 +6669,11 @@ int main() {
     // the browser sends the attacker's name as Host (and as Origin), so the
     // Origin==Host guard passes; route() now refuses any Host that is not an
     // IP literal, a reserved local name, the machine's own name or a
-    // configured one, for every method and path.
+    // configured one, for every method and path. The check is opt-in
+    // (http.host_check_enabled), so this block turns it on.
     {
         alpacahttp::Router router;
+        router.set_host_check_enabled(true);
         const std::string apiversions = "/management/apiversions";
 
         char hostname_buffer[256] = {};
@@ -6748,6 +6750,34 @@ int main() {
         // Replacing the list drops the old entries.
         router.set_allowed_hosts({});
         EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "pi.lan"), "pi.lan"));
+    }
+
+    // The Host check is off by default: a router or reverse-proxy name such as
+    // astropi.lan is served, the API and the static UI alike. Turning it on
+    // on the live Router changes the next request, turning it off restores it.
+    // The Origin==Host guard does not depend on the flag.
+    {
+        alpacahttp::Router router;
+        const std::string apiversions = "/management/apiversions";
+        EXPECT(route_with_host(router, "GET", "/management/v1/description", "astropi.lan").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", "/", "astropi.lan").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+
+        router.set_host_check_enabled(true);
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "astropi.lan"), "astropi.lan"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", "/", "astropi.lan"), "astropi.lan"));
+
+        router.set_host_check_enabled(false);
+        EXPECT(route_with_host(router, "GET", apiversions, "astropi.lan").status_code() == 200);
+
+        // Origin differs from Host: refused with the check off.
+        std::ostringstream raw;
+        raw << "DELETE /management/v1/synctime HTTP/1.1\r\n"
+            << "Host: astropi.lan\r\n"
+            << "Origin: http://evil.example\r\n\r\n";
+        alpacahttp::Request request;
+        EXPECT(request.parse(raw.str()));
+        EXPECT(router.route(request, 1).status_code() == 403);
     }
 
 #ifdef ALPACACORE_ENABLE_WEEWX

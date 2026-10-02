@@ -1674,8 +1674,9 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
             return response;
         }
 
-        // open-astro#392: before static files, setup pages and routing.
-        {
+        // open-astro#392: before static files, setup pages and routing. Only
+        // when http.host_check_enabled is on.
+        if (host_check_enabled_.load(std::memory_order_acquire)) {
             std::shared_ptr<const std::vector<std::string>> allowed_hosts;
             {
                 std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
