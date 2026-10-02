@@ -143,15 +143,20 @@ public:
         }
     }
 
-    /// Closes every live connection from the mount's side and waits until
-    /// each handler has closed its fd, so the driver's next writes go to a
-    /// closed peer: the first may still succeed (it is what draws the RST),
-    /// the ones after it fail. The listener stays up. Returns false if a
-    /// handler has not closed within `timeout`.
+    /// Closes every live connection from the mount's side with a RST and
+    /// waits until each handler has closed its fd, so the driver's next write
+    /// already fails. A plain close sends a FIN, and the first write after it
+    /// still succeeds (it is what draws the RST), so a test that needs the
+    /// write to fail depended on the RST winning a race with the driver's next
+    /// send. A zero-linger close sends the RST itself, before this returns.
+    /// The listener stays up. Returns false if a handler has not closed within
+    /// `timeout`.
     bool drop_connections(std::chrono::milliseconds timeout = std::chrono::milliseconds(2000)) {
         {
             std::lock_guard<std::mutex> lock(conn_mutex_);
             for (const int fd : conn_fds_) {
+                const struct linger abortive = {1, 0};
+                static_cast<void>(::setsockopt(fd, SOL_SOCKET, SO_LINGER, &abortive, sizeof(abortive)));
                 ::shutdown(fd, SHUT_RDWR);
             }
         }

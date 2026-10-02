@@ -477,8 +477,7 @@ TEST_CASE("OnStep Telescope Driver - non-finite slew and sync coordinates are re
 // #742: MoveAxis(axis, 0) swallowed both direction stops and cleared the
 // manual-slew flag, so a stop lost on a dead link read as Slewing false while
 // the mount kept moving. The stops are blind sends, which a responder cannot
-// fail, so the fake closes the connection instead: the first stop after that
-// still leaves the socket (it draws the RST), the second one fails.
+// fail, so the fake resets the connection instead: every stop after that fails.
 TEST_CASE("OnStep Telescope Driver - MoveAxis at rate 0 reports a stop it could not send",
           "[onstep][telescope][unit]") {
     alpacacore::test::FakeMountServer server([](const std::string& chunk) {

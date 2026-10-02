@@ -390,8 +390,8 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
 // #742: the three stops Unpark sends to cancel a park in flight (cancel GOTO,
 // then both axes to rate 0) sat in one empty catch, and Unpark then set
 // Slewing false and returned success. The SynScan stops are blind sends, so a
-// silent handset cannot fail them; the fake drops the link instead (the first
-// stop still leaves the socket and draws the RST, the ones after it fail).
+// silent handset cannot fail them; the fake resets the link instead (every stop
+// after that fails).
 // Unpark must throw once the park task is joined, and Slewing must not read
 // false: the park slew may still be running.
 TEST_CASE("SynScan async - Unpark reports stops it could not send", "[synscan][telescope][async]") {
