@@ -8,6 +8,7 @@
 #
 #   ./scripts/ci_preflight.sh                 # base = main
 #   PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh   # fork contributors
+#     (a <remote>/<branch> base is fetched first; a failed fetch or a local-branch base warns)
 #     (a base that does not resolve, or shares no history with HEAD, is a hard failure)
 #   RUN_SANITIZERS=0 ./scripts/ci_preflight.sh # SKIP the ASan+UBSan job (on by default)
 #   RUN_TSAN=1 ./scripts/ci_preflight.sh       # also run the TSan concurrency stress job
@@ -181,7 +182,20 @@ ensure_zizmor() {
 
 # --- changed-file sets -----------------------------------------------------
 
-git fetch --no-tags origin "${BASE#origin/}" >/dev/null 2>&1 || true
+# Refresh the base from the remote it names (issue #708). BASE is <remote>/<branch>
+# when its prefix is a configured remote; a failed fetch is a warning, not fatal,
+# so an offline run still diffs against the cached ref. A plain local branch
+# (the default `main`) is never fetched.
+base_remote="${BASE%%/*}"
+if [[ "${BASE}" == */* ]] && git remote | grep -Fxq "${base_remote}"; then
+  if ! fetch_err="$(git fetch --no-tags "${base_remote}" "${BASE#*/}" 2>&1 >/dev/null)"; then
+    if cached_date="$(git log -1 --format=%cI "${BASE}" 2>/dev/null)" && [[ -n "${cached_date}" ]]; then
+      echo "WARNING: could not refresh '${BASE}' (${fetch_err//$'\n'/ }); using cached ref from ${cached_date}" >&2
+    fi
+  fi
+else
+  echo "WARNING: '${BASE}' is a local branch, not refreshed; run git fetch or set PREFLIGHT_BASE=<remote>/<branch>" >&2
+fi
 # Fail fast when the base cannot be resolved (issue #601): an empty diff would
 # make every change-scoped gate skip and the run end "Safe to push".
 if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
