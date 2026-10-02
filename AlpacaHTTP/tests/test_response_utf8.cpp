@@ -35,12 +35,18 @@ int main() {
     // Control: valid UTF-8 SSIDs serialise.
     {
         AlpacaResponse ok(1, 2);
-        ok.value = nlohmann::json::array({net("HomeWiFi", 80), net("Cafe", 50)});
+        ok.value = nlohmann::json::array({net("HomeWiFi", 80), net("Caf\xC3\xA9", 50)});
         Response r;
         bool threw = false;
-        try { r.set_body(ok); } catch (const std::exception&) { threw = true; }
+        try {
+            r.set_body(ok);
+        } catch (const std::exception&) {
+            threw = true;
+        }
         EXPECT(!threw);
         EXPECT(r.body().find("HomeWiFi") != std::string::npos);
+        // Valid multi-byte UTF-8 passes through byte for byte (not \u-escaped).
+        EXPECT(r.body().find("Caf\xC3\xA9") != std::string::npos);
         std::cout << "control OK, body bytes=" << r.body().size() << "\n";
     }
 
@@ -62,11 +68,30 @@ int main() {
 
         bool parsed_ok = true;
         nlohmann::json parsed;
-        try { parsed = nlohmann::json::parse(r.body()); } catch (const std::exception&) { parsed_ok = false; }
+        try {
+            parsed = nlohmann::json::parse(r.body());
+        } catch (const std::exception&) {
+            parsed_ok = false;
+        }
         EXPECT(parsed_ok);
         EXPECT(parsed["Value"].size() == 2);
         EXPECT(parsed["Value"][0]["Ssid"] == "HomeWiFi");
         EXPECT(parsed["Value"][1]["Ssid"].get<std::string>() == "\xEF\xBF\xBD");
+    }
+
+    // Mixed: valid bytes around an invalid one survive; only the bad byte is replaced.
+    {
+        AlpacaResponse mixed(1, 2);
+        mixed.value = nlohmann::json::array({net("Caf\xE9 Bar", 70)});
+        Response r;
+        bool threw = false;
+        try {
+            r.set_body(mixed);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        EXPECT(!threw);
+        EXPECT(r.body().find("Caf\xEF\xBF\xBD Bar") != std::string::npos);
     }
 
     std::cout << "PASS\n";
