@@ -33,6 +33,38 @@
 
 namespace alpacahttp::util {
 
+std::string ssid_to_hex(std::string_view ssid) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(ssid.size() * 2);
+    for (unsigned char byte : ssid) {
+        out.push_back(digits[byte >> 4]);
+        out.push_back(digits[byte & 0x0f]);
+    }
+    return out;
+}
+
+std::string ssid_from_hex(std::string_view hex) {
+    if (hex.empty() || hex.size() > 64 || hex.size() % 2 != 0) {
+        throw WifiError("SsidHex must encode 1-32 bytes as even-length hexadecimal");
+    }
+    const auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string out;
+    out.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i < hex.size(); i += 2) {
+        const int hi = nibble(hex[i]);
+        const int lo = nibble(hex[i + 1]);
+        if (hi < 0 || lo < 0) throw WifiError("SsidHex must contain only hexadecimal characters");
+        out.push_back(static_cast<char>((hi << 4) | lo));
+    }
+    return out;
+}
+
 namespace {
 
 constexpr const char* kNmService = "org.freedesktop.NetworkManager";
@@ -851,6 +883,15 @@ std::string security_label(std::uint32_t wpa_flags, std::uint32_t rsn_flags) {
     return "Open";
 }
 
+std::string safe_ssid_id(const std::string& ssid) {
+    try {
+        (void)nlohmann::json(ssid).dump(-1, ' ', false, nlohmann::json::error_handler_t::strict);
+        if (ssid.find('\0') == std::string::npos) return ssid;
+    } catch (const nlohmann::json::exception&) {
+    }
+    return "Wi-Fi " + ssid_to_hex(ssid);
+}
+
 }  // namespace
 
 // ---- WifiManager ------------------------------------------------------------
@@ -940,6 +981,7 @@ nlohmann::json WifiManager::status() {
     auto ap = bus_->prop_path(dev.c_str(), kNmWirelessIface, "ActiveAccessPoint");
     if (!ap.empty() && ap != "/") {
         out["Ssid"] = bus_->prop_bytes(ap.c_str(), kNmApIface, "Ssid");
+        out["SsidHex"] = ssid_to_hex(out["Ssid"].get<std::string>());
         out["FrequencyMhz"] = static_cast<std::uint32_t>(bus_->prop_trivial(ap.c_str(), kNmApIface, "Frequency", 'u'));
         out["SignalPercent"] = static_cast<std::uint32_t>(bus_->prop_trivial(ap.c_str(), kNmApIface, "Strength", 'y'));
     }
@@ -1023,6 +1065,7 @@ nlohmann::json WifiManager::scan() {
         auto it = best.find(ssid);
         if (it == best.end() || it->second["SignalPercent"].get<std::uint32_t>() < strength) {
             best[ssid] = {{"Ssid", ssid},
+                          {"SsidHex", ssid_to_hex(ssid)},
                           {"FrequencyMhz", freq},
                           {"SignalPercent", strength},
                           {"Security", security_label(wpa, rsn)}};
@@ -1058,6 +1101,7 @@ nlohmann::json WifiManager::profiles() {
         list.push_back({{"Id", conn.value("id", "")},
                         {"Uuid", uuid},
                         {"Ssid", ssid},
+                        {"SsidHex", ssid_to_hex(ssid)},
                         {"Mode", mode},
                         {"Autoconnect", conn.value("autoconnect", true)},
                         {"Priority", conn.value("autoconnect-priority", 0)},
@@ -1087,7 +1131,9 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::str
         }
     }
 
-    Section conn{{"id", SVal::str(ssid)},
+    const std::string connection_id =
+        existing_path.empty() ? safe_ssid_id(ssid) : existing["connection"].value("id", safe_ssid_id(ssid));
+    Section conn{{"id", SVal::str(connection_id)},
                  {"type", SVal::str("802-11-wireless")},
                  {"autoconnect", SVal::boolean(autoconnect)},
                  {"autoconnect-priority", SVal::i32(priority)}};
@@ -1122,7 +1168,11 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::str
         bus_->update_connection(existing_path, spec, /*pin_shared_ip4=*/false);
     }
 
-    return {{"Id", ssid}, {"Ssid", ssid}, {"Autoconnect", autoconnect}, {"Priority", priority}};
+    return {{"Id", connection_id},
+            {"Ssid", ssid},
+            {"SsidHex", ssid_to_hex(ssid)},
+            {"Autoconnect", autoconnect},
+            {"Priority", priority}};
 }
 
 void WifiManager::delete_profile(const std::string& uuid) {
@@ -1179,6 +1229,7 @@ nlohmann::json WifiManager::get_ap() {
         std::string uuid = s["connection"].value("uuid", "");
         return {{"Configured", true},
                 {"Ssid", wifi.value("ssid", "")},
+                {"SsidHex", ssid_to_hex(wifi.value("ssid", ""))},
                 {"Band", wifi.value("band", "")},
                 {"Channel", wifi.value("channel", 0u)},
                 {"Autoconnect", s["connection"].value("autoconnect", true)},
@@ -1269,7 +1320,7 @@ nlohmann::json WifiManager::set_ap(const std::string& ssid, const std::string& p
         }
     }
 
-    return {{"Ssid", ssid}, {"Band", band}, {"Channel", channel}, {"Enabled", enabled}};
+    return {{"Ssid", ssid}, {"SsidHex", ssid_to_hex(ssid)}, {"Band", band}, {"Channel", channel}, {"Enabled", enabled}};
 }
 
 nlohmann::json WifiManager::get_country() {

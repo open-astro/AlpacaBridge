@@ -31,6 +31,7 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace alpacahttp::util {
 
@@ -38,6 +39,11 @@ class WifiError : public std::runtime_error {
 public:
     explicit WifiError(const std::string& what) : std::runtime_error(what) {}
 };
+
+// SSIDs are arbitrary octets; expose a JSON-safe hex form and validate its
+// decoded size at the API boundary.
+std::string ssid_to_hex(std::string_view ssid);
+std::string ssid_from_hex(std::string_view hex);
 
 class WifiManager {
 public:
@@ -65,7 +71,8 @@ public:
     //
     // {"Available":bool, "WirelessEnabled":bool, "Device":str,
     //  "ApDevice":str, "DeviceCount":u32,
-    //  "State":str, "ConnectionId":str, "Ssid":str, "Mode":"infrastructure"|"ap",
+    //  "State":str, "ConnectionId":str, "Ssid":display str, "SsidHex":exact bytes,
+    //  "Mode":"infrastructure"|"ap",
     //  "FrequencyMhz":u32, "SignalPercent":u8, "Ip4Address":str,
     //  "Capabilities":{"Freq2GHz":bool,"Freq5GHz":bool,"Ap":bool},
     //  "ScanSees5GHz":bool, "Country":str}
@@ -79,13 +86,15 @@ public:
     void set_wireless_enabled(bool enabled);
 
     // Triggers a scan (best-effort) and returns the visible access points:
-    // [{"Ssid":str,"FrequencyMhz":u32,"SignalPercent":u8,"Security":str}]
+    // [{"Ssid":display str,"SsidHex":exact bytes,"FrequencyMhz":u32,
+    //   "SignalPercent":u8,"Security":str}]
     // sorted by signal, hidden-SSID entries dropped, deduplicated by SSID
     // keeping the strongest BSS.
     nlohmann::json scan();
 
     // Saved wifi profiles (802-11-wireless connections):
-    // [{"Id":str,"Uuid":str,"Ssid":str,"Mode":"infrastructure"|"ap",
+    // [{"Id":str,"Uuid":str,"Ssid":display str,"SsidHex":exact bytes,
+    //   "Mode":"infrastructure"|"ap",
     //   "Autoconnect":bool,"Priority":int,"Active":bool}]
     // Passphrases are never returned.
     nlohmann::json profiles();
@@ -107,7 +116,8 @@ public:
     void connect_profile(const std::string& uuid);
 
     // AP (hotspot) configuration.
-    // get: {"Configured":bool,"Ssid":str,"Band":"bg"|"a","Channel":u32,
+    // get: {"Configured":bool,"Ssid":display str,"SsidHex":exact bytes,
+    //       "Band":"bg"|"a","Channel":u32,
     //       "Autoconnect":bool,"Active":bool,"Ip4Address":str}
     nlohmann::json get_ap();
     // set: creates or updates the AP profile (id kApProfileId). Empty
