@@ -191,8 +191,7 @@ TEST_CASE("iOptron iEAF Focuser Driver - move range is InvalidValue even while d
           "[ioptron][focuser][unit]") {
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
     require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { driver->move(99999 + 1); },
-                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move(99999 + 1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->move(1000); }, alpacacore::AlpacaError::NotConnected);
 }
 
@@ -201,8 +200,7 @@ TEST_CASE("iOptron iEAF Focuser Driver - move range over the fake", "[ioptron][f
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { driver->move(99999 + 1); },
-                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move(99999 + 1); }, alpacacore::AlpacaError::InvalidValue);
     CHECK(fake.count(":FM") == 0);
     driver->set_connected(false);
 }

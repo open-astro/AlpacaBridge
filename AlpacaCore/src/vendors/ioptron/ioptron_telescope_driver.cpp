@@ -931,7 +931,7 @@ public:
         }
         return (axis == 0 || axis == 1);
     }
-    
+
     void move_axis(int axis, double rate) override {
         if (axis != 0 && axis != 1) {
             throw AlpacaException("Axis must be 0 (Primary) or 1 (Secondary)",
@@ -1176,7 +1176,7 @@ public:
         // Alpaca TrackingRate uses DriveRates enum values (0-4).
         return static_cast<int>(cached_status_.tracking_rate);
     }
-    
+
     void set_tracking_rate(int rate) override {
         if (rate < 0 || rate > 4) {
             throw AlpacaException("Invalid tracking rate", AlpacaError::InvalidValue);
@@ -1195,7 +1195,7 @@ public:
         last_status_update_ = std::chrono::steady_clock::now();
         tracking_rate_override_until_ = last_status_update_ + std::chrono::seconds(2);
     }
-    
+
     std::vector<int> get_tracking_rates() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
