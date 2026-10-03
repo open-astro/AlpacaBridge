@@ -689,7 +689,7 @@ These three test cases catch the bugs that cause ConformU failures. They run wit
      require_alpaca_error([&]() { driver->set_site_elevation(10000.1); },
                           alpacacore::AlpacaError::InvalidValue);
      ```
-   - Note: some drivers check connection before validating values (e.g., iOptron site properties throw NotConnected first). Only test value validation for operations that work disconnected — check existing tests for the same device type.
+   - Note: some drivers check connection before validating values (check the driver; iOptron now validates static ranges first). Only test value validation for operations that work disconnected — check existing tests for the same device type.
 
 7. **State machine contracts** `"<Vendor> <Device> Driver - State machine"` `[<vendor>][<device>][unit]`
    - Verify that device state follows ASCOM rules without needing hardware.
