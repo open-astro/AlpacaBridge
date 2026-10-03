@@ -1,0 +1,2 @@
+### Fixed
+- **The layering gate matches vendor targets and sources inside CMake generator expressions** (tooling, issue #724). `scripts/check_layering.py` compared whole tokens, so `$<LINK_ONLY:alpacacore_zwo>`, `$<$<BOOL:ON>:src/vendors/zwo/x.cpp>` and `$<TARGET_OBJECTS:alpacacore_zwo>` in `alpacacore` slipped past rules L1 and L3. It now splits each token on generator-expression punctuation and matches the fragments, for `add_library` and `target_sources`.
