@@ -269,6 +269,69 @@ a userspace `hwclock --hctosys` under a non-systemd init, or a kernel without
 client that switches on `ClockSource` should treat any unknown value as
 "not NTP".
 
+### Host check (`HostCheckEnabled`, `AllowedHosts`)
+
+`GET /management/v1/description` also carries the two settings of the Host
+header check, a guard against DNS rebinding. Both are persisted under `http:` in
+the config file (`host_check_enabled`, `allowed_hosts`) and have no environment
+override.
+
+- `HostCheckEnabled` (boolean, default `false`): when `true`, every request
+  whose `Host` header is not allowed is refused with HTTP 403, an Alpaca error
+  body with `ErrorNumber` 1025 (`InvalidValue`) and the message `Host '<name>'
+  is not allowed; open the web UI by IP address and add it under Allowed host
+  names, or add it to http.allowed_hosts`. When `false`, any Host name is
+  served. A missing or empty `Host` header is always allowed.
+- `AllowedHosts` (string, default `""`): extra host names accepted while the
+  check is on, comma-separated, written as `a.lan, b.lan` (comma plus space) in
+  `GET` and in the config file. The `PUT` reader splits on commas and trims
+  each entry, so any spacing is accepted and empty entries are skipped. Entries
+  are lowercased and a trailing dot is removed. A leading dot allows the domain
+  and every name under it (`.lan` allows `lan` and `pi.lan`). Always allowed
+  without an entry: IP addresses, `localhost` and `*.localhost`, this machine's
+  host name and `<host name>.local`, `*.local`, `*.home.arpa` and `*.internal`.
+  The field only matters while `HostCheckEnabled` is `true`.
+
+`PUT`/`POST` accept either field alone or both, in the same body as the other
+description fields:
+
+| Field | Accepted names | Value |
+|---|---|---|
+| `HostCheckEnabled` | `HostCheckEnabled`, `hostCheckEnabled`, `host_check_enabled` | boolean, or the string `true`, `false`, `1` or `0` (case-insensitive) |
+| `AllowedHosts` | `AllowedHosts`, `allowedHosts`, `allowed_hosts` | one string, comma-separated; `""` clears the list |
+
+If a body holds several spellings of one field, the first in the order listed
+is used. Values are checked before anything is applied or saved. Errors:
+
+- A value of the wrong type (`AllowedHosts` not a string, `HostCheckEnabled` not
+  a boolean or string): HTTP 200, `ErrorNumber` 1025, `Invalid value for
+  <name>`. A string that is not one of the four accepted for
+  `HostCheckEnabled`: `ErrorNumber` 1025, `Invalid value for parameter:
+  <name>`.
+- More than 64 entries in `AllowedHosts`: HTTP 400, `ErrorNumber` 1025,
+  `AllowedHosts holds more than 64 entries`.
+- An entry that is not a host name: HTTP 400, `ErrorNumber` 1025,
+  `AllowedHosts entry '<entry>' is not a host name` (the entry is cut to 80
+  characters, non-printable characters shown as `?`). A host name is an
+  optional leading dot and dot-separated labels of `a-z`, `0-9`, `_` and `-`
+  (1 to 63 characters each, 253 in all), or a bracketed IPv6 literal. An
+  optional `:port` of 1 to 5 digits is accepted and dropped. A URL such as
+  `http://x.lan` is refused.
+- No self-lockout: a request that turns the check on, or edits the list while
+  it is on, is refused when its own `Host` header would not pass the resulting
+  settings: HTTP 400, `ErrorNumber` 1025, `Host '<name>' would be refused by
+  these settings; add it to the allowed host names or use the IP address`.
+  Nothing is changed. Use the server's IP address or add the name in the same
+  request.
+- A body with none of `Location`, `ProfileName`, `SyncSystemClockFromClients`,
+  `HostCheckEnabled` or `AllowedHosts`: `ErrorNumber` 1026 (`ValueNotSet`).
+- The config file cannot be written: `ErrorNumber` 1280 (`DriverException`),
+  `Failed to persist server settings: <reason>`; the running settings are not
+  changed.
+
+The `PUT` response is the new `description` payload. The change takes effect at
+once and is logged at INFO with the client address.
+
 ## Related: build info
 
 - `GET /management/v1/buildinfo` (3.6.0) — `Value` carries `Version` plus the

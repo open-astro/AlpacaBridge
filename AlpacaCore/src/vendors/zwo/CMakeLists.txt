@@ -78,7 +78,6 @@ if(ALPACACORE_ENABLE_ZWO)
         ${ZWO_EAF_INCLUDE}
         ${ZWO_EFW_INCLUDE}
         ${ZWO_CAA_INCLUDE}
-        ${ALPACACORE_ROOT}/external/ZWO/asiair-plus
     )
 
     # Base drivers, logging and AsyncConnectable live in alpacacore; this vendor

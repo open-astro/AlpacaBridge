@@ -294,17 +294,27 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         return std::string(value.substr(start, end - start));
     };
 
-    // A '#' inside a double-quoted value is data (location "Obs #2").
+    // A '#' inside a double-quoted value is data (location "Obs #2"). A double
+    // quote opens a quoted value only as the first non-space character after
+    // the key's colon; later in a plain value it is a literal.
     auto strip_comment = [](const std::string& text) {
         bool quoted = false;
+        bool seen_colon = false;
+        bool at_value_start = false;
         for (std::size_t i = 0; i < text.size(); ++i) {
             const char c = text[i];
             if (quoted && c == '\\') {
                 ++i;
-            } else if (c == '"') {
+            } else if (c == '"' && (quoted || at_value_start)) {
                 quoted = !quoted;
+                at_value_start = false;
             } else if (c == '#' && !quoted) {
                 return text.substr(0, i);
+            } else if (c == ':' && !seen_colon) {
+                seen_colon = true;
+                at_value_start = true;
+            } else if (!std::isspace(static_cast<unsigned char>(c))) {
+                at_value_start = false;
             }
         }
         return text;
@@ -362,8 +372,22 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
                 const auto& values = sections[current].second;
                 for (std::size_t i = 0; i < values.size() && !replaced; ++i) {
                     if (values[i].first == key) {
-                        output.push_back(std::string(indent, ' ') + key + ": \"" +
-                                         escape_yaml_string(values[i].second) + "\"");
+                        // Keep the old line's trailing comment, with the
+                        // whitespace that sat before the '#'.
+                        std::string replacement(indent, ' ');
+                        replacement += key;
+                        replacement += ": \"";
+                        replacement += escape_yaml_string(values[i].second);
+                        replacement += '"';
+                        if (stripped_comment.size() < current_line.size()) {
+                            std::size_t gap = stripped_comment.size();
+                            while (gap > 0 && std::isspace(static_cast<unsigned char>(stripped_comment[gap - 1]))) {
+                                --gap;
+                            }
+                            replacement.append(stripped_comment, gap, std::string::npos);
+                            replacement.append(current_line, stripped_comment.size(), std::string::npos);
+                        }
+                        output.push_back(std::move(replacement));
                         written[current][i] = true;
                         replaced = true;
                     }
