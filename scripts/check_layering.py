@@ -36,9 +36,10 @@ stripped:
     ALPACACORE_ENABLE_, and no directory-scoped `add_definitions` /
     `add_compile_definitions` in AlpacaCore/CMakeLists.txt does either (a
     directory-scoped one reaches `alpacacore` as well). The same holds for
-    AlpacaHTTP/CMakeLists.txt, but only for a call before its first
+    AlpacaHTTP/CMakeLists.txt, but only for a call before its last
     `add_subdirectory(... AlpacaCore ...)` (a later one does not reach
-    `alpacacore`); a file with no such add_subdirectory fails.
+    `alpacacore`; the last, so a commented-out copy above the real call
+    cannot hide anything); a file with no such add_subdirectory fails.
   - L3: no source listed in `add_library(alpacacore ...)` (AlpacaCore/CMakeLists.txt)
     or `target_sources(alpacacore ...)` (any scanned file), directly or through
     the `${VAR}` lists it expands (each resolved from a `set(VAR ...)` in the
@@ -212,12 +213,14 @@ def check_cmake_rules(root: pathlib.Path) -> tuple[list[str], list[str]]:
     vendor_targets = {f"alpacacore_{v}" for v in vendors}
 
     http_rel = "AlpacaHTTP/CMakeLists.txt"
-    http_cutoff = None  # line of the first add_subdirectory(... AlpacaCore ...) in http_rel
+    # Line of the LAST add_subdirectory(... AlpacaCore ...) in http_rel. Comments are not
+    # stripped, so a commented-out call above the real one must not move the cutoff up and
+    # hide the definitions between them; a stray later match only makes the check stricter.
+    http_cutoff = None
     if http_rel in texts:
         for cmd, toks in cmake_calls(texts[http_rel]):
             if cmd == "add_subdirectory" and any("AlpacaCore" in t for t, _ in toks):
                 http_cutoff = toks[0][1]
-                break
         if http_cutoff is None:
             failures.append(f"L2: {http_rel}: no add_subdirectory(... AlpacaCore ...) call -- rule is vacuous")
 
@@ -723,6 +726,16 @@ def self_test() -> int:
         rc, err = _run(r, base)
         case("L2: AlpacaHTTP add_compile_definitions before add_subdirectory(AlpacaCore) fails",
              rc == 1 and "L2: AlpacaHTTP/CMakeLists.txt:1:" in err)
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaHTTP/CMakeLists.txt",
+               "# add_subdirectory(../AlpacaCore AlpacaCore)\n"
+               "add_definitions(-DALPACACORE_ENABLE_ZWO)\n"
+               "add_subdirectory(../AlpacaCore AlpacaCore)\n")
+        rc, err = _run(r, base)
+        case("L2: a commented-out add_subdirectory(AlpacaCore) above the real one does not move the cutoff",
+             rc == 1 and "L2: AlpacaHTTP/CMakeLists.txt:2:" in err)
 
     t, r = cmake_fixture()
     with t:
