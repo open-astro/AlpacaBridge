@@ -188,7 +188,6 @@ public:
     void set_switch_value(int id, double value) override {
         validate_id(id);
         ensure_writable(id);
-        ensure_connected();
         // std::lround on NaN/Inf is undefined behaviour; reject non-finite
         // values from the HTTP API as InvalidValue first.
         if (!std::isfinite(value)) {
@@ -200,6 +199,7 @@ public:
             throw AlpacaException("Switch value out of range [0," + std::to_string(max_v) + "]",
                                   AlpacaError::InvalidValue);
         }
+        ensure_connected();
         wrapper_.set_value(static_cast<std::size_t>(id), static_cast<int>(rounded));
     }
 

@@ -47,8 +47,12 @@ stripped:
     the `${VAR}` lists it expands (each resolved from a `set(VAR ...)` in the
     same file as the call; one that cannot be resolved is a failure), is under
     src/vendors/ or is a vendor target (`$<TARGET_OBJECTS:alpacacore_<name>>`),
-    also inside a generator expression. A `${VAR}` nested inside a generator
-    expression is not expanded.
+    also inside a generator expression. A variable the gate cannot see through
+    fails closed: any source token that still holds `${` once the two directory
+    prefixes are removed (a `${VAR}` inside a generator expression) is an L3
+    failure (open-astro#799). The `target_link_libraries(alpacacore ...)` tokens
+    of L1 are resolved the same way, and one that cannot be resolved is an L1
+    failure.
   - each rule fails when it has nothing to check: a missing or unreadable
     AlpacaCore/CMakeLists.txt, no `add_library(alpacacore ...)` call, an empty
     source list (L3) or no vendor directory (L1).
@@ -193,21 +197,26 @@ def cmake_files(root: pathlib.Path) -> list[pathlib.Path]:
 
 
 def _resolve_sources(text: str, toks: list[tuple[str, int]], sets: dict[str, list[tuple[str, int]]],
-                     errors: list[str], rel: str, depth: int = 0) -> list[tuple[str, int]]:
+                     errors: list[str], rel: str, depth: int = 0,
+                     rule: str = "L3") -> list[tuple[str, int]]:
     out: list[tuple[str, int]] = []
     for tok, line in toks:
         v = VAR_RE.match(tok)
         if v is None:
+            if "${" in tok.replace("${CMAKE_CURRENT_SOURCE_DIR}/", "").replace("${CMAKE_SOURCE_DIR}/", ""):
+                errors.append(f"{rule}: {rel}:{line}: unresolved variable in {tok} "
+                              f"(a ${{VAR}} inside a generator expression is not expanded)")
+                continue
             out.append((tok, line))
             continue
         name = v.group("name")
         if depth > 8:
-            errors.append(f"L3: {rel}:{line}: ${{{name}}} nests too deep to resolve")
+            errors.append(f"{rule}: {rel}:{line}: ${{{name}}} nests too deep to resolve")
             continue
         if name not in sets:
-            errors.append(f"L3: {rel}:{line}: cannot resolve ${{{name}}} (no set({name} ...) in this file)")
+            errors.append(f"{rule}: {rel}:{line}: cannot resolve ${{{name}}} (no set({name} ...) in this file)")
             continue
-        out.extend(_resolve_sources(text, sets[name], sets, errors, rel, depth + 1))
+        out.extend(_resolve_sources(text, sets[name], sets, errors, rel, depth + 1, rule))
     return out
 
 
@@ -254,7 +263,7 @@ def check_cmake_rules(root: pathlib.Path) -> tuple[list[str], list[str]]:
                 sets[toks[0][0]] = toks[1:]
         for cmd, toks in calls:
             if cmd == "target_link_libraries" and _target_is(toks, "alpacacore"):
-                for tok, line in toks[1:]:
+                for tok, line in _resolve_sources(text, toks[1:], sets, failures, rel, rule="L1"):
                     if any(f in vendor_targets for f in _fragments(tok)):
                         l1 += 1
                         failures.append(f"L1: {rel}:{line}: target_link_libraries(alpacacore ...) links vendor library {tok}")
@@ -767,6 +776,35 @@ def self_test() -> int:
         with t:
             rc, err = _run(r, base)
             case("genex: " + name, rc == 0 and err == "")
+
+    # --- a ${VAR} the gate cannot see through fails closed (open-astro#799) --
+    var_fail = [
+        ("L3: ${VAR} nested in a generator expression fails and names the token", "L3",
+         "${VENDOR_SRCS}",
+         "set(VENDOR_SRCS src/vendors/zwo/zwo_schema.cpp)\n"
+         "target_sources(alpacacore PRIVATE $<$<BOOL:ON>:${VENDOR_SRCS}>)\n"),
+        ("L3: unresolvable ${X} in a generator expression fails", "L3", "${X}",
+         "target_sources(alpacacore PRIVATE $<$<BOOL:ON>:${X}>)\n"),
+        ("L1: ${VAR} naming a vendor library fails", "L1", "alpacacore_zwo",
+         "set(L alpacacore_zwo)\ntarget_link_libraries(alpacacore PRIVATE ${L})\n"),
+        ("L1: unresolvable ${L} fails", "L1", "${L}",
+         "target_link_libraries(alpacacore PRIVATE ${L})\n"),
+        ("L1: ${VAR} nested in a generator expression fails", "L1", "${L}",
+         "set(L alpacacore_zwo)\ntarget_link_libraries(alpacacore PRIVATE $<LINK_ONLY:${L}>)\n"),
+    ]
+    for name, rule, named, line in var_fail:
+        t, r = cmake_fixture(core=CLEAN_CORE_CMAKE + line)
+        with t:
+            rc, err = _run(r, base)
+            case("var: " + name,
+                 rc == 1 and any(l.startswith(f"{rule}: AlpacaCore/CMakeLists.txt:") and named in l
+                                 for l in err.splitlines()))
+
+    t, r = cmake_fixture(core=CLEAN_CORE_CMAKE + "set(L alpacacore_zwo_extra)\n"
+                         "target_link_libraries(alpacacore PRIVATE ${L})\n")
+    with t:
+        rc, err = _run(r, base)
+        case("var: L1 ${VAR} naming a non-vendor target passes", rc == 0 and err == "")
 
     t, r = cmake_fixture()
     with t:

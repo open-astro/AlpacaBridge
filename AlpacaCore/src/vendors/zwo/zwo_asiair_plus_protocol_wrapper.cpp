@@ -15,7 +15,6 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_protocol_wrapper.h>
 #include <fcntl.h>
-#include <pwm_gpio.h>  // vendored from external/ZWO/asiair-plus/
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -30,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+#include "pwm_gpio.h"  // first-party, AlpacaCore/src/vendors/zwo/
+
 namespace alpacacore::vendor::zwo {
 
 namespace {
@@ -37,7 +38,7 @@ namespace {
 constexpr const char* kLogCategory = "ZWO_ASIAIR_PLUS";
 
 // Kernel ioctl indices reserved by the airplus-gpios device tree node.
-// See external/ZWO/asiair-plus/pwm_gpio.h for the full mapping.
+// See AlpacaCore/src/vendors/zwo/pwm_gpio.h for the full mapping.
 constexpr int kKernelIndexMasterEnable = 3;
 constexpr int kKernelIndexDcPortBase   = 4;  // DC ports 1..4 at indices 4..7
 

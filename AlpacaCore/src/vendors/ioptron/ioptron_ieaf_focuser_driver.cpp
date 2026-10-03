@@ -244,10 +244,10 @@ public:
     }
 
     void move(int position) override {
-        ensure_connected();
         if (position < 0 || position > IEAF_MAX_STEP) {
             throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
         }
+        ensure_connected();
         protocol_.move_to(position);
         invalidate_status_cache();
     }

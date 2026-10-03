@@ -1,0 +1,2 @@
+### Fixed
+- **Saving a setting keeps the trailing comment on its config line** (config, no upstream issue yet). The settings writer replaced a matched `key: value  # help` line with `key: "value"`, so the first save from the web UI deleted the help text `default.yaml` ships on `host_check_enabled` and `allowed_hosts`. It now keeps the comment and the spaces before it; a `#` inside a quoted value is still data.
