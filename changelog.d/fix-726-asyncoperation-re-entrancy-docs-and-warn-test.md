@@ -1,0 +1,2 @@
+### Added (tests)
+- **`util::AsyncOperation` stale-throw WARN is covered, and its re-entrancy rule is documented** (component `util::AsyncOperation`). A new case pins the single `stale operation failed: <what>` WARN record, with the slot name, that a superseded body's throw produces, through a capturing log sink that restores the previous sink on exit. The rule 10 comment now says `start()` and `cancel_all_and_join()` must not be called from inside a body of the same slot, and what happens if they are.
