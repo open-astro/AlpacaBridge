@@ -104,6 +104,7 @@ TEST_CASE("iOptron Telescope Driver - Target Range Validation", "[ioptron][teles
     require_alpaca_error([&]() { driver->set_tracking_rate(5); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_tracking_rate(-1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->move_axis(2, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move_axis(0, 99.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->sync_to_coordinates(25.0, 0.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { (void)driver->get_destination_side_of_pier(25.0, 0.0); },
                          alpacacore::AlpacaError::InvalidValue);
