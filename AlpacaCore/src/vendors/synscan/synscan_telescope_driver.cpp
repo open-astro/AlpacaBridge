@@ -22,6 +22,7 @@
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -280,7 +281,9 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        std::unique_lock<std::mutex> ilock(initiator_mutex_, std::defer_lock);
         if (!connected) {
+            ilock.lock();
             // Cancel + join the background slew/pulse task threads BEFORE
             // taking mutex_: the task threads take mutex_, so joining under
             // the lock would deadlock, and leaving them running across the
@@ -349,7 +352,7 @@ public:
             parked_ = false;
             parking_ = false;
             at_home_ = false;
-            pulse_guiding_active_ = false;
+            clear_pulse_guiding_locked();
             slewing_cached_ = false;
             last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
@@ -435,7 +438,7 @@ public:
             parked_ = false;
             parking_ = false;
             at_home_ = false;
-            pulse_guiding_active_ = false;
+            clear_pulse_guiding_locked();
             slewing_cached_ = false;
             last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
@@ -559,10 +562,13 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (pulse_guiding_active_ && std::chrono::steady_clock::now() >= pulse_guide_end_time_) {
-            pulse_guiding_active_ = false;
+        const auto now = std::chrono::steady_clock::now();
+        for (std::size_t axis = 0; axis < pulse_guiding_active_.size(); ++axis) {
+            if (pulse_guiding_active_[axis] && now >= pulse_guide_end_time_[axis]) {
+                pulse_guiding_active_[axis] = false;
+            }
         }
-        return pulse_guiding_active_;
+        return pulse_guiding_active_[0] || pulse_guiding_active_[1];
     }
 
     bool get_can_set_declination_rate() const override {
@@ -996,6 +1002,7 @@ public:
         // Cancel + join any previous slew task first. Must run without mutex_
         // held: the task takes mutex_.
         reap_slew_task();
+        reap_pulse_tasks();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1020,6 +1027,7 @@ public:
             manual_axis_slewing_[1] = false;
             at_home_ = false;
             parking_ = true;
+            clear_pulse_guiding_locked();
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that calls Park after a failed GOTO must not be told the OLD
             // goto failed while it's parking.
@@ -1064,8 +1072,9 @@ public:
                 lock.unlock();
                 const bool keep_going = task_wait_for(std::chrono::milliseconds(250), slew_task_cancel_);
                 lock.lock();
-                // Cancelled (disconnect / destruction / superseding slew),
-                // aborted, or unparked meanwhile: the canceller owns the state.
+                // Cancelled (AbortSlew, disconnect / destruction, or a newer
+                // initiator), aborted, or unparked meanwhile: the canceller owns
+                // the state.
                 if (!keep_going || !connected_ || !parking_) {
                     parking_ = false;
                     return;
@@ -1161,42 +1170,46 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
+        if (duration < 0) {
+            throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
+        }
         int axis = -1;
-        int tracking_mode = 0;
+        double direction_sign = 0.0;
+        switch (direction) {
+            case 0:
+                axis = 1;
+                direction_sign = 1.0;
+                break;
+            case 1:
+                axis = 1;
+                direction_sign = -1.0;
+                break;
+            case 2:
+                axis = 0;
+                direction_sign = -1.0;
+                break;
+            case 3:
+                axis = 0;
+                direction_sign = 1.0;
+                break;
+            default:
+                throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
+        }
+
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("PulseGuide");
-
-            if (duration < 0) {
-                throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
-            }
-
+        }
+        reap_pulse_task(axis);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("PulseGuide");
             auto& protocol = SynScanProtocolWrapper::instance();
-
-            double slew_rate_deg_per_sec = 0.0;
-
-            switch (direction) {
-                case 0:
-                    axis = 1;
-                    slew_rate_deg_per_sec = guide_rate_.dec;
-                    break;
-                case 1:
-                    axis = 1;
-                    slew_rate_deg_per_sec = -guide_rate_.dec;
-                    break;
-                case 2:
-                    axis = 0;
-                    slew_rate_deg_per_sec = -guide_rate_.ra;
-                    break;
-                case 3:
-                    axis = 0;
-                    slew_rate_deg_per_sec = guide_rate_.ra;
-                    break;
-                default:
-                    throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-            }
-
+            const double guide_rate = axis == 1 ? guide_rate_.dec : guide_rate_.ra;
+            double slew_rate_deg_per_sec = direction_sign * guide_rate;
             if (axis == 1) {
                 char pier = protocol.get_pointing_state();
                 if (pier == 'W') {
@@ -1234,36 +1247,23 @@ public:
 
             protocol.move_axis_variable_rate(axis, slew_rate_deg_per_sec);
 
-            pulse_guiding_active_ = true;
-            pulse_guide_end_time_ = now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
+            pulse_guiding_active_[static_cast<std::size_t>(axis)] = true;
+            pulse_guide_end_time_[static_cast<std::size_t>(axis)] =
+                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
-
-            tracking_mode = tracking_mode_cached_;
         }
 
-        // Stop-the-pulse timer: a joinable member thread (never detached),
-        // cancelled + joined on disconnect and in the destructor. Spawned
-        // OUTSIDE mutex_ because its failure path takes mutex_.
-        reap_pulse_task();
-        // Join any task that raced in between the reap above and this lock,
-        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
-        // to observe the cancel and exit, so joining under the lock deadlocks.
-        std::unique_lock<std::mutex> tlock(task_mutex_);
-        while (pulse_task_thread_.joinable()) {
-            std::thread stale = std::move(pulse_task_thread_);
-            tlock.unlock();
-            pulse_task_cancel_.store(true);
-            task_cv_.notify_all();
-            stale.join();
-            pulse_task_cancel_.store(false);
-            tlock.lock();
-        }
-        pulse_task_thread_ = std::thread([this, axis, duration, tracking_mode]() {
-            if (!task_wait_for(std::chrono::milliseconds(duration), pulse_task_cancel_)) {
-                // Cancelled by disconnect/destruction. Still make a best-effort
-                // attempt to stop the axis before exiting — the mount would
-                // otherwise keep slewing.
+        // Each axis has its own timer; reaping above happened before the new
+        // rate command, so the old timer cannot stop this replacement pulse.
+        std::lock_guard<std::mutex> tlock(task_mutex_);
+        pulse_task_threads_[static_cast<std::size_t>(axis)] = std::thread([this, axis, duration]() {
+            const auto axis_index = static_cast<std::size_t>(axis);
+            auto& cancel = pulse_task_cancel_[axis_index];
+            if (!task_wait_for(std::chrono::milliseconds(duration), cancel)) {
+                // Cancelled by replacement, AbortSlew, disconnect or
+                // destruction. Still make a best-effort attempt to stop the
+                // axis before exiting — the mount would otherwise keep slewing.
                 try {
                     SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0);
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
@@ -1289,12 +1289,20 @@ public:
                 } catch (...) {
                     last_error = "unknown error";
                 }
-                if (!stopped && !task_wait_for(std::chrono::milliseconds(100), pulse_task_cancel_)) {
+                if (!stopped && !task_wait_for(std::chrono::milliseconds(100), cancel)) {
                     break;
                 }
             }
             if (stopped) {
-                if (axis == 0 && tracking_mode > 0) {
+                if (axis == 0) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (!connected_) {
+                        return;
+                    }
+                    const int tracking_mode = tracking_mode_cached_;
+                    if (tracking_mode <= 0) {
+                        return;
+                    }
                     try {
                         proto.set_tracking_mode(tracking_mode);
                     } catch (const std::exception& e) {
@@ -1308,7 +1316,7 @@ public:
                                                 " attempts on axis " + std::to_string(axis) +
                                                 " — axis may still be moving (mount runaway risk): " + last_error);
                 std::lock_guard<std::mutex> lock(mutex_);
-                pulse_guiding_active_ = false;
+                pulse_guiding_active_[axis_index] = false;
                 // Surface the error state: report the axis as slewing until an
                 // AbortSlew/MoveAxis(0) or disconnect clears it.
                 if (connected_) {
@@ -1328,10 +1336,20 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        std::unique_lock<std::mutex> ilock(initiator_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("SlewToCoordinates");
+            validate_ra_dec(ra, dec, "SlewToCoordinates");
+        }
+        reap_slew_task();
+        reap_pulse_tasks();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
+        ilock.unlock();
         wait_for_slew_complete(lock);
     }
 
@@ -1350,6 +1368,7 @@ public:
         // Cancel + join any previous slew dispatch task first. Must run
         // without mutex_ held: the task takes mutex_.
         reap_slew_task();
+        reap_pulse_tasks();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1378,6 +1397,7 @@ public:
             manual_axis_slewing_[1] = false;
             parked_ = false;
             at_home_ = false;
+            clear_pulse_guiding_locked();
         }
 
         // Dispatch in a joinable member thread (never detached), cancelled +
@@ -1408,11 +1428,9 @@ public:
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
                 // open-astro#575: a reap by a newer initiator is not a failure -- that
                 // initiator already owns clearing/replacing last_slew_error_.
-                // AbortSlew does not set the cancel flag, so a dispatch it did not
-                // reap can still send its GOTO and record a real failure after the
-                // abort cleared the error. Recording it here
-                // would poison the NEXT Slewing read with an artifact of the
-                // cancel, not a real fault.
+                // AbortSlew now reaps the worker as well, so recording an error
+                // after cancellation would poison the NEXT Slewing read with an
+                // artifact of the cancel, not a real fault.
                 if (!slew_task_cancel_.load()) {
                     last_slew_error_ = std::string("SlewToCoordinatesAsync failed: ") + ex.what();
                 }
@@ -1510,20 +1528,26 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("MoveAxis");
         if (axis != 0 && axis != 1) {
             throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
         }
-
-        if (std::isnan(rate) || std::isinf(rate)) {
+        if (!std::isfinite(rate)) {
             throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
         }
         if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("MoveAxis rate exceeds supported range",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("MoveAxis");
+        }
+        reap_slew_task();
+        reap_pulse_task(axis);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        check_not_parked_locked("MoveAxis");
 
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
@@ -1538,6 +1562,8 @@ public:
         last_slew_error_.clear();
 
         SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0);
+        pulse_guiding_active_[static_cast<std::size_t>(axis)] = false;
+        pulse_guide_end_time_[static_cast<std::size_t>(axis)] = std::chrono::steady_clock::time_point::min();
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1559,15 +1585,24 @@ public:
     }
 
     void abort_slew() override {
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
+        }
+        reap_slew_task();
+        reap_pulse_tasks();
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
+        check_not_fully_parked_locked("AbortSlew");
         auto& protocol = SynScanProtocolWrapper::instance();
         protocol.cancel_goto();
         protocol.move_axis_fixed_rate(0, 0);
         protocol.move_axis_fixed_rate(1, 0);
         parking_ = false;  // an aborted park never reaches AtPark
         slewing_cached_ = false;
+        clear_pulse_guiding_locked();
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next Slewing
         // read must answer normally again.
@@ -1632,20 +1667,26 @@ private:
     // (both task threads take mutex_).
     void cancel_async_tasks() {
         slew_task_cancel_.store(true);
-        pulse_task_cancel_.store(true);
+        for (auto& cancel : pulse_task_cancel_) {
+            cancel.store(true);
+        }
         task_cv_.notify_all();
         std::thread slew_thread;
-        std::thread pulse_thread;
+        std::array<std::thread, 2> pulse_threads;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
             slew_thread = std::move(slew_task_thread_);
-            pulse_thread = std::move(pulse_task_thread_);
+            for (std::size_t axis = 0; axis < pulse_task_threads_.size(); ++axis) {
+                pulse_threads[axis] = std::move(pulse_task_threads_[axis]);
+            }
         }
         if (slew_thread.joinable()) {
             slew_thread.join();
         }
-        if (pulse_thread.joinable()) {
-            pulse_thread.join();
+        for (auto& pulse_thread : pulse_threads) {
+            if (pulse_thread.joinable()) {
+                pulse_thread.join();
+            }
         }
     }
 
@@ -1665,20 +1706,31 @@ private:
         slew_task_cancel_.store(false);
     }
 
-    // Join the previous pulse-stop task (if any) and reset its cancel flag.
-    // Must be called WITHOUT mutex_ held (its failure path takes mutex_).
-    void reap_pulse_task() {
-        pulse_task_cancel_.store(true);
+    // Join the previous pulse-stop task for one axis and reset its cancel flag.
+    // Must be called WITHOUT mutex_ held (the task failure path takes mutex_).
+    void reap_pulse_task(int axis) {
+        const auto index = static_cast<std::size_t>(axis);
+        pulse_task_cancel_[index].store(true);
         task_cv_.notify_all();
         std::thread prev;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
-            prev = std::move(pulse_task_thread_);
+            prev = std::move(pulse_task_threads_[index]);
         }
         if (prev.joinable()) {
             prev.join();
         }
-        pulse_task_cancel_.store(false);
+        pulse_task_cancel_[index].store(false);
+    }
+
+    void reap_pulse_tasks() {
+        reap_pulse_task(0);
+        reap_pulse_task(1);
+    }
+
+    void clear_pulse_guiding_locked() {
+        pulse_guiding_active_.fill(false);
+        pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
     }
 
     // A park in flight (parking_) gates the same members as a completed park:
@@ -2023,8 +2075,8 @@ private:
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
     GuideRate guide_rate_{};
-    mutable bool pulse_guiding_active_ = false;
-    mutable std::chrono::steady_clock::time_point pulse_guide_end_time_;
+    mutable std::array<bool, 2> pulse_guiding_active_{};
+    mutable std::array<std::chrono::steady_clock::time_point, 2> pulse_guide_end_time_{};
 
     bool park_position_set_ = false;
     mutable bool parking_ = false;  // park task in flight (Slewing true, AtPark false)
@@ -2040,9 +2092,9 @@ private:
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;
     std::thread slew_task_thread_;
-    std::thread pulse_task_thread_;
+    std::array<std::thread, 2> pulse_task_threads_;
     mutable std::atomic<bool> slew_task_cancel_{false};
-    mutable std::atomic<bool> pulse_task_cancel_{false};
+    std::array<std::atomic<bool>, 2> pulse_task_cancel_{};
 };
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope(

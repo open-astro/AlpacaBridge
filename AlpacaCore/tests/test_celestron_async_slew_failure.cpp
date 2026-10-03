@@ -22,13 +22,16 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
@@ -42,6 +45,18 @@ struct FakeCelestronState {
     std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
+    std::mutex command_mutex;
+    std::vector<std::string> commands;
+    void record(const std::string& command) {
+        std::lock_guard<std::mutex> lock(command_mutex);
+        commands.push_back(command);
+    }
+    int command_count(char prefix) {
+        std::lock_guard<std::mutex> lock(command_mutex);
+        return static_cast<int>(std::count_if(commands.begin(), commands.end(), [prefix](const std::string& command) {
+            return !command.empty() && command[0] == prefix;
+        }));
+    }
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (goto_count.load() == 0) return false;
@@ -61,6 +76,9 @@ struct FakeCelestronState {
 alpacacore::test::FakeMountServer::Responder celestron_responder(const std::shared_ptr<FakeCelestronState>& st) {
     return [st](const std::string& chunk) -> std::string {
         if (chunk.empty()) return "0#";
+        if (chunk[0] == 'T' || chunk[0] == 'P') {
+            st->record(chunk);
+        }
         switch (chunk[0]) {
             case 'e':
             case 'E':
@@ -174,6 +192,68 @@ TEST_CASE("Celestron async - AbortSlew clears a stored slew failure (#575)",
 
     REQUIRE_NOTHROW(driver->abort_slew());
     CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron async - AbortSlew fences a pending GOTO", "[celestron][telescope][async][abort]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    for (int i = 0; i < 50; ++i) {
+        const int before = st->goto_count.load();
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE_NOTHROW(driver->abort_slew());
+        const int at_abort_return = st->goto_count.load();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        INFO("iteration " << i << ", GOTO count before=" << before << " at abort return=" << at_abort_return
+                          << " after=" << st->goto_count.load());
+        CHECK(st->goto_count.load() == at_abort_return);
+    }
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron async - MoveAxis owns motion after superseding an async slew",
+          "[celestron][telescope][async][ownership]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+
+    const int before = st->goto_count.load();
+    driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3000));
+    driver->move_axis(0, 0.5);
+    const int tracking_writes_after_move = st->command_count('T');
+    std::this_thread::sleep_for(std::chrono::milliseconds(1700));
+
+    CHECK(st->command_count('T') == tracking_writes_after_move);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
+          "[celestron][telescope][async][ownership]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+    const int tracking_writes_before = st->command_count('T');
+
+    const int before = st->goto_count.load();
+    driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3000));
+    driver->slew_to_coordinates(6.0, 22.0);
+    const int tracking_writes_after_sync = st->command_count('T');
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    CHECK(tracking_writes_after_sync == tracking_writes_before + 1);
+    CHECK(st->command_count('T') == tracking_writes_after_sync);
     driver->set_connected(false);
 }
 
