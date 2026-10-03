@@ -888,6 +888,7 @@ std::string safe_ssid_id(const std::string& ssid) {
         (void)nlohmann::json(ssid).dump(-1, ' ', false, nlohmann::json::error_handler_t::strict);
         if (ssid.find('\0') == std::string::npos) return ssid;
     } catch (const nlohmann::json::exception&) {
+        return "Wi-Fi " + ssid_to_hex(ssid);
     }
     return "Wi-Fi " + ssid_to_hex(ssid);
 }
