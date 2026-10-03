@@ -185,10 +185,16 @@ ensure_zizmor() {
 # Refresh the base from the remote it names (issue #708). BASE is <remote>/<branch>
 # when its prefix is a configured remote; a failed fetch is a warning, not fatal,
 # so an offline run still diffs against the cached ref. A plain local branch
-# (the default `main`) is never fetched.
+# (the default `main`) is never fetched. A base starting with '-' would reach git
+# as an option (`--output=FILE` makes git log overwrite FILE), and a branch part
+# holding ':' would be a refspec that writes a local ref, so both are refused.
+if [[ "${BASE}" == -* || "${BASE}" == */*:* ]]; then
+  echo "ERROR: PREFLIGHT_BASE='${BASE}' is not a branch name or <remote>/<branch>." >&2
+  exit 1
+fi
 base_remote="${BASE%%/*}"
-if [[ "${BASE}" == */* ]] && git remote | grep -Fxq "${base_remote}"; then
-  if ! fetch_err="$(git fetch --no-tags "${base_remote}" "${BASE#*/}" 2>&1 >/dev/null)"; then
+if [[ "${BASE}" == */* ]] && git remote | grep -Fxq -e "${base_remote}"; then
+  if ! fetch_err="$(git fetch --no-tags -- "${base_remote}" "${BASE#*/}" 2>&1 >/dev/null)"; then
     if cached_date="$(git log -1 --format=%cI "${BASE}" 2>/dev/null)" && [[ -n "${cached_date}" ]]; then
       echo "WARNING: could not refresh '${BASE}' (${fetch_err//$'\n'/ }); using cached ref from ${cached_date}" >&2
     fi
