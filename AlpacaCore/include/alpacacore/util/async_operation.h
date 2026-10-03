@@ -121,12 +121,14 @@ struct OperationContext::Body {
  *
  * Neither start() nor cancel_all_and_join() may be called from inside a body
  * of the same slot. cancel_all_and_join() from a body takes that body and
- * joins its own thread, which throws std::system_error. start() from a body
- * counts that body as still running: it replaces it when the stale bound has
- * room, but with kMaxStaleBodies replaced bodies already running it waits up
- * to kStaleReapTimeout for one to return and then throws
- * AlpacaException(InvalidOperation). Use cancel() or ctx.stop_reason() from a
- * body instead.
+ * joins its own thread: join() throws std::system_error, and the unwinding
+ * then destroys that body's still-joinable std::thread, so the process ends
+ * in std::terminate(). start() from a body counts that body as still
+ * running: it replaces it when the stale bound has room, but with
+ * kMaxStaleBodies replaced bodies already running it waits up to
+ * kStaleReapTimeout for one to return and throws
+ * AlpacaException(InvalidOperation) if none does. Use cancel() or
+ * ctx.stop_reason() from a body instead.
  *
  * Rule 11: neither copyable nor movable; it owns a mutex and threads that
  * capture `this`.
