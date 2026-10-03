@@ -1590,27 +1590,33 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
+            slew_task_cancel_.store(true);
+            task_cv_.notify_all();
+        }
+        reap_pulse_tasks();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_fully_parked_locked("AbortSlew");
+            // The wrapper serializes transactions, so a GOTO already in flight
+            // must finish (or time out) before these stops can reach the mount.
+            auto& protocol = SynScanProtocolWrapper::instance();
+            protocol.cancel_goto();
+            protocol.move_axis_fixed_rate(0, 0);
+            protocol.move_axis_fixed_rate(1, 0);
+            parking_ = false;  // an aborted park never reaches AtPark
+            slewing_cached_ = false;
+            clear_pulse_guiding_locked();
+            // open-astro#575: AbortSlew is a valid clearing command for a stored
+            // slew failure -- the client acted on the error, so the next Slewing
+            // read must answer normally again.
+            last_slew_error_.clear();
+            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            manual_axis_slewing_[0] = false;
+            manual_axis_slewing_[1] = false;
         }
         reap_slew_task();
-        reap_pulse_tasks();
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_fully_parked_locked("AbortSlew");
-        auto& protocol = SynScanProtocolWrapper::instance();
-        protocol.cancel_goto();
-        protocol.move_axis_fixed_rate(0, 0);
-        protocol.move_axis_fixed_rate(1, 0);
-        parking_ = false;  // an aborted park never reaches AtPark
-        slewing_cached_ = false;
-        clear_pulse_guiding_locked();
-        // open-astro#575: AbortSlew is a valid clearing command for a stored
-        // slew failure -- the client acted on the error, so the next Slewing
-        // read must answer normally again.
-        last_slew_error_.clear();
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
-        manual_axis_slewing_[0] = false;
-        manual_axis_slewing_[1] = false;
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {

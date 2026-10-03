@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -55,6 +56,14 @@ struct FakeCelestronState {
         std::lock_guard<std::mutex> lock(command_mutex);
         return static_cast<int>(std::count_if(commands.begin(), commands.end(), [prefix](const std::string& command) {
             return !command.empty() && command[0] == prefix;
+        }));
+    }
+    int guide_command_count(int axis) {
+        const auto device = static_cast<unsigned char>(axis == 0 ? 0x10 : 0x11);
+        std::lock_guard<std::mutex> lock(command_mutex);
+        return static_cast<int>(std::count_if(commands.begin(), commands.end(), [device](const std::string& command) {
+            return command.size() >= 8 && command[0] == 'P' && static_cast<unsigned char>(command[2]) == device &&
+                   static_cast<unsigned char>(command[3]) == 0x26;
         }));
     }
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
@@ -96,10 +105,22 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(const std::shar
                 return "#";
             case 'J':  // alignment complete (the slew-safety gate requires it)
                 return "1#";
+            case 'p':  // pier side used by the DEC guide command
+                return "W#";
             case 'T':
                 return "#";
             case 'P': {  // AUX passthrough: P len dev op ...
                 const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
+                const unsigned char device = chunk.size() > 2 ? static_cast<unsigned char>(chunk[2]) : 0;
+                if (op == 0xFE && device == 0x32) {  // DEC autoguider port firmware probe
+                    return std::string("\x01\x00#", 3);
+                }
+                if (op == 0xFE) {  // complete the binary firmware reply for absent bus devices
+                    return std::string("\x00\x00#", 3);
+                }
+                if (op == 0x26) {  // MC_AUX_GUIDE
+                    return "#";
+                }
                 if (op == 0x02 || op == 0x17) {  // MC_GOTO_FAST / MC_GOTO_SLOW
                     return st->goto_reply();
                 }
@@ -254,6 +275,47 @@ TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
 
     CHECK(tracking_writes_after_sync == tracking_writes_before + 1);
     CHECK(st->command_count('T') == tracking_writes_after_sync);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron PulseGuide - overlapping axes keep independent pulse chains",
+          "[celestron][telescope][pulseguiding][ownership]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+
+    const int ra_before = st->guide_command_count(0);
+    const int dec_before = st->guide_command_count(1);
+    const double ra_start = driver->get_right_ascension();
+    const double ra_delta = driver->get_guide_rate().ra * 8.0 / 15.0;
+    driver->pulse_guide(2, 8000);  // East: RA chain continues beyond the 2.55 s hardware limit.
+    driver->pulse_guide(0, 3500);  // North: must not cancel RA's remaining chunks.
+
+    REQUIRE(wait_until([&] { return st->guide_command_count(0) >= ra_before + 2; }, 4500));
+    REQUIRE(st->guide_command_count(1) >= dec_before + 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    CHECK(driver->get_is_pulse_guiding());  // DEC expired; the longer RA pulse is still active.
+    CHECK(std::abs(driver->get_right_ascension() - (ra_start + ra_delta)) < 1e-5);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron MoveAxis - a jog on one axis preserves the other axis pulse chain",
+          "[celestron][telescope][pulseguiding][ownership]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_can_pulse_guide());
+
+    const int ra_before = st->guide_command_count(0);
+    driver->pulse_guide(2, 6000);  // RA pulse is still chaining after its first hardware chunk.
+    driver->move_axis(1, 0.0);     // A Dec-axis stop must not cancel the RA pulse.
+
+    CHECK(wait_until([&] { return st->guide_command_count(0) >= ra_before + 2; }, 4500));
     driver->set_connected(false);
 }
 
