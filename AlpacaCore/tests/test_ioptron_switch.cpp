@@ -14,6 +14,7 @@
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/version.h>
 
+#include <cmath>
 #include <functional>
 
 #include "catch2_compat.h"
@@ -62,6 +63,17 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Device metadata", "[ioptron][s
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 3);
     CHECK(driver->get_unique_id() == "iOptron_iMate_PowerBox_3");
+}
+
+// Value validation precedes the connection check (ASCOM precedence).
+TEST_CASE("iOptron iMate PowerBox Switch Driver - value range is InvalidValue while disconnected",
+          "[ioptron][switch][unit]") {
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(
+        0, alpacacore::vendor::ioptron::default_imate_powerbox_config());
+    require_alpaca_error([&]() { driver->set_switch_value(2, 2.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, -1.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, std::nan("")); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_switch_value(2, 1.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 // 3. Not connected throws with correct error code

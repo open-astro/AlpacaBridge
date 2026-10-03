@@ -796,9 +796,9 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
+        validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_ra_dec(ra, dec, "DestinationSideOfPier");
 
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
@@ -882,16 +882,16 @@ public:
         ensure_site_info_cached_locked();
         return site_latitude_cached_;
     }
-    
+
     void set_site_latitude(double latitude) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
         if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException(
                 "Site latitude must be between -90 and 90 degrees",
                 AlpacaError::InvalidValue
             );
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_latitude(latitude);
         protocol.set_hemisphere(latitude >= 0.0);
@@ -900,7 +900,7 @@ public:
         site_info_valid_ = true;
         last_site_info_fetch_ = std::chrono::steady_clock::now();
     }
-    
+
     double get_site_longitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
@@ -908,16 +908,16 @@ public:
         ensure_site_info_cached_locked();
         return site_longitude_cached_;
     }
-    
+
     void set_site_longitude(double longitude) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
         if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException(
                 "Site longitude must be between -180 and 180 degrees",
                 AlpacaError::InvalidValue
             );
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_longitude(longitude);
         site_longitude_cached_ = longitude;
@@ -931,12 +931,8 @@ public:
         }
         return (axis == 0 || axis == 1);
     }
-    
-    void move_axis(int axis, double rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        ensure_not_parked_locked("MoveAxis");
 
+    void move_axis(int axis, double rate) override {
         if (axis != 0 && axis != 1) {
             throw AlpacaException("Axis must be 0 (Primary) or 1 (Secondary)",
                                   AlpacaError::InvalidValue);
@@ -946,6 +942,10 @@ public:
         if (!is_axis_rate_supported(abs_rate)) {
             throw AlpacaException("Axis rate out of range", AlpacaError::InvalidValue);
         }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        ensure_not_parked_locked("MoveAxis");
 
         const bool was_any_axis_active = axis_move_active_primary_ || axis_move_active_secondary_;
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -1136,9 +1136,9 @@ public:
     }
     
     void set_target_declination(double dec) override {
+        validate_dec(dec, "TargetDeclination");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_dec(dec, "TargetDeclination");
 
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -1155,9 +1155,9 @@ public:
     }
     
     void set_target_right_ascension(double ra) override {
+        validate_ra(ra, "TargetRightAscension");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_ra(ra, "TargetRightAscension");
 
         target_ra_hours_ = ra;
         target_ra_set_ = true;
@@ -1176,16 +1176,15 @@ public:
         // Alpaca TrackingRate uses DriveRates enum values (0-4).
         return static_cast<int>(cached_status_.tracking_rate);
     }
-    
-    void set_tracking_rate(int rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        
-        auto& protocol = iOptronProtocolWrapper::instance();
 
+    void set_tracking_rate(int rate) override {
         if (rate < 0 || rate > 4) {
             throw AlpacaException("Invalid tracking rate", AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+
+        auto& protocol = iOptronProtocolWrapper::instance();
 
         protocol.set_tracking_rate(rate);
         if (rate == 4) {
@@ -1196,7 +1195,7 @@ public:
         last_status_update_ = std::chrono::steady_clock::now();
         tracking_rate_override_until_ = last_status_update_ + std::chrono::seconds(2);
     }
-    
+
     std::vector<int> get_tracking_rates() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
@@ -1570,9 +1569,9 @@ public:
     }
     
     void sync_to_coordinates(double ra, double dec) override {
+        validate_ra_dec(ra, dec, "SyncToCoordinates");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_ra_dec(ra, dec, "SyncToCoordinates");
         ensure_not_parked_locked("SyncToCoordinates");
 
         target_ra_hours_ = ra;
@@ -1603,10 +1602,10 @@ public:
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
+        validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
-            validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
             if (!site_info_valid_) {
                 ensure_site_info_cached_locked();
                 // ensure_site_info_cached_locked() sets site_info_valid_ on success;
@@ -1680,10 +1679,10 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra_hours = 0.0;
         double dec_degrees = 0.0;
+        validate_alt_az(altitude, azimuth, "SlewToAltAz");
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
-            validate_alt_az(altitude, azimuth, "SlewToAltAz");
             ensure_site_info_cached_locked();
             if (!site_info_valid_) {
                 throw AlpacaException("Site information unavailable for Alt/Az slew",
