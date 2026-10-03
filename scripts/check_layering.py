@@ -31,7 +31,9 @@ stripped:
   - L1: no `target_link_libraries(alpacacore ...)` (target name exactly
     `alpacacore`; `alpacacore_tests` or any other prefix match is not it)
     names `alpacacore_<name>` where <name> is a directory under
-    AlpacaCore/src/vendors/.
+    AlpacaCore/src/vendors/, bare, as `AlpacaCore::alpacacore_<name>` or inside a
+    generator expression (`$<LINK_ONLY:...>`): tokens are matched by fragment,
+    split on `$ < > : , ;` and quotes.
   - L2: no `target_compile_definitions(alpacacore ...)` names a macro starting
     ALPACACORE_ENABLE_, and no directory-scoped `add_definitions` /
     `add_compile_definitions` in AlpacaCore/CMakeLists.txt does either (a
@@ -44,7 +46,9 @@ stripped:
     or `target_sources(alpacacore ...)` (any scanned file), directly or through
     the `${VAR}` lists it expands (each resolved from a `set(VAR ...)` in the
     same file as the call; one that cannot be resolved is a failure), is under
-    src/vendors/.
+    src/vendors/ or is a vendor target (`$<TARGET_OBJECTS:alpacacore_<name>>`),
+    also inside a generator expression. A `${VAR}` nested inside a generator
+    expression is not expanded.
   - each rule fails when it has nothing to check: a missing or unreadable
     AlpacaCore/CMakeLists.txt, no `add_library(alpacacore ...)` call, an empty
     source list (L3) or no vendor directory (L1).
@@ -145,6 +149,22 @@ def cmake_calls(text: str):
         yield m.group("cmd"), toks
 
 
+GENEX_SPLIT_RE = re.compile(r'[$<>:,;"]+')
+
+
+def _fragments(tok: str) -> list[str]:
+    """Split a token on generator-expression punctuation (and `::`, quotes) after
+    dropping the ${CMAKE_CURRENT_SOURCE_DIR}/ and ${CMAKE_SOURCE_DIR}/ prefixes, so a
+    name or path wrapped in `$<...>` is matched like a bare one (open-astro#724)."""
+    norm = tok.replace("${CMAKE_CURRENT_SOURCE_DIR}/", "").replace("${CMAKE_SOURCE_DIR}/", "")
+    return [f for f in GENEX_SPLIT_RE.split(norm) if f]
+
+
+def _is_vendor_source(tok: str, vendor_targets) -> bool:
+    return any(f.startswith("src/vendors/") or "/src/vendors/" in f or f in vendor_targets
+               for f in _fragments(tok))
+
+
 def _target_is(toks: list[tuple[str, int]], name: str) -> bool:
     return bool(toks) and toks[0][0] == name
 
@@ -235,8 +255,7 @@ def check_cmake_rules(root: pathlib.Path) -> tuple[list[str], list[str]]:
         for cmd, toks in calls:
             if cmd == "target_link_libraries" and _target_is(toks, "alpacacore"):
                 for tok, line in toks[1:]:
-                    name = tok.split("::", 1)[1] if tok.startswith("AlpacaCore::") else tok
-                    if name in vendor_targets:
+                    if any(f in vendor_targets for f in _fragments(tok)):
                         l1 += 1
                         failures.append(f"L1: {rel}:{line}: target_link_libraries(alpacacore ...) links vendor library {tok}")
             elif cmd == "target_compile_definitions" and _target_is(toks, "alpacacore"):
@@ -256,8 +275,7 @@ def check_cmake_rules(root: pathlib.Path) -> tuple[list[str], list[str]]:
             elif cmd == "target_sources" and _target_is(toks, "alpacacore"):
                 body = [(t, n) for t, n in toks[1:] if t not in ("PUBLIC", "PRIVATE", "INTERFACE")]
                 for tok, line in _resolve_sources(text, body, sets, failures, rel):
-                    norm = tok.replace("${CMAKE_CURRENT_SOURCE_DIR}/", "").replace("${CMAKE_SOURCE_DIR}/", "")
-                    if norm.startswith("src/vendors/") or "/src/vendors/" in norm:
+                    if _is_vendor_source(tok, vendor_targets):
                         l3 += 1
                         failures.append(f"L3: {rel}:{line}: target_sources(alpacacore ...) compiles vendor source {tok}")
             elif cmd == "add_library" and _target_is(toks, "alpacacore") and rel == core_rel:
@@ -267,8 +285,7 @@ def check_cmake_rules(root: pathlib.Path) -> tuple[list[str], list[str]]:
                 if not sources:
                     failures.append(f"L3: {rel}: add_library(alpacacore ...) lists no source -- rule is vacuous")
                 for tok, line in sources:
-                    norm = tok.replace("${CMAKE_CURRENT_SOURCE_DIR}/", "").replace("${CMAKE_SOURCE_DIR}/", "")
-                    if norm.startswith("src/vendors/") or "/src/vendors/" in norm:
+                    if _is_vendor_source(tok, vendor_targets):
                         l3 += 1
                         failures.append(f"L3: {rel}:{line}: add_library(alpacacore ...) compiles vendor source {tok}")
     if not add_library_seen:
@@ -710,6 +727,46 @@ def self_test() -> int:
                "target_sources(alpacacore PRIVATE src/core/a.cpp)\n")
         rc, err = _run(r, base)
         case("L3: target_sources on another target or a non-vendor source passes", rc == 0 and err == "")
+
+    # --- tokens inside generator expressions (open-astro#724) ---------------
+    genex_fail = [
+        ("L1: $<LINK_ONLY:vendor target> fails", "L1", "target_link_libraries(alpacacore PRIVATE $<LINK_ONLY:alpacacore_zwo>)\n"),
+        ("L1: nested $<$<BOOL:ON>:vendor target> fails", "L1", "target_link_libraries(alpacacore PRIVATE $<$<BOOL:ON>:alpacacore_zwo>)\n"),
+        ("L1: quoted LINK_ONLY and BUILD_INTERFACE:AlpacaCore:: vendor target fail", "L1",
+         'target_link_libraries(alpacacore PRIVATE "$<LINK_ONLY:alpacacore_zwo>" $<BUILD_INTERFACE:AlpacaCore::alpacacore_zwo>)\n'),
+        ("L3: add_library source in $<$<BOOL:ON>:src/vendors/...> fails", "L3",
+         "add_library(alpacacore STATIC src/a.cpp $<$<BOOL:ON>:src/vendors/zwo/x.cpp>)\n"),
+        ("L3: add_library BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/vendors/ source fails", "L3",
+         'add_library(alpacacore STATIC src/a.cpp "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/vendors/zwo/y.cpp>")\n'),
+        ("L3: add_library $<TARGET_OBJECTS:vendor target> fails", "L3",
+         "add_library(alpacacore STATIC src/a.cpp $<TARGET_OBJECTS:alpacacore_zwo>)\n"),
+        ("L3: target_sources source in a generator expression fails", "L3",
+         "target_sources(alpacacore PRIVATE $<$<BOOL:ON>:src/vendors/zwo/x.cpp>)\n"),
+        ("L3: target_sources $<TARGET_OBJECTS:vendor target> fails", "L3",
+         "target_sources(alpacacore PRIVATE $<TARGET_OBJECTS:alpacacore_zwo>)\n"),
+    ]
+    for name, rule, line in genex_fail:
+        t, r = cmake_fixture(core=CLEAN_CORE_CMAKE + line)
+        with t:
+            rc, err = _run(r, base)
+            case(name, rc == 1 and f"{rule}: AlpacaCore/CMakeLists.txt:20:" in err)
+
+    genex_pass = [
+        ("generator expression around a longer target name (alpacacore_zwo_extra) passes",
+         "target_link_libraries(alpacacore PRIVATE $<LINK_ONLY:alpacacore_zwo_extra>)\n"),
+        ("generator expression around a non-vendor include path passes",
+         "target_include_directories(alpacacore PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)\n"
+         "target_sources(alpacacore PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/a.h>)\n"),
+        ("generator-expression vendor link on another target (alpacacore_tests) passes",
+         "target_link_libraries(alpacacore_tests PRIVATE $<LINK_ONLY:alpacacore_zwo>)\n"),
+        ("source under src/vendorsx/ passes",
+         "target_sources(alpacacore PRIVATE src/vendorsx/a.cpp)\n"),
+    ]
+    for name, line in genex_pass:
+        t, r = cmake_fixture(core=CLEAN_CORE_CMAKE + line)
+        with t:
+            rc, err = _run(r, base)
+            case("genex: " + name, rc == 0 and err == "")
 
     t, r = cmake_fixture()
     with t:
