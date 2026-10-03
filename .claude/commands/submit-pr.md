@@ -216,35 +216,15 @@ Confirm the push succeeded before proceeding.
 
 ### PR body
 
-Build the body from the branch's commits and diffs. Use this structure:
+Build the body from the branch's commits and diffs. The body is
+`.github/PULL_REQUEST_TEMPLATE.md` filled in:
 
-```markdown
-## Summary
-- Bullet points summarizing what this PR does (1-4 bullets)
-- Include vendor, device model, and key technical details
-- Reference ConformU results if applicable (e.g., "0 errors, 0 issues on arm64")
-
-## Changes
-Group by component using bold tags:
-- **Vendor Device Driver** (AlpacaCore): what was added/changed
-- **Vendor Device Support** (AlpacaHTTP): router, web UI changes
-- **Vendor Unit Tests**: test count and assertion count
-- **Vendor SDK**: version and location
-- **ConformU Validation**: platforms tested, results
-- **Documentation**: changelog fragment, SUPPORTED-DRIVERS.md, AGENTS.md updates
-
-## Test plan
-- [ ] Local CI pre-flight green: `run_all_tests.sh` (vendors OFF + ON), clang-format, unicode scan, and (when installed) clang-tidy/cppcheck
-- [ ] Unit tests pass (`cd build && ctest`)
-- [ ] ConformU (latest release, but NOT arm64 4.5.0 — see `/conformu` step 2g) passes on Linux arm64
-- [ ] Web UI configuration works in browser
-- [ ] Device connects and operates correctly
-(Include only items relevant to this PR)
-
-## ConformU results
-(If applicable — link to the report files in the branch)
-- **arm64**: `AlpacaCore/conformu/Vendor/Model/arm64/`
-```
+- Every section has real content (Thinking Path, Linked Issues or Issue Description, What Changed, Verification, Risks, Model Used, Checklist).
+- Delete the HTML comments.
+- Tick a checklist box only when it is true. Leave "All CI gates are green" and "Claude Review passes with no open P1, P2s, recommendations, or follow-ups" unticked when you open the PR.
+- ConformU results and the report path (`AlpacaCore/conformu/<Vendor>/<Model>/<arch>/`) go under **Verification**.
+- Web UI Before / After tables go under **Verification**.
+- The body ends with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
 ### Present for approval
 
