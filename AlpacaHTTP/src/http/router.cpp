@@ -362,8 +362,22 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
                 const auto& values = sections[current].second;
                 for (std::size_t i = 0; i < values.size() && !replaced; ++i) {
                     if (values[i].first == key) {
-                        output.push_back(std::string(indent, ' ') + key + ": \"" +
-                                         escape_yaml_string(values[i].second) + "\"");
+                        // Keep the old line's trailing comment, with the
+                        // whitespace that sat before the '#'.
+                        std::string replacement(indent, ' ');
+                        replacement += key;
+                        replacement += ": \"";
+                        replacement += escape_yaml_string(values[i].second);
+                        replacement += '"';
+                        if (stripped_comment.size() < current_line.size()) {
+                            std::size_t gap = stripped_comment.size();
+                            while (gap > 0 && std::isspace(static_cast<unsigned char>(stripped_comment[gap - 1]))) {
+                                --gap;
+                            }
+                            replacement.append(stripped_comment, gap, std::string::npos);
+                            replacement.append(current_line, stripped_comment.size(), std::string::npos);
+                        }
+                        output.push_back(std::move(replacement));
                         written[current][i] = true;
                         replaced = true;
                     }
