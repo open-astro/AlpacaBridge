@@ -7108,6 +7108,50 @@ int main() {
         }
     }
 
+    // Saving a setting keeps the trailing comment of the line it replaces
+    // (the help text default.yaml ships), and a '#' inside a quoted old value
+    // is data, not a comment.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_routing_comments_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "http:\n"
+                   "  host_check_enabled: false  # help text\n"
+                   "  allowed_hosts: \"\"\n"
+                   "server:\n"
+                   "  location: \"Obs #2\"\n"
+                   "  profile_name: \"Old\"   # shown in the UI\n";
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        const auto put = [&router](const std::string& body) {
+            return route_with_host(router, "PUT", "/management/v1/description", std::nullopt, body);
+        };
+        EXPECT(put(R"({"HostCheckEnabled": true, "AllowedHosts": ".lan", "Location": "Roof", "ProfileName": "New"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        const std::string text = buf.str();
+        EXPECT(text.find("  host_check_enabled: \"true\"  # help text\n") != std::string::npos);
+        EXPECT(text.find("  allowed_hosts: \".lan\"\n") != std::string::npos);
+        EXPECT(text.find("  location: \"Roof\"\n") != std::string::npos);
+        EXPECT(text.find("  profile_name: \"New\"   # shown in the UI\n") != std::string::npos);
+        EXPECT(text.find("Obs") == std::string::npos);
+
+        alpacahttp::Config reloaded;
+        EXPECT(reloaded.load(config_path));
+        EXPECT(reloaded.host_check_enabled());
+        EXPECT((reloaded.allowed_hosts() == std::vector<std::string>{".lan"}));
+        EXPECT(reloaded.location() == "Roof");
+        EXPECT(reloaded.profile_name() == "New");
+        std::remove(config_path.c_str());
+    }
+
 #ifdef ALPACACORE_ENABLE_WEEWX
     // open-astro#731: the WeeWX refusals keep the router arm's exact text on
     // the API path, and a persisted entry that breaks one is still not
