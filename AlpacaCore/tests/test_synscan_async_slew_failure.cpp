@@ -27,8 +27,10 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
@@ -42,6 +44,16 @@ struct FakeSynScanState {
     std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
+    std::mutex command_mutex;
+    std::vector<std::string> commands;
+    void record(const std::string& command) {
+        std::lock_guard<std::mutex> lock(command_mutex);
+        commands.push_back(command);
+    }
+    std::vector<std::string> command_snapshot() {
+        std::lock_guard<std::mutex> lock(command_mutex);
+        return commands;
+    }
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (goto_count.load() == 0) return false;
@@ -53,6 +65,9 @@ struct FakeSynScanState {
 alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
     return [st](const std::string& chunk) -> std::string {
         if (chunk.empty()) return "0#";
+        if (chunk[0] == 'P' || chunk[0] == 'T') {
+            st->record(chunk);
+        }
         switch (chunk[0]) {
             case 'K':  // protocol echo: "K" + byte -> byte + "#" (the connect-time link check)
                 return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
@@ -101,6 +116,15 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return pred();
+}
+
+bool is_variable_rate_command(const std::string& command, int device) {
+    return command.size() >= 6 && command[0] == 'P' && command[1] == 3 &&
+           static_cast<unsigned char>(command[2]) == device;
+}
+
+bool is_zero_rate_command(const std::string& command) {
+    return command.size() >= 6 && command[4] == 0 && command[5] == 0;
 }
 
 // Threw only for the driver-specific DriverException (0x500) the #575 contract
@@ -166,6 +190,82 @@ TEST_CASE("SynScan async - AbortSlew clears a stored slew failure (#575)", "[syn
 
     REQUIRE_NOTHROW(driver->abort_slew());
     CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - AbortSlew fences a pending GOTO", "[synscan][telescope][async][abort]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    for (int i = 0; i < 50; ++i) {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE_NOTHROW(driver->abort_slew());
+        const int at_abort_return = st->goto_count.load();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        INFO("iteration " << i << ", GOTO count at abort return=" << at_abort_return);
+        CHECK(st->goto_count.load() == at_abort_return);
+    }
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan PulseGuide - cross-axis pulses keep the RA tracking restore", "[synscan][telescope][pulseguiding]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+
+    driver->pulse_guide(2, 1500);  // East, RA
+    driver->pulse_guide(0, 300);   // North, Dec; must not cancel the RA timer
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5000));
+
+    const auto commands = st->command_snapshot();
+    int last_ra = -1;
+    bool tracking_restored_after_ra_stop = false;
+    for (std::size_t i = 0; i < commands.size(); ++i) {
+        if (is_variable_rate_command(commands[i], 16)) {
+            last_ra = static_cast<int>(i);
+            tracking_restored_after_ra_stop = false;
+        } else if (last_ra >= 0 && commands[i][0] == 'T') {
+            tracking_restored_after_ra_stop = true;
+        }
+    }
+    REQUIRE(last_ra >= 0);
+    CHECK(is_zero_rate_command(commands[static_cast<std::size_t>(last_ra)]));
+    CHECK(tracking_restored_after_ra_stop);
+    CHECK(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan PulseGuide - a same-axis replacement runs for its requested duration",
+          "[synscan][telescope][pulseguiding]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    driver->pulse_guide(0, 2000);
+    driver->pulse_guide(0, 2000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const auto commands = st->command_snapshot();
+    int last_dec = -1;
+    for (std::size_t i = 0; i < commands.size(); ++i) {
+        if (is_variable_rate_command(commands[i], 17)) {
+            last_dec = static_cast<int>(i);
+        }
+    }
+    REQUIRE(last_dec >= 0);
+    CHECK_FALSE(is_zero_rate_command(commands[static_cast<std::size_t>(last_dec)]));
+    CHECK(driver->get_is_pulse_guiding());
     driver->set_connected(false);
 }
 

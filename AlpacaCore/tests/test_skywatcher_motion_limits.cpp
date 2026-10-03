@@ -33,6 +33,7 @@
 #include <alpacacore/util/motion_limits.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -222,6 +223,54 @@ TEST_CASE("SkyWatcher limits - a legal goto during a park in flight is refused a
                          alpacacore::AlpacaError::InvalidWhileParked);
     CHECK(driver->get_slewing());
     CHECK(MotionFrames::snapshot(mount) == before);
+    REQUIRE(wait_until([&] { return driver->get_at_park(); }, 30000));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - FindHome during a park refuses without cancelling the park",
+          "[skywatcher][telescope][limits]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    mount.jump_axis_degrees(1, 30.0);
+    mount.jump_axis_degrees(2, 20.0);
+    driver->park();
+    REQUIRE(wait_until([&] { return mount.frames_seen('J') >= 2; }, 5000));
+    const auto before = MotionFrames::snapshot(mount);
+
+    require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(driver->get_slewing());
+    CHECK(MotionFrames::snapshot(mount) == before);
+    REQUIRE(wait_until([&] { return driver->get_at_park(); }, 30000));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - a later Park supersedes a synchronous slew without stale completion",
+          "[skywatcher][telescope][limits]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    mount.jump_axis_degrees(1, 30.0);
+    mount.jump_axis_degrees(2, 20.0);
+    const double ra = near_pole_ra(*driver);
+    std::atomic<int> slew_result{-1};
+    std::jthread sync_slew([&] {
+        try {
+            driver->slew_to_coordinates(ra, kNearPoleDec);
+            slew_result.store(0);
+        } catch (const alpacacore::AlpacaException& ex) {
+            slew_result.store(ex.error_code());
+        } catch (...) {
+            slew_result.store(-2);
+        }
+    });
+    REQUIRE(wait_until([&] { return mount.axis_running(1) || mount.axis_running(2); }, 5000));
+
+    driver->park();
+    sync_slew.join();
+    CHECK(slew_result.load() == alpacacore::AlpacaError::InvalidOperation);
     REQUIRE(wait_until([&] { return driver->get_at_park(); }, 30000));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
