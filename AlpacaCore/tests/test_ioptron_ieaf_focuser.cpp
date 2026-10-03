@@ -186,6 +186,27 @@ TEST_CASE("iOptron iEAF Focuser Driver - connects and moves over the fake", "[io
     CHECK(driver->get_connected() == false);
 }
 
+// Parameter validation precedes the connection check (ASCOM precedence).
+TEST_CASE("iOptron iEAF Focuser Driver - move range is InvalidValue even while disconnected",
+          "[ioptron][focuser][unit]") {
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
+    require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move(99999 + 1); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move(1000); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("iOptron iEAF Focuser Driver - move range over the fake", "[ioptron][focuser][unit]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move(99999 + 1); },
+                         alpacacore::AlpacaError::InvalidValue);
+    CHECK(fake.count(":FM") == 0);
+    driver->set_connected(false);
+}
+
 // Issue #528: a synchronous disconnect that lands while a synchronous connect
 // is inside the wrapper's handshake (which sleeps 100 ms before the first
 // exchange) must not be dropped. Without transition_mutex_ thread B saw

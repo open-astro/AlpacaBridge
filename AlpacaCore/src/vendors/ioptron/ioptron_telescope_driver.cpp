@@ -796,9 +796,9 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
+        validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_ra_dec(ra, dec, "DestinationSideOfPier");
 
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
@@ -933,10 +933,6 @@ public:
     }
     
     void move_axis(int axis, double rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        ensure_not_parked_locked("MoveAxis");
-
         if (axis != 0 && axis != 1) {
             throw AlpacaException("Axis must be 0 (Primary) or 1 (Secondary)",
                                   AlpacaError::InvalidValue);
@@ -946,6 +942,10 @@ public:
         if (!is_axis_rate_supported(abs_rate)) {
             throw AlpacaException("Axis rate out of range", AlpacaError::InvalidValue);
         }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        ensure_not_parked_locked("MoveAxis");
 
         const bool was_any_axis_active = axis_move_active_primary_ || axis_move_active_secondary_;
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -1136,9 +1136,9 @@ public:
     }
     
     void set_target_declination(double dec) override {
+        validate_dec(dec, "TargetDeclination");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_dec(dec, "TargetDeclination");
 
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -1155,9 +1155,9 @@ public:
     }
     
     void set_target_right_ascension(double ra) override {
+        validate_ra(ra, "TargetRightAscension");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_ra(ra, "TargetRightAscension");
 
         target_ra_hours_ = ra;
         target_ra_set_ = true;
@@ -1178,14 +1178,13 @@ public:
     }
     
     void set_tracking_rate(int rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        
-        auto& protocol = iOptronProtocolWrapper::instance();
-
         if (rate < 0 || rate > 4) {
             throw AlpacaException("Invalid tracking rate", AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+
+        auto& protocol = iOptronProtocolWrapper::instance();
 
         protocol.set_tracking_rate(rate);
         if (rate == 4) {
@@ -1570,9 +1569,9 @@ public:
     }
     
     void sync_to_coordinates(double ra, double dec) override {
+        validate_ra_dec(ra, dec, "SyncToCoordinates");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_ra_dec(ra, dec, "SyncToCoordinates");
         ensure_not_parked_locked("SyncToCoordinates");
 
         target_ra_hours_ = ra;
