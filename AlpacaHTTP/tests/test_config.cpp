@@ -406,6 +406,31 @@ int main() {
         ::unlink(path.c_str());
     }
 
+    // A double quote opens a quoted value only as its first non-space
+    // character; a later one in a plain value is a literal.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_lone_quote_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string path = path_template;
+        const auto location_of = [&path](const std::string& line) {
+            {
+                std::ofstream out(path);
+                out << "server:\n" << line << "\n";
+            }
+            alpacahttp::Config cfg;
+            EXPECT(cfg.load(path));
+            return cfg.location();
+        };
+        EXPECT(location_of("  location: 8\" Dob  # note") == "8\" Dob");
+        EXPECT(location_of("  location: \"Obs #2\"  # c") == "Obs #2");
+        EXPECT(location_of("  location: \"a\\\"#b\"  # c") == "a\"#b");
+        EXPECT(location_of("  location: 'Obs'  # c") == "Obs");
+        EXPECT(location_of("  location: Plain Site") == "Plain Site");
+        ::unlink(path.c_str());
+    }
+
     std::cout << "All configuration tests passed!\n";
     return 0;
 }

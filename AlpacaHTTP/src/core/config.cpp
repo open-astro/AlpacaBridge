@@ -46,16 +46,26 @@ std::string trim_copy(std::string_view input) {
 }
 
 std::string strip_inline_comment(const std::string& line) {
-    // A '#' inside a double-quoted value is data, not a comment.
+    // A '#' inside a double-quoted value is data, not a comment. A double
+    // quote opens a quoted value only as the first non-space character after
+    // the key's colon; later in a plain value it is a literal.
     bool quoted = false;
+    bool seen_colon = false;
+    bool at_value_start = false;
     for (std::size_t i = 0; i < line.size(); ++i) {
         const char c = line[i];
         if (quoted && c == '\\') {
             ++i;
-        } else if (c == '"') {
+        } else if (c == '"' && (quoted || at_value_start)) {
             quoted = !quoted;
+            at_value_start = false;
         } else if (c == '#' && !quoted) {
             return line.substr(0, i);
+        } else if (c == ':' && !seen_colon) {
+            seen_colon = true;
+            at_value_start = true;
+        } else if (!std::isspace(static_cast<unsigned char>(c))) {
+            at_value_start = false;
         }
     }
     return line;
