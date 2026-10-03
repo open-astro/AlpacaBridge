@@ -107,6 +107,10 @@ TEST_CASE("iOptron Telescope Driver - Target Range Validation", "[ioptron][teles
     require_alpaca_error([&]() { driver->sync_to_coordinates(25.0, 0.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { (void)driver->get_destination_side_of_pier(25.0, 0.0); },
                          alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_latitude(90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_longitude(180.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_alt_az(90.1, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_alt_az_async(0.0, 360.0); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("iOptron Telescope Driver - Axis Rate Ranges", "[ioptron][telescope][unit]") {
@@ -588,9 +592,8 @@ TEST_CASE("iOptron Telescope Driver - non-finite guide rate is rejected", "[iopt
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
 }
 
-// #627: iOptron's site latitude and longitude setters take the mutex and check
-// the connection before validating, so unlike the other vendors their NaN
-// path needs a connected driver.
+// #627: the NaN path of iOptron's site latitude and longitude setters, over a
+// connected driver. The disconnected range case is in Target Range Validation.
 TEST_CASE("iOptron Telescope Driver - non-finite site latitude and longitude are rejected",
           "[ioptron][telescope][unit][nonfinite]") {
     alpacacore::test::FakeMountServer server;

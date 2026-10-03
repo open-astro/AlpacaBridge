@@ -882,16 +882,16 @@ public:
         ensure_site_info_cached_locked();
         return site_latitude_cached_;
     }
-    
+
     void set_site_latitude(double latitude) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
         if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException(
                 "Site latitude must be between -90 and 90 degrees",
                 AlpacaError::InvalidValue
             );
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_latitude(latitude);
         protocol.set_hemisphere(latitude >= 0.0);
@@ -900,7 +900,7 @@ public:
         site_info_valid_ = true;
         last_site_info_fetch_ = std::chrono::steady_clock::now();
     }
-    
+
     double get_site_longitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
@@ -908,16 +908,16 @@ public:
         ensure_site_info_cached_locked();
         return site_longitude_cached_;
     }
-    
+
     void set_site_longitude(double longitude) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
         if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException(
                 "Site longitude must be between -180 and 180 degrees",
                 AlpacaError::InvalidValue
             );
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_longitude(longitude);
         site_longitude_cached_ = longitude;
@@ -1602,10 +1602,10 @@ public:
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
+        validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
-            validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
             if (!site_info_valid_) {
                 ensure_site_info_cached_locked();
                 // ensure_site_info_cached_locked() sets site_info_valid_ on success;
@@ -1679,10 +1679,10 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra_hours = 0.0;
         double dec_degrees = 0.0;
+        validate_alt_az(altitude, azimuth, "SlewToAltAz");
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
-            validate_alt_az(altitude, azimuth, "SlewToAltAz");
             ensure_site_info_cached_locked();
             if (!site_info_valid_) {
                 throw AlpacaException("Site information unavailable for Alt/Az slew",
