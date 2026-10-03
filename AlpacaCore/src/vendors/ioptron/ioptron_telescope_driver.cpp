@@ -1352,6 +1352,14 @@ public:
     }
     
     void pulse_guide(int direction, int duration) override {
+        // Argument validation precedes the connection and park checks (ASCOM).
+        // 99999 ms is the protocol's 5-digit duration field.
+        if (direction < 0 || direction > 3) {
+            throw AlpacaException("PulseGuide direction must be 0-3", AlpacaError::InvalidValue);
+        }
+        if (duration < 0 || duration > 99999) {
+            throw AlpacaException("PulseGuide duration must be 0-99999 ms", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         ensure_not_parked_fast_locked("PulseGuide");

@@ -112,6 +112,13 @@ TEST_CASE("iOptron Telescope Driver - Target Range Validation", "[ioptron][teles
     require_alpaca_error([&]() { driver->set_site_longitude(180.1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->slew_to_alt_az(90.1, 0.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->slew_to_alt_az_async(0.0, 360.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    // PulseGuide: direction 0-3 and duration 0-99999 ms (the protocol's 5-digit field).
+    require_alpaca_error([&]() { driver->pulse_guide(4, 100); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->pulse_guide(-1, 100); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->pulse_guide(0, -1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->pulse_guide(0, 100000); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->pulse_guide(0, 100); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("iOptron Telescope Driver - Axis Rate Ranges", "[ioptron][telescope][unit]") {
