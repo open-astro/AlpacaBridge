@@ -47,11 +47,12 @@ stripped:
     the `${VAR}` lists it expands (each resolved from a `set(VAR ...)` in the
     same file as the call; one that cannot be resolved is a failure), is under
     src/vendors/ or is a vendor target (`$<TARGET_OBJECTS:alpacacore_<name>>`),
-    also inside a generator expression. A `${VAR}` nested inside a generator
-    expression is not expanded, so it fails closed: any source token that still
-    holds `${` once the two directory prefixes are removed is an L3 failure
-    (open-astro#799). The `target_link_libraries(alpacacore ...)` tokens of L1
-    are resolved the same way, with the same failure as L1.
+    also inside a generator expression. A variable the gate cannot see through
+    fails closed: any source token that still holds `${` once the two directory
+    prefixes are removed (a `${VAR}` inside a generator expression) is an L3
+    failure (open-astro#799). The `target_link_libraries(alpacacore ...)` tokens
+    of L1 are resolved the same way, and one that cannot be resolved is an L1
+    failure.
   - each rule fails when it has nothing to check: a missing or unreadable
     AlpacaCore/CMakeLists.txt, no `add_library(alpacacore ...)` call, an empty
     source list (L3) or no vendor directory (L1).
