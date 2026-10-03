@@ -29,8 +29,8 @@
       each alone on its own line, with real content under each:
         Bug:     **What happened?**  **Expected behavior**  **Steps to reproduce**
         Feature: **Problem**  **Proposed change**  **Alternatives considered**
-      (the same fields as .github/ISSUE_TEMPLATE/bug_report.md and
-      feature_request.md).
+      (the equivalent of the fields in .github/ISSUE_TEMPLATE/bug_report.md
+      and feature_request.md).
 
   Only reference PUBLIC GitHub issues and pull requests (`#NNN` or
   github.com/open-astro/AlpacaBridge URLs). No private tracker ids, internal
@@ -54,8 +54,10 @@
   checks. Name each check you did not run locally and what covers it (for
   example: whole ctest suite, sanitizers, arm64 build -> pull request CI).
   Hardware: name the device, firmware and platform, or say "not tested on
-  hardware". Driver pull requests: give the ConformU result and the report
-  path (AlpacaCore/conformu/<Vendor>/<Model>/<arch>/).
+  hardware". Driver pull requests: name the vendor and device model, give
+  the unit-test case and assertion counts (AGENTS.md: at least 8 cases and
+  30 assertions per driver), the ConformU result and the report path
+  (AlpacaCore/conformu/<Vendor>/<Model>/<arch>/).
   Web UI changes: add a Before / After screenshot table.
 -->
 
@@ -98,3 +100,4 @@
 - [ ] All CI gates are green
 - [ ] Claude Review passes with no open P1, P2s, recommendations, or follow-ups
 - [ ] I will address all review-bot and reviewer comments before requesting merge
+

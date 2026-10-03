@@ -222,7 +222,7 @@ Build the body from the branch's commits and diffs. The body is
 - Every section has real content (Thinking Path, Linked Issues or Issue Description, What Changed, Verification, Risks, Model Used, Checklist).
 - Delete the HTML comments.
 - Tick a checklist box only when it is true. Leave "All CI gates are green" and "Claude Review passes with no open P1, P2s, recommendations, or follow-ups" unticked when you open the PR.
-- ConformU results and the report path (`AlpacaCore/conformu/<Vendor>/<Model>/<arch>/`) go under **Verification**.
+- Driver PRs: the vendor and device model, the unit-test case and assertion counts, the ConformU result and the report path (`AlpacaCore/conformu/<Vendor>/<Model>/<arch>/`) go under **Verification**.
 - Web UI Before / After tables go under **Verification**.
 - The body ends with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
