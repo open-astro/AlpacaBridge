@@ -7152,6 +7152,29 @@ int main() {
         std::remove(config_path.c_str());
     }
 
+    // A lone double quote inside a plain old value does not hide its comment.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_routing_lone_quote_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "server:\n"
+                   "  location: 8\" Dob  # note\n";
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt, R"({"Location": "Roof"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        EXPECT(buf.str().find("  location: \"Roof\"  # note\n") != std::string::npos);
+        std::remove(config_path.c_str());
+    }
+
 #ifdef ALPACACORE_ENABLE_WEEWX
     // open-astro#731: the WeeWX refusals keep the router arm's exact text on
     // the API path, and a persisted entry that breaks one is still not
