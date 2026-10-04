@@ -274,6 +274,9 @@ def assemble(text: str, directory: Path, version: str, date: str) -> str:
         raise SystemExit(
             "ERROR: %s is not greater than the latest dated release %s" % (version, latest_released(lines))
         )
+    proposed = propose_bump(lines, directory)
+    if version_tuple(version) < version_tuple(proposed):
+        raise SystemExit("ERROR: %s is below the proposed bump %s for these fragments" % (version, proposed))
     entries, legacy, _ = collect(lines, directory)
     if not any(entries.values()):
         raise SystemExit("ERROR: nothing to release: no fragments and no UNRELEASED entries")
@@ -441,6 +444,12 @@ def self_test() -> int:
                 failures.append("release accepted: " + why)
             except SystemExit:
                 pass
+        try:
+            assemble(FIXTURE, d, "1.2.5", "2026-02-03")
+            failures.append("release accepted a version below the proposed bump")
+        except SystemExit as e:
+            expect("1.3.0" in str(e), "below-bump refusal does not name the proposed version: %s" % e)
+        expect("## [1.4.0]" in assemble(FIXTURE, d, "1.4.0", "2026-02-03"), "a version above the proposal was refused")
         empty = root / "empty.d"
         empty.mkdir()
         try:
