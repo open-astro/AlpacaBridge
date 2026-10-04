@@ -104,7 +104,7 @@ A change passes only when every line holds, or the exception is written in the c
 | NS-06 | Wi-Fi API | open | hotspot passphrase by default |
 | NS-07 | Device API, Management API | fixed | JSON output replaces invalid UTF-8 with U+FFFD instead of throwing (`error_handler_t::replace` in `Response::set_body`, `AlpacaHTTP/src/core/response.cpp`, issue #764) |
 | NS-08 | Web UI | open | framing headers and CSP |
-| NS-09 | Device API | open | the iOptron telescope lowers the mount altitude limit to -89 degrees when a slew is refused, with no opt-in (`AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp:1872`) |
+| NS-09 | Device API | fixed | the iOptron telescope no longer changes the mount altitude limit (`:SAL`) or meridian treatment (`:SMT`); a GOTO the firmware refuses is reported and not retried (issue #763) |
 | NS-10 | Management API | open | the WeeWX feed URL has no scheme allowlist, follows redirects and reads an unbounded body (`AlpacaCore/src/vendors/weewx/weewx_observingconditions_driver.cpp:257-261`) |
 | NS-11 | Management API | open | the `gpioChip` config path is checked only for a `/dev/` prefix before `gpiod_chip_open` |
 | NS-12 | Device API | open | an image array request holds the whole frame (`get_image_array`, `AlpacaCore/include/alpacacore/camera_driver.h:154`); memory per request has no stated constant |

@@ -1,0 +1,2 @@
+### Fixed
+- **iOptron no longer rewrites the mount's altitude limit or meridian treatment** (`AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp`, issue #763): after a refused GOTO the driver used to write `:SAL-89#` and `:SMT130#` and retry, restoring them only when the slew ended, on AbortSlew or on a failed retry, so a disconnect mid-slew left the mount at -89 degrees. The driver now never writes either setting. A GOTO the firmware refuses is reported as before (an error for a synchronous slew, a `Slewing` error for an asynchronous one) and is not retried.

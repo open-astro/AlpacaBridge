@@ -126,6 +126,12 @@ private:
             // hemisphere.
             return "+0000000000000000010001#";
         }
+        if (cmd == ":GAL#") {
+            return "+00#";  // user altitude limit 0 degrees
+        }
+        if (cmd.rfind(":GMT", 0) == 0) {
+            return "0030#";  // meridian treatment: stop, 30 degrees past
+        }
         if (cmd == ":GEP#") {
             const long long ra = ra_units_.load();
             const long long dec = dec_units_.load();
