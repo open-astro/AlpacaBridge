@@ -356,6 +356,14 @@ def self_test() -> int:
         any("unclosed" in p for p in validate("a.md", "### Fixed\n- x\n  ````\n  ```\n- y\n")),
         "shorter fence closed a four-backtick fence",
     )
+    fence_cases = (
+        "### Fixed\n- y\n  ~~~\n### Added\n- z\n  ~~~\n- w\n  ```\n  ~~~\n  ```\n- v\n  ```\n  ```python\n  ```\n"
+    )
+    e, p = parse_body(fence_cases.splitlines())
+    expect(
+        p == [] and list(e) == ["Fixed"] and len(e["Fixed"]) == 3,
+        "tilde, mixed-character or info-string fence mis-tracked",
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
