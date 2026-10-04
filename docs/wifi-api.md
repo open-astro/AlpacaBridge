@@ -34,6 +34,7 @@ The one call a client needs for its WiFi UI state.
   "ConnectionUuid": "639bae67-...",
   "ApActive": true,
   "Ssid": "OpenAstro-65CD",
+  "SsidHex": "4f70656e417374726f2d36354344",
   "FrequencyMhz": 5180,
   "SignalPercent": 62,
   "Ip4Address": "172.24.1.1",
@@ -50,6 +51,9 @@ The one call a client needs for its WiFi UI state.
   are supported.
 - `Ssid`/`FrequencyMhz`/`SignalPercent` describe the current association
   (own AP when `ApActive`, joined network otherwise); absent when idle.
+- `SsidHex` is the lowercase hexadecimal encoding of the exact SSID bytes.
+  `Ssid` is display text and invalid UTF-8 bytes appear as U+FFFD; use
+  `SsidHex` for identity and round-tripping.
 - **5 GHz gating rule**: offer 5 GHz options when
   `Capabilities.Freq5GHz || ScanSees5GHz`. Some vendor drivers (ASIAIR Plus
   RK3568 `bcmdhd`) under-report capabilities while 5 GHz works.
@@ -63,7 +67,7 @@ Triggers a scan (best-effort; ~1.5 s) and returns visible networks, strongest
 first, deduplicated by SSID, hidden SSIDs omitted:
 
 ```json
-[ { "Ssid": "HomeNet", "FrequencyMhz": 5200, "SignalPercent": 71,
+[ { "Ssid": "HomeNet", "SsidHex": "486f6d654e6574", "FrequencyMhz": 5200, "SignalPercent": 71,
     "Security": "WPA2" } ]
 ```
 
@@ -76,7 +80,7 @@ most drivers — results may be stale in AP mode.
 Saved connections (client networks AND the hotspot profile):
 
 ```json
-[ { "Id": "HomeNet", "Uuid": "…", "Ssid": "HomeNet",
+[ { "Id": "HomeNet", "Uuid": "…", "Ssid": "HomeNet", "SsidHex": "486f6d654e6574",
     "Mode": "infrastructure", "Autoconnect": true, "Priority": 0,
     "Active": false } ]
 ```
@@ -84,16 +88,28 @@ Saved connections (client networks AND the hotspot profile):
 `Mode` is `infrastructure` (client) or `ap` (hotspot). Passphrases are never
 returned by any endpoint.
 
+`Id` is the NetworkManager connection name. A new profile uses the SSID text
+when it is valid UTF-8 and contains no NUL byte. Otherwise, its ID is
+`Wi-Fi <SsidHex>`. Updating an existing profile keeps its current `Id`.
+
 ### PUT /management/v1/wifi/profiles
 
 Create or update a client profile: `{ "Ssid": "HomeNet", "Passphrase":
 "secret123", "Autoconnect": true, "Priority": 0 }`.
 
+For arbitrary SSID bytes, send `SsidHex` instead of `Ssid`, for example
+`{ "SsidHex": "ff00fe", "Passphrase": "secret123" }`. It is an even-length
+hex string encoding 1–32 bytes. When both fields are supplied, `SsidHex` is
+authoritative. Legacy clients may continue to send `Ssid` text; that form cannot
+represent arbitrary invalid UTF-8 bytes.
+
 - `Passphrase` empty or omitted: open network for a NEW profile; "keep the
   existing secret" when the profile already has one. A secured profile can
   never be silently converted to open — delete and re-add instead.
-- Passphrase must be 8–63 chars when present; SSID 1–32 bytes.
+- Passphrase must be 8–63 chars when present; SSID is 1–32 bytes.
 - Updating matches by SSID (client profiles only).
+- A new profile uses a safe `Id` as described above. An update keeps the existing
+  profile `Id`.
 
 ### DELETE /management/v1/wifi/profiles/{uuid}
 
@@ -109,7 +125,7 @@ a device can't be stranded unreachable; hotspot config goes through `ap`.
 ### GET /management/v1/wifi/ap
 
 ```json
-{ "Configured": true, "Ssid": "OpenAstro-65CD", "Band": "a",
+{ "Configured": true, "Ssid": "OpenAstro-65CD", "SsidHex": "4f70656e417374726f2d36354344", "Band": "a",
   "Channel": 36, "Autoconnect": true, "Active": false,
   "Ip4Address": "172.24.1.1" }
 ```
@@ -129,6 +145,11 @@ DHCP on the fleet-wide subnet `172.24.1.0/24`; the portal is always at
 - `Band`: `"a"` = 5 GHz, `"bg"` = 2.4 GHz. `Channel: 0` lets
   NetworkManager pick. Empty `Passphrase` keeps the existing secret.
 - A brand-new hotspot profile requires a passphrase (8–63 chars).
+- `SsidHex` may be supplied instead of `Ssid` with the same encoding and
+  precedence rules as `PUT /profiles`. This lets clients preserve a configured
+  SSID while changing other AP settings.
+- The web UI preserves the configured `SsidHex` when the displayed SSID text is
+  unchanged. Change the text to set a new SSID.
 
 ### PUT /management/v1/wifi/radio
 

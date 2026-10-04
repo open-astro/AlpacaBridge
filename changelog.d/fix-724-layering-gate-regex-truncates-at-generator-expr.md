@@ -1,0 +1,2 @@
+### Fixed
+- **The layering gate no longer misses a vendor reached through a variable** (issue #799): a `${VAR}` inside a generator expression in `target_sources(alpacacore ...)` now fails L3 instead of matching nothing, and the tokens of `target_link_libraries(alpacacore ...)` are resolved from same-file `set()` calls like L3 sources, so a vendor library named through `${VAR}` fails L1. An unresolvable variable fails closed.

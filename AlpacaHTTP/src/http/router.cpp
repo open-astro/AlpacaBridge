@@ -47,6 +47,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -1414,6 +1415,9 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
 } // namespace
 
 namespace alpacahttp {
+
+// open-astro#765: configuredevice answers 400 for a refusal that starts with this.
+constexpr const char* kHardwareConfigRefusal = "Hardware config refused: ";
 
 namespace {
 // Issue #358: a driver that refuses a connect explains why, and the client
@@ -7054,6 +7058,9 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
                 error_message
             );
             response.set_body(alpaca_response);
+            if (error_message.rfind(kHardwareConfigRefusal, 0) == 0) {
+                response.set_status(400, "Bad Request");
+            }
             return response;
         }
 
@@ -7935,6 +7942,15 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
         response.set_body(alpaca_response);
         return response;
     };
+    auto get_ssid = [](const nlohmann::json& body) {
+        if (const auto* hex = find_json_value(body, "SsidHex")) {
+            if (!hex->is_string()) throw util::WifiError("SsidHex (string) is required");
+            return util::ssid_from_hex(hex->get<std::string>());
+        }
+        const auto* ssid = find_json_value(body, "Ssid");
+        if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) or SsidHex (string) is required");
+        return ssid->get<std::string>();
+    };
 
     try {
         auto& wifi = wifi_manager();
@@ -7954,8 +7970,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             ok.value = wifi.profiles();
         } else if (sub == "profiles" && is_put) {
             auto body = body_json();
-            const auto* ssid = find_json_value(body, "Ssid");
-            if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) is required");
+            const auto ssid = get_ssid(body);
             std::string passphrase;
             if (const auto* p = find_json_value(body, "Passphrase"); p && p->is_string()) {
                 passphrase = p->get<std::string>();
@@ -7968,7 +7983,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             if (const auto* pr = find_json_value(body, "Priority"); pr && pr->is_number_integer()) {
                 priority = pr->get<int>();
             }
-            ok.value = wifi.save_profile(ssid->get<std::string>(), passphrase, autoconnect, priority);
+            ok.value = wifi.save_profile(ssid, passphrase, autoconnect, priority);
         } else if (sub.rfind("profiles/", 0) == 0 && is_delete) {
             wifi.delete_profile(sub.substr(std::string("profiles/").size()));
             ok.value = nlohmann::json{{"Deleted", true}};
@@ -7985,8 +8000,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             ok.value = wifi.get_ap();
         } else if (sub == "ap" && is_put) {
             auto body = body_json();
-            const auto* ssid = find_json_value(body, "Ssid");
-            if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) is required");
+            const auto ssid = get_ssid(body);
             std::string passphrase;
             if (const auto* p = find_json_value(body, "Passphrase"); p && p->is_string()) {
                 passphrase = p->get<std::string>();
@@ -8003,7 +8017,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             if (const auto* e = find_json_value(body, "Enabled"); e && e->is_boolean()) {
                 enabled = e->get<bool>();
             }
-            ok.value = wifi.set_ap(ssid->get<std::string>(), passphrase, band, channel, enabled);
+            ok.value = wifi.set_ap(ssid, passphrase, band, channel, enabled);
         } else if (sub == "country" && is_get) {
             ok.value = wifi.get_country();
         } else if (sub == "country" && is_put) {
@@ -8146,6 +8160,28 @@ namespace {
 // telescope 1". Kept in one place so the two lines read alike in the log.
 std::string persisted_device_subject(const std::string& vendor, const std::string& device_type, int device_number) {
     return "Persisted " + vendor + " " + device_type + " " + std::to_string(device_number);
+}
+
+// open-astro#765: a device config may not choose which GPIO chip, GPIO line or
+// device node the server opens. The boards have fixed wiring, so the only
+// accepted values are the board's own; anything else is refused before the
+// device is built or saved (configuredevice answers 400 for this prefix).
+bool refuse_hardware_config(std::string& error_message, const std::string& field, const std::string& allowed) {
+    error_message = std::string(kHardwareConfigRefusal) + "'" + field + "' must be " + allowed +
+                    " for this board; the server does not open other chip nodes or GPIO lines";
+    return false;
+}
+
+bool gpio_chip_is_board_chip(const std::string& value, const char* board_chip, std::string& error_message,
+                             const char* alt_chip = nullptr) {
+    if (value == board_chip || (alt_chip != nullptr && value == alt_chip)) {
+        return true;
+    }
+    std::string allowed = std::string("'") + board_chip + "'";
+    if (alt_chip != nullptr) {
+        allowed += std::string(" or '") + alt_chip + "'";
+    }
+    return refuse_hardware_config(error_message, "gpioChip", allowed);
 }
 
 // open-astro#664: the catalog consult in register_device_from_config() below.
@@ -8373,6 +8409,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // controllable DC1/DC2 lines.
         auto powerbox_config = alpacacore::vendor::ioptron::default_imate_powerbox_config();
         powerbox_config.gpio_chip_path = config_get(config, "gpioChip", powerbox_config.gpio_chip_path);
+        if (!gpio_chip_is_board_chip(powerbox_config.gpio_chip_path, "/dev/gpiochip1", error_message,
+                                     "/dev/gpiochip0" /* stock BSP kernel */)) {
+            return false;
+        }
         powerbox_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
         // Per-port PWM/name overrides applied positionally onto the fixed
         // DC3/DC1/DC2 layout. The always-on pass-through has no GPIO line and
@@ -9090,6 +9130,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         if (switch_type == "asiair-plus-rk3568") {
             auto plus_config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
             plus_config.device_path = config_get(config, "devicePath", plus_config.device_path);
+            if (plus_config.device_path != "/dev/pwm-gpio-misc") {
+                return refuse_hardware_config(error_message, "devicePath", "'/dev/pwm-gpio-misc'");
+            }
             plus_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", plus_config.pwm_frequency_hz);
             if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
                 std::vector<alpacacore::vendor::zwo::AsiairPlusPortConfig> ports;
@@ -9132,10 +9175,14 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 asiair_config.model_name = "ASIAIR Plus (Pi CM4)";
             }
             asiair_config.gpio_chip_path = config_get(config, "gpioChip", asiair_config.gpio_chip_path);
+            if (!gpio_chip_is_board_chip(asiair_config.gpio_chip_path, "/dev/gpiochip0", error_message)) {
+                return false;
+            }
             asiair_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", asiair_config.pwm_frequency_hz);
             if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
                 std::vector<alpacacore::vendor::zwo::AsiairPortConfig> ports;
                 ports.reserve(config["ports"].size());
+                std::set<int> seen_gpio_lines;
                 for (const auto& p : config["ports"]) {
                     // A non-object entry (e.g. "ports":[null]) would make the
                     // contains()/[] accessors below throw nlohmann type_error.
@@ -9148,9 +9195,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                         return false;
                     }
                     const int gpio_value = p["gpio"].get<int>();
-                    if (gpio_value < 0 || gpio_value > 63) {
-                        error_message = "ASIAIR port 'gpio' must be in [0, 63]";
-                        return false;
+                    if (gpio_value != 12 && gpio_value != 13 && gpio_value != 26 && gpio_value != 18) {
+                        return refuse_hardware_config(error_message, "ports[].gpio", "one of 12, 13, 26, 18");
+                    }
+                    if (!seen_gpio_lines.insert(gpio_value).second) {
+                        return refuse_hardware_config(error_message, "ports[].gpio",
+                                                      "each of 12, 13, 26, 18 at most once");
                     }
                     alpacacore::vendor::zwo::AsiairPortConfig pc;
                     pc.name = p.value("name", std::string("Port ") + std::to_string(ports.size() + 1));
@@ -9522,6 +9572,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // lines (BCM GPIO 18/10/17/4).
         auto powerbox_config = alpacacore::vendor::touptek::default_stellavita_config();
         powerbox_config.gpio_chip_path = config_get(config, "gpioChip", powerbox_config.gpio_chip_path);
+        if (!gpio_chip_is_board_chip(powerbox_config.gpio_chip_path, "/dev/gpiochip0", error_message)) {
+            return false;
+        }
         powerbox_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
         // Per-port PWM/name overrides applied positionally onto the fixed
         // Port 1..4 layout.

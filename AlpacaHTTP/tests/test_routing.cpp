@@ -5725,8 +5725,10 @@ int main() {
                  std::pair{"/management/v1/wifi/country", "{\"Alpha2\": \"usa\"}"},
                  std::pair{"/management/v1/wifi/country", "{}"},
                  std::pair{"/management/v1/wifi/profiles", "{\"Passphrase\": \"x\"}"},
+                 std::pair{"/management/v1/wifi/profiles", "{\"SsidHex\": \"gg\"}"},
                  std::pair{"/management/v1/wifi/connect", "not json"},
                  std::pair{"/management/v1/wifi/ap", "{\"Ssid\": \"x\", \"Band\": \"g\"}"},
+                 std::pair{"/management/v1/wifi/ap", "{\"SsidHex\": \"f\"}"},
                  std::pair{"/management/v1/wifi/radio", "{\"Enabled\": \"yes\"}"},
              }) {
             const auto response = route_request(router, "PUT", path, body);

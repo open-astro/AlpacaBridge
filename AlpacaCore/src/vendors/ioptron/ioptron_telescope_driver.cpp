@@ -1122,8 +1122,6 @@ public:
             }
         }
         slew_in_progress_ = false;
-        restore_altitude_limit_locked("Slewing");
-        restore_meridian_treatment_locked("Slewing");
         return false;
     }
     
@@ -1314,6 +1312,10 @@ public:
     }
 
     void abort_slew() override {
+        // open-astro#768: fence the async slew dispatch first, so no :MS1#/:MS2#
+        // can reach the mount after the stop below. Runs without mutex_ held
+        // (the dispatch thread takes it), like every other reap site.
+        reap_slew_dispatch();
         std::lock_guard<std::mutex> lock(mutex_);
         // open-astro#728: a latched fault must not stop a client stopping the
         // mount. Skip the latch check, the parked check (a status read) and the
@@ -1327,14 +1329,11 @@ public:
         }
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next Slewing
-        // read must answer normally again. Clear unconditionally, before the
-        // early-return below (a soft-failed goto never set is_slewing).
+        // read must answer normally again. Clear unconditionally (a
+        // soft-failed goto never set is_slewing).
         last_slew_error_.clear();
-        if (!faulted && !cached_status_.is_slewing) {
-            restore_altitude_limit_locked("AbortSlew");
-            restore_meridian_treatment_locked("AbortSlew");
-            return;
-        }
+        // open-astro#768: the stop is sent even when the cached status says the
+        // mount is not slewing; that cache can lag a GOTO the mount accepted.
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
             protocol.stop_slewing();
@@ -1347,8 +1346,6 @@ public:
         slew_in_progress_ = false;
         status_cache_valid_ = false;
         slew_override_until_ = std::chrono::steady_clock::time_point{};
-        restore_altitude_limit_locked("AbortSlew");
-        restore_meridian_treatment_locked("AbortSlew");
     }
     
     void pulse_guide(int direction, int duration) override {
@@ -1885,78 +1882,6 @@ private:
         }
     }
 
-    bool try_override_altitude_limit_locked() const {
-        auto& protocol = iOptronProtocolWrapper::instance();
-        try {
-            const int current_limit = protocol.get_altitude_limit_degrees();
-            altitude_limit_restore_degrees_ = current_limit;
-            constexpr int kAltitudeLimitOverrideDegrees = -89;
-            if (current_limit != kAltitudeLimitOverrideDegrees) {
-                protocol.set_altitude_limit_degrees(kAltitudeLimitOverrideDegrees);
-            }
-            altitude_limit_override_active_ = true;
-            ALPACA_LOG_INFO(
-                "iOptron",
-                "Temporarily lowering altitude limit to " +
-                    std::to_string(kAltitudeLimitOverrideDegrees) +
-                    " degrees for slew");
-            return true;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string("Unable to override altitude limit: ") + e.what());
-            altitude_limit_override_active_ = false;
-            return false;
-        }
-    }
-
-    void restore_altitude_limit_locked(const char* label) const {
-        if (!altitude_limit_override_active_) {
-            return;
-        }
-        try {
-            auto& protocol = iOptronProtocolWrapper::instance();
-            protocol.set_altitude_limit_degrees(altitude_limit_restore_degrees_);
-            altitude_limit_override_active_ = false;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string(label) + ": Failed to restore altitude limit: " +
-                                         e.what());
-        }
-    }
-
-    bool try_override_meridian_treatment_locked() const {
-        auto& protocol = iOptronProtocolWrapper::instance();
-        try {
-            const MeridianTreatment current = protocol.get_meridian_treatment();
-            meridian_restore_behavior_ = current.behavior;
-            meridian_restore_degrees_ = current.degrees_past;
-            constexpr int kMeridianOverrideDegrees = 30;
-            protocol.set_meridian_treatment(1, kMeridianOverrideDegrees);
-            meridian_override_active_ = true;
-            ALPACA_LOG_INFO(
-                "iOptron",
-                "Temporarily relaxing meridian treatment to flip, " +
-                    std::to_string(kMeridianOverrideDegrees) + " degrees past meridian");
-            return true;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string("Unable to override meridian treatment: ") + e.what());
-            meridian_override_active_ = false;
-            return false;
-        }
-    }
-
-    void restore_meridian_treatment_locked(const char* label) const {
-        if (!meridian_override_active_) {
-            return;
-        }
-        try {
-            auto& protocol = iOptronProtocolWrapper::instance();
-            protocol.set_meridian_treatment(meridian_restore_behavior_, meridian_restore_degrees_);
-            meridian_override_active_ = false;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string(label) + ": Failed to restore meridian treatment: " +
-                                         e.what());
-        }
-    }
-
     void prepare_slew_state_locked(double ascom_ra, double ascom_dec,
                                     double phys_ra, double phys_dec,
                                     const char* label) {
@@ -1994,35 +1919,14 @@ private:
         if (!accepted) {
             accepted = protocol.slew_to_ra_dec_cw_up();
         }
-        bool altitude_override_applied = false;
-        bool meridian_override_applied = false;
-        if (!accepted && !altitude_limit_override_active_) {
-            altitude_override_applied = try_override_altitude_limit_locked();
-        }
-        if (!accepted && !meridian_override_active_) {
-            meridian_override_applied = try_override_meridian_treatment_locked();
-        }
-        if (!accepted && (altitude_override_applied || meridian_override_applied)) {
-            accepted = protocol.slew_to_ra_dec();
-            if (!accepted) {
-                accepted = protocol.slew_to_ra_dec_cw_up();
-            }
-            if (!accepted && altitude_override_applied) {
-                restore_altitude_limit_locked(label);
-            }
-            if (!accepted && meridian_override_applied) {
-                restore_meridian_treatment_locked(label);
-            }
-        }
         if (!accepted) {
             slew_in_progress_ = false;
             clear_slew_override_locked();
             if (allow_soft_fail) {
                 // open-astro#575: a reap by a newer initiator is not a failure -- that
                 // initiator already owns clearing/replacing last_slew_error_.
-                // AbortSlew does not set the cancel flag, so a dispatch it did not
-                // reap can still send its GOTO and record a real failure after the
-                // abort cleared the error.
+                // AbortSlew reaps the dispatch (open-astro#768), so none can
+                // record a failure after the abort cleared the error.
                 if (!slew_dispatch_cancel_.load()) {
                     last_slew_error_ = std::string(label) + " failed: mount rejected the target";
                 }
@@ -2102,8 +2006,6 @@ private:
             std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
         slew_in_progress_ = false;
-        restore_altitude_limit_locked(label);
-        restore_meridian_treatment_locked(label);
     }
     
     void refresh_position_cache_locked(bool force = false) const {
@@ -2644,17 +2546,18 @@ private:
     // Must be called WITHOUT mutex_ held — the dispatch thread takes mutex_,
     // so joining under the lock would deadlock. The thread only dispatches a
     // single command (no long sleeps), so the join is quick.
+    // open-astro#768: join under slew_dispatch_mutex_ (the dispatch never
+    // takes it) and touch the cancel flag only there, so a second reaper waits
+    // for the first join instead of returning early and clearing the cancel
+    // the queued dispatch still has to see. Same shape as
+    // stop_clock_sync_thread_locked().
     void reap_slew_dispatch() {
-        slew_dispatch_cancel_.store(true);
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
-            prev = std::move(slew_dispatch_thread_);
+        std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
+        if (slew_dispatch_thread_.joinable()) {
+            slew_dispatch_cancel_.store(true);
+            slew_dispatch_thread_.join();
+            slew_dispatch_cancel_.store(false);
         }
-        if (prev.joinable()) {
-            prev.join();
-        }
-        slew_dispatch_cancel_.store(false);
     }
 
     std::chrono::system_clock::time_point current_utc_time_locked() const {
@@ -2893,11 +2796,6 @@ private:
     mutable int slew_refine_count_ = 0;
     mutable double slew_target_ra_hours_ = 0.0;
     mutable double slew_target_dec_degrees_ = 0.0;
-    mutable bool altitude_limit_override_active_ = false;
-    mutable int altitude_limit_restore_degrees_ = 0;
-    mutable bool meridian_override_active_ = false;
-    mutable int meridian_restore_behavior_ = 0;
-    mutable int meridian_restore_degrees_ = 0;
     mutable bool device_faulted_ = false;
     mutable int device_fault_count_ = 0;
     mutable std::string last_device_error_;
@@ -2912,7 +2810,8 @@ private:
     // bodies — see start_clock_sync_thread(). Never taken by the body.
     std::mutex clock_sync_mutex_;
     // Async slew dispatch thread (never detached) — see reap_slew_dispatch().
-    // slew_dispatch_mutex_ only guards the thread handle.
+    // slew_dispatch_mutex_ guards the thread handle and every write of the
+    // cancel flag; the dispatch body never takes it.
     std::mutex slew_dispatch_mutex_;
     std::thread slew_dispatch_thread_;
     std::atomic<bool> slew_dispatch_cancel_{false};
