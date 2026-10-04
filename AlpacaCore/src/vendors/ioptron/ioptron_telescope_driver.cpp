@@ -1312,6 +1312,10 @@ public:
     }
 
     void abort_slew() override {
+        // open-astro#768: fence the async slew dispatch first, so no :MS1#/:MS2#
+        // can reach the mount after the stop below. Runs without mutex_ held
+        // (the dispatch thread takes it), like every other reap site.
+        reap_slew_dispatch();
         std::lock_guard<std::mutex> lock(mutex_);
         // open-astro#728: a latched fault must not stop a client stopping the
         // mount. Skip the latch check, the parked check (a status read) and the
@@ -1325,12 +1329,11 @@ public:
         }
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next Slewing
-        // read must answer normally again. Clear unconditionally, before the
-        // early-return below (a soft-failed goto never set is_slewing).
+        // read must answer normally again. Clear unconditionally (a
+        // soft-failed goto never set is_slewing).
         last_slew_error_.clear();
-        if (!faulted && !cached_status_.is_slewing) {
-            return;
-        }
+        // open-astro#768: the stop is sent even when the cached status says the
+        // mount is not slewing; that cache can lag a GOTO the mount accepted.
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
             protocol.stop_slewing();
@@ -1922,9 +1925,8 @@ private:
             if (allow_soft_fail) {
                 // open-astro#575: a reap by a newer initiator is not a failure -- that
                 // initiator already owns clearing/replacing last_slew_error_.
-                // AbortSlew does not set the cancel flag, so a dispatch it did not
-                // reap can still send its GOTO and record a real failure after the
-                // abort cleared the error.
+                // AbortSlew reaps the dispatch (open-astro#768), so none can
+                // record a failure after the abort cleared the error.
                 if (!slew_dispatch_cancel_.load()) {
                     last_slew_error_ = std::string(label) + " failed: mount rejected the target";
                 }
