@@ -486,6 +486,10 @@ TEST_CASE("Bisque Telescope Driver - connected slew, sync and MoveAxis refuse no
         });
     };
 
+    // Count motion commands as a delta from here, so a connect handshake that ever
+    // sends one does not break the absolute counts below.
+    const auto baseline = motion_commands_sent();
+
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const double inf = std::numeric_limits<double>::infinity();
     namespace AlpacaError = alpacacore::AlpacaError;
@@ -500,14 +504,15 @@ TEST_CASE("Bisque Telescope Driver - connected slew, sync and MoveAxis refuse no
         require_alpaca_error([&]() { driver->move_axis(0, bad); }, AlpacaError::InvalidValue);
         require_alpaca_error([&]() { driver->move_axis(1, bad); }, AlpacaError::InvalidValue);
     }
-    CHECK(motion_commands_sent() == 0);
+    CHECK(motion_commands_sent() - baseline == 0);
     // Nothing was stored as a target either.
     require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, AlpacaError::ValueNotSet);
     require_alpaca_error([&]() { (void)driver->get_target_declination(); }, AlpacaError::ValueNotSet);
 
     // The fake is live: a finite MoveAxis rate does reach it.
+    const auto before_move = motion_commands_sent();
     CHECK_NOTHROW(driver->move_axis(0, 1.0));
-    CHECK(motion_commands_sent() == 1);
+    CHECK(motion_commands_sent() - before_move == 1);
     driver->set_connected(false);
 }
 
