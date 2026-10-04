@@ -4809,41 +4809,54 @@ async function wifiRenderNetworks(rescan) {
         return;
     }
     const profiles = wifiState.profiles || [];
-    const savedBySsid = {};
+    const savedBySsid = new Map();
     for (const p of profiles) {
-        if (p.Mode !== 'ap') savedBySsid[p.Ssid] = p;
+        if (p.Mode !== 'ap') savedBySsid.set(wifiSsidKey(p), p);
     }
-    const activeSsid = wifiClientConnected(status) ? status.Ssid : null;
+    const activeSsid = wifiClientConnected(status) ? wifiSsidKey(status) : null;
 
     list.innerHTML = '';
     const inRange = new Set();
+    const displayKeys = new Map();
+    for (const item of networks.concat(profiles)) {
+        const keys = displayKeys.get(item.Ssid) || new Set();
+        keys.add(wifiSsidKey(item));
+        displayKeys.set(item.Ssid, keys);
+    }
     for (const n of networks) {
-        if (n.Ssid === (wifiState.ap && wifiState.ap.Ssid)) continue;  // own hotspot
-        inRange.add(n.Ssid);
-        const saved = savedBySsid[n.Ssid];
-        const isActive = n.Ssid === activeSsid;
+        const key = wifiSsidKey(n);
+        if (key === wifiSsidKey(wifiState.ap)) continue;  // own hotspot
+        inRange.add(key);
+        const saved = savedBySsid.get(key);
+        const isActive = key === activeSsid;
+        const label = wifiSsidLabel(n, displayKeys.get(n.Ssid).size);
         const row = document.createElement('div');
         row.className = 'wifi-net-row' + (isActive ? ' active' : '');
         row.innerHTML =
             '<span class="wifi-net-check">' + (isActive ? '✓' : '') + '</span>' +
-            '<span class="wifi-net-name">' + escapeHtml(n.Ssid) + (saved && !isActive ? ' <small>saved</small>' : '') + '</span>' +
+            '<span class="wifi-net-name">' + escapeHtml(label) + (saved && !isActive ? ' <small>saved</small>' : '') + '</span>' +
             '<span class="wifi-net-meta">' + (n.Security !== 'Open' ? '🔒 ' : '') +
             (n.FrequencyMhz > 5000 ? '5' : '2.4') + ' GHz <span class="wifi-signal">' + wifiSignalIcon(n.SignalPercent) + '</span></span>';
         if (!isActive) {
-            row.addEventListener('click', () => saved ? wifiConnectSaved(saved) : wifiJoinNew(n));
+            row.addEventListener('click', () => saved ?
+                wifiConnectSaved(saved, displayKeys.get(saved.Ssid).size) :
+                wifiJoinNew(n, displayKeys.get(n.Ssid).size));
         }
         if (saved) {
             const forget = document.createElement('button');
             forget.className = 'btn btn-secondary btn-small';
             forget.textContent = 'Forget';
-            forget.addEventListener('click', (e) => { e.stopPropagation(); wifiForget(saved); });
+            forget.addEventListener('click', (e) => {
+                e.stopPropagation();
+                wifiForget(saved, displayKeys.get(saved.Ssid).size);
+            });
             row.appendChild(forget);
         }
         list.appendChild(row);
     }
 
     // Saved networks that are not in range right now: manageable (forget).
-    const outOfRange = profiles.filter((p) => p.Mode !== 'ap' && !inRange.has(p.Ssid));
+    const outOfRange = profiles.filter((p) => p.Mode !== 'ap' && !inRange.has(wifiSsidKey(p)));
     if (outOfRange.length) {
         const title = document.createElement('p');
         title.className = 'wifi-substatus';
@@ -4852,11 +4865,15 @@ async function wifiRenderNetworks(rescan) {
         for (const p of outOfRange) {
             const row = document.createElement('div');
             row.className = 'wifi-net-row dim';
-            row.innerHTML = '<span class="wifi-net-check"></span><span class="wifi-net-name">' + escapeHtml(p.Ssid) + '</span>';
+            row.innerHTML = '<span class="wifi-net-check"></span><span class="wifi-net-name">' +
+                escapeHtml(wifiSsidLabel(p, displayKeys.get(p.Ssid).size)) + '</span>';
             const forget = document.createElement('button');
             forget.className = 'btn btn-secondary btn-small';
             forget.textContent = 'Forget';
-            forget.addEventListener('click', (e) => { e.stopPropagation(); wifiForget(p); });
+            forget.addEventListener('click', (e) => {
+                e.stopPropagation();
+                wifiForget(p, displayKeys.get(p.Ssid).size);
+            });
             row.appendChild(forget);
             list.appendChild(row);
         }
@@ -4868,39 +4885,45 @@ async function wifiRenderNetworks(rescan) {
 
 function wifiScanClicked() { wifiRenderNetworks(true); }
 
-async function wifiJoinNew(network) {
+async function wifiJoinNew(network, displayCount) {
+    const label = wifiSsidLabel(network, displayCount);
     let passphrase = '';
     if (network.Security !== 'Open') {
-        passphrase = prompt('Password for "' + network.Ssid + '":');
+        passphrase = prompt('Password for "' + label + '":');
         if (passphrase === null) return;
     }
-    if (!wifiConfirmSwitch('join "' + network.Ssid + '"')) return;
+    if (!wifiConfirmSwitch('join "' + label + '"')) return;
     try {
-        await wifiApi('/profiles', 'PUT', { Ssid: network.Ssid, Passphrase: passphrase, Autoconnect: true, Priority: 0 });
+        await wifiApi('/profiles', 'PUT', Object.assign(
+            network.SsidHex ? { SsidHex: network.SsidHex } : { Ssid: network.Ssid },
+            { Passphrase: passphrase, Autoconnect: true, Priority: 0 }));
         const profiles = await wifiApi('/profiles');
-        const match = profiles.find((p) => p.Ssid === network.Ssid && p.Mode !== 'ap');
+        const match = profiles.find((p) => wifiSsidKey(p) === wifiSsidKey(network) && p.Mode !== 'ap');
         if (match) await wifiApi('/connect', 'PUT', { Uuid: match.Uuid });
-        wifiMessage('Joining ' + network.Ssid + '...');
+        wifiMessage('Joining ' + label + '...');
         setTimeout(wifiRefresh, 8000);
     } catch (e) {
         wifiMessage('Could not join: ' + e.message, true);
     }
 }
 
-async function wifiConnectSaved(profile) {
-    if (!wifiConfirmSwitch('switch to "' + profile.Ssid + '"')) return;
+async function wifiConnectSaved(profile, displayCount) {
+    const label = wifiSsidLabel(profile, displayCount);
+    if (!wifiConfirmSwitch('switch to "' + label + '"')) return;
     try {
         await wifiApi('/connect', 'PUT', { Uuid: profile.Uuid });
-        wifiMessage('Connecting to ' + profile.Ssid + '...');
+        wifiMessage('Connecting to ' + label + '...');
         setTimeout(wifiRefresh, 8000);
     } catch (e) {
         wifiMessage('Could not connect: ' + e.message, true);
     }
 }
 
-async function wifiForget(profile) {
-    const connectedNow = wifiClientConnected(wifiState.status || {}) && (wifiState.status || {}).Ssid === profile.Ssid;
-    if (!confirm('Forget "' + profile.Ssid + '"?' + (connectedNow ? '\n\nThe device is connected to this network right now and will disconnect from it.' : ''))) return;
+async function wifiForget(profile, displayCount) {
+    const label = wifiSsidLabel(profile, displayCount);
+    const connectedNow = wifiClientConnected(wifiState.status || {}) &&
+        wifiSsidKey(wifiState.status || {}) === wifiSsidKey(profile);
+    if (!confirm('Forget "' + label + '"?' + (connectedNow ? '\n\nThe device is connected to this network right now and will disconnect from it.' : ''))) return;
     try {
         await wifiApi('/profiles/' + encodeURIComponent(profile.Uuid), 'DELETE');
         wifiState.profiles = await wifiApi('/profiles');
@@ -4972,7 +4995,12 @@ async function wifiApplyAp(enabled, fromToggle) {
     }
     wifiState.busy = true;
     try {
-        await wifiApi('/ap', 'PUT', { Ssid: ssid, Passphrase: passphrase, Band: wifiSelectedBand(), Channel: 0, Enabled: enabled });
+        const apBody = { Ssid: ssid, Passphrase: passphrase, Band: wifiSelectedBand(), Channel: 0, Enabled: enabled };
+        // Keep the exact configured bytes when the user leaves the displayed SSID text unchanged.
+        if (wifiState.ap && wifiState.ap.Configured && ssid === wifiState.ap.Ssid && wifiState.ap.SsidHex) {
+            apBody.SsidHex = wifiState.ap.SsidHex;
+        }
+        await wifiApi('/ap', 'PUT', apBody);
         const passInput = wifiEl('wifi-ap-pass');
         if (passInput) passInput.value = '';
         wifiMessage(fromToggle ? (enabled ? 'Hotspot starting...' : 'Hotspot turned off.') : 'Saved.');
