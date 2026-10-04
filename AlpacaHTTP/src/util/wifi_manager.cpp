@@ -65,6 +65,19 @@ std::string ssid_from_hex(std::string_view hex) {
     return out;
 }
 
+std::string ssid_connection_id(std::string_view ssid, const std::optional<std::string>& existing_id) {
+    if (existing_id) return *existing_id;
+    bool safe_text_id = ssid.find('\0') == std::string_view::npos;
+    if (safe_text_id) {
+        try {
+            (void)nlohmann::json(std::string(ssid)).dump(-1, ' ', false, nlohmann::json::error_handler_t::strict);
+        } catch (const nlohmann::json::exception&) {
+            safe_text_id = false;
+        }
+    }
+    return safe_text_id ? std::string(ssid) : "Wi-Fi " + ssid_to_hex(ssid);
+}
+
 namespace {
 
 constexpr const char* kNmService = "org.freedesktop.NetworkManager";
@@ -883,16 +896,6 @@ std::string security_label(std::uint32_t wpa_flags, std::uint32_t rsn_flags) {
     return "Open";
 }
 
-std::string safe_ssid_id(const std::string& ssid) {
-    try {
-        (void)nlohmann::json(ssid).dump(-1, ' ', false, nlohmann::json::error_handler_t::strict);
-        if (ssid.find('\0') == std::string::npos) return ssid;
-    } catch (const nlohmann::json::exception&) {
-        return "Wi-Fi " + ssid_to_hex(ssid);
-    }
-    return "Wi-Fi " + ssid_to_hex(ssid);
-}
-
 }  // namespace
 
 // ---- WifiManager ------------------------------------------------------------
@@ -1132,8 +1135,11 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::str
         }
     }
 
-    const std::string connection_id =
-        existing_path.empty() ? safe_ssid_id(ssid) : existing["connection"].value("id", safe_ssid_id(ssid));
+    std::optional<std::string> existing_id;
+    if (!existing_path.empty()) {
+        existing_id = existing["connection"].value("id", ssid_connection_id(ssid));
+    }
+    const std::string connection_id = ssid_connection_id(ssid, existing_id);
     Section conn{{"id", SVal::str(connection_id)},
                  {"type", SVal::str("802-11-wireless")},
                  {"autoconnect", SVal::boolean(autoconnect)},

@@ -88,6 +88,10 @@ Saved connections (client networks AND the hotspot profile):
 `Mode` is `infrastructure` (client) or `ap` (hotspot). Passphrases are never
 returned by any endpoint.
 
+`Id` is the NetworkManager connection name. A new profile uses the SSID text
+when it is valid UTF-8 and contains no NUL byte. Otherwise, its ID is
+`Wi-Fi <SsidHex>`. Updating an existing profile keeps its current `Id`.
+
 ### PUT /management/v1/wifi/profiles
 
 Create or update a client profile: `{ "Ssid": "HomeNet", "Passphrase":
@@ -104,6 +108,8 @@ represent arbitrary invalid UTF-8 bytes.
   never be silently converted to open — delete and re-add instead.
 - Passphrase must be 8–63 chars when present; SSID is 1–32 bytes.
 - Updating matches by SSID (client profiles only).
+- A new profile uses a safe `Id` as described above. An update keeps the existing
+  profile `Id`.
 
 ### DELETE /management/v1/wifi/profiles/{uuid}
 
@@ -142,6 +148,8 @@ DHCP on the fleet-wide subnet `172.24.1.0/24`; the portal is always at
 - `SsidHex` may be supplied instead of `Ssid` with the same encoding and
   precedence rules as `PUT /profiles`. This lets clients preserve a configured
   SSID while changing other AP settings.
+- The web UI preserves the configured `SsidHex` when the displayed SSID text is
+  unchanged. Change the text to set a new SSID.
 
 ### PUT /management/v1/wifi/radio
 

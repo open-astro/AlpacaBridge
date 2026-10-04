@@ -4996,6 +4996,7 @@ async function wifiApplyAp(enabled, fromToggle) {
     wifiState.busy = true;
     try {
         const apBody = { Ssid: ssid, Passphrase: passphrase, Band: wifiSelectedBand(), Channel: 0, Enabled: enabled };
+        // Keep the exact configured bytes when the user leaves the displayed SSID text unchanged.
         if (wifiState.ap && wifiState.ap.Configured && ssid === wifiState.ap.Ssid && wifiState.ap.SsidHex) {
             apBody.SsidHex = wifiState.ap.SsidHex;
         }

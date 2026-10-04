@@ -29,6 +29,7 @@
 
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -44,6 +45,8 @@ public:
 // decoded size at the API boundary.
 std::string ssid_to_hex(std::string_view ssid);
 std::string ssid_from_hex(std::string_view hex);
+// Preserve an existing ID; otherwise use safe SSID text or its hex form.
+std::string ssid_connection_id(std::string_view ssid, const std::optional<std::string>& existing_id = std::nullopt);
 
 class WifiManager {
 public:

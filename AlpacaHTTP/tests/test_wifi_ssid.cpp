@@ -24,6 +24,10 @@ int main() {
     EXPECT(alpacahttp::util::ssid_from_hex("FF00Fe") == arbitrary_bytes);
     EXPECT(alpacahttp::util::ssid_from_hex(alpacahttp::util::ssid_to_hex(std::string(32, '\x80'))) ==
            std::string(32, '\x80'));
+    EXPECT(alpacahttp::util::ssid_connection_id("HomeNet") == "HomeNet");
+    EXPECT(alpacahttp::util::ssid_connection_id(std::string("\xff", 1)) == "Wi-Fi ff");
+    EXPECT(alpacahttp::util::ssid_connection_id(std::string("a\0b", 3)) == "Wi-Fi 610062");
+    EXPECT(alpacahttp::util::ssid_connection_id("HomeNet", std::string("Saved profile")) == "Saved profile");
 
     for (const auto* malformed : {"", "f", "gg", "000"}) {
         bool rejected = false;
