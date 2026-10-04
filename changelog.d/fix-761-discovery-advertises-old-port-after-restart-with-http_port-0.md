@@ -1,0 +1,2 @@
+### Fixed
+- **Discovery advertises the new HTTP port after a management restart with `http_port` 0** (`AlpacaHTTP/examples/simple_server/main.cpp`): the wait loop set the discovery port once and never again, so a restart that bound a new ephemeral port left discovery answering with the old one. The loop now remembers the last advertised port and advertises again when `bound_port()` changes. A fixed `http_port` is unchanged.
