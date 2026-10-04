@@ -1168,6 +1168,20 @@ public:
     // home position, so homing is a goto to axis angles 0,0. AtHome flips true (and Slewing false) in
     // the same locked step when the goto lands.
     void find_home() override {
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            // Validate before reaping: a refused FindHome during Park must not
+            // cancel the park task.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("FindHome");
+            if (homing_) {
+                return;
+            }
+            if (at_home_ && !get_hardware_slewing_locked(true)) {
+                return;
+            }
+        }
         reap_slew_task();
         reap_pulse_task();
         {
@@ -1185,6 +1199,8 @@ public:
             restore_tracking_after_slew_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            goto_in_progress_ = false;
+            restoring_tracking_ = false;
             homing_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that calls FindHome after a failed GOTO must not be told the
@@ -1286,6 +1302,8 @@ public:
             restore_tracking_after_slew_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            goto_in_progress_ = false;
+            restoring_tracking_ = false;
             parking_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that calls Park after a failed GOTO must not be told the OLD
@@ -1812,6 +1830,7 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        std::unique_lock<std::mutex> ilock(initiator_mutex_);
         {
             // A refused goto must not cancel a goto, park or pulse in flight,
             // so gate BEFORE reaping (the copies below re-check after it).
@@ -1828,17 +1847,31 @@ public:
         check_not_parked_locked("SlewToCoordinates");
         validate_ra_dec(ra, dec, "SlewToCoordinates");
         check_target_altitude_locked(ra, dec, "SlewToCoordinates");
-        goto_in_progress_ = true;
+        uint64_t owner_generation = motion_generation_;
+        goto_in_progress_ = false;
+        restoring_tracking_ = false;
         try {
             do_slew_to_ra_dec_locked(lock, ra, dec);
-            wait_for_slew_complete(lock);
-            refine_goto_landing(lock, ra, dec);
+            owner_generation = motion_generation_;
+            goto_in_progress_ = true;
+            ilock.unlock();
+            if (!wait_for_slew_complete(lock, owner_generation)) {
+                throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+            }
+            if (!refine_goto_landing(lock, ra, dec, &owner_generation)) {
+                throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+            }
+            if (motion_generation_ != owner_generation) {
+                throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+            }
         } catch (...) {
-            goto_in_progress_ = false;
-            // An abandoned goto never reaches the landing that consumes this
-            // stamp, and a Park/FindHome landing within the next 30 s would
-            // otherwise fold the abandoned interval into goto_overhead_seconds_.
-            last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
+            if (motion_generation_ == owner_generation) {
+                goto_in_progress_ = false;
+                // An abandoned goto never reaches the landing that consumes this
+                // stamp, and a Park/FindHome landing within the next 30 s would
+                // otherwise fold the abandoned interval into goto_overhead_seconds_.
+                last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
+            }
             throw;
         }
         // Same order as the async task: Slewing stays true until tracking is
@@ -1857,10 +1890,16 @@ public:
         try {
             restore_tracking_after_slew_locked(lock);
         } catch (...) {
-            restoring_tracking_ = false;
+            if (!parking_ && !homing_ && !goto_in_progress_ && !slewing_cached_ && !manual_axis_slewing_[0] &&
+                !manual_axis_slewing_[1]) {
+                restoring_tracking_ = false;
+            }
             throw;
         }
-        restoring_tracking_ = false;
+        if (!parking_ && !homing_ && !goto_in_progress_ && !slewing_cached_ && !manual_axis_slewing_[0] &&
+            !manual_axis_slewing_[1]) {
+            restoring_tracking_ = false;
+        }
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -1903,6 +1942,8 @@ public:
             restore_tracking_after_slew_ = tracking_;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            goto_in_progress_ = false;
+            restoring_tracking_ = false;
             parked_ = false;
             at_home_ = false;
         }
@@ -2125,6 +2166,8 @@ public:
             if (moving) {
                 parked_ = false;
                 at_home_ = false;
+                goto_in_progress_ = false;
+                restoring_tracking_ = false;
                 // Command the motion BEFORE publishing the Slewing flag: if the
                 // transport throws (seen as UDP timeouts over a flaky Wi-Fi
                 // link), a pre-set flag is never cleared and Slewing wedges
@@ -2543,6 +2586,10 @@ private:
     }
 
     void reset_runtime_state_locked() {
+        // Invalidate every unlocked stop-wait from the previous connection.
+        // `connected_` alone cannot distinguish a reconnect that completed
+        // while an older operation was sleeping outside mutex_.
+        ++motion_generation_;
         target_ra_set_ = false;
         target_dec_set_ = false;
         client_disagreement_warned_ = false;  // open-astro#400: one WARN per connection
@@ -3815,8 +3862,12 @@ private:
     // After the first goto lands, close the residual (prediction error) with
     // short re-gotos until inside the deadband. Slewing is held true across
     // the inter-goto gaps by goto_in_progress_, which both callers set.
-    void refine_goto_landing(std::unique_lock<std::mutex>& lock, double ra, double dec) {
+    bool refine_goto_landing(std::unique_lock<std::mutex>& lock, double ra, double dec,
+                             uint64_t* expected_generation = nullptr) {
         for (int iter = 0; iter < 3; ++iter) {
+            if (expected_generation && motion_generation_ != *expected_generation) {
+                return false;
+            }
             if (slew_task_cancel_.load()) {
                 break;  // AbortSlew/unpark/disconnect cancelled the slew
             }
@@ -3830,9 +3881,19 @@ private:
             }
             slewing_cached_ = true;
             dispatch_predicted_goto_locked(lock, ra, dec);
-            wait_for_slew_complete(lock);
+            if (expected_generation) {
+                *expected_generation = motion_generation_;
+            }
+            if (!wait_for_slew_complete(
+                    lock, expected_generation ? std::optional<uint64_t>(*expected_generation) : std::nullopt)) {
+                return false;
+            }
+        }
+        if (expected_generation && motion_generation_ != *expected_generation) {
+            return false;
         }
         slewing_cached_ = false;
+        return true;
     }
 
     void do_slew_to_ra_dec_locked(std::unique_lock<std::mutex>& lock, double ra, double dec) {
@@ -3858,6 +3919,7 @@ private:
             // pre-published slew state so Slewing cannot wedge true.
             slewing_cached_ = false;
             restore_tracking_after_slew_ = false;
+            last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
             throw;
         }
         manual_axis_slewing_[0] = false;
@@ -4357,7 +4419,8 @@ private:
                 " s after the controller reported it stopped");
     }
 
-    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock) const {
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock,
+                                std::optional<uint64_t> expected_generation = std::nullopt) const {
         const auto timeout = std::chrono::seconds(180);
         auto start = std::chrono::steady_clock::now();
         const auto start_grace = std::chrono::seconds(2);
@@ -4369,6 +4432,9 @@ private:
             check_connected();
         };
         while (true) {
+            if (expected_generation && motion_generation_ != *expected_generation) {
+                return false;
+            }
             if (slew_task_cancel_.load()) {
                 // A reap (unpark cancelling an in-flight park, or a newer async
                 // slew) wants this waiter gone; abandon the wait promptly so
@@ -4393,6 +4459,9 @@ private:
         }
         wait_axis_stationary_locked(lock, kAxisRa);
         wait_axis_stationary_locked(lock, kAxisDec);
+        if (expected_generation && motion_generation_ != *expected_generation) {
+            return false;
+        }
         last_landing_time_ = std::chrono::steady_clock::now();
         if (last_goto_dispatch_time_ != std::chrono::steady_clock::time_point{}) {
             const double took = std::chrono::duration<double>(last_landing_time_ - last_goto_dispatch_time_).count();
@@ -4413,6 +4482,7 @@ private:
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
+        return !expected_generation || motion_generation_ == *expected_generation;
     }
 
     // ── Background task threads (async slew, pulse stop) ────────────────────

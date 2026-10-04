@@ -190,7 +190,9 @@ Knobs:
 - `RUN_SANITIZERS=0 ./scripts/ci_preflight.sh` — skip the ASan+UBSan `sanitizers` reproduction (a third rebuild). The pass is **on by default** since #588, because it was the one configuration neither CI nor a human ran; opt out only for docs/CI-only changes.
 - `PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh` — never apt-install; missing tools are reported `[SKIP]` instead.
 
-**Gate:** the script exits non-zero if any mandatory check failed. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` only appears when a check is not applicable (no matching files changed), when `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled, or when `RUN_SANITIZERS=0` opted out of the ASan+UBSan pass — in the last two cases, surface it so the user knows CI will still enforce that gate.
+It can also exit non-zero before any check runs, when `PREFLIGHT_BASE` (or the default base) cannot be resolved (`ERROR: cannot resolve the diff base '<base>' to a commit.` or `ERROR: no merge-base between the diff base '<base>' and HEAD.`); report that error and the base it tried, not a failing check, and fix the base as the message says.
+
+**Gate:** the script exits non-zero if any mandatory check failed or the diff base could not be resolved. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` only appears when a check is not applicable (no matching files changed), when `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled, or when `RUN_SANITIZERS=0` opted out of the ASan+UBSan pass — in the last two cases, surface it so the user knows CI will still enforce that gate.
 
 ## Step 5 — Push the branch
 
