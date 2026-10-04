@@ -445,6 +445,10 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_wifi_manager alpacahttp)
     add_test(NAME test_wifi_manager COMMAND test_wifi_manager)
 
+    add_executable(test_wifi_ssid tests/test_wifi_ssid.cpp)
+    target_link_libraries(test_wifi_ssid alpacahttp)
+    add_test(NAME test_wifi_ssid COMMAND test_wifi_ssid)
+
     # Issue #764: the JSON sink must not throw on non-UTF-8 bytes (Wi-Fi SSIDs).
     add_executable(test_response_utf8 tests/test_response_utf8.cpp)
     target_link_libraries(test_response_utf8 alpacahttp)

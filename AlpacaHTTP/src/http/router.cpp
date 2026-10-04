@@ -7942,6 +7942,15 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
         response.set_body(alpaca_response);
         return response;
     };
+    auto get_ssid = [](const nlohmann::json& body) {
+        if (const auto* hex = find_json_value(body, "SsidHex")) {
+            if (!hex->is_string()) throw util::WifiError("SsidHex (string) is required");
+            return util::ssid_from_hex(hex->get<std::string>());
+        }
+        const auto* ssid = find_json_value(body, "Ssid");
+        if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) or SsidHex (string) is required");
+        return ssid->get<std::string>();
+    };
 
     try {
         auto& wifi = wifi_manager();
@@ -7961,8 +7970,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             ok.value = wifi.profiles();
         } else if (sub == "profiles" && is_put) {
             auto body = body_json();
-            const auto* ssid = find_json_value(body, "Ssid");
-            if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) is required");
+            const auto ssid = get_ssid(body);
             std::string passphrase;
             if (const auto* p = find_json_value(body, "Passphrase"); p && p->is_string()) {
                 passphrase = p->get<std::string>();
@@ -7975,7 +7983,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             if (const auto* pr = find_json_value(body, "Priority"); pr && pr->is_number_integer()) {
                 priority = pr->get<int>();
             }
-            ok.value = wifi.save_profile(ssid->get<std::string>(), passphrase, autoconnect, priority);
+            ok.value = wifi.save_profile(ssid, passphrase, autoconnect, priority);
         } else if (sub.rfind("profiles/", 0) == 0 && is_delete) {
             wifi.delete_profile(sub.substr(std::string("profiles/").size()));
             ok.value = nlohmann::json{{"Deleted", true}};
@@ -7992,8 +8000,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             ok.value = wifi.get_ap();
         } else if (sub == "ap" && is_put) {
             auto body = body_json();
-            const auto* ssid = find_json_value(body, "Ssid");
-            if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) is required");
+            const auto ssid = get_ssid(body);
             std::string passphrase;
             if (const auto* p = find_json_value(body, "Passphrase"); p && p->is_string()) {
                 passphrase = p->get<std::string>();
@@ -8010,7 +8017,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             if (const auto* e = find_json_value(body, "Enabled"); e && e->is_boolean()) {
                 enabled = e->get<bool>();
             }
-            ok.value = wifi.set_ap(ssid->get<std::string>(), passphrase, band, channel, enabled);
+            ok.value = wifi.set_ap(ssid, passphrase, band, channel, enabled);
         } else if (sub == "country" && is_get) {
             ok.value = wifi.get_country();
         } else if (sub == "country" && is_put) {
