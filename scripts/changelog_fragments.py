@@ -61,24 +61,36 @@ def parse_body(lines: list[str]) -> tuple[Entries, list[str]]:
     entries: Entries = {}
     problems: list[str] = []
     category: str | None = None
+    in_fence = False
+    pending: list[str] = []  # blank lines seen since the last kept line
     for raw in lines:
         line = raw.rstrip()
-        m = CATEGORY_RE.match(line)
-        if m:
-            category = m.group(1)
-            entries.setdefault(category, [])
-            continue
+        if not in_fence:
+            m = CATEGORY_RE.match(line)
+            if m:
+                category = m.group(1)
+                entries.setdefault(category, [])
+                pending = []
+                continue
         if not line.strip():
+            pending.append("")
             continue
         if category is None:
             problems.append("text before the first '### <Category>' subsection: %r" % line[:60])
+            pending = []
             continue
-        if line.startswith("- "):
+        if not in_fence and line.startswith("- "):
             entries[category].append([line])
         elif entries[category]:
+            # a blank line stays only inside a bullet: before an indented line or within a fence
+            if pending and (in_fence or line[0] in " \t"):
+                entries[category][-1].extend(pending)
             entries[category][-1].append(line)  # continuation or nested bullet
         else:
             problems.append("'### %s' has text before its first '- ' bullet: %r" % (category, line[:60]))
+        pending = []
+        if category is not None and line.strip().startswith("```"):
+            in_fence = not in_fence
     return entries, problems
 
 
@@ -357,8 +369,18 @@ def self_test() -> int:
         # release on a fixture: legacy UNRELEASED + two fragments
         _write(d, "b-second.md", "### Fixed\n- **Second fix** (issue #3)\n\n### Security\n- **Sec** (issue #3)\n")
         _write(d, "a-first.md", "### Added\n- **First add** (issue #2)\n\n### Fixed\n- **First fix** (issue #2)\n")
+        _write(
+            d,
+            "c-blank.md",
+            "### Fixed\n- **Paragraphs** (issue #4)\n\n  Second paragraph.\n\n- **Fence** (issue #4)\n  ```\n  a\n\nb\n  ```\n\n\n",
+        )
         new = assemble(FIXTURE, d, "1.3.0", "2026-02-03")
         out = new.split("\n")
+        expect(
+            "- **Paragraphs** (issue #4)\n\n  Second paragraph.\n- **Fence** (issue #4)\n  ```\n  a\n\nb\n  ```\n\n"
+            in new,
+            "blank lines inside a bullet or fence lost, or between-bullet blanks not collapsed",
+        )
         expect("## [1.3.0] - 2026-02-03" in out, "new dated heading missing")
         expect(not any("UNRELEASED" in x for x in out), "UNRELEASED heading survived")
         expect(out.index("Intro paragraph.") + 2 == out.index("## [1.3.0] - 2026-02-03"), "section not under intro")

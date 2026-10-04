@@ -1,0 +1,2 @@
+### Fixed
+- **Changelog fragments keep blank lines inside a bullet** (scripts): `parse_body()` in `scripts/changelog_fragments.py` dropped every blank line, so a multi-paragraph bullet or a fenced code block lost its internal blank lines at `--release`. It now keeps a blank line that precedes an indented continuation or sits inside a fence, and still drops blank lines between bullets and categories.
