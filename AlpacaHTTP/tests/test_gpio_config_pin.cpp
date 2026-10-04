@@ -141,10 +141,8 @@ std::string switch_config(int number, const std::string& type, const std::string
 
 int main() {
     namespace fs = std::filesystem;
-    const fs::path cwd = fs::temp_directory_path() / "gpio-config-pin-cwd";
-    fs::remove_all(cwd);
-    fs::create_directories(cwd);
-    fs::current_path(cwd);  // Router persists config/registered_devices.json relative to cwd
+    // Router persists config/registered_devices.json relative to the CMake-provided cwd.
+    fs::remove_all("config");
 
     alpacahttp::Router router;
     int status = 0;
@@ -168,6 +166,12 @@ int main() {
     configure(router, switch_config(9703, "asiair", R"("gpioChip":"/dev/gpiochip4","ports":[{"gpio":12}])"), status);
     EXPECT(status == 400);
     EXPECT(!registered(router, 9703));
+
+    // The same line twice is refused.
+    body = configure(router, switch_config(9711, "asiair", R"("ports":[{"gpio":12},{"gpio":12}])"), status);
+    EXPECT(status == 400);
+    EXPECT(body.find("Hardware config refused") != std::string::npos);
+    EXPECT(!registered(router, 9711));
 
     // A request-supplied devicePath is refused, whatever the path.
     for (const char* path : {"/etc/hostname", "/dev/sda", "/dev/gpiochip0"}) {
@@ -210,6 +214,7 @@ int main() {
     configure(router, R"({"vendor":"ioptron","deviceType":"switch","deviceNumber":9708,"gpioChip":"/dev/gpiochip0"})",
               status);
     EXPECT(status == 200);
+    EXPECT(registered(router, 9708));
 #endif
 
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
@@ -227,7 +232,6 @@ int main() {
     EXPECT(registered(router, 9710));
 #endif
 
-    fs::current_path(fs::temp_directory_path());
-    fs::remove_all(cwd);
+    fs::remove_all("config");
     return 0;
 }

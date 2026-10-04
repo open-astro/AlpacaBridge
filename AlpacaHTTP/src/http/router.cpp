@@ -47,6 +47,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -9174,6 +9175,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
                 std::vector<alpacacore::vendor::zwo::AsiairPortConfig> ports;
                 ports.reserve(config["ports"].size());
+                std::set<int> seen_gpio_lines;
                 for (const auto& p : config["ports"]) {
                     // A non-object entry (e.g. "ports":[null]) would make the
                     // contains()/[] accessors below throw nlohmann type_error.
@@ -9188,6 +9190,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                     const int gpio_value = p["gpio"].get<int>();
                     if (gpio_value != 12 && gpio_value != 13 && gpio_value != 26 && gpio_value != 18) {
                         return refuse_hardware_config(error_message, "ports[].gpio", "one of 12, 13, 26, 18");
+                    }
+                    if (!seen_gpio_lines.insert(gpio_value).second) {
+                        return refuse_hardware_config(error_message, "ports[].gpio",
+                                                      "each of 12, 13, 26, 18 at most once");
                     }
                     alpacacore::vendor::zwo::AsiairPortConfig pc;
                     pc.name = p.value("name", std::string("Port ") + std::to_string(ports.size() + 1));
