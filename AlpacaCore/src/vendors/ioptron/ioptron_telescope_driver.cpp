@@ -1312,6 +1312,10 @@ public:
     }
 
     void abort_slew() override {
+        // open-astro#768: fence the async slew dispatch first, so no :MS1#/:MS2#
+        // can reach the mount after the stop below. Runs without mutex_ held
+        // (the dispatch thread takes it), like every other reap site.
+        reap_slew_dispatch();
         std::lock_guard<std::mutex> lock(mutex_);
         // open-astro#728: a latched fault must not stop a client stopping the
         // mount. Skip the latch check, the parked check (a status read) and the
@@ -1325,12 +1329,11 @@ public:
         }
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next Slewing
-        // read must answer normally again. Clear unconditionally, before the
-        // early-return below (a soft-failed goto never set is_slewing).
+        // read must answer normally again. Clear unconditionally (a
+        // soft-failed goto never set is_slewing).
         last_slew_error_.clear();
-        if (!faulted && !cached_status_.is_slewing) {
-            return;
-        }
+        // open-astro#768: the stop is sent even when the cached status says the
+        // mount is not slewing; that cache can lag a GOTO the mount accepted.
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
             protocol.stop_slewing();
@@ -1922,9 +1925,8 @@ private:
             if (allow_soft_fail) {
                 // open-astro#575: a reap by a newer initiator is not a failure -- that
                 // initiator already owns clearing/replacing last_slew_error_.
-                // AbortSlew does not set the cancel flag, so a dispatch it did not
-                // reap can still send its GOTO and record a real failure after the
-                // abort cleared the error.
+                // AbortSlew reaps the dispatch (open-astro#768), so none can
+                // record a failure after the abort cleared the error.
                 if (!slew_dispatch_cancel_.load()) {
                     last_slew_error_ = std::string(label) + " failed: mount rejected the target";
                 }
@@ -2544,17 +2546,18 @@ private:
     // Must be called WITHOUT mutex_ held — the dispatch thread takes mutex_,
     // so joining under the lock would deadlock. The thread only dispatches a
     // single command (no long sleeps), so the join is quick.
+    // open-astro#768: join under slew_dispatch_mutex_ (the dispatch never
+    // takes it) and touch the cancel flag only there, so a second reaper waits
+    // for the first join instead of returning early and clearing the cancel
+    // the queued dispatch still has to see. Same shape as
+    // stop_clock_sync_thread_locked().
     void reap_slew_dispatch() {
-        slew_dispatch_cancel_.store(true);
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
-            prev = std::move(slew_dispatch_thread_);
+        std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
+        if (slew_dispatch_thread_.joinable()) {
+            slew_dispatch_cancel_.store(true);
+            slew_dispatch_thread_.join();
+            slew_dispatch_cancel_.store(false);
         }
-        if (prev.joinable()) {
-            prev.join();
-        }
-        slew_dispatch_cancel_.store(false);
     }
 
     std::chrono::system_clock::time_point current_utc_time_locked() const {
@@ -2807,7 +2810,8 @@ private:
     // bodies — see start_clock_sync_thread(). Never taken by the body.
     std::mutex clock_sync_mutex_;
     // Async slew dispatch thread (never detached) — see reap_slew_dispatch().
-    // slew_dispatch_mutex_ only guards the thread handle.
+    // slew_dispatch_mutex_ guards the thread handle and every write of the
+    // cancel flag; the dispatch body never takes it.
     std::mutex slew_dispatch_mutex_;
     std::thread slew_dispatch_thread_;
     std::atomic<bool> slew_dispatch_cancel_{false};
