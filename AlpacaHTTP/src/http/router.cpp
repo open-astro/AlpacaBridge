@@ -334,15 +334,23 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
     std::vector<std::string> output;
     output.reserve(lines.size() + 8);
 
+    // Output index just past the last content line of the current section, so
+    // keys added at the section's end land before its trailing blank and
+    // comment lines.
+    std::size_t section_end = 0;
+
     auto append_unwritten = [&](std::size_t section_index, std::size_t indent) {
         const auto& values = sections[section_index].second;
+        std::vector<std::string> added;
         for (std::size_t i = 0; i < values.size(); ++i) {
             if (!written[section_index][i]) {
-                output.push_back(std::string(indent, ' ') + values[i].first + ": \"" +
-                                 escape_yaml_string(values[i].second) + "\"");
+                added.push_back(std::string(indent, ' ') + values[i].first + ": \"" +
+                                escape_yaml_string(values[i].second) + "\"");
                 written[section_index][i] = true;
             }
         }
+        output.insert(output.begin() + static_cast<std::ptrdiff_t>(std::min(section_end, output.size())), added.begin(),
+                      added.end());
     };
 
     for (const auto& current_line : lines) {
@@ -350,7 +358,9 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         std::string trimmed = trim_copy(stripped_comment);
         std::size_t indent = leading_spaces(current_line);
 
-        if (indent == 0) {
+        // Only a top-level key ends a section; blank and comment lines at
+        // column 0 sit inside it (a hand-edited file may leave a gap).
+        if (indent == 0 && !(current < sections.size() && trimmed.empty())) {
             if (current < sections.size()) {
                 append_unwritten(current, 2);
             }
@@ -363,6 +373,7 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
                 }
             }
             output.push_back(current_line);
+            section_end = output.size();
             continue;
         }
 
@@ -399,6 +410,9 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
 
         if (!replaced) {
             output.push_back(current_line);
+        }
+        if (!trimmed.empty()) {
+            section_end = output.size();
         }
     }
 

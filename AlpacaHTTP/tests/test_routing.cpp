@@ -7188,6 +7188,50 @@ int main() {
         std::remove(config_path.c_str());
     }
 
+    // A blank line or a column-0 comment inside a section does not end it: the
+    // existing key is updated in place and no duplicate key is appended.
+    {
+        const char* const kGaps[] = {"\n", "# note\n"};
+        for (const char* gap : kGaps) {
+            char path_template[] = "/tmp/alpacahttp_test_routing_gap_XXXXXX";
+            int fd = ::mkstemp(path_template);
+            EXPECT(fd >= 0);
+            ::close(fd);
+            const std::string config_path = path_template;
+            {
+                std::ofstream out(config_path);
+                out << "http:\n"
+                       "  host_check_enabled: false\n"
+                    << gap
+                    << "  allowed_hosts: \"\"\n"
+                       "\n"
+                       "# next section\n"
+                       "server:\n"
+                       "  location: \"Old\"\n";
+            }
+            alpacahttp::Router router;
+            router.set_config_path(config_path);
+            EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt,
+                                   R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})")
+                       .status_code() == 200);
+            std::ifstream in(config_path);
+            std::stringstream buf;
+            buf << in.rdbuf();
+            const std::string text = buf.str();
+            const auto count = [&text](const std::string& needle) {
+                std::size_t n = 0;
+                for (auto pos = text.find(needle); pos != std::string::npos; pos = text.find(needle, pos + 1)) {
+                    ++n;
+                }
+                return n;
+            };
+            EXPECT(count("host_check_enabled:") == 1);
+            EXPECT(count("allowed_hosts:") == 1);
+            EXPECT(text.find("  allowed_hosts: \".lan\"\n\n# next section\nserver:\n") != std::string::npos);
+            std::remove(config_path.c_str());
+        }
+    }
+
     // A lone double quote inside a plain old value does not hide its comment.
     {
         char path_template[] = "/tmp/alpacahttp_test_routing_lone_quote_XXXXXX";
