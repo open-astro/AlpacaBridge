@@ -42,6 +42,7 @@ using Clock = std::chrono::steady_clock;
 struct FakeCelestronState {
     std::atomic<bool> goto_seen{false};
     std::atomic<int> goto_count{0};
+    std::atomic<int> level_start_count{0};
     std::atomic<Clock::rep> goto_started{0};
     // #742: `silent` makes the handset answer nothing (every command times
     // out, the stops included); `silent_from_goto` flips it on at the next
@@ -89,6 +90,10 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                 return "#";
             case 'P': {  // AUX passthrough: P len dev op ...
                 const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
+                if (op == 0x0B) {
+                    st->level_start_count.fetch_add(1);
+                    return "#";
+                }
                 if (op == 0x02 || op == 0x17) {  // MC_GOTO_FAST / MC_GOTO_SLOW
                     if (st->silent_from_goto.load()) {
                         st->silent.store(true);
@@ -204,6 +209,30 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     driver->park();
     driver->set_connected(false);
     REQUIRE_FALSE(driver->get_connected());
+}
+
+TEST_CASE("Celestron FindHome - refuses during Park without replacing the park task",
+          "[celestron][telescope][async][home]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    try {
+        driver->find_home();
+        FAIL("FindHome was accepted while Park was in progress");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
+    }
+    CHECK(st->level_start_count.load() == 0);
+    CHECK(driver->get_slewing());
+    CHECK(wait_until([&] { return driver->get_at_park(); }, 20000));
+    CHECK(st->goto_count.load() == 1);
+    driver->unpark();
+    driver->set_connected(false);
 }
 
 // #742: the three stops Unpark sends to cancel a park in flight (cancel GOTO,

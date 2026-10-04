@@ -1807,7 +1807,9 @@ public:
             owner_generation = motion_generation_;
             goto_in_progress_ = true;
             ilock.unlock();
-            wait_for_slew_complete(lock, owner_generation);
+            if (!wait_for_slew_complete(lock, owner_generation)) {
+                throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+            }
             if (!refine_goto_landing(lock, ra, dec, &owner_generation)) {
                 throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
             }

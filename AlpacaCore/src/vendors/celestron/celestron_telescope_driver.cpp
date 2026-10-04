@@ -1301,7 +1301,7 @@ public:
 
         if (is_dec_axis) {
             pg_hold_ra_hours_ = cached_ra_hours_;
-            pg_hold_ra_valid_ = !pulse_guide_active_[0];
+            pg_hold_ra_valid_ = !pulse_guide_active_[0] || now >= pulse_guide_end_time_[0];
             pg_hold_ra_until_ = hold_end;
             pg_hold_dec_valid_ = false;
 
@@ -1313,7 +1313,7 @@ public:
             pg_dec_correction_until_ = correction_end;
         } else {
             pg_hold_dec_degrees_ = cached_dec_degrees_;
-            pg_hold_dec_valid_ = !pulse_guide_active_[1];
+            pg_hold_dec_valid_ = !pulse_guide_active_[1] || now >= pulse_guide_end_time_[1];
             pg_hold_dec_until_ = hold_end;
             pg_hold_ra_valid_ = false;
 
@@ -1658,6 +1658,7 @@ public:
     }
 
     void unpark() override {
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
         bool was_parking = false;
         std::string stop_error;
         {
@@ -1764,35 +1765,40 @@ public:
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
         }
-        // Stop both pulse chains before stopping hardware, so neither can
-        // re-arm a guide pulse after the stop commands.
-        reap_pulse_tasks();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            check_not_fully_parked_locked("AbortSlew");
-            // The slew cancellation above prevents delayed dispatches. The
-            // wrapper serializes transactions, so a GOTO already in flight
-            // must finish (or time out) before these stops can reach the mount.
-            // open-astro#575: AbortSlew is a valid clearing command for a stored
-            // slew failure -- the client acted on the error, so the next Slewing
-            // read must answer normally again.
-            last_slew_error_.clear();
-            auto& protocol = CelestronProtocolWrapper::instance();
-            protocol.cancel_goto();
-            protocol.move_axis_fixed_rate(0, 0);
-            protocol.move_axis_fixed_rate(1, 0);
-            pulse_guide_active_.fill(false);
-            pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
-            homing_ = false;
-            parking_ = false;  // an aborted park never reaches AtPark
-            slewing_cached_ = false;
-            slew_aborted_ = true;
-            flip_in_progress_ = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
-            manual_axis_slewing_[0] = false;
-            manual_axis_slewing_[1] = false;
+        try {
+            // Stop both pulse chains before stopping hardware, so neither can
+            // re-arm a guide pulse after the stop commands.
+            reap_pulse_tasks();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                check_connected();
+                check_not_fully_parked_locked("AbortSlew");
+                // The slew cancellation above prevents delayed dispatches. The
+                // wrapper serializes transactions, so a GOTO already in flight
+                // must finish (or time out) before these stops can reach the mount.
+                // open-astro#575: AbortSlew is a valid clearing command for a stored
+                // slew failure -- the client acted on the error, so the next Slewing
+                // read must answer normally again.
+                last_slew_error_.clear();
+                auto& protocol = CelestronProtocolWrapper::instance();
+                protocol.cancel_goto();
+                protocol.move_axis_fixed_rate(0, 0);
+                protocol.move_axis_fixed_rate(1, 0);
+                pulse_guide_active_.fill(false);
+                pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
+                homing_ = false;
+                parking_ = false;  // an aborted park never reaches AtPark
+                slewing_cached_ = false;
+                slew_aborted_ = true;
+                flip_in_progress_ = false;
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                position_override_until_ = std::chrono::steady_clock::time_point::min();
+                manual_axis_slewing_[0] = false;
+                manual_axis_slewing_[1] = false;
+            }
+        } catch (...) {
+            reap_slew_task();
+            throw;
         }
         reap_slew_task();
     }
@@ -2484,9 +2490,9 @@ private:
 
     // Background task threads — see the helpers above. task_mutex_ only guards
     // thread handles and the cv; it is never held across protocol I/O.
-    // Serializes the async initiators (park, slew_to_coordinates_async) so
-    // their check -> reap -> spawn sequences cannot interleave. Never held
-    // by the task threads and never taken while mutex_ is held.
+    // Serializes motion handoffs: sync/async slews, park, FindHome, PulseGuide,
+    // MoveAxis, AbortSlew, Unpark, and disconnect. Never taken under mutex_; a
+    // blocking slew releases it before waiting for motion completion.
     std::mutex initiator_mutex_;
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;

@@ -1491,6 +1491,7 @@ public:
     }
 
     void unpark() override {
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
         bool was_parking = false;
         std::string stop_error;
         {
@@ -1562,6 +1563,9 @@ public:
         last_slew_error_.clear();
 
         SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0);
+        slewing_cached_ = false;
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
         pulse_guiding_active_[static_cast<std::size_t>(axis)] = false;
         pulse_guide_end_time_[static_cast<std::size_t>(axis)] = std::chrono::steady_clock::time_point::min();
     }
@@ -1593,28 +1597,39 @@ public:
             slew_task_cancel_.store(true);
             task_cv_.notify_all();
         }
-        reap_pulse_tasks();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            check_not_fully_parked_locked("AbortSlew");
-            // The wrapper serializes transactions, so a GOTO already in flight
-            // must finish (or time out) before these stops can reach the mount.
-            auto& protocol = SynScanProtocolWrapper::instance();
-            protocol.cancel_goto();
-            protocol.move_axis_fixed_rate(0, 0);
-            protocol.move_axis_fixed_rate(1, 0);
-            parking_ = false;  // an aborted park never reaches AtPark
-            slewing_cached_ = false;
-            clear_pulse_guiding_locked();
-            // open-astro#575: AbortSlew is a valid clearing command for a stored
-            // slew failure -- the client acted on the error, so the next Slewing
-            // read must answer normally again.
-            last_slew_error_.clear();
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
-            manual_axis_slewing_[0] = false;
-            manual_axis_slewing_[1] = false;
+        try {
+            reap_pulse_tasks();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                check_connected();
+                check_not_fully_parked_locked("AbortSlew");
+                // The wrapper serializes transactions, so a GOTO already in flight
+                // must finish (or time out) before these stops can reach the mount.
+                auto& protocol = SynScanProtocolWrapper::instance();
+                protocol.cancel_goto();
+                protocol.move_axis_fixed_rate(0, 0);
+                protocol.move_axis_fixed_rate(1, 0);
+                if (tracking_mode_cached_ > 0) {
+                    // Stopping an RA guide pulse also stops sidereal tracking.
+                    // AbortSlew owns this stop, so restore the currently
+                    // requested mode only after both axes have stopped.
+                    protocol.set_tracking_mode(tracking_mode_cached_);
+                }
+                parking_ = false;  // an aborted park never reaches AtPark
+                slewing_cached_ = false;
+                clear_pulse_guiding_locked();
+                // open-astro#575: AbortSlew is a valid clearing command for a stored
+                // slew failure -- the client acted on the error, so the next Slewing
+                // read must answer normally again.
+                last_slew_error_.clear();
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                position_override_until_ = std::chrono::steady_clock::time_point::min();
+                manual_axis_slewing_[0] = false;
+                manual_axis_slewing_[1] = false;
+            }
+        } catch (...) {
+            reap_slew_task();
+            throw;
         }
         reap_slew_task();
     }
@@ -2091,9 +2106,9 @@ private:
 
     // Background task threads — see the helpers above. task_mutex_ only guards
     // thread handles and the cv; it is never held across protocol I/O.
-    // Serializes the async initiators (park, slew_to_coordinates_async) so
-    // their check -> reap -> spawn sequences cannot interleave. Never held
-    // by the task threads and never taken while mutex_ is held.
+    // Serializes motion handoffs: sync/async slews, park, PulseGuide, MoveAxis,
+    // AbortSlew, Unpark, and disconnect. Never taken under mutex_; a blocking
+    // slew releases it before waiting for motion completion.
     std::mutex initiator_mutex_;
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;

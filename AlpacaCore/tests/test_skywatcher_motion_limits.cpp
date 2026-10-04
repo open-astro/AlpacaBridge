@@ -276,6 +276,35 @@ TEST_CASE("SkyWatcher limits - a later Park supersedes a synchronous slew withou
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher limits - AbortSlew supersedes a blocking synchronous slew", "[skywatcher][telescope][limits]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount);
+    mount.jump_axis_degrees(1, 30.0);
+    mount.jump_axis_degrees(2, 20.0);
+    const double ra = near_pole_ra(*driver);
+    std::atomic<int> result{-1};
+    std::jthread sync_slew([&] {
+        try {
+            driver->slew_to_coordinates(ra, kNearPoleDec);
+            result.store(0);
+        } catch (const alpacacore::AlpacaException& ex) {
+            result.store(ex.error_code());
+        } catch (...) {
+            result.store(-2);
+        }
+    });
+    REQUIRE(wait_until([&] { return mount.axis_running(1) || mount.axis_running(2); }, 5000));
+
+    driver->abort_slew();
+    sync_slew.join();
+    CHECK(result.load() == alpacacore::AlpacaError::InvalidOperation);
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher limits - a below-floor goto during a park in flight leaves the park running",
           "[skywatcher][telescope][limits]") {
     FakeSkyWatcherMount mount;
