@@ -19,6 +19,7 @@
 #include <alpacacore/catalog/schema.h>
 
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -72,5 +73,9 @@ private:
     std::vector<Schema> schemas_;
     std::vector<Factory> factories_;
 };
+
+// Formats a range bound for a message: an Int field without a fraction, a
+// Double field in its shortest round-trip form (0.5, 100).
+std::string format_bound(FieldRef::Kind kind, double bound);
 
 }  // namespace alpacacore::catalog

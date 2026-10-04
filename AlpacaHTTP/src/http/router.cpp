@@ -47,6 +47,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -294,21 +295,22 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         return std::string(value.substr(start, end - start));
     };
 
-    // A '#' inside a double-quoted value is data (location "Obs #2"). A double
-    // quote opens a quoted value only as the first non-space character after
-    // the key's colon; later in a plain value it is a literal.
+    // A '#' inside a quoted value is data (location "Obs #2" or 'Obs #2'). A
+    // double or single quote opens a quoted value only as the first non-space
+    // character after the key's colon; later in a plain value it is a literal.
+    // Backslash escapes apply inside double quotes only.
     auto strip_comment = [](const std::string& text) {
-        bool quoted = false;
+        char quote = 0;
         bool seen_colon = false;
         bool at_value_start = false;
         for (std::size_t i = 0; i < text.size(); ++i) {
             const char c = text[i];
-            if (quoted && c == '\\') {
+            if (quote == '"' && c == '\\') {
                 ++i;
-            } else if (c == '"' && (quoted || at_value_start)) {
-                quoted = !quoted;
+            } else if ((c == '"' || c == '\'') && (quote == c || (quote == 0 && at_value_start))) {
+                quote = (quote == 0) ? c : static_cast<char>(0);
                 at_value_start = false;
-            } else if (c == '#' && !quoted) {
+            } else if (c == '#' && quote == 0) {
                 return text.substr(0, i);
             } else if (c == ':' && !seen_colon) {
                 seen_colon = true;
@@ -1414,6 +1416,9 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
 } // namespace
 
 namespace alpacahttp {
+
+// open-astro#765: configuredevice answers 400 for a refusal that starts with this.
+constexpr const char* kHardwareConfigRefusal = "Hardware config refused: ";
 
 namespace {
 // Issue #358: a driver that refuses a connect explains why, and the client
@@ -6937,9 +6942,11 @@ bool read_site_coordinates(const nlohmann::json& config, bool from_api, const st
         // NaN, so the !(in range) form below catches it where (out of range)
         // would not.
         if (!(value >= -field.limit && value <= field.limit)) {
-            const std::string detail = std::string(field.key) + " " + std::to_string(value) +
-                                       " is out of range: must be between " + std::to_string(-field.limit) + " and " +
-                                       std::to_string(field.limit) + " degrees";
+            using alpacacore::catalog::format_bound;
+            const auto kDouble = alpacacore::catalog::FieldRef::Kind::Double;
+            const std::string detail = std::string(field.key) + " " + format_bound(kDouble, value) +
+                                       " is out of range: must be between " + format_bound(kDouble, -field.limit) +
+                                       " and " + format_bound(kDouble, field.limit) + " degrees";
             if (from_api) {
                 error_message = detail;
                 return false;
@@ -7054,6 +7061,9 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
                 error_message
             );
             response.set_body(alpaca_response);
+            if (error_message.rfind(kHardwareConfigRefusal, 0) == 0) {
+                response.set_status(400, "Bad Request");
+            }
             return response;
         }
 
@@ -8155,6 +8165,28 @@ std::string persisted_device_subject(const std::string& vendor, const std::strin
     return "Persisted " + vendor + " " + device_type + " " + std::to_string(device_number);
 }
 
+// open-astro#765: a device config may not choose which GPIO chip, GPIO line or
+// device node the server opens. The boards have fixed wiring, so the only
+// accepted values are the board's own; anything else is refused before the
+// device is built or saved (configuredevice answers 400 for this prefix).
+bool refuse_hardware_config(std::string& error_message, const std::string& field, const std::string& allowed) {
+    error_message = std::string(kHardwareConfigRefusal) + "'" + field + "' must be " + allowed +
+                    " for this board; the server does not open other chip nodes or GPIO lines";
+    return false;
+}
+
+bool gpio_chip_is_board_chip(const std::string& value, const char* board_chip, std::string& error_message,
+                             const char* alt_chip = nullptr) {
+    if (value == board_chip || (alt_chip != nullptr && value == alt_chip)) {
+        return true;
+    }
+    std::string allowed = std::string("'") + board_chip + "'";
+    if (alt_chip != nullptr) {
+        allowed += std::string(" or '") + alt_chip + "'";
+    }
+    return refuse_hardware_config(error_message, "gpioChip", allowed);
+}
+
 // open-astro#664: the catalog consult in register_device_from_config() below.
 // DeviceCatalog::find_schema is private, so the router can only ask
 // describe() for the DescriptorView of a key.
@@ -8380,6 +8412,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // controllable DC1/DC2 lines.
         auto powerbox_config = alpacacore::vendor::ioptron::default_imate_powerbox_config();
         powerbox_config.gpio_chip_path = config_get(config, "gpioChip", powerbox_config.gpio_chip_path);
+        if (!gpio_chip_is_board_chip(powerbox_config.gpio_chip_path, "/dev/gpiochip1", error_message,
+                                     "/dev/gpiochip0" /* stock BSP kernel */)) {
+            return false;
+        }
         powerbox_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
         // Per-port PWM/name overrides applied positionally onto the fixed
         // DC3/DC1/DC2 layout. The always-on pass-through has no GPIO line and
@@ -9097,6 +9133,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         if (switch_type == "asiair-plus-rk3568") {
             auto plus_config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
             plus_config.device_path = config_get(config, "devicePath", plus_config.device_path);
+            if (plus_config.device_path != "/dev/pwm-gpio-misc") {
+                return refuse_hardware_config(error_message, "devicePath", "'/dev/pwm-gpio-misc'");
+            }
             plus_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", plus_config.pwm_frequency_hz);
             if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
                 std::vector<alpacacore::vendor::zwo::AsiairPlusPortConfig> ports;
@@ -9139,10 +9178,14 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 asiair_config.model_name = "ASIAIR Plus (Pi CM4)";
             }
             asiair_config.gpio_chip_path = config_get(config, "gpioChip", asiair_config.gpio_chip_path);
+            if (!gpio_chip_is_board_chip(asiair_config.gpio_chip_path, "/dev/gpiochip0", error_message)) {
+                return false;
+            }
             asiair_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", asiair_config.pwm_frequency_hz);
             if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
                 std::vector<alpacacore::vendor::zwo::AsiairPortConfig> ports;
                 ports.reserve(config["ports"].size());
+                std::set<int> seen_gpio_lines;
                 for (const auto& p : config["ports"]) {
                     // A non-object entry (e.g. "ports":[null]) would make the
                     // contains()/[] accessors below throw nlohmann type_error.
@@ -9155,9 +9198,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                         return false;
                     }
                     const int gpio_value = p["gpio"].get<int>();
-                    if (gpio_value < 0 || gpio_value > 63) {
-                        error_message = "ASIAIR port 'gpio' must be in [0, 63]";
-                        return false;
+                    if (gpio_value != 12 && gpio_value != 13 && gpio_value != 26 && gpio_value != 18) {
+                        return refuse_hardware_config(error_message, "ports[].gpio", "one of 12, 13, 26, 18");
+                    }
+                    if (!seen_gpio_lines.insert(gpio_value).second) {
+                        return refuse_hardware_config(error_message, "ports[].gpio",
+                                                      "each of 12, 13, 26, 18 at most once");
                     }
                     alpacacore::vendor::zwo::AsiairPortConfig pc;
                     pc.name = p.value("name", std::string("Port ") + std::to_string(ports.size() + 1));
@@ -9529,6 +9575,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // lines (BCM GPIO 18/10/17/4).
         auto powerbox_config = alpacacore::vendor::touptek::default_stellavita_config();
         powerbox_config.gpio_chip_path = config_get(config, "gpioChip", powerbox_config.gpio_chip_path);
+        if (!gpio_chip_is_board_chip(powerbox_config.gpio_chip_path, "/dev/gpiochip0", error_message)) {
+            return false;
+        }
         powerbox_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
         // Per-port PWM/name overrides applied positionally onto the fixed
         // Port 1..4 layout.

@@ -3768,4 +3768,89 @@ TEST_CASE("SkyWatcher async - a MoveAxis stop-wait cannot dispatch into a reconn
     driver->set_connected(false);
 }
 
+// open-astro#770: Tracking=false during an East/West pulse stops RA, but the
+// pulse task's end-of-pulse restore used to put the drive step period back and
+// send ":J" regardless, so RA ran at sidereal while Tracking read false.
+// Same contract as the MoveAxis(0) restore (#535/#630): a restore never
+// restarts an axis the client has switched off.
+TEST_CASE("SkyWatcher async - Tracking=false during an East pulse stays stopped after the pulse (#770)",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->pulse_guide(2, 2000);  // East, 2 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->set_tracking(false);
+    REQUIRE_FALSE(driver->get_tracking());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));  // pulse over, t = 3 s
+    CHECK_FALSE(driver->get_tracking());
+    CHECK_FALSE(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
+// open-astro#770, the window after the restore: a pulse of 1.5 s or more checks
+// that the restored rate took, with IsPulseGuiding still true. Tracking=false
+// landing there stops RA, the check reads the stopped axis as "did not take"
+// and its resend of ":I"+":J" used to restart RA while Tracking read false.
+TEST_CASE("SkyWatcher async - Tracking=false during the post-pulse rate check stays stopped (#770)",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    const uint32_t drive_period = mount.step_period(1);
+
+    driver->pulse_guide(2, 2000);  // East, 2 s
+    REQUIRE(wait_until([&] { return mount.step_period(1) != drive_period; }, 3000));
+    // Tight poll: the check settles 150 ms before its first position sample.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+    while (mount.step_period(1) != drive_period && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(mount.step_period(1) == drive_period);  // the pulse-end restore landed
+    REQUIRE(driver->get_is_pulse_guiding());
+    driver->set_tracking(false);
+
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK_FALSE(driver->get_tracking());
+    CHECK_FALSE(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
+// open-astro#770, the window after dispatch: a West pulse of 1.5 s or more
+// checks that the faster pulse rate took. Tracking=false landing there stops
+// RA, the stopped axis reads nearer the old drive rate than the pulse rate, and
+// the check's resend of ":I"+":J" used to run RA at the pulse rate until the
+// pulse ended, while Tracking read false and IsPulseGuiding read true.
+TEST_CASE("SkyWatcher async - Tracking=false during the West pulse dispatch check stays stopped (#770)",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    const uint32_t drive_period = mount.step_period(1);
+
+    driver->pulse_guide(3, 3000);  // West, 3 s
+    // Tight poll: Tracking=false has to land inside the check's 150 ms settle.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
+    while (mount.step_period(1) == drive_period && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(mount.step_period(1) != drive_period);  // the in-place dispatch landed
+    driver->set_tracking(false);
+    REQUIRE_FALSE(driver->get_tracking());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));  // check over, pulse still on
+    REQUIRE(driver->get_is_pulse_guiding());
+    CHECK_FALSE(mount.axis_running(1));
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5000));
+    CHECK_FALSE(driver->get_tracking());
+    CHECK_FALSE(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

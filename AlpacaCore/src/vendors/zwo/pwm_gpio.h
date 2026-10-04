@@ -50,6 +50,7 @@
 #define PWM_GPIO_H
 
 #include <linux/ioctl.h>
+#include <stdint.h>
 
 #define PWM_GPIO_MAGIC 'C' /* ioctl type/magic byte (0x43) */
 #define PWM_GPIO_DEV "/dev/pwm-gpio-misc"
@@ -64,9 +65,10 @@
  * @level: GPIO value (0 = low, 1 = high)
  */
 typedef struct gpio_level_s {
-    int index;
-    int level;
+    int32_t index;
+    int32_t level;
 } gpio_level_t; /* 8 bytes */
+static_assert(sizeof(gpio_level_t) == 8, "kernel ioctl struct size");
 
 /*
  * struct pwm_parm_s - PWM configuration
@@ -75,10 +77,11 @@ typedef struct gpio_level_s {
  * @duty_ns:   PWM duty (high time) in nanoseconds
  */
 typedef struct pwm_parm_s {
-    int index;
-    int period_ns;
-    int duty_ns;
+    int32_t index;
+    int32_t period_ns;
+    int32_t duty_ns;
 } pwm_param_t; /* 12 bytes */
+static_assert(sizeof(pwm_param_t) == 12, "kernel ioctl struct size");
 
 /*
  * struct work_mode_s - GPIO/PWM mode selection
@@ -86,9 +89,10 @@ typedef struct pwm_parm_s {
  * @mode:  1 = GPIO mode, 2 = PWM mode
  */
 typedef struct work_mode_s {
-    int index;
-    int mode;
+    int32_t index;
+    int32_t mode;
 } work_mode_t; /* 8 bytes */
+static_assert(sizeof(work_mode_t) == 8, "kernel ioctl struct size");
 
 /*
  * ioctl commands

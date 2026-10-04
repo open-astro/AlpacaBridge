@@ -47,15 +47,6 @@ std::string allowed_list(const FieldRef& f) {
     return s;
 }
 
-// Formats a range bound for a message: an Int field without a fraction, a
-// Double field in its shortest round-trip form (0.5, 100).
-std::string format_bound(FieldRef::Kind kind, double bound) {
-    if (kind == FieldRef::Kind::Int) return std::to_string(int_bound(bound));
-    char buf[32];
-    auto res = std::to_chars(buf, buf + sizeof(buf), bound);
-    return std::string(buf, res.ptr);
-}
-
 // Applies the per-field rules to `in`, appending one message per failure.
 // The returned config is the Persisted normalization; Api callers use only
 // the messages.
@@ -145,6 +136,15 @@ DeviceConfig sanitize_fields(std::span<const FieldRef> fields, const DeviceConfi
 std::string describe_key(const DeviceKey& k) { return "'" + k.vendor + "' " + device_type_to_string(k.type); }
 
 }  // namespace
+
+// Formats a range bound for a message: an Int field without a fraction, a
+// Double field in its shortest round-trip form (0.5, 100).
+std::string format_bound(FieldRef::Kind kind, double bound) {
+    if (kind == FieldRef::Kind::Int) return std::to_string(int_bound(bound));
+    char buf[32];
+    auto res = std::to_chars(buf, buf + sizeof(buf), bound);
+    return std::string(buf, res.ptr);
+}
 
 std::vector<DescriptorView> DeviceCatalog::describe() const {
     std::vector<DescriptorView> views;

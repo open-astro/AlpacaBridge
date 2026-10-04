@@ -107,7 +107,7 @@ The value of the toggled pin will flip between `inactive` and `active`.
 
 ### Advanced configuration
 
-The defaults match the Pi 4 ASIair Pro wiring. For non-default deployments (different SBC, different pin map, PWM channels), override per-port in the device config:
+The defaults match the Pi 4 ASIair Pro wiring. The device config can rename ports, set PWM and reorder the four port lines, but it cannot point the driver at other lines or another chip: since #765 the server refuses (HTTP 400, config not saved) any `gpio` other than 12, 13, 26, 18 and any `gpioChip` other than `/dev/gpiochip0`. The full schema:
 
 ```json
 {
@@ -128,10 +128,10 @@ The defaults match the Pi 4 ASIair Pro wiring. For non-default deployments (diff
 
 | Field | Type | Notes |
 |----|----|----|
-| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip0`. |
+| `gpioChip` | string | Path to the gpiochip character device. Must be `/dev/gpiochip0` (the default); any other value is refused. |
 | `pwmFrequencyHz` | integer | Soft-PWM frequency for any port with `pwm: true`. Range 1–100000. Default 1000. |
 | `ports[].name` | string | Human-readable channel name shown to ASCOM clients (NINA, etc.). |
-| `ports[].gpio` | integer | BCM GPIO line number. |
+| `ports[].gpio` | integer | BCM GPIO line number: one of 12, 13, 26, 18; any other value is refused. |
 | `ports[].pwm` | boolean | `true` for analog 0–100% (dew heater, flat panel). `false` for boolean on/off. |
 
 ### Disconnect behavior — important for unattended observatories
@@ -483,7 +483,7 @@ The defaults match the StellaVita wiring. The configurable fields are the GPIO c
 
 | Field | Type | Notes |
 |----|----|----|
-| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip0` (the CM4's main BCM2711 bank). |
+| `gpioChip` | string | Path to the gpiochip character device. Must be `/dev/gpiochip0` (the default, the CM4's main BCM2711 bank); any other value is refused. |
 | `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `100` (tested best on StellaVita — dims flat panels smoothly without 50 Hz flicker). |
 | `ports` | array | Positional overlay on `[Port 1, Port 2, Port 3, Port 4]`; each entry's optional `pwm` (bool) / `name` (string) is applied to that port. The GPIO line mapping (18/10/17/4) is fixed. |
 
@@ -591,7 +591,7 @@ The fixed DC3/DC1/DC2 layout is not remappable; the configurable fields are the 
 
 | Field | Type | Notes |
 |----|----|----|
-| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip1`. |
+| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip1`; the only other accepted value is `/dev/gpiochip0` (the stock BSP kernel). |
 | `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `50` (dims flat panels; raise for dew-heater-only setups if you prefer). |
 | `ports` | array | Positional overlay on `[DC3, DC1, DC2]`; each entry's optional `pwm` (bool) / `name` (string) is applied to that port. The DC3 entry's `pwm` is ignored (no GPIO). |
 

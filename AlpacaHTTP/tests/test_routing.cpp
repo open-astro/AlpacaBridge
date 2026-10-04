@@ -4421,7 +4421,16 @@ int main() {
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
             {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted Sky-Watcher telescope",
              "has no site latitude and will refuse to connect"},
-            {"Skipping persisted device", "The coordinate is ignored", "200.000000"});
+            {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
+#endif
+#ifdef ALPACACORE_ENABLE_IOPTRON
+        // The router-owned arm still words both the API refusal and the saved
+        // config's WARN through read_site_coordinates(): short numbers in both.
+        pin("siteLatitude 200 (read_site_coordinates)", "ioptron", "telescope", "Telescope",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            "siteLatitude 200 is out of range: must be between -90 and 90 degrees", "{}", true,
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            {"siteLatitude 200 is out of range: must be between -90 and 90 degrees"}, {"200.000000"});
 #endif
 
         // #508 item 1, the arms that DROP a saved entry on an empty portPath
@@ -6202,6 +6211,31 @@ int main() {
     }
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
 
+#ifdef ALPACACORE_ENABLE_IOPTRON
+    // read_site_coordinates() still words the refusal for the router-owned
+    // vendors: the numbers print in their short form, not std::to_string's
+    // "200.000000" / "-90.000000".
+    {
+        alpacahttp::Router router;
+        for (const auto& [override_json, expected] :
+             {std::pair{nlohmann::json{{"siteLatitude", 200.0}},
+                        std::string("siteLatitude 200 is out of range: must be between -90 and 90 degrees")},
+              std::pair{nlohmann::json{{"siteLongitude", 999.5}},
+                        std::string("siteLongitude 999.5 is out of range: must be between -180 and 180 degrees")}}) {
+            nlohmann::json config = {{"vendor", "ioptron"},
+                                     {"deviceType", "telescope"},
+                                     {"deviceNumber", 9641},
+                                     {"connectionType", "serial"},
+                                     {"portPath", "/dev/null"}};
+            config.update(override_json);
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", config.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find(expected) != std::string::npos);
+        }
+    }
+#endif
+
     // Issue #348: every state-changing management endpoint carries the
     // cross-origin guard, not just synctime and wifi.
     {
@@ -7174,6 +7208,32 @@ int main() {
         std::stringstream buf;
         buf << in.rdbuf();
         EXPECT(buf.str().find("  location: \"Roof\"  # note\n") != std::string::npos);
+        std::remove(config_path.c_str());
+    }
+
+    // A single-quoted old value protects its '#' like a double-quoted one; a
+    // single quote inside a plain value does not.
+    // The second row's comment starts at its first '#', so "#2  # note" is kept whole.
+    const char* const kQuoteRows[][2] = {{"  location: 'Obs #2'  # note\n", "  location: \"Roof\"  # note\n"},
+                                         {"  location: Bob's #2  # note\n", "  location: \"Roof\" #2  # note\n"}};
+    for (const auto& row : kQuoteRows) {
+        char path_template[] = "/tmp/alpacahttp_test_routing_single_quote_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "server:\n" << row[0];
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt, R"({"Location": "Roof"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        EXPECT(buf.str() == std::string("server:\n") + row[1]);
         std::remove(config_path.c_str());
     }
 
