@@ -86,7 +86,12 @@ def validate(name: str, text: str) -> list[str]:
     """Return the rule violations of one fragment (file name and body)."""
     problems: list[str] = []
     if not NAME_RE.match(name):
-        problems.append("file name must match [a-z0-9][a-z0-9._-]*.md (the branch name after its last '/')")
+        hint = ""
+        if name != name.lower() and NAME_RE.match(name.lower()):
+            hint = ": lowercase the branch slug, expected '%s'" % name.lower()
+        problems.append(
+            "file name must match [a-z0-9][a-z0-9._-]*.md (the branch name after its last '/', lowercased)" + hint
+        )
     lines = text.splitlines()
     for i, line in enumerate(lines, 1):
         if BAD_HEADING_RE.match(line):
@@ -311,6 +316,8 @@ def self_test() -> int:
     expect(validate("a-b.c-d.md", good) == [], "valid fragment rejected")
     expect(any("file name" in p for p in validate("Bad Name.md", good)), "bad name accepted")
     expect(any("file name" in p for p in validate("-x.md", good)), "leading hyphen accepted")
+    expect(any("expected 'fix-issue-12.md'" in p for p in validate("fix-Issue-12.md", good)), "uppercase name lacks lowercase hint")
+    expect(validate("fix-issue-12.md", good) == [], "lowercase name rejected")
     expect(any("no '- ' bullet" in p for p in validate("a.md", "### Fixed\n\n")), "empty category accepted")
     expect(any("unknown category" in p for p in validate("a.md", "### Stuff\n- x\n")), "unknown category accepted")
     expect(any("unknown category" in p for p in validate("a.md", "### Added (x\n- x\n")), "open paren accepted")
