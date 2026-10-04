@@ -157,7 +157,7 @@ says yes, and surface activation errors gracefully if an AP attempt fails.
 - **Phase 3:** hardware validation pass (Pi rig `astro.lan`, iMate, OPi rig
   `192.168.1.134`); mount-over-hotspot end-to-end test with a WiFi mount.
 - Docs: user guide on openastro.net/docs (not the GitHub wiki), architecture.md
-  section on the polkit mechanism, CHANGELOG minor bump per versioning policy.
+  section on the polkit mechanism, a `changelog.d/` fragment (minor bump per versioning policy).
 
 ## Open questions
 
