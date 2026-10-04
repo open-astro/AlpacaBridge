@@ -43,6 +43,7 @@ BASE_CATEGORIES = [
     "Security",
 ]
 QUALIFIED_RE = re.compile(r"^(%s)(?: \(([^()]+)\))?$" % "|".join(BASE_CATEGORIES))
+FENCE_RE = re.compile(r"^(`{3,}|~{3,})(.*)$")
 BAD_HEADING_RE = re.compile(r"^#{1,2}\s")
 
 Entries = dict  # category -> list of bullets; a bullet is a list of lines
@@ -61,6 +62,7 @@ def parse_body(lines: list[str]) -> tuple[Entries, list[str]]:
     entries: Entries = {}
     problems: list[str] = []
     category: str | None = None
+    fence = ""  # the opening fence run (``` or ~~~, any length) while inside a fenced block
     in_fence = False
     pending: list[str] = []  # blank lines seen since the last kept line
     for raw in lines:
@@ -89,8 +91,14 @@ def parse_body(lines: list[str]) -> tuple[Entries, list[str]]:
         else:
             problems.append("'### %s' has text before its first '- ' bullet: %r" % (category, line[:60]))
         pending = []
-        if category is not None and line.strip().startswith("```"):
-            in_fence = not in_fence
+        if category is not None:
+            m = FENCE_RE.match(line.strip())
+            if m and not in_fence:
+                fence, in_fence = m.group(1), True
+            elif m and in_fence and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2):
+                fence, in_fence = "", False
+    if in_fence:
+        problems.append("unclosed code fence %r: close it with a matching fence line" % fence)
     return entries, problems
 
 
@@ -338,6 +346,16 @@ def self_test() -> int:
     expect(any("before the first" in p for p in validate("a.md", "text\n### Fixed\n- x\n")), "stray text accepted")
     expect(any("before its first" in p for p in validate("a.md", "### Fixed\nstray\n- x\n")), "text before first bullet accepted")
     expect(validate("a.md", "") != [], "empty fragment accepted")
+    expect(
+        any("unclosed" in p for p in validate("a.md", "### Fixed\n- x\n  ```\n  a\n\n### Added\n- y\n")),
+        "unclosed fence accepted",
+    )
+    ok_fence = "### Fixed\n- x\n  ````\n  ```\n  ````\n- y\n  ~~~\n  a\n  ~~~\n"
+    expect(validate("a.md", ok_fence) == [], "longer or tilde fence mis-tracked")
+    expect(
+        any("unclosed" in p for p in validate("a.md", "### Fixed\n- x\n  ````\n  ```\n- y\n")),
+        "shorter fence closed a four-backtick fence",
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
