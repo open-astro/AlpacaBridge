@@ -7211,6 +7211,32 @@ int main() {
         std::remove(config_path.c_str());
     }
 
+    // A single-quoted old value protects its '#' like a double-quoted one; a
+    // single quote inside a plain value does not.
+    // The second row's comment starts at its first '#', so "#2  # note" is kept whole.
+    const char* const kQuoteRows[][2] = {{"  location: 'Obs #2'  # note\n", "  location: \"Roof\"  # note\n"},
+                                         {"  location: Bob's #2  # note\n", "  location: \"Roof\" #2  # note\n"}};
+    for (const auto& row : kQuoteRows) {
+        char path_template[] = "/tmp/alpacahttp_test_routing_single_quote_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "server:\n" << row[0];
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt, R"({"Location": "Roof"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        EXPECT(buf.str() == std::string("server:\n") + row[1]);
+        std::remove(config_path.c_str());
+    }
+
 #ifdef ALPACACORE_ENABLE_WEEWX
     // open-astro#731: the WeeWX refusals keep the router arm's exact text on
     // the API path, and a persisted entry that breaks one is still not

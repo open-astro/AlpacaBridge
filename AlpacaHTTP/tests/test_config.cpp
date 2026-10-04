@@ -427,6 +427,9 @@ int main() {
         EXPECT(location_of("  location: \"Obs #2\"  # c") == "Obs #2");
         EXPECT(location_of("  location: \"a\\\"#b\"  # c") == "a\"#b");
         EXPECT(location_of("  location: 'Obs'  # c") == "Obs");
+        EXPECT(location_of("  location: 'Obs #2'") == "Obs #2");
+        EXPECT(location_of("  location: 'Obs' # comment") == "Obs");
+        EXPECT(location_of("  location: Bob's #2") == "Bob's");
         EXPECT(location_of("  location: Plain Site") == "Plain Site");
         ::unlink(path.c_str());
     }

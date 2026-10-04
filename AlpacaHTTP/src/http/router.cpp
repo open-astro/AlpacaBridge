@@ -295,21 +295,22 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         return std::string(value.substr(start, end - start));
     };
 
-    // A '#' inside a double-quoted value is data (location "Obs #2"). A double
-    // quote opens a quoted value only as the first non-space character after
-    // the key's colon; later in a plain value it is a literal.
+    // A '#' inside a quoted value is data (location "Obs #2" or 'Obs #2'). A
+    // double or single quote opens a quoted value only as the first non-space
+    // character after the key's colon; later in a plain value it is a literal.
+    // Backslash escapes apply inside double quotes only.
     auto strip_comment = [](const std::string& text) {
-        bool quoted = false;
+        char quote = 0;
         bool seen_colon = false;
         bool at_value_start = false;
         for (std::size_t i = 0; i < text.size(); ++i) {
             const char c = text[i];
-            if (quoted && c == '\\') {
+            if (quote == '"' && c == '\\') {
                 ++i;
-            } else if (c == '"' && (quoted || at_value_start)) {
-                quoted = !quoted;
+            } else if ((c == '"' || c == '\'') && (quote == c || (quote == 0 && at_value_start))) {
+                quote = quote == 0 ? c : 0;
                 at_value_start = false;
-            } else if (c == '#' && !quoted) {
+            } else if (c == '#' && quote == 0) {
                 return text.substr(0, i);
             } else if (c == ':' && !seen_colon) {
                 seen_colon = true;
