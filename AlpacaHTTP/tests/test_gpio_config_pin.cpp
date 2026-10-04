@@ -141,8 +141,12 @@ std::string switch_config(int number, const std::string& type, const std::string
 
 int main() {
     namespace fs = std::filesystem;
-    // Router persists config/registered_devices.json relative to the CMake-provided cwd.
-    fs::remove_all("config");
+    // Router persists config/registered_devices.json relative to the cwd: work in a per-run
+    // subdirectory of the CMake-provided cwd so a developer's own config/ is never touched.
+    const fs::path cwd = fs::current_path() / "gpio_config_pin_cwd";
+    fs::remove_all(cwd);
+    fs::create_directories(cwd);
+    fs::current_path(cwd);
 
     alpacahttp::Router router;
     int status = 0;
@@ -232,6 +236,7 @@ int main() {
     EXPECT(registered(router, 9710));
 #endif
 
-    fs::remove_all("config");
+    fs::current_path(cwd.parent_path());
+    fs::remove_all(cwd);
     return 0;
 }
