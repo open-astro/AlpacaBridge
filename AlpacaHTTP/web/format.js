@@ -407,10 +407,21 @@ function settingsSaveError(status, data) {
     return isEnvelope ? `Server error ${data.ErrorNumber}` : 'Unknown server error';
 }
 
+function wifiSsidKey(item) {
+    return item && typeof item.SsidHex === 'string' ? item.SsidHex.toLowerCase() : String((item && item.Ssid) || '');
+}
+
+function wifiSsidLabel(item, displayCount) {
+    const label = String((item && item.Ssid) || '');
+    const hex = item && typeof item.SsidHex === 'string' ? item.SsidHex : '';
+    return displayCount > 1 && hex ? `${label} (${hex})` : label;
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,
-                       HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError };
+                        HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
+                        wifiSsidKey, wifiSsidLabel };
 }

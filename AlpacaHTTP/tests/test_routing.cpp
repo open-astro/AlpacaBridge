@@ -4421,7 +4421,16 @@ int main() {
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
             {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted Sky-Watcher telescope",
              "has no site latitude and will refuse to connect"},
-            {"Skipping persisted device", "The coordinate is ignored", "200.000000"});
+            {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
+#endif
+#ifdef ALPACACORE_ENABLE_IOPTRON
+        // The router-owned arm still words both the API refusal and the saved
+        // config's WARN through read_site_coordinates(): short numbers in both.
+        pin("siteLatitude 200 (read_site_coordinates)", "ioptron", "telescope", "Telescope",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            "siteLatitude 200 is out of range: must be between -90 and 90 degrees", "{}", true,
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            {"siteLatitude 200 is out of range: must be between -90 and 90 degrees"}, {"200.000000"});
 #endif
 
         // #508 item 1, the arms that DROP a saved entry on an empty portPath
@@ -5725,8 +5734,10 @@ int main() {
                  std::pair{"/management/v1/wifi/country", "{\"Alpha2\": \"usa\"}"},
                  std::pair{"/management/v1/wifi/country", "{}"},
                  std::pair{"/management/v1/wifi/profiles", "{\"Passphrase\": \"x\"}"},
+                 std::pair{"/management/v1/wifi/profiles", "{\"SsidHex\": \"gg\"}"},
                  std::pair{"/management/v1/wifi/connect", "not json"},
                  std::pair{"/management/v1/wifi/ap", "{\"Ssid\": \"x\", \"Band\": \"g\"}"},
+                 std::pair{"/management/v1/wifi/ap", "{\"SsidHex\": \"f\"}"},
                  std::pair{"/management/v1/wifi/radio", "{\"Enabled\": \"yes\"}"},
              }) {
             const auto response = route_request(router, "PUT", path, body);
@@ -6199,6 +6210,31 @@ int main() {
         remove_device(router, "skywatcher", "telescope", 9259);
     }
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
+
+#ifdef ALPACACORE_ENABLE_IOPTRON
+    // read_site_coordinates() still words the refusal for the router-owned
+    // vendors: the numbers print in their short form, not std::to_string's
+    // "200.000000" / "-90.000000".
+    {
+        alpacahttp::Router router;
+        for (const auto& [override_json, expected] :
+             {std::pair{nlohmann::json{{"siteLatitude", 200.0}},
+                        std::string("siteLatitude 200 is out of range: must be between -90 and 90 degrees")},
+              std::pair{nlohmann::json{{"siteLongitude", 999.5}},
+                        std::string("siteLongitude 999.5 is out of range: must be between -180 and 180 degrees")}}) {
+            nlohmann::json config = {{"vendor", "ioptron"},
+                                     {"deviceType", "telescope"},
+                                     {"deviceNumber", 9641},
+                                     {"connectionType", "serial"},
+                                     {"portPath", "/dev/null"}};
+            config.update(override_json);
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", config.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find(expected) != std::string::npos);
+        }
+    }
+#endif
 
     // Issue #348: every state-changing management endpoint carries the
     // cross-origin guard, not just synctime and wifi.

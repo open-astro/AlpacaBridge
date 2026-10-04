@@ -40,5 +40,5 @@ Also include AlpacaHTTP server logs captured during the ConformU run (DEBUG or T
 ## Documentation
 
 - Add Doxygen comments for public APIs
-- Update CHANGELOG.md for user-facing changes
+- Add a `changelog.d/<branch-slug>.md` fragment for user-facing changes (format: `changelog.d/README.md`); do not edit `CHANGELOG.md`
 - Update README.md if adding new features or build options

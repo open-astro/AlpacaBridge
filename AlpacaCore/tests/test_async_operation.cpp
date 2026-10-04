@@ -26,6 +26,7 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 
 #include <atomic>
 #include <chrono>
@@ -40,6 +41,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -51,6 +53,7 @@
 
 namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
+using alpacacore::logging::LogLevel;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::StressCallGuard;
 using alpacacore::util::AsyncOperation;
@@ -250,6 +253,37 @@ struct Harness {
         f.get();
         return true;
     }
+};
+
+// Installs a capturing log sink and restores the previous one when it goes out
+// of scope, also when a REQUIRE fails.
+class LogCapture {
+public:
+    struct Record {
+        LogLevel level;
+        std::string component;
+        std::string message;
+    };
+
+    LogCapture() : previous_(alpacacore::logging::get_log_sink()) {
+        alpacacore::logging::set_log_sink([this](LogLevel level, std::string_view component, std::string_view message) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            records_.push_back({level, std::string(component), std::string(message)});
+        });
+    }
+    LogCapture(const LogCapture&) = delete;
+    LogCapture& operator=(const LogCapture&) = delete;
+    ~LogCapture() { alpacacore::logging::set_log_sink(previous_); }
+
+    std::vector<Record> records() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return records_;
+    }
+
+private:
+    alpacacore::logging::LogSink previous_;
+    mutable std::mutex mutex_;
+    std::vector<Record> records_;
 };
 
 ProbePtr probe() { return std::make_shared<Probe>(); }
@@ -598,6 +632,39 @@ TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]")
         REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
         CHECK(h.op->last_failure() == std::optional<std::string>("disconnect"));
     }
+}
+
+// Rule 9: a superseded body's throw is logged at WARN, once, and not kept.
+TEST_CASE("AsyncOperation - a superseded body's throw is logged", "[util][async_operation][unit]") {
+    LogCapture capture;  // declared first: destroyed last, after the Harness joins every thread
+    Harness h;
+    auto g = h.gate();
+    auto stale = probe();
+    REQUIRE(h.start_within([g, stale](OperationContext& ctx) {
+        stale->entered = true;
+        g->wait();
+        stale->reason = ctx.stop_reason();
+        throw std::runtime_error("late boom");
+    }));
+    REQUIRE(eventually([&] { return stale->entered.load(); }));
+    auto next = probe();
+    REQUIRE(h.start_within(waiting_body(next, 1h)));
+    g->open();
+    h.op->cancel_all_and_join();  // joins the superseded body after it has logged
+
+    CHECK(stale->reason.load() == StopReason::Superseded);
+    CHECK_FALSE(h.op->last_failure().has_value());
+    std::size_t warns = 0;
+    for (const auto& r : capture.records()) {
+        if (r.message.find("stale operation failed: ") == std::string::npos) {
+            continue;
+        }
+        ++warns;
+        CHECK(r.level == LogLevel::Warn);
+        CHECK(r.component == "test-slot");
+        CHECK(r.message == "stale operation failed: late boom");
+    }
+    CHECK(warns == 1);
 }
 
 // Case 7: the destructor and cancel_all_and_join() wake and join every body

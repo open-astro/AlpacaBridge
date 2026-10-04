@@ -1,3 +1,15 @@
+// AlpacaCore
+// Copyright (c) 2025-2026 Joey Troy and contributors
+//
+// This file is part of AlpacaCore.
+//
+// AlpacaCore is licensed under the GNU Affero General Public License,
+// version 3 or (at your option) any later version (AGPL-3.0-or-later),
+// with an additional permission allowing combination with proprietary
+// device-vendor SDKs. See the LICENSE file in this repository for the full
+// license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
+
 /*
  * pwm_gpio.h — Reverse-engineered ioctl interface for ZWO ASIAIR Plus
  *
@@ -38,13 +50,14 @@
 #define PWM_GPIO_H
 
 #include <linux/ioctl.h>
+#include <stdint.h>
 
-#define PWM_GPIO_MAGIC  'C'   /* ioctl type/magic byte (0x43) */
-#define PWM_GPIO_DEV    "/dev/pwm-gpio-misc"
+#define PWM_GPIO_MAGIC 'C' /* ioctl type/magic byte (0x43) */
+#define PWM_GPIO_DEV "/dev/pwm-gpio-misc"
 
 /* Work modes */
-#define PWM_GPIO_MODE_GPIO  1
-#define PWM_GPIO_MODE_PWM   2
+#define PWM_GPIO_MODE_GPIO 1
+#define PWM_GPIO_MODE_PWM 2
 
 /*
  * struct gpio_level_s - GPIO level read/write
@@ -52,9 +65,10 @@
  * @level: GPIO value (0 = low, 1 = high)
  */
 typedef struct gpio_level_s {
-	int index;
-	int level;
-} gpio_level_t;  /* 8 bytes */
+    int32_t index;
+    int32_t level;
+} gpio_level_t; /* 8 bytes */
+static_assert(sizeof(gpio_level_t) == 8, "kernel ioctl struct size");
 
 /*
  * struct pwm_parm_s - PWM configuration
@@ -63,10 +77,11 @@ typedef struct gpio_level_s {
  * @duty_ns:   PWM duty (high time) in nanoseconds
  */
 typedef struct pwm_parm_s {
-	int index;
-	int period_ns;
-	int duty_ns;
-} pwm_param_t;  /* 12 bytes */
+    int32_t index;
+    int32_t period_ns;
+    int32_t duty_ns;
+} pwm_param_t; /* 12 bytes */
+static_assert(sizeof(pwm_param_t) == 12, "kernel ioctl struct size");
 
 /*
  * struct work_mode_s - GPIO/PWM mode selection
@@ -74,9 +89,10 @@ typedef struct pwm_parm_s {
  * @mode:  1 = GPIO mode, 2 = PWM mode
  */
 typedef struct work_mode_s {
-	int index;
-	int mode;
-} work_mode_t;  /* 8 bytes */
+    int32_t index;
+    int32_t mode;
+} work_mode_t; /* 8 bytes */
+static_assert(sizeof(work_mode_t) == 8, "kernel ioctl struct size");
 
 /*
  * ioctl commands
@@ -86,28 +102,28 @@ typedef struct work_mode_s {
  */
 
 /* Read GPIO level: pass index, get back level */
-#define PWM_GPIO_GET_LEVEL    _IOR(PWM_GPIO_MAGIC, 1, gpio_level_t)   /* 0x80084301 */
+#define PWM_GPIO_GET_LEVEL _IOR(PWM_GPIO_MAGIC, 1, gpio_level_t) /* 0x80084301 */
 
 /* Set GPIO level: requires GPIO mode (mode=1), output direction */
-#define PWM_GPIO_SET_LEVEL    _IOW(PWM_GPIO_MAGIC, 2, gpio_level_t)   /* 0x40084302 */
+#define PWM_GPIO_SET_LEVEL _IOW(PWM_GPIO_MAGIC, 2, gpio_level_t) /* 0x40084302 */
 
 /* Read current PWM config: pass index, get back period_ns + duty_ns */
-#define PWM_GPIO_GET_CONFIG   _IOR(PWM_GPIO_MAGIC, 3, pwm_param_t)    /* 0x800c4303 */
+#define PWM_GPIO_GET_CONFIG _IOR(PWM_GPIO_MAGIC, 3, pwm_param_t) /* 0x800c4303 */
 
 /* Set PWM config: requires PWM mode (mode=2). Sets period and duty cycle */
-#define PWM_GPIO_SET_CONFIG   _IOW(PWM_GPIO_MAGIC, 4, pwm_param_t)    /* 0x400c4304 */
+#define PWM_GPIO_SET_CONFIG _IOW(PWM_GPIO_MAGIC, 4, pwm_param_t) /* 0x400c4304 */
 
 /* Disable GPIO output (set to input / hi-Z). Pass index only */
-#define PWM_GPIO_DISABLE      _IOW(PWM_GPIO_MAGIC, 5, int)            /* 0x40044305 */
+#define PWM_GPIO_DISABLE _IOW(PWM_GPIO_MAGIC, 5, int) /* 0x40044305 */
 
 /* Enable GPIO output. Pass index only */
-#define PWM_GPIO_ENABLE       _IOW(PWM_GPIO_MAGIC, 6, int)            /* 0x40044306 */
+#define PWM_GPIO_ENABLE _IOW(PWM_GPIO_MAGIC, 6, int) /* 0x40044306 */
 
 /* Set work mode (GPIO vs PWM) */
-#define PWM_GPIO_SET_MODE     _IOW(PWM_GPIO_MAGIC, 7, work_mode_t)    /* 0x40084307 */
+#define PWM_GPIO_SET_MODE _IOW(PWM_GPIO_MAGIC, 7, work_mode_t) /* 0x40084307 */
 
 /* Read physical button/key state */
-#define PWM_GPIO_GET_KEYS     _IOW(PWM_GPIO_MAGIC, 8, gpio_level_t)   /* 0x40084308 */
+#define PWM_GPIO_GET_KEYS _IOW(PWM_GPIO_MAGIC, 8, gpio_level_t) /* 0x40084308 */
 
 /*
  * Usage examples (pseudocode):

@@ -1582,6 +1582,32 @@ public:
                 end_pulse_locked();
                 return;
             }
+            // open-astro#770: Tracking=false landed while a rate check below
+            // was sampling RA; the check read the stopped axis as "did not
+            // take" and resent ":I"+":J". Stop RA again, unless a reaper owns
+            // the axis now. Called with mutex_ held. Same three attempts as
+            // the pulse stop below, and the same runaway flag if all fail.
+            auto stop_ra_if_tracking_off_locked = [this, ai]() {
+                if (tracking_ || !connected_ || pulse_task_cancel_[ai].load()) {
+                    return;
+                }
+                constexpr int kAttempts = 3;
+                std::string last_error;
+                for (int attempt = 0; attempt < kAttempts; ++attempt) {
+                    try {
+                        protocol_->stop_motion(kAxisRa);
+                        cmd_axis_rate_deg_s_[0] = 0.0;
+                        invalidate_position_cache_locked();
+                        return;
+                    } catch (const std::exception& e) {
+                        last_error = e.what();
+                    }
+                }
+                ALPACA_LOG_ERROR("SkyWatcher", "Pulse: failed to stop RA after Tracking=false (" +
+                                                   std::to_string(kAttempts) +
+                                                   " attempts) -- axis may still be moving: " + last_error);
+                manual_axis_slewing_[0] = true;
+            };
             // Time spent verifying counts as pulse time: on this path the axis
             // is ALREADY running at the pulse rate before the check starts, so
             // the hold below must be shortened by however long it took.
@@ -1602,12 +1628,20 @@ public:
                 verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate, pulse_task_cancel_[ai],
                                            dispatch_max_window);
                 verify_elapsed = clock_.now() - verify_start;
+                // A West pulse runs faster than the drive rate, so a stopped
+                // axis reads nearer the old rate and the check resends.
+                std::lock_guard<std::mutex> lock(mutex_);
+                stop_ra_if_tracking_off_locked();
             }
             // What stop_axis() actually restored, for the post-stop verify
             // below. Seeded with the dispatch-time capture so a stop that
             // never ran (or a non-restoring pulse) behaves as before.
             double applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
-            auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate]() {
+            // open-astro#770: cleared when Tracking=false landed during the
+            // pulse; the end of the pulse then only stops the axis.
+            bool restore_still_wanted = restore_tracking;
+            auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate,
+                              &restore_still_wanted]() {
                 auto& proto = *protocol_;
                 // Re-derived here, NOT the value captured at dispatch: since
                 // the drive direction became hemisphere-dependent, a
@@ -1621,7 +1655,15 @@ public:
                 // one path that was still using a stale snapshot.
                 double ra_restore_rate_deg_per_sec = 0.0;
                 bool ra_reverses = false;
-                if (restore_tracking) {
+                // Same contract as the MoveAxis(0) restore (#535/#630): the
+                // restore never restarts an axis the client switched off.
+                bool restore = restore_tracking;
+                if (restore) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    restore = tracking_;
+                    restore_still_wanted = restore;
+                }
+                if (restore) {
                     std::lock_guard<std::mutex> lock(mutex_);
                     ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
                     applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
@@ -1634,7 +1676,7 @@ public:
                     // way at the new rate.
                     ra_reverses = (ra_restore_rate_deg_per_sec > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0);
                 }
-                if (restore_tracking && !pulse_restart && !ra_reverses) {
+                if (restore && !pulse_restart && !ra_reverses) {
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped. Same ":J" kick as
                     // the dispatch above, for the same reason, and skipped
@@ -1646,7 +1688,7 @@ public:
                     }
                     std::lock_guard<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
-                } else if (restore_tracking) {
+                } else if (restore) {
                     // Reversed pulse, or a hemisphere change mid-pulse: full
                     // stop-and-restart back to the drive rate.
                     std::unique_lock<std::mutex> lock(mutex_);
@@ -1716,7 +1758,7 @@ public:
             // the motion, so it costs no pulse distance, but it does hold the
             // pulse task ~450 ms (or more) longer, which the next command's
             // reap must join. Not worth that latency on short guide pulses.
-            if (stopped && restore_tracking && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
+            if (stopped && restore_still_wanted && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
                 // What stop_axis() RE-DERIVED, not the dispatch-time capture.
                 // The two differ whenever effective_ra_rate_locked() moved
                 // during the pulse -- a RightAscensionRate write (deferred by
@@ -1739,6 +1781,12 @@ public:
                 // took the busy-axis deferral and waited on a restore this
                 // task had already run: the write was stranded.
                 std::lock_guard<std::mutex> lock(mutex_);
+                // open-astro#770: Tracking=false after the restore, either
+                // during the rate check above or between stop_axis()'s
+                // tracking_ read and its unlocked ":I"+":J".
+                if (restore_still_wanted) {
+                    stop_ra_if_tracking_off_locked();
+                }
                 end_pulse_locked();
             }
             if (!stopped) {

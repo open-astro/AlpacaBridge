@@ -16,6 +16,7 @@
 // survives.
 
 #include <alpacahttp/response.h>
+#include <alpacahttp/wifi_manager.h>
 
 #include <iostream>
 #include <string>
@@ -26,7 +27,11 @@ using alpacahttp::AlpacaResponse;
 using alpacahttp::Response;
 
 static nlohmann::json net(const std::string& ssid, int signal) {
-    return nlohmann::json{{"Ssid", ssid}, {"FrequencyMhz", 2412u}, {"SignalPercent", signal}, {"Security", "WPA2"}};
+    return nlohmann::json{{"Ssid", ssid},
+                          {"SsidHex", alpacahttp::util::ssid_to_hex(ssid)},
+                          {"FrequencyMhz", 2412u},
+                          {"SignalPercent", signal},
+                          {"Security", "WPA2"}};
 }
 
 int main() {
@@ -53,7 +58,8 @@ int main() {
     // A scan containing one non-UTF-8 SSID must still serialise.
     {
         AlpacaResponse scan(1, 2);
-        scan.value = nlohmann::json::array({net("HomeWiFi", 80), net(std::string("\xff", 1), 60)});
+        scan.value = nlohmann::json::array(
+            {net("HomeWiFi", 80), net(std::string("\xff", 1), 60), net(std::string("\xfe", 1), 55)});
         Response r;
         bool threw = false;
         try {
@@ -74,9 +80,12 @@ int main() {
             parsed_ok = false;
         }
         EXPECT(parsed_ok);
-        EXPECT(parsed["Value"].size() == 2);
+        EXPECT(parsed["Value"].size() == 3);
         EXPECT(parsed["Value"][0]["Ssid"] == "HomeWiFi");
         EXPECT(parsed["Value"][1]["Ssid"].get<std::string>() == "\xEF\xBF\xBD");
+        EXPECT(parsed["Value"][1]["SsidHex"] == "ff");
+        EXPECT(parsed["Value"][2]["Ssid"] == parsed["Value"][1]["Ssid"]);
+        EXPECT(parsed["Value"][2]["SsidHex"] == "fe");
     }
 
     // Mixed: valid bytes around an invalid one survive; only the bad byte is replaced.

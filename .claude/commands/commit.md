@@ -166,7 +166,8 @@ other open branch in conflict. A PR adds **one file**, `changelog.d/<branch-slug
 release step (`/bump-release`) writes `CHANGELOG.md`. The format is in `changelog.d/README.md`; the
 project uses [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) categories.
 
-1. `<branch-slug>` is the branch name after its last `/` (`git branch --show-current`); allowed
+1. `<branch-slug>` is the branch name after its last `/` (`git branch --show-current`), lowercased
+   (`fix/Issue-12` gives `issue-12.md`); allowed
    characters `[a-z0-9][a-z0-9._-]*`. If the file already exists on this branch, update it rather
    than adding a second one.
 2. The body is one or more `### <Category>` subsections, each with at least one `- ` bullet:

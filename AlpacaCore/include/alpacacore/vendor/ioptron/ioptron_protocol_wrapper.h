@@ -125,14 +125,6 @@ struct SiteInfo {
 };
 
 /**
- * @brief Meridian treatment settings.
- */
-struct MeridianTreatment {
-    int behavior = 0;        // 0 = stop at limit, 1 = flip at limit
-    int degrees_past = 0;    // Degrees past meridian
-};
-
-/**
  * @brief Clean C++ interface wrapping iOptron RS-232 protocol.
  *
  * This wrapper isolates the RS-232 command protocol and transport layer
@@ -208,39 +200,6 @@ public:
      */
     AltAz get_park_position();
 
-    /**
-     * @brief Get altitude limit in degrees.
-     *
-     * Sends :GAL# command.
-     */
-    int get_altitude_limit_degrees();
-
-    /**
-     * @brief Set altitude limit in degrees.
-     *
-     * Sends :SALsnn# command.
-     *
-     * @param limit_degrees Altitude limit in degrees.
-     */
-    void set_altitude_limit_degrees(int limit_degrees);
-
-    /**
-     * @brief Get meridian treatment behavior.
-     *
-     * Sends :GMT# command.
-     */
-    MeridianTreatment get_meridian_treatment();
-
-    /**
-     * @brief Set meridian treatment behavior.
-     *
-     * Sends :SMTnnn# command.
-     *
-     * @param behavior 0 = stop at limit, 1 = flip at limit
-     * @param degrees_past degrees past meridian
-     */
-    void set_meridian_treatment(int behavior, int degrees_past);
-    
     // Mount motion commands
     
     /**
