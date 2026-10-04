@@ -275,7 +275,7 @@ TEST_CASE("SynScan async - MoveAxis supersedes a pending async slew", "[synscan]
         return -1;
     }();
     REQUIRE(stop_index >= 0);
-    CHECK(goto_index < stop_index || goto_index == -1);
+    CHECK((goto_index == -1 || goto_index < stop_index));
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
