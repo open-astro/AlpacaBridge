@@ -20,7 +20,12 @@
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
 #include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdlib>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
@@ -48,19 +53,47 @@ TEST_CASE("iOptron AbortSlew - no GOTO reaches the mount after it returns", "[io
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     const int iterations = 20;
-    int goto_after_abort = 0;
+    auto target_ra = [](int i) { return 5.0 + 0.1 * i; };
+    std::vector<std::size_t> log_at_return;
     int missing_stop = 0;
     for (int i = 0; i < iterations; ++i) {
         const int q_before = mount.count(":Q#");
-        driver->slew_to_coordinates_async(5.0 + 0.1 * i, 20.0);
+        driver->slew_to_coordinates_async(target_ra(i), 20.0);
         driver->abort_slew();
-        const int ms_at_return = mount.count(":MS1#") + mount.count(":MS2#");
+        log_at_return.push_back(mount.commands().size());
         if (mount.count(":Q#") <= q_before) {
             ++missing_stop;
         }
-        // Let any dispatch that escaped the fence reach the mount.
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        if (mount.count(":MS1#") + mount.count(":MS2#") > ms_at_return) {
+        // An escaped dispatch is already waiting on the driver mutex when
+        // AbortSlew returns, so its :SRA lands within milliseconds; let it in
+        // before the next initiator's reap would cancel it and hide the bug.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (mount.commands().size() == log_at_return.back() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    // A new initiator joins the previous dispatch before it starts its own, so
+    // once this pair returns every dispatch above has finished. An escaped GOTO
+    // lands ~0.6 s after AbortSlew returns on this fake, too late for a sleep.
+    driver->slew_to_coordinates_async(4.0, 20.0);
+    driver->abort_slew();
+    const auto log = mount.commands();
+
+    // Tie each :MS1#/:MS2# to its iteration through the :SRA before it (RA in
+    // 0.01 arcsec units), and count those sent after that iteration's AbortSlew.
+    int goto_after_abort = 0;
+    int owner = -1;
+    for (std::size_t k = 0; k < log.size(); ++k) {
+        const std::string& cmd = log[k];
+        if (cmd.rfind(":SRA", 0) == 0) {
+            const double hours = static_cast<double>(std::atoll(cmd.substr(4, 9).c_str())) / 5400000.0;
+            owner = -1;
+            for (int i = 0; i < iterations; ++i) {
+                if (std::abs(hours - target_ra(i)) < 0.01) {
+                    owner = i;
+                }
+            }
+        } else if ((cmd == ":MS1#" || cmd == ":MS2#") && owner >= 0 && k >= log_at_return[owner]) {
             ++goto_after_abort;
         }
     }
