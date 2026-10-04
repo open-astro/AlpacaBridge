@@ -374,7 +374,12 @@ TEST_CASE("Celestron PulseGuide - an expired unpolled opposite-axis pulse does n
         REQUIRE(driver->get_can_pulse_guide());
 
         driver->pulse_guide(first_direction, 500);
-        std::this_thread::sleep_for(std::chrono::milliseconds(900));  // Do not poll IsPulseGuiding.
+        // Past the 500 ms pulse plus the driver's 1 s completion delay, so the
+        // first pulse has expired. Do not poll IsPulseGuiding.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1700));
+        // The first read after a pulse returns its one-shot readback correction;
+        // take it now so `held` below compares hold against hold.
+        (void)(is_ra ? driver->get_right_ascension() : driver->get_declination());
         driver->pulse_guide(second_direction, 1500);
         const double held = is_ra ? driver->get_right_ascension() : driver->get_declination();
         st->shifted_position.store(true);
