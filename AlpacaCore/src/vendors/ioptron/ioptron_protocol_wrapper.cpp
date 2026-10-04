@@ -1882,56 +1882,6 @@ AltAz iOptronProtocolWrapper::get_park_position() {
     return park;
 }
 
-int iOptronProtocolWrapper::get_altitude_limit_degrees() {
-    std::string response = send_command(":GAL");
-    if (response.empty()) {
-        throw AlpacaException("Invalid altitude limit response from mount");
-    }
-    int64_t limit = pimpl_->parse_signed_int(response);
-    return static_cast<int>(limit);
-}
-
-void iOptronProtocolWrapper::set_altitude_limit_degrees(int limit_degrees) {
-    if (limit_degrees < -89) {
-        limit_degrees = -89;
-    } else if (limit_degrees > 89) {
-        limit_degrees = 89;
-    }
-    std::string cmd = ":SAL" + pimpl_->format_signed_int(limit_degrees, 2) + "#";
-    std::string response = send_command(cmd, false);
-    if (!response.empty() && response != "1") {
-        ALPACA_LOG_WARN("iOptron", "Unexpected :SAL response: " + response);
-    }
-}
-
-MeridianTreatment iOptronProtocolWrapper::get_meridian_treatment() {
-    std::string response = send_command(":GMT");
-    if (response.size() < 3) {
-        throw AlpacaException("Invalid meridian treatment response from mount");
-    }
-    MeridianTreatment treatment;
-    treatment.behavior = response[0] - '0';
-    treatment.degrees_past = static_cast<int>(parse_int64_field(response.substr(1, 2), ":GMT degrees"));
-    return treatment;
-}
-
-void iOptronProtocolWrapper::set_meridian_treatment(int behavior, int degrees_past) {
-    if (behavior != 0 && behavior != 1) {
-        behavior = 0;
-    }
-    if (degrees_past < 0) {
-        degrees_past = 0;
-    } else if (degrees_past > 90) {
-        degrees_past = 90;
-    }
-    std::ostringstream cmd;
-    cmd << ":SMT" << behavior << std::setfill('0') << std::setw(2) << degrees_past << "#";
-    std::string response = send_command(cmd.str(), false);
-    if (!response.empty() && response != "1") {
-        ALPACA_LOG_WARN("iOptron", "Unexpected :SMT response: " + response);
-    }
-}
-
 // Mount motion commands
 void iOptronProtocolWrapper::set_target_ra(double ra_hours) {
     int64_t ra_value = pimpl_->ra_to_ioptron_format(ra_hours);
