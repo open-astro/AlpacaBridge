@@ -263,6 +263,28 @@ TEST_CASE("SynScan Telescope Driver - ASCOM Error Codes", "[synscan][telescope][
     require_alpaca_error([&]() { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
 }
 
+// open-astro#769: PulseGuide and MoveAxis validate their arguments before the
+// connection check (AGENTS.md error precedence), so a disconnected driver
+// answers a bad argument with InvalidValue rather than NotConnected.
+TEST_CASE("SynScan Telescope Driver - motion argument errors precede NotConnected", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+
+    require_alpaca_error([&]() { driver->pulse_guide(5, 100); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->pulse_guide(0, -1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move_axis(2, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move_axis(0, std::numeric_limits<double>::quiet_NaN()); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move_axis(0, 1000.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    // Valid arguments still reach the connection check.
+    require_alpaca_error([&]() { driver->pulse_guide(0, 100); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
 // open-astro#346, the shape #304 fixed on the Sky-Watcher driver: ASCOM treats
 // TargetRightAscension and TargetDeclination as independent properties, each
 // throwing ValueNotSet until that property itself has been written. One shared
