@@ -4421,7 +4421,16 @@ int main() {
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
             {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted Sky-Watcher telescope",
              "has no site latitude and will refuse to connect"},
-            {"Skipping persisted device", "The coordinate is ignored", "200.000000"});
+            {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
+#endif
+#ifdef ALPACACORE_ENABLE_IOPTRON
+        // The router-owned arm still words both the API refusal and the saved
+        // config's WARN through read_site_coordinates(): short numbers in both.
+        pin("siteLatitude 200 (read_site_coordinates)", "ioptron", "telescope", "Telescope",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            "siteLatitude 200 is out of range: must be between -90 and 90 degrees", "{}", true,
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            {"siteLatitude 200 is out of range: must be between -90 and 90 degrees"}, {"200.000000"});
 #endif
 
         // #508 item 1, the arms that DROP a saved entry on an empty portPath
