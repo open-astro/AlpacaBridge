@@ -3735,6 +3735,39 @@ TEST_CASE("SkyWatcher async - the EQ-AL55i Pro is not asked for the ':i' step-pe
     }
 }
 
+TEST_CASE("SkyWatcher async - a MoveAxis stop-wait cannot dispatch into a reconnected session",
+          "[skywatcher][telescope][async][connection]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    mount.set_stop_ramp_ms(1500);
+    driver->move_axis(1, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+
+    const int stops_before = mount.frames_seen('K');
+    std::atomic<int> old_call_result{-1};
+    std::jthread old_call([&] {
+        try {
+            driver->move_axis(1, -2.0);
+            old_call_result.store(0);
+        } catch (const alpacacore::AlpacaException& ex) {
+            old_call_result.store(ex.error_code());
+        } catch (...) {
+            old_call_result.store(-2);
+        }
+    });
+    REQUIRE(wait_until([&] { return mount.frames_seen('K') > stops_before; }, 3000));
+
+    driver->set_connected(false);
+    driver->set_connected(true);
+    const int starts_after_reconnect = mount.start_count(2);
+    old_call.join();
+
+    CHECK(old_call_result.load() != 0);
+    CHECK(mount.start_count(2) == starts_after_reconnect);
+    driver->set_connected(false);
+}
+
 // open-astro#770: Tracking=false during an East/West pulse stops RA, but the
 // pulse task's end-of-pulse restore used to put the drive step period back and
 // send ":J" regardless, so RA ran at sidereal while Tracking read false.
