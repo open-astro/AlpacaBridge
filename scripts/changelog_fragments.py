@@ -43,6 +43,7 @@ BASE_CATEGORIES = [
     "Security",
 ]
 QUALIFIED_RE = re.compile(r"^(%s)(?: \(([^()]+)\))?$" % "|".join(BASE_CATEGORIES))
+FENCE_RE = re.compile(r"^(`{3,}|~{3,})(.*)$")
 BAD_HEADING_RE = re.compile(r"^#{1,2}\s")
 
 Entries = dict  # category -> list of bullets; a bullet is a list of lines
@@ -61,24 +62,43 @@ def parse_body(lines: list[str]) -> tuple[Entries, list[str]]:
     entries: Entries = {}
     problems: list[str] = []
     category: str | None = None
+    fence = ""  # the opening fence run (``` or ~~~, any length) while inside a fenced block
+    in_fence = False
+    pending: list[str] = []  # blank lines seen since the last kept line
     for raw in lines:
         line = raw.rstrip()
-        m = CATEGORY_RE.match(line)
-        if m:
-            category = m.group(1)
-            entries.setdefault(category, [])
-            continue
+        if not in_fence:
+            m = CATEGORY_RE.match(line)
+            if m:
+                category = m.group(1)
+                entries.setdefault(category, [])
+                pending = []
+                continue
         if not line.strip():
+            pending.append("")
             continue
         if category is None:
             problems.append("text before the first '### <Category>' subsection: %r" % line[:60])
+            pending = []
             continue
-        if line.startswith("- "):
+        if not in_fence and line.startswith("- "):
             entries[category].append([line])
         elif entries[category]:
+            # a blank line stays only inside a bullet: before an indented line or within a fence
+            if pending and (in_fence or line[0] in " \t"):
+                entries[category][-1].extend(pending)
             entries[category][-1].append(line)  # continuation or nested bullet
         else:
             problems.append("'### %s' has text before its first '- ' bullet: %r" % (category, line[:60]))
+        pending = []
+        if category is not None:
+            m = FENCE_RE.match(line.strip())
+            if m and not in_fence:
+                fence, in_fence = m.group(1), True
+            elif m and in_fence and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2):
+                fence, in_fence = "", False
+    if in_fence:
+        problems.append("unclosed code fence %r: close it with a matching fence line" % fence)
     return entries, problems
 
 
@@ -326,6 +346,24 @@ def self_test() -> int:
     expect(any("before the first" in p for p in validate("a.md", "text\n### Fixed\n- x\n")), "stray text accepted")
     expect(any("before its first" in p for p in validate("a.md", "### Fixed\nstray\n- x\n")), "text before first bullet accepted")
     expect(validate("a.md", "") != [], "empty fragment accepted")
+    expect(
+        any("unclosed" in p for p in validate("a.md", "### Fixed\n- x\n  ```\n  a\n\n### Added\n- y\n")),
+        "unclosed fence accepted",
+    )
+    ok_fence = "### Fixed\n- x\n  ````\n  ```\n  ````\n- y\n  ~~~\n  a\n  ~~~\n"
+    expect(validate("a.md", ok_fence) == [], "longer or tilde fence mis-tracked")
+    expect(
+        any("unclosed" in p for p in validate("a.md", "### Fixed\n- x\n  ````\n  ```\n- y\n")),
+        "shorter fence closed a four-backtick fence",
+    )
+    fence_cases = (
+        "### Fixed\n- y\n  ~~~\n### Added\n- z\n  ~~~\n- w\n  ```\n  ~~~\n  ```\n- v\n  ```\n  ```python\n  ```\n"
+    )
+    e, p = parse_body(fence_cases.splitlines())
+    expect(
+        p == [] and list(e) == ["Fixed"] and len(e["Fixed"]) == 3,
+        "tilde, mixed-character or info-string fence mis-tracked",
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -357,8 +395,18 @@ def self_test() -> int:
         # release on a fixture: legacy UNRELEASED + two fragments
         _write(d, "b-second.md", "### Fixed\n- **Second fix** (issue #3)\n\n### Security\n- **Sec** (issue #3)\n")
         _write(d, "a-first.md", "### Added\n- **First add** (issue #2)\n\n### Fixed\n- **First fix** (issue #2)\n")
+        _write(
+            d,
+            "c-blank.md",
+            "### Fixed\n- **Paragraphs** (issue #4)\n\n  Second paragraph.\n\n- **Fence** (issue #4)\n  ```\n  a\n\nb\n  ```\n\n\n",
+        )
         new = assemble(FIXTURE, d, "1.3.0", "2026-02-03")
         out = new.split("\n")
+        expect(
+            "- **Paragraphs** (issue #4)\n\n  Second paragraph.\n- **Fence** (issue #4)\n  ```\n  a\n\nb\n  ```\n\n"
+            in new,
+            "blank lines inside a bullet or fence lost, or between-bullet blanks not collapsed",
+        )
         expect("## [1.3.0] - 2026-02-03" in out, "new dated heading missing")
         expect(not any("UNRELEASED" in x for x in out), "UNRELEASED heading survived")
         expect(out.index("Intro paragraph.") + 2 == out.index("## [1.3.0] - 2026-02-03"), "section not under intro")
