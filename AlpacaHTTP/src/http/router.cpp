@@ -349,6 +349,9 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
                 written[section_index][i] = true;
             }
         }
+        if (added.empty()) {
+            return;
+        }
         output.insert(output.begin() + static_cast<std::ptrdiff_t>(std::min(section_end, output.size())), added.begin(),
                       added.end());
     };

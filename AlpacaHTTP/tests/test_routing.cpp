@@ -7232,6 +7232,36 @@ int main() {
         }
     }
 
+    // A key missing from an existing section is added after the section's last
+    // content line, ahead of its trailing blank and comment lines.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_routing_append_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "http:\n"
+                   "  host_check_enabled: false\n"
+                   "\n"
+                   "# next section\n"
+                   "server:\n"
+                   "  location: \"Old\"\n";
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt,
+                               R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        const std::string text = buf.str();
+        EXPECT(text.find("  allowed_hosts: \".lan\"\n\n# next section\nserver:") != std::string::npos);
+        std::remove(config_path.c_str());
+    }
+
     // Keys for a section the file lacks go under that section's new header,
     // not into the section the file ends with.
     {
