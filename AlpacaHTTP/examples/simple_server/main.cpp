@@ -107,16 +107,19 @@ int main(int argc, char* argv[]) {
 
     // With http_port 0 the OS picks the port, and discovery stays silent
     // until it is told which one (#562). bound_port() reads 0 until the
-    // listener is up, so keep trying from the wait loop below.
-    bool advertised = !discovery || config.http_port() != 0;
+    // listener is up, so keep trying from the wait loop below. A management
+    // restart binds a new ephemeral port, so remember the last one advertised
+    // and advertise again when it changes (#761).
+    const bool track_port = discovery && config.http_port() == 0;
+    std::uint16_t advertised_port = 0;
 
     // Wait for shutdown signal
     while (g_running && server.is_running()) {
-        if (!advertised) {
-            if (const std::uint16_t port = server.bound_port(); port != 0) {
+        if (track_port) {
+            if (const std::uint16_t port = server.bound_port(); port != 0 && port != advertised_port) {
                 discovery->set_advertised_port(port);
                 alpacahttp::util::log_info("Discovery advertising HTTP port " + std::to_string(port));
-                advertised = true;
+                advertised_port = port;
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
