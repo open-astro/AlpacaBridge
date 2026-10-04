@@ -576,7 +576,7 @@ After files are saved and `SUPPORTED-DRIVERS.md` is updated, tell the user:
 
 > "ConformU validated — 0 errors, 0 issues, 0 timing issues. Saved to `AlpacaCore/conformu/<Vendor>/<Model>/`. SUPPORTED-DRIVERS.md updated. AB log level restored to `<original-level>`. Run `/commit` to stage and commit these changes — the hard-block in `/commit` Step 3 will re-verify the report counts as a final safety net before the commit lands."
 
-Do NOT run `git add` or `git commit` from this skill. Leave staging and commit message authoring to `/commit`, which has the proper component grouping, CHANGELOG handling, and the redundant ConformU validation gate.
+Do NOT run `git add` or `git commit` from this skill. Leave staging and commit message authoring to `/commit`, which has the proper component grouping, changelog fragment handling, and the redundant ConformU validation gate.
 
 ## Workflow notes
 
