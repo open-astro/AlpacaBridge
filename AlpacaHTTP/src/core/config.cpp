@@ -11,10 +11,12 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacahttp/config.h>
-#include <fstream>
-#include <cstdlib>
+#include <alpacahttp/util/yaml_comment.h>
+
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <string_view>
 
@@ -43,33 +45,6 @@ std::string trim_copy(std::string_view input) {
         --end;
     }
     return std::string(input.substr(start, end - start));
-}
-
-std::string strip_inline_comment(const std::string& line) {
-    // A '#' inside a quoted value is data, not a comment. A double or single
-    // quote opens a quoted value only as the first non-space character after
-    // the key's colon; later in a plain value it is a literal. Backslash
-    // escapes apply inside double quotes only.
-    char quote = 0;
-    bool seen_colon = false;
-    bool at_value_start = false;
-    for (std::size_t i = 0; i < line.size(); ++i) {
-        const char c = line[i];
-        if (quote == '"' && c == '\\') {
-            ++i;
-        } else if ((c == '"' || c == '\'') && (quote == c || (quote == 0 && at_value_start))) {
-            quote = (quote == 0) ? c : static_cast<char>(0);
-            at_value_start = false;
-        } else if (c == '#' && quote == 0) {
-            return line.substr(0, i);
-        } else if (c == ':' && !seen_colon) {
-            seen_colon = true;
-            at_value_start = true;
-        } else if (!std::isspace(static_cast<unsigned char>(c))) {
-            at_value_start = false;
-        }
-    }
-    return line;
 }
 
 std::string unquote_string(const std::string& value) {
@@ -180,7 +155,7 @@ void Config::load_config_from_yaml(const std::string& config_path) {
     std::string current_section;
     std::string line;
     while (std::getline(file, line)) {
-        std::string no_comment = strip_inline_comment(line);
+        std::string no_comment = alpacahttp::util::strip_yaml_comment(line);
         std::string trimmed = trim_copy(no_comment);
         if (trimmed.empty()) {
             continue;

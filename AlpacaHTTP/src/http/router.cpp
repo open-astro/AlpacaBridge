@@ -25,6 +25,7 @@
 #include <alpacahttp/util/error_mapping.h>
 #include <alpacahttp/util/host_timezone.h>
 #include <alpacahttp/util/logging_adapter.h>
+#include <alpacahttp/util/yaml_comment.h>
 #include <alpacahttp/version.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -295,33 +296,6 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
         return std::string(value.substr(start, end - start));
     };
 
-    // A '#' inside a quoted value is data (location "Obs #2" or 'Obs #2'). A
-    // double or single quote opens a quoted value only as the first non-space
-    // character after the key's colon; later in a plain value it is a literal.
-    // Backslash escapes apply inside double quotes only.
-    auto strip_comment = [](const std::string& text) {
-        char quote = 0;
-        bool seen_colon = false;
-        bool at_value_start = false;
-        for (std::size_t i = 0; i < text.size(); ++i) {
-            const char c = text[i];
-            if (quote == '"' && c == '\\') {
-                ++i;
-            } else if ((c == '"' || c == '\'') && (quote == c || (quote == 0 && at_value_start))) {
-                quote = (quote == 0) ? c : static_cast<char>(0);
-                at_value_start = false;
-            } else if (c == '#' && quote == 0) {
-                return text.substr(0, i);
-            } else if (c == ':' && !seen_colon) {
-                seen_colon = true;
-                at_value_start = true;
-            } else if (!std::isspace(static_cast<unsigned char>(c))) {
-                at_value_start = false;
-            }
-        }
-        return text;
-    };
-
     // Index into `sections` of the section the current line sits in, or
     // sections.size() outside every section we edit.
     std::size_t current = sections.size();
@@ -357,7 +331,7 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
     };
 
     for (const auto& current_line : lines) {
-        std::string stripped_comment = strip_comment(current_line);
+        std::string stripped_comment = alpacahttp::util::strip_yaml_comment(current_line);
         std::string trimmed = trim_copy(stripped_comment);
         std::size_t indent = leading_spaces(current_line);
 

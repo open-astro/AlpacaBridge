@@ -441,6 +441,10 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_config alpacahttp)
     add_test(NAME test_config COMMAND test_config)
 
+    add_executable(test_yaml_comment tests/test_yaml_comment.cpp)
+    target_link_libraries(test_yaml_comment alpacahttp)
+    add_test(NAME test_yaml_comment COMMAND test_yaml_comment)
+
     add_executable(test_wifi_manager tests/test_wifi_manager.cpp)
     target_link_libraries(test_wifi_manager alpacahttp)
     add_test(NAME test_wifi_manager COMMAND test_wifi_manager)
