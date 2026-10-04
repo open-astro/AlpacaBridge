@@ -58,7 +58,7 @@ std::string strip_inline_comment(const std::string& line) {
         if (quote == '"' && c == '\\') {
             ++i;
         } else if ((c == '"' || c == '\'') && (quote == c || (quote == 0 && at_value_start))) {
-            quote = quote == 0 ? c : 0;
+            quote = (quote == 0) ? c : static_cast<char>(0);
             at_value_start = false;
         } else if (c == '#' && quote == 0) {
             return line.substr(0, i);
