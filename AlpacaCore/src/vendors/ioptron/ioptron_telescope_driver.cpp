@@ -1122,8 +1122,6 @@ public:
             }
         }
         slew_in_progress_ = false;
-        restore_altitude_limit_locked("Slewing");
-        restore_meridian_treatment_locked("Slewing");
         return false;
     }
     
@@ -1331,8 +1329,6 @@ public:
         // early-return below (a soft-failed goto never set is_slewing).
         last_slew_error_.clear();
         if (!faulted && !cached_status_.is_slewing) {
-            restore_altitude_limit_locked("AbortSlew");
-            restore_meridian_treatment_locked("AbortSlew");
             return;
         }
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -1347,8 +1343,6 @@ public:
         slew_in_progress_ = false;
         status_cache_valid_ = false;
         slew_override_until_ = std::chrono::steady_clock::time_point{};
-        restore_altitude_limit_locked("AbortSlew");
-        restore_meridian_treatment_locked("AbortSlew");
     }
     
     void pulse_guide(int direction, int duration) override {
@@ -1885,78 +1879,6 @@ private:
         }
     }
 
-    bool try_override_altitude_limit_locked() const {
-        auto& protocol = iOptronProtocolWrapper::instance();
-        try {
-            const int current_limit = protocol.get_altitude_limit_degrees();
-            altitude_limit_restore_degrees_ = current_limit;
-            constexpr int kAltitudeLimitOverrideDegrees = -89;
-            if (current_limit != kAltitudeLimitOverrideDegrees) {
-                protocol.set_altitude_limit_degrees(kAltitudeLimitOverrideDegrees);
-            }
-            altitude_limit_override_active_ = true;
-            ALPACA_LOG_INFO(
-                "iOptron",
-                "Temporarily lowering altitude limit to " +
-                    std::to_string(kAltitudeLimitOverrideDegrees) +
-                    " degrees for slew");
-            return true;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string("Unable to override altitude limit: ") + e.what());
-            altitude_limit_override_active_ = false;
-            return false;
-        }
-    }
-
-    void restore_altitude_limit_locked(const char* label) const {
-        if (!altitude_limit_override_active_) {
-            return;
-        }
-        try {
-            auto& protocol = iOptronProtocolWrapper::instance();
-            protocol.set_altitude_limit_degrees(altitude_limit_restore_degrees_);
-            altitude_limit_override_active_ = false;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string(label) + ": Failed to restore altitude limit: " +
-                                         e.what());
-        }
-    }
-
-    bool try_override_meridian_treatment_locked() const {
-        auto& protocol = iOptronProtocolWrapper::instance();
-        try {
-            const MeridianTreatment current = protocol.get_meridian_treatment();
-            meridian_restore_behavior_ = current.behavior;
-            meridian_restore_degrees_ = current.degrees_past;
-            constexpr int kMeridianOverrideDegrees = 30;
-            protocol.set_meridian_treatment(1, kMeridianOverrideDegrees);
-            meridian_override_active_ = true;
-            ALPACA_LOG_INFO(
-                "iOptron",
-                "Temporarily relaxing meridian treatment to flip, " +
-                    std::to_string(kMeridianOverrideDegrees) + " degrees past meridian");
-            return true;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string("Unable to override meridian treatment: ") + e.what());
-            meridian_override_active_ = false;
-            return false;
-        }
-    }
-
-    void restore_meridian_treatment_locked(const char* label) const {
-        if (!meridian_override_active_) {
-            return;
-        }
-        try {
-            auto& protocol = iOptronProtocolWrapper::instance();
-            protocol.set_meridian_treatment(meridian_restore_behavior_, meridian_restore_degrees_);
-            meridian_override_active_ = false;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string(label) + ": Failed to restore meridian treatment: " +
-                                         e.what());
-        }
-    }
-
     void prepare_slew_state_locked(double ascom_ra, double ascom_dec,
                                     double phys_ra, double phys_dec,
                                     const char* label) {
@@ -1993,26 +1915,6 @@ private:
         bool accepted = protocol.slew_to_ra_dec();
         if (!accepted) {
             accepted = protocol.slew_to_ra_dec_cw_up();
-        }
-        bool altitude_override_applied = false;
-        bool meridian_override_applied = false;
-        if (!accepted && !altitude_limit_override_active_) {
-            altitude_override_applied = try_override_altitude_limit_locked();
-        }
-        if (!accepted && !meridian_override_active_) {
-            meridian_override_applied = try_override_meridian_treatment_locked();
-        }
-        if (!accepted && (altitude_override_applied || meridian_override_applied)) {
-            accepted = protocol.slew_to_ra_dec();
-            if (!accepted) {
-                accepted = protocol.slew_to_ra_dec_cw_up();
-            }
-            if (!accepted && altitude_override_applied) {
-                restore_altitude_limit_locked(label);
-            }
-            if (!accepted && meridian_override_applied) {
-                restore_meridian_treatment_locked(label);
-            }
         }
         if (!accepted) {
             slew_in_progress_ = false;
@@ -2102,8 +2004,6 @@ private:
             std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
         slew_in_progress_ = false;
-        restore_altitude_limit_locked(label);
-        restore_meridian_treatment_locked(label);
     }
     
     void refresh_position_cache_locked(bool force = false) const {
@@ -2893,11 +2793,6 @@ private:
     mutable int slew_refine_count_ = 0;
     mutable double slew_target_ra_hours_ = 0.0;
     mutable double slew_target_dec_degrees_ = 0.0;
-    mutable bool altitude_limit_override_active_ = false;
-    mutable int altitude_limit_restore_degrees_ = 0;
-    mutable bool meridian_override_active_ = false;
-    mutable int meridian_restore_behavior_ = 0;
-    mutable int meridian_restore_degrees_ = 0;
     mutable bool device_faulted_ = false;
     mutable int device_fault_count_ = 0;
     mutable std::string last_device_error_;

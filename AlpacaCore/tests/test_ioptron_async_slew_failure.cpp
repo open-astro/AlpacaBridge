@@ -129,4 +129,31 @@ TEST_CASE("iOptron async - AbortSlew clears a stored slew failure (#575)", "[iop
     driver->set_connected(false);
 }
 
+// open-astro#763: the driver never rewrites the mount's own limits. A GOTO the
+// firmware refuses (user altitude limit +00 here) is reported and not retried
+// after lowering :SAL / :SMT.
+TEST_CASE("iOptron - a refused GOTO never writes the altitude limit or meridian treatment (#763)",
+          "[ioptron][telescope][slewfailure]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    mount.set_reject_goto(true);
+    CHECK_THROWS_AS(driver->slew_to_coordinates(5.5, 20.0), alpacacore::AlpacaException);
+    const int goto_attempts = mount.count(":MS1#");
+    CHECK(goto_attempts == 1);  // no retry after a limit rewrite
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= goto_attempts + 1; }, 5000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    CHECK(mount.count(":MS1#") == goto_attempts + 1);
+
+    REQUIRE_NOTHROW(driver->abort_slew());
+    driver->set_connected(false);
+
+    CHECK(mount.count(":SAL") == 0);
+    CHECK(mount.count(":SMT") == 0);
+}
+
 #endif  // _WIN32
