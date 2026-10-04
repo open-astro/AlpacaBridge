@@ -365,7 +365,7 @@ TEST_CASE("Celestron AbortSlew - stops each active pulse chain before returning"
 
 TEST_CASE("Celestron PulseGuide - an expired unpolled opposite-axis pulse does not disable the hold",
           "[celestron][telescope][pulseguiding][ownership]") {
-    for (const auto [first_direction, second_direction, is_ra] : {std::tuple{2, 0, true}, std::tuple{0, 2, false}}) {
+    for (const auto& [first_direction, second_direction, is_ra] : {std::tuple{2, 0, true}, std::tuple{0, 2, false}}) {
         auto st = std::make_shared<FakeCelestronState>();
         alpacacore::test::FakeMountServer server(celestron_responder(st));
         REQUIRE(server.ok());
