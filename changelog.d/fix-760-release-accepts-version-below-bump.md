@@ -1,0 +1,2 @@
+### Fixed
+- **`--release` refuses a version below the proposed bump** (tooling). `scripts/changelog_fragments.py --release` only checked the version against the latest dated release, so a patch number was accepted with a `Breaking changes` fragment or below a legacy UNRELEASED floor. It now fails with `ERROR: <version> is below the proposed bump <proposed> for these fragments`; a version above the proposal is still allowed.
