@@ -3828,6 +3828,7 @@ int main() {
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded());
             EXPECT(json.value("ErrorNumber", 0) != 0);
+            std::fprintf(stderr, "DBG %s\n", json.dump().c_str());
             EXPECT(json.value("ErrorMessage", "").find(expected) != std::string::npos);
         };
 
@@ -6201,6 +6202,31 @@ int main() {
         remove_device(router, "skywatcher", "telescope", 9259);
     }
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
+
+#ifdef ALPACACORE_ENABLE_IOPTRON
+    // read_site_coordinates() still words the refusal for the router-owned
+    // vendors: the numbers print in their short form, not std::to_string's
+    // "200.000000" / "-90.000000".
+    {
+        alpacahttp::Router router;
+        for (const auto& [override_json, expected] :
+             {std::pair{nlohmann::json{{"siteLatitude", 200.0}},
+                        std::string("siteLatitude 200 is out of range: must be between -90 and 90 degrees")},
+              std::pair{nlohmann::json{{"siteLongitude", 999.5}},
+                        std::string("siteLongitude 999.5 is out of range: must be between -180 and 180 degrees")}}) {
+            nlohmann::json config = {{"vendor", "ioptron"},
+                                     {"deviceType", "telescope"},
+                                     {"deviceNumber", 9641},
+                                     {"connectionType", "serial"},
+                                     {"portPath", "/dev/null"}};
+            config.update(override_json);
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", config.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find(expected) != std::string::npos);
+        }
+    }
+#endif
 
     // Issue #348: every state-changing management endpoint carries the
     // cross-origin guard, not just synctime and wifi.

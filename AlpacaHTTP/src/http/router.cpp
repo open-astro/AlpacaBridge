@@ -6941,9 +6941,11 @@ bool read_site_coordinates(const nlohmann::json& config, bool from_api, const st
         // NaN, so the !(in range) form below catches it where (out of range)
         // would not.
         if (!(value >= -field.limit && value <= field.limit)) {
-            const std::string detail = std::string(field.key) + " " + std::to_string(value) +
-                                       " is out of range: must be between " + std::to_string(-field.limit) + " and " +
-                                       std::to_string(field.limit) + " degrees";
+            using alpacacore::catalog::format_bound;
+            const auto kDouble = alpacacore::catalog::FieldRef::Kind::Double;
+            const std::string detail = std::string(field.key) + " " + format_bound(kDouble, value) +
+                                       " is out of range: must be between " + format_bound(kDouble, -field.limit) +
+                                       " and " + format_bound(kDouble, field.limit) + " degrees";
             if (from_api) {
                 error_message = detail;
                 return false;
