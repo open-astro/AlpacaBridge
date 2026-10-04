@@ -39,5 +39,6 @@ int main() {
 
     // A quote after the first colon of a plain value does not open a string.
     EXPECT(strip_yaml_comment("url: http://h:1 #x") == "url: http://h:1 ");
+    EXPECT(strip_yaml_comment("name: a:\"b #c\"") == "name: a:\"b ");
     return 0;
 }
