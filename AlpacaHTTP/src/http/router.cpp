@@ -428,6 +428,7 @@ bool update_config_values(const std::string& config_path, const std::vector<Conf
             output.push_back("");
         }
         output.push_back(sections[i].first + ":");
+        section_end = output.size();
         append_unwritten(i, 2);
     }
 

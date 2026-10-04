@@ -7232,6 +7232,37 @@ int main() {
         }
     }
 
+    // Keys for a section the file lacks go under that section's new header,
+    // not into the section the file ends with.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_routing_new_section_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "server:\n"
+                   "  location: \"Old\"\n";
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt,
+                               R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        EXPECT(buf.str() ==
+               "server:\n"
+               "  location: \"Old\"\n"
+               "\n"
+               "http:\n"
+               "  host_check_enabled: \"true\"\n"
+               "  allowed_hosts: \".lan\"\n");
+        std::remove(config_path.c_str());
+    }
+
     // A lone double quote inside a plain old value does not hide its comment.
     {
         char path_template[] = "/tmp/alpacahttp_test_routing_lone_quote_XXXXXX";
