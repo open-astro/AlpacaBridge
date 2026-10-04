@@ -3828,7 +3828,6 @@ int main() {
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded());
             EXPECT(json.value("ErrorNumber", 0) != 0);
-            std::fprintf(stderr, "DBG %s\n", json.dump().c_str());
             EXPECT(json.value("ErrorMessage", "").find(expected) != std::string::npos);
         };
 
