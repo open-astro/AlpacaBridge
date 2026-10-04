@@ -2546,17 +2546,18 @@ private:
     // Must be called WITHOUT mutex_ held — the dispatch thread takes mutex_,
     // so joining under the lock would deadlock. The thread only dispatches a
     // single command (no long sleeps), so the join is quick.
+    // open-astro#768: join under slew_dispatch_mutex_ (the dispatch never
+    // takes it) and touch the cancel flag only there, so a second reaper waits
+    // for the first join instead of returning early and clearing the cancel
+    // the queued dispatch still has to see. Same shape as
+    // stop_clock_sync_thread_locked().
     void reap_slew_dispatch() {
-        slew_dispatch_cancel_.store(true);
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
-            prev = std::move(slew_dispatch_thread_);
+        std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
+        if (slew_dispatch_thread_.joinable()) {
+            slew_dispatch_cancel_.store(true);
+            slew_dispatch_thread_.join();
+            slew_dispatch_cancel_.store(false);
         }
-        if (prev.joinable()) {
-            prev.join();
-        }
-        slew_dispatch_cancel_.store(false);
     }
 
     std::chrono::system_clock::time_point current_utc_time_locked() const {
@@ -2809,7 +2810,8 @@ private:
     // bodies — see start_clock_sync_thread(). Never taken by the body.
     std::mutex clock_sync_mutex_;
     // Async slew dispatch thread (never detached) — see reap_slew_dispatch().
-    // slew_dispatch_mutex_ only guards the thread handle.
+    // slew_dispatch_mutex_ guards the thread handle and every write of the
+    // cancel flag; the dispatch body never takes it.
     std::mutex slew_dispatch_mutex_;
     std::thread slew_dispatch_thread_;
     std::atomic<bool> slew_dispatch_cancel_{false};
