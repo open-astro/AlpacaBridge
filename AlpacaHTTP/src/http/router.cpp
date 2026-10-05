@@ -99,9 +99,6 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_GPHOTO
-#include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #endif
@@ -9404,25 +9401,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "gphoto" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_GPHOTO
-        int camera_index = config_get(config, "cameraIndex", 0);
-
-        auto camera = alpacacore::vendor::gphoto::create_gphoto_camera(device_number, camera_index);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered gphoto camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "gphoto support not enabled. Rebuild with -DALPACACORE_ENABLE_GPHOTO=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "touptek" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_TOUPTEK
         int camera_index = config_get(config, "cameraIndex", 0);
@@ -10191,8 +10169,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "qhy") {
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
-    } else if (vendor == "gphoto") {
-        copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
         if (device_type == "switch") {
             // Two switch backends share (touptek, switch): the StellaVita
