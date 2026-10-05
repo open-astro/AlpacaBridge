@@ -68,8 +68,7 @@ PRODUCTION_PREFIXES = (
 )
 HELPER_PREFIXES = ("AlpacaCore/tests/", "AlpacaHTTP/tests/")
 HELPER_SUBJECT_RE = re.compile(
-    r"\bFake[A-Za-z0-9_]*|\bPtyPair\b|\bStressCallGuard\b|\[stress-guard\]",
-    re.IGNORECASE,
+    r"\bFake[A-Za-z0-9_]*|\bPtyPair\b|\bStressCallGuard\b|\[stress-guard\]"
 )
 
 HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*\*|__)?\s*falsified by\s*:?\s*(?:\*\*|__)?\s*:?\s*$",
@@ -101,7 +100,7 @@ def catch_cases(text):
 
 def web_cases(text):
     """{name: set()} for each `test('<name>', ...)` call in a web test file."""
-    return {m.group("name"): set() for m in WEB_TEST_RE.finditer(text)}
+    return {m.group("name"): set() for m in WEB_TEST_RE.finditer(strip_comments(text))}
 
 
 def hand_rolled_cases(diff_text):
@@ -142,7 +141,7 @@ def parse_body(body):
             break
         m = LINE_RE.match(ln)
         if not m:
-            errors.append('malformed line (want `- "<case>": <path>:<line> <change>`): %s' % ln.strip())
+            errors.append('malformed line (want `- "<case>": <path>:<line> <change>`): %r' % ln.strip())
             continue
         if len(m.group("change").split()) < 3:
             errors.append("change has fewer than 3 words for %r" % m.group("name"))
@@ -164,8 +163,13 @@ def path_error(name, path, tags, exists):
     return "%r: %s is not production code (AlpacaCore/src|include, AlpacaHTTP/src|web)" % (name, path)
 
 
-def evaluate(new_cases, entries, body_errors, exists):
-    """Every problem found, given {name: tags} of new cases and the parsed body."""
+def evaluate(new_cases, entries, body_errors, exists, head_cases=None):
+    """Every problem found, given {name: tags} of new cases and the parsed body.
+
+    A line naming a case that is not new but exists at HEAD is accepted: it is
+    the evidence for a fix to an existing case. A line naming neither is stale.
+    """
+    head_cases = head_cases or {}
     errors = list(body_errors)
     claimed = {}
     for name, path, _change in entries:
@@ -174,10 +178,14 @@ def evaluate(new_cases, entries, body_errors, exists):
         if name not in claimed:
             errors.append("new test case has no `Falsified by:` line: %r" % name)
     for name, path, _change in entries:
-        if name not in new_cases:
-            errors.append("`Falsified by:` line names no new test case (stale or typo): %r" % name)
+        if name in new_cases:
+            tags = new_cases[name]
+        elif name in head_cases:
+            tags = head_cases[name]
+        else:
+            errors.append("`Falsified by:` line names no test case at HEAD (stale or typo): %r" % name)
             continue
-        err = path_error(name, path, new_cases[name], exists)
+        err = path_error(name, path, tags, exists)
         if err:
             errors.append(err)
     return errors
@@ -204,33 +212,66 @@ def is_catch_file(path):
     return path.startswith(CATCH_DIRS) and path.endswith(CATCH_EXTS)
 
 
+def is_web_file(path):
+    return path.startswith(WEB_DIR) and path.endswith(".test.js")
+
+
+def is_hand_rolled_file(path):
+    return path.startswith(HAND_ROLLED_DIR) and path.endswith(".cpp")
+
+
+def case_names_in(path, text):
+    """Every case name `text` (the content of `path`) declares, of any kind."""
+    names = {}
+    if is_web_file(path):
+        names.update(web_cases(text))
+    elif is_catch_file(path):
+        names.update(catch_cases(text))
+        if is_hand_rolled_file(path):
+            names.update({m.group("name"): set()
+                          for m in map(CASE_MARKER_RE.match, text.splitlines()) if m})
+    return names
+
+
+def new_cases_in(path, text, base_names, diff_for_path):
+    """({name: tags}, [error]) for the cases `text` adds over `base_names`.
+
+    `diff_for_path()` returns the unified diff of `path`; it is read only for a
+    hand-rolled test file with no Catch2 cases.
+    """
+    errors = []
+    if is_web_file(path):
+        found = web_cases(text)
+    elif is_catch_file(path):
+        found = catch_cases(text)
+        if is_hand_rolled_file(path) and not found:
+            found, errs = hand_rolled_cases(diff_for_path())
+            errors.extend("%s: %s" % (path, e) for e in errs)
+    else:
+        found = {}
+    return {n: t for n, t in found.items() if n not in base_names}, errors
+
+
 def gather_new_cases(base):
+    """(new, errors, head_cases) for the diff `base...HEAD`."""
     changed = git("diff", "--name-only", "--diff-filter=AMR", base + "...HEAD").split()
     base_names = set()
     for path in git("ls-tree", "-r", "--name-only", base, "--", "AlpacaCore/tests", "AlpacaHTTP/tests").split():
-        text = git("show", "%s:%s" % (base, path), check=False)
-        if path.startswith(WEB_DIR) and path.endswith(".test.js"):
-            base_names.update(web_cases(text))
-        elif is_catch_file(path):
-            base_names.update(catch_cases(text))
-    new, errors = {}, []
-    for path in changed:
+        base_names.update(case_names_in(path, git("show", "%s:%s" % (base, path), check=False)))
+    new, errors, head_cases = {}, [], {}
+    for path in git("ls-files", "AlpacaCore/tests", "AlpacaHTTP/tests").split():
         full = os.path.join(ROOT, path)
         if not os.path.isfile(full):
             continue
         with open(full, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
-        found = {}
-        if path.startswith(WEB_DIR) and path.endswith(".test.js"):
-            found = web_cases(text)
-        elif is_catch_file(path):
-            found = catch_cases(text)
-            if path.startswith(HAND_ROLLED_DIR) and path.endswith(".cpp") and not found:
-                names, errs = hand_rolled_cases(git("diff", "-U0", base + "...HEAD", "--", path))
-                found = {n: t for n, t in names.items() if n not in base_names}
-                errors.extend("%s: %s" % (path, e) for e in errs)
-        new.update({n: t for n, t in found.items() if n not in base_names})
-    return new, errors
+        head_cases.update(case_names_in(path, text))
+        if path in changed:
+            found, errs = new_cases_in(path, text, base_names,
+                                       lambda p=path: git("diff", "-U0", base + "...HEAD", "--", p))
+            new.update(found)
+            errors.extend(errs)
+    return new, errors, head_cases
 
 
 def main(argv):
@@ -251,15 +292,16 @@ def main(argv):
         body = os.environ.get("PR_BODY", "")
     try:
         base = resolve_base(base_arg or os.environ.get("FALSIFIED_BASE"))
-        new, errors = gather_new_cases(base)
+        new, errors, head_cases = gather_new_cases(base)
     except RuntimeError as exc:
         print("falsified-by: ERROR: %s" % exc, file=sys.stderr)
         return 2
-    if not new and not errors:
+    entries, body_errors = parse_body(body)
+    errors = errors + evaluate(new, entries, body_errors, lambda p: os.path.exists(os.path.join(ROOT, p)),
+                               head_cases)
+    if not new and not entries and not errors:
         print("falsified-by: no new test cases; nothing to check")
         return 0
-    entries, body_errors = parse_body(body)
-    errors = errors + evaluate(new, entries, body_errors, lambda p: os.path.exists(os.path.join(ROOT, p)))
     if errors:
         for e in errors:
             print("FALSIFIED-BY: " + e)
@@ -297,12 +339,32 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     check("catch parameterised is one case", "Templated" in cases and len(cases) == 4)
     check("catch concatenated", cases.get("Concat") == {"a", "b"})
 
-    # Moved vs renamed: new = names absent from the base set.
-    base_names = set(catch_cases('TEST_CASE("Old name", "[x]") {}'))
-    moved = {n for n in catch_cases('TEST_CASE("Old name", "[x]") {}') if n not in base_names}
-    renamed = {n for n in catch_cases('TEST_CASE("Old name 2", "[x]") {}') if n not in base_names}
+    # Moved vs renamed, through the same functions gather_new_cases calls.
+    cpp = "AlpacaCore/tests/t.cpp"
+    nodiff = lambda: ""  # noqa: E731
+    base_names = set(case_names_in(cpp, 'TEST_CASE("Old name", "[x]") {}'))
+    moved, _e = new_cases_in(cpp, '// moved\nTEST_CASE("Old name", "[x]") {}', base_names, nodiff)
+    renamed, _e = new_cases_in(cpp, 'TEST_CASE("Old name 2", "[x]") {}', base_names, nodiff)
     check("moved case is not new", not moved)
-    check("renamed case is new", renamed == {"Old name 2"})
+    check("renamed case is new", set(renamed) == {"Old name 2"})
+    wjs = "AlpacaHTTP/tests/web/a.test.js"
+    wbase = set(case_names_in(wjs, "test('old web', () => {});"))
+    moved, _e = new_cases_in(wjs, "test('old web', () => {});", wbase, nodiff)
+    renamed, _e = new_cases_in(wjs, "test('new web', () => {});", wbase, nodiff)
+    check("web moved not new", not moved)
+    check("web renamed is new", set(renamed) == {"new web"})
+    check("web comment stripped", "ghost" not in web_cases("// test('ghost', f);\n/* test('ghost2', f); */"))
+    hr = "AlpacaHTTP/tests/test_h.cpp"
+    hr_base = "int main() {\n    {\n        // case: moved block\n        EXPECT(1);\n    }\n}\n"
+    hr_names = set(case_names_in(hr, hr_base))
+    check("hand-rolled base names collected", hr_names == {"moved block"})
+    hr_diff = lambda: "+    {\n+        // case: moved block\n+        EXPECT(1);\n+    }\n"  # noqa: E731
+    moved, errs = new_cases_in(hr, "int main() {}", hr_names, hr_diff)
+    check("hand-rolled moved block is not new", not moved and not errs)
+    fresh, errs = new_cases_in(hr, "int main() {}", set(), hr_diff)
+    check("hand-rolled new block is new", set(fresh) == {"moved block"} and not errs)
+    _n, errs = new_cases_in(hr, "int main() {}", set(), lambda: "+    {\n+        EXPECT(1);\n")
+    check("hand-rolled missing marker error", len(errs) == 1)
 
     # Hand-rolled blocks.
     diff = "+++ b/f.cpp\n+    {\n+        // case: marker one\n+        EXPECT(1);\n+    }\n"
@@ -356,6 +418,15 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
                    ("Harness self-test", {"stress-guard"})]:
         errs = evaluate({nm: tg}, [(nm, "AlpacaCore/tests/fake.h", "x y z")], [], always)
         check("helper path accepted: " + nm, not errs)
+    for nm, tg in [("Driver connects over the fake", set()), ("Camera connect", {"fakesdk"}),
+                   ("Camera connect", {"fake"})]:
+        errs = evaluate({nm: tg}, [(nm, "AlpacaCore/tests/fake_a.h", "x y z")], [], always)
+        check("helper path rejected for lowercase fake: %s %s" % (nm, sorted(tg)),
+              len(errs) == 1 and "test helper" in errs[0])
+    # A line for an existing (not new) case is accepted; one naming no case is stale.
+    check("existing case accepted", not evaluate({}, [("Old", prod, "x y z")], [], always, {"Old": set()}))
+    errs = evaluate({}, [("Ghost", prod, "x y z")], [], always, {"Old": set()})
+    check("stale line with no new cases", len(errs) == 1 and "Ghost" in errs[0])
     errs = evaluate({"A": set()}, [("A", prod, "x y z")], ["malformed line"], always)
     check("body errors carried", errs == ["malformed line"])
 

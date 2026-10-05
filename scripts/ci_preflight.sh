@@ -306,14 +306,15 @@ fi
 
 section "Falsified-by (PR body)"
 if python3 scripts/check_falsified_by.py --self-test; then
-  if [ -n "${PR_BODY_FILE:-}" ] && [ -f "${PR_BODY_FILE}" ]; then
-    if FALSIFIED_BASE="${MERGE_BASE}" python3 scripts/check_falsified_by.py --body-file "${PR_BODY_FILE}"; then
-      record PASS "falsified-by"
-    else
-      record FAIL "falsified-by"
-    fi
-  else
+  if [ -z "${PR_BODY_FILE:-}" ]; then
     record SKIP "falsified-by (no PR body)"
+  elif [ ! -f "${PR_BODY_FILE}" ]; then
+    echo "falsified-by: PR_BODY_FILE is set but ${PR_BODY_FILE} does not exist"
+    record FAIL "falsified-by"
+  elif FALSIFIED_BASE="${MERGE_BASE}" python3 scripts/check_falsified_by.py --body-file "${PR_BODY_FILE}"; then
+    record PASS "falsified-by"
+  else
+    record FAIL "falsified-by"
   fi
 else
   record FAIL "falsified-by"
