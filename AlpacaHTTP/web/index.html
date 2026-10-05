@@ -718,7 +718,7 @@
                     <div id="zwo-asiair-fields" style="display: none;">
                         <div class="form-group">
                             <label for="asiair-gpio-chip">GPIO Chip Device:</label>
-                            <input type="text" id="asiair-gpio-chip" name="asiairGpioChip" value="/dev/gpiochip0">
+                            <input type="text" id="asiair-gpio-chip" name="asiairGpioChip" value="/dev/gpiochip0" readonly>
                             <small>Path to the libgpiod character device. Default <code>/dev/gpiochip0</code> matches the Pi 4 ASIAIR Pro.</small>
                         </div>
                         <div class="form-group">
@@ -739,22 +739,22 @@
                             <tbody>
                                 <tr>
                                     <td style="padding: 4px;"><input type="text" id="asiair-port-name-0" name="asiairPortName0" value="Port 1" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-0" name="asiairPortGpio0" value="12" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-0" name="asiairPortGpio0" style="width: 60px;"><option value="12" selected>12</option><option value="13">13</option><option value="26">26</option><option value="18">18</option></select></td>
                                     <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-0" name="asiairPortPwm0"></td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 4px;"><input type="text" id="asiair-port-name-1" name="asiairPortName1" value="Port 2" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-1" name="asiairPortGpio1" value="13" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-1" name="asiairPortGpio1" style="width: 60px;"><option value="12">12</option><option value="13" selected>13</option><option value="26">26</option><option value="18">18</option></select></td>
                                     <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-1" name="asiairPortPwm1"></td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 4px;"><input type="text" id="asiair-port-name-2" name="asiairPortName2" value="Port 3" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-2" name="asiairPortGpio2" value="26" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-2" name="asiairPortGpio2" style="width: 60px;"><option value="12">12</option><option value="13">13</option><option value="26" selected>26</option><option value="18">18</option></select></td>
                                     <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-2" name="asiairPortPwm2"></td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 4px;"><input type="text" id="asiair-port-name-3" name="asiairPortName3" value="Port 4" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-3" name="asiairPortGpio3" value="18" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-3" name="asiairPortGpio3" style="width: 60px;"><option value="12">12</option><option value="13">13</option><option value="26">26</option><option value="18" selected>18</option></select></td>
                                     <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-3" name="asiairPortPwm3"></td>
                                 </tr>
                             </tbody>
@@ -764,7 +764,7 @@
                     <div id="zwo-asiair-plus-fields" style="display: none;">
                         <div class="form-group">
                             <label for="asiair-plus-device-path">Power Control Device:</label>
-                            <input type="text" id="asiair-plus-device-path" name="asiairPlusDevicePath" value="/dev/pwm-gpio-misc">
+                            <input type="text" id="asiair-plus-device-path" name="asiairPlusDevicePath" value="/dev/pwm-gpio-misc" readonly>
                             <small>Path to the ZWO <code>pwm_gpio.ko</code> kernel module's character device. Default <code>/dev/pwm-gpio-misc</code> is correct for stock ASIAIR Plus (RK3568) hardware.</small>
                         </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
