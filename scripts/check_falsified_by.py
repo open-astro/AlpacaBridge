@@ -103,17 +103,31 @@ def web_cases(text):
     return {m.group("name"): set() for m in WEB_TEST_RE.finditer(strip_comments(text))}
 
 
-def hand_rolled_cases(diff_text):
-    """(names, errors) for the added top-level `main()` blocks in a unified diff.
+HUNK_RE = re.compile(r"^@@ -\S+ \+(\d+)")
+MAIN_RE = re.compile(r"^int\s+main\s*\(", re.M)
 
-    An added line that is exactly `    {` opens a block; the next added line
-    must be `// case: <name>`.
+
+def hand_rolled_cases(diff_text, head_text):
+    """(names, errors) for the added top-level `main()` blocks in a -U0 unified diff.
+
+    An added line that is exactly `    {` and sits after the `int main(` line of
+    `head_text` (the file at HEAD) opens a block; the next added line must be
+    `// case: <name>`. Scoped blocks in helper functions above `main()` are not cases.
     """
-    added = [ln[1:] for ln in diff_text.splitlines()
-             if ln.startswith("+") and not ln.startswith("+++")]
+    m = MAIN_RE.search(head_text)
+    main_line = head_text.count("\n", 0, m.start()) + 1 if m else None
+    added, lineno, n = [], [], 0
+    for ln in diff_text.splitlines():
+        h = HUNK_RE.match(ln)
+        if h:
+            n = int(h.group(1))
+        elif ln.startswith("+") and not ln.startswith("+++"):
+            added.append(ln[1:])
+            lineno.append(n)
+            n += 1
     names, errors = {}, []
     for i, ln in enumerate(added):
-        if ln.rstrip() != "    {":
+        if ln.rstrip() != "    {" or main_line is None or lineno[i] <= main_line:
             continue
         nxt = next((a for a in added[i + 1:i + 3] if a.strip()), "")
         m = CASE_MARKER_RE.match(nxt)
@@ -121,7 +135,7 @@ def hand_rolled_cases(diff_text):
             names[m.group("name")] = set()
         else:
             errors.append("added top-level block in an AlpacaHTTP test has no `// case: <name>` marker "
-                          "on its first line (block after added line %d of the diff)" % (i + 1))
+                          "on its first line (block at line %d)" % lineno[i])
     return names, errors
 
 
@@ -134,8 +148,6 @@ def parse_body(body):
     entries, errors = [], []
     for ln in lines[start + 1:]:
         if not ln.strip():
-            if entries or errors:
-                break
             continue
         if re.match(r"^\s*#{1,6}\s", ln) or not re.match(r"^\s*[-*]\s", ln):
             break
@@ -245,7 +257,7 @@ def new_cases_in(path, text, base_names, diff_for_path):
     elif is_catch_file(path):
         found = catch_cases(text)
         if is_hand_rolled_file(path) and not found:
-            found, errs = hand_rolled_cases(diff_for_path())
+            found, errs = hand_rolled_cases(diff_for_path(), text)
             errors.extend("%s: %s" % (path, e) for e in errs)
     else:
         found = {}
@@ -254,12 +266,16 @@ def new_cases_in(path, text, base_names, diff_for_path):
 
 def gather_new_cases(base):
     """(new, errors, head_cases) for the diff `base...HEAD`."""
-    changed = git("diff", "--name-only", "--diff-filter=AMR", base + "...HEAD").split()
+    changed = set(git("diff", "-z", "--name-only", "--diff-filter=AMR", base + "...HEAD").split("\0"))
     base_names = set()
-    for path in git("ls-tree", "-r", "--name-only", base, "--", "AlpacaCore/tests", "AlpacaHTTP/tests").split():
+    for path in git("ls-tree", "-r", "-z", "--name-only", base, "--", "AlpacaCore/tests", "AlpacaHTTP/tests").split("\0"):
+        if not path:
+            continue
         base_names.update(case_names_in(path, git("show", "%s:%s" % (base, path), check=False)))
     new, errors, head_cases = {}, [], {}
-    for path in git("ls-files", "AlpacaCore/tests", "AlpacaHTTP/tests").split():
+    for path in git("ls-files", "-z", "AlpacaCore/tests", "AlpacaHTTP/tests").split("\0"):
+        if not path:
+            continue
         full = os.path.join(ROOT, path)
         if not os.path.isfile(full):
             continue
@@ -358,22 +374,27 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     hr_base = "int main() {\n    {\n        // case: moved block\n        EXPECT(1);\n    }\n}\n"
     hr_names = set(case_names_in(hr, hr_base))
     check("hand-rolled base names collected", hr_names == {"moved block"})
-    hr_diff = lambda: "+    {\n+        // case: moved block\n+        EXPECT(1);\n+    }\n"  # noqa: E731
-    moved, errs = new_cases_in(hr, "int main() {}", hr_names, hr_diff)
+    hr_diff = lambda: "@@ -0,0 +3,4 @@\n+    {\n+        // case: moved block\n+        EXPECT(1);\n+    }\n"  # noqa: E731
+    moved, errs = new_cases_in(hr, "int main() {\n}\n", hr_names, hr_diff)
     check("hand-rolled moved block is not new", not moved and not errs)
-    fresh, errs = new_cases_in(hr, "int main() {}", set(), hr_diff)
+    fresh, errs = new_cases_in(hr, "int main() {\n}\n", set(), hr_diff)
     check("hand-rolled new block is new", set(fresh) == {"moved block"} and not errs)
-    _n, errs = new_cases_in(hr, "int main() {}", set(), lambda: "+    {\n+        EXPECT(1);\n")
+    _n, errs = new_cases_in(hr, "int main() {\n}\n", set(), lambda: "@@ -0,0 +3,2 @@\n+    {\n+        EXPECT(1);\n")
     check("hand-rolled missing marker error", len(errs) == 1)
 
-    # Hand-rolled blocks.
-    diff = "+++ b/f.cpp\n+    {\n+        // case: marker one\n+        EXPECT(1);\n+    }\n"
-    names, errs = hand_rolled_cases(diff)
+    # Hand-rolled blocks: only after the `int main(` line of the HEAD file.
+    head = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n    }\n}\n"
+    diff = "+++ b/f.cpp\n@@ -0,0 +6,4 @@\n+    {\n+        // case: marker one\n+        EXPECT(1);\n+    }\n"
+    names, errs = hand_rolled_cases(diff, head)
     check("hand-rolled marker", "marker one" in names and not errs)
-    names, errs = hand_rolled_cases("+    {\n+        EXPECT(1);\n+    }\n")
+    names, errs = hand_rolled_cases("@@ -0,0 +6,3 @@\n+    {\n+        EXPECT(1);\n+    }\n", head)
     check("hand-rolled missing marker", not names and len(errs) == 1)
-    names, errs = hand_rolled_cases("+        {\n+            x();\n")
+    names, errs = hand_rolled_cases("@@ -0,0 +6,2 @@\n+        {\n+            x();\n", head)
     check("nested block ignored", not names and not errs)
+    names, errs = hand_rolled_cases("@@ -0,0 +2,3 @@\n+    {\n+        x();\n+    }\n", head)
+    check("scoped block in a helper before main is not a case", not names and not errs)
+    names, errs = hand_rolled_cases("@@ -0,0 +6,3 @@\n+    {\n+        x();\n+    }\n", "void f() {}\n")
+    check("file without main has no cases", not names and not errs)
 
     # Web tests.
     web = "test('first web', () => {});\ntest(\"second web\", async () => {});\nit('not a test call', f);"
@@ -383,6 +404,8 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     ok = 'Intro\n\nFalsified by:\n- "A case": %s:12 delete the range check\n- "B case": AlpacaHTTP/web/app.js:3 drop the guard clause\n\n## Next\n' % prod
     entries, errs = parse_body(ok)
     check("body accepted", len(entries) == 2 and not errs)
+    entries, errs = parse_body('Falsified by:\n- "A": %s:1 delete the check now\n\n- "B": %s:2 drop the other guard\n' % (prod, prod))
+    check("loose list keeps later entries", len(entries) == 2 and not errs)
     entries, errs = parse_body('**Falsified by:**\n* "A": %s:1 delete the check now\n' % prod)
     check("bold heading and star bullet", len(entries) == 1 and not errs)
     entries, errs = parse_body('## Falsified by\n- "A": %s:1 delete the check now\n' % prod)
