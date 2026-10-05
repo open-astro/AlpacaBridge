@@ -51,6 +51,10 @@ alpacacore::vendor::ioptron::ConnectionInfo ioptron_endpoint(int port) {
 
 void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
+    guard([&] { scope.set_target_right_ascension(5.0); });
+    guard([&] { scope.set_target_declination(20.0); });
+    guard([&] { static_cast<void>(scope.get_target_right_ascension()); });
+    guard([&] { static_cast<void>(scope.get_target_declination()); });
     guard([&] { static_cast<void>(scope.get_tracking()); });
     guard([&] { static_cast<void>(scope.get_right_ascension()); });
     guard([&] { static_cast<void>(scope.get_declination()); });
@@ -60,6 +64,7 @@ void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
     guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
     guard([&] { scope.pulse_guide(0, 50); });
     guard([&] { scope.abort_slew(); });
+    guard([&] { scope.slew_to_target(); });
 }
 
 }  // namespace
@@ -90,9 +95,9 @@ TEST_CASE("iOptron telescope - concurrent connect/disconnect/slew/pulse stress",
     // to be named. A real driver defect would show up as a code outside this
     // set, and guard.report() names every distinct one it saw.
     alpacacore::test::StressCallGuard guard{
-        alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
-        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::NotImplemented,
-        alpacacore::AlpacaError::DriverException};
+        alpacacore::AlpacaError::NotConnected,     alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::ValueNotSet,
+        alpacacore::AlpacaError::NotImplemented,   alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { telescope_operate(guard, d); });
 
     // open-astro#326: settle_connected() rather than a bare set_connected():

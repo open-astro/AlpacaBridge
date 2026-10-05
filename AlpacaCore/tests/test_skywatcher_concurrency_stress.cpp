@@ -78,8 +78,10 @@ void skywatcher_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& 
     guard([&] { static_cast<void>(scope.get_right_ascension()); });
     guard([&] { static_cast<void>(scope.get_declination()); });
     guard([&] { static_cast<void>(scope.get_slewing()); });
+    guard([&] { static_cast<void>(scope.get_guide_rate()); });
 
     guard([&] { scope.set_tracking(true); });
+    guard([&] { scope.set_guide_rate({0.004, 0.004}); });
     const double ra_rate = (g_rate_toggle.fetch_add(1) % 2 == 0) ? 0.25 : 0.0;
     // in-place change spawns rate_verify_thread_ (#248)
     guard([&] { scope.set_right_ascension_rate(ra_rate); });
