@@ -13,7 +13,9 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+
 #include <memory>
+#include <string>
 
 namespace alpacacore::vendor::touptek {
 
@@ -30,5 +32,23 @@ std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camer
 
 // Test seam: identical driver wired to an injected SDK implementation.
 std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index, ToupTekSDK& sdk);
+
+/**
+ * The identity a ToupTek-family camera presents. OEM brands (Altair) run this
+ * same driver over their own copy of the SDK and differ only in these strings.
+ */
+struct ToupCameraBranding {
+    std::string label;             // "ToupTek": names, descriptions, log tag, refusal text
+    std::string unique_id_prefix;  // "TOUPTEK": <prefix>_SN_<serial>, else <prefix>_<device number>
+};
+
+/**
+ * @brief Create a ToupTek-family camera driver under the given brand.
+ *
+ * create_touptek_camera() is this with ToupTek branding; OEM factories
+ * (create_altair_camera) call it with their own SDK and branding.
+ */
+std::unique_ptr<CameraDriver> create_toupcam_family_camera(int device_number, int camera_index, ToupTekSDK& sdk,
+                                                           ToupCameraBranding branding);
 
 } // namespace alpacacore::vendor::touptek

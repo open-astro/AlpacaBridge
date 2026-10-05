@@ -186,6 +186,13 @@ run_system_setup() {
     sudo ldconfig
   fi
 
+  altair_lib_dir="${CORE_DIR}/external/Altair/altaircamsdk.20260531/linux/arm64/glibc"
+  if [[ -f "${altair_lib_dir}/libaltaircam.so" ]]; then
+    echo "Installing Altair Camera shared library to /usr/local/lib"
+    sudo cp -a "${altair_lib_dir}/libaltaircam.so"* /usr/local/lib/
+    sudo ldconfig
+  fi
+
   playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64"
   if [[ -f "${playerone_lib_dir}/libPlayerOneCamera.so" ]]; then
     echo "Installing Player One Camera shared library to /usr/local/lib"

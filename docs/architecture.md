@@ -89,7 +89,7 @@ All interfaces inherit from `AlpacaDriver` which provides device information, co
 - Isolates SDK dependencies from core code
 - Only place where vendor SDK headers are included
 
-Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY, gphoto; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch; QHY for the Q-Focuser and the standalone CFW3 filter wheel). ZWO, ToupTek and QHY therefore use both — hence "SDK + protocol wrapper" in the table above. gphoto is the only SDK-wrapper vendor whose "SDK" (libgphoto2/libraw) is an open-source system package rather than a vendored proprietary library — see `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`.
+Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY, Altair, gphoto; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch; QHY for the Q-Focuser and the standalone CFW3 filter wheel). ZWO, ToupTek and QHY therefore use both — hence "SDK + protocol wrapper" in the table above. gphoto is the only SDK-wrapper vendor whose "SDK" (libgphoto2/libraw) is an open-source system package rather than a vendored proprietary library — see `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`.
 
 #### Layer 3: Vendor implementation
 
@@ -109,6 +109,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | QHY | Camera, FilterWheel (integrated CFW, e.g. miniCam8M; standalone QHYCFW3 over USB serial), Focuser (Q-Focuser, serial) | SDK + protocol wrapper | Production |
 | Player One | Camera, FilterWheel (Phoenix Wheel), Switch (dew heater + fan) | SDK wrapper | Production |
 | SVBONY | Camera | SDK wrapper | Production |
+| Altair | Camera (ToupTek OEM: the ToupTek camera driver over libaltaircam, sharing `ToupcamFamilySDK` with ToupTek) | SDK wrapper | Production |
 | ToupTek | Camera (incl. cooled + High Full Well), Focuser (AAF), FilterWheel (AFW-M), Switch (camera thermal: dew heater + fan; StellaVita power) | SDK + protocol wrapper | Production |
 | iOptron | Telescope, Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, routed to the Player One SDK wrapper) | Protocol wrapper (+ Player One SDK wrapper for iCAM) | Production |
 | SynScan | Telescope | Protocol wrapper | Production |
@@ -239,13 +240,13 @@ AlpacaBridge/
 |   |   +- vendors/                   # Vendor-specific implementations
 |   |   |   +- zwo/ qhy/ ioptron/    # One directory per vendor
 |   |   |   +- synscan/ celestron/
-|   |   |   +- playerone/ svbony/ touptek/
+|   |   |   +- playerone/ svbony/ touptek/ altair/
 |   |   |   +- gemini/ wandererastro/ weewx/ bisque/
 |   |   |   +- gphoto/                # No external/ SDK dir -- system libgphoto2/libraw
 |   |   +- management/               # Device registry, discovery
 |   +- external/                      # Vendor SDKs and protocol docs
 |   |   +- ZWO/ QHY/ PlayerOne/      # SDK libraries
-|   |   +- SVBONY/ ToupTek/
+|   |   +- SVBONY/ ToupTek/ Altair/
 |   |   +- iOptron/ SynScan/         # Protocol documentation
 |   |   +- Celestron/ Losmandy/
 |   |   +- WandererAstro/            # WandererCover V4 serial protocol docs

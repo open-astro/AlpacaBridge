@@ -133,6 +133,7 @@ cmake --build AlpacaHTTP/build --parallel
 | `ALPACACORE_ENABLE_CELESTRON` | `OFF` | Celestron mounts |
 | `ALPACACORE_ENABLE_SVBONY` | `OFF` | SVBONY cameras |
 | `ALPACACORE_ENABLE_TOUPTEK` | `OFF` | ToupTek cameras |
+| `ALPACACORE_ENABLE_ALTAIR` | `OFF` | Altair Astro cameras (ToupTek OEM; requires `ALPACACORE_ENABLE_TOUPTEK`) |
 | `ALPACACORE_ENABLE_PLAYERONE` | `OFF` | Player One cameras |
 | `ALPACACORE_ENABLE_GEMINI` | `OFF` | Losmandy Gemini focusers |
 | `ALPACACORE_ENABLE_WEEWX` | `OFF` | WeeWX observing conditions |

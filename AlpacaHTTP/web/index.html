@@ -74,6 +74,7 @@
                         <!-- TODO: re-enable when drivers are ready
                         <option value="bisque">Bisque (Paramount / TheSkyX)</option>
                         -->
+                        <option value="altair">Altair</option>
                         <option value="astroasis">Astroasis</option>
                         <option value="celestron">Celestron NexStar</option>
                         <option value="gemini">Gemini</option>
@@ -1099,6 +1100,19 @@
                         <label for="svbony-camera-index">Camera Index:</label>
                         <input type="number" id="svbony-camera-index" name="svbonyCameraIndex" value="0" min="0">
                         <small>0-based index from the SVBONY SDK enumeration.</small>
+                    </div>
+
+                </div>
+
+                <!-- Altair Camera Configuration -->
+                <div id="altair-config" class="vendor-config" style="display: none;">
+                    <h3>Altair Camera Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="altair-camera-index">Camera Index:</label>
+                        <input type="number" id="altair-camera-index" name="altairCameraIndex" value="0" min="0">
+                        <small>0-based index from the Altair SDK enumeration. Configure an Altair
+                        camera here, not under ToupTek: each camera belongs to one vendor.</small>
                     </div>
 
                 </div>

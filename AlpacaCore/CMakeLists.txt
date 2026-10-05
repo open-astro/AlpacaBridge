@@ -32,6 +32,7 @@ option(ALPACACORE_ENABLE_SVBONY "Enable SVBONY vendor support" OFF)
 option(ALPACACORE_ENABLE_CELESTRON "Enable Celestron NexStar vendor support" OFF)
 option(ALPACACORE_ENABLE_BISQUE "Enable Bisque/Paramount (TheSkyX) telescope support" OFF)
 option(ALPACACORE_ENABLE_TOUPTEK "Enable ToupTek vendor support" OFF)
+option(ALPACACORE_ENABLE_ALTAIR "Enable Altair Astro camera support (requires ALPACACORE_ENABLE_TOUPTEK)" OFF)
 option(ALPACACORE_ENABLE_PLAYERONE "Enable Player One vendor support" OFF)
 option(ALPACACORE_ENABLE_WANDERERASTRO "Enable WandererAstro CoverCalibrator vendor support" OFF)
 option(ALPACACORE_ENABLE_ASTROASIS "Enable Astroasis Oasis Focuser vendor support" OFF)
@@ -52,6 +53,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_CELESTRON ON)
     set(ALPACACORE_ENABLE_BISQUE ON)
     set(ALPACACORE_ENABLE_TOUPTEK ON)
+    set(ALPACACORE_ENABLE_ALTAIR ON)
     set(ALPACACORE_ENABLE_PLAYERONE ON)
     set(ALPACACORE_ENABLE_WANDERERASTRO ON)
     set(ALPACACORE_ENABLE_ASTROASIS ON)
@@ -124,6 +126,7 @@ add_library(AlpacaCore::alpacacore ALIAS alpacacore)
 # register_builtin_factories() are added per vendor below.
 add_library(alpacacore_builtins STATIC
     src/catalog/builtin_catalog.cpp
+    src/vendors/altair/altair_schema.cpp
     src/vendors/astroasis/astroasis_schema.cpp
     src/vendors/skywatcher/skywatcher_schema.cpp
     src/vendors/weewx/weewx_schema.cpp
@@ -239,6 +242,18 @@ if(ALPACACORE_ENABLE_TOUPTEK)
     add_subdirectory(src/vendors/touptek)
     if(TARGET alpacacore_touptek)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_touptek)
+    endif()
+endif()
+
+# Altair runs on the ToupTek camera driver, so it comes after ToupTek and its
+# CMakeLists refuses to configure without alpacacore_touptek.
+if(ALPACACORE_ENABLE_ALTAIR)
+    add_subdirectory(src/vendors/altair)
+    if(TARGET alpacacore_altair)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_altair)
+        # Guards the Altair factory registration in register_builtin_factories(),
+        # as for Astroasis below.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_ALTAIR)
     endif()
 endif()
 
@@ -434,6 +449,15 @@ endif()
 
 if(ALPACACORE_ENABLE_TOUPTEK AND TARGET alpacacore_touptek)
     install(TARGETS alpacacore_touptek
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_ALTAIR AND TARGET alpacacore_altair)
+    install(TARGETS alpacacore_altair
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

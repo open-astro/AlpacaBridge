@@ -103,6 +103,9 @@
 #include "fake_qhy_sdk.h"
 #include "locked_qhy_sdk.h"
 #endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#include <alpacacore/vendor/altair/altair_camera_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 
@@ -1177,6 +1180,42 @@ Tier2Host tier2_host_touptek_camera() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ALTAIR
+// Recipe of altair_concurrency_stress.cpp: the touptek_camera host through the
+// Altair factory, over the same fake.
+Tier2Host tier2_host_altair_camera() {
+    Tier2Host h{"altair_camera",
+                "altair",
+                "camera",
+                "fake_touptek_sdk.h",
+                DeviceType::Camera,
+                "altair_camera",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk_hold = std::make_shared<ToupTekSdkHold>();
+        if (hold) {
+            sdk_hold->fake.before_call = [](const std::string& name) {
+                if (name == "open_camera_by_id") std::this_thread::sleep_for(kHold);
+            };
+        }
+        return host_over(sdk_hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::altair::create_altair_camera(0, 0, s.sdk);
+        });
+    };
+    h.failing = []() {
+        auto hold = std::make_shared<ToupTekSdkHold>();
+        hold->fake.throw_from.insert("open_camera_by_id");  // fake_touptek_sdk.h fault injection
+        return host_over(hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::altair::create_altair_camera(0, 0, s.sdk);
+        });
+    };
+    return h;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_GPHOTO
 struct GPhotoSdkHold {
     alpacacore::test::FakeGPhotoSDK fake;
@@ -1366,6 +1405,11 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_TOUPTEK(X)
 #endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#define CS2_ALTAIR(X) X(altair_camera, NPR)
+#else
+#define CS2_ALTAIR(X)
+#endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
 #define CS2_GPHOTO(X) X(gphoto_camera, NPR)
 #else
@@ -1386,6 +1430,7 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_GEMINI(X) \
     CS2_QHY(X) \
     CS2_TOUPTEK(X) \
+    CS2_ALTAIR(X) \
     CS2_GPHOTO(X) \
     CS2_WANDERERASTRO(X)
 // clang-format on
@@ -1486,6 +1531,9 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
     CS2_ENABLED("touptek")
+#endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+    CS2_ENABLED("altair")
 #endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
     CS2_ENABLED("gphoto")

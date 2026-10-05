@@ -128,6 +128,14 @@ install_udev_rules() {
     sudo ldconfig
   fi
 
+  # Install Altair Camera shared library (ToupTek OEM SDK under Altair's name)
+  local altair_lib_dir="${CORE_DIR}/external/Altair/altaircamsdk.20260531/linux/arm64/glibc"
+  if [[ -f "${altair_lib_dir}/libaltaircam.so" ]]; then
+    echo "Installing Altair Camera shared library to /usr/local/lib"
+    sudo cp -a "${altair_lib_dir}/libaltaircam.so"* /usr/local/lib/
+    sudo ldconfig
+  fi
+
   # Install Player One Camera shared library (SmartGuider dlopens this directly)
   local playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64"
   if [[ -f "${playerone_lib_dir}/libPlayerOneCamera.so" ]]; then

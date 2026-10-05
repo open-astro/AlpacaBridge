@@ -2554,6 +2554,21 @@ int main() {
     }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ALTAIR
+    {
+        // case: altair camera cameraIndex survives the config round-trip
+        // altair / camera — cameraIndex survives the catalog-sanitized save.
+        // Construction runs one enumeration (a failure is logged), nothing is
+        // opened until connect, so it registers with no camera attached.
+        const auto cfg = roundtrip_config(
+            router, {{"vendor", "altair"}, {"deviceType", "camera"}, {"deviceNumber", 9666}, {"cameraIndex", 2}},
+            "Camera", 9666);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("cameraIndex", -1) == 2);
+        remove_device(router, "altair", "camera", 9666);
+    }
+#endif
+
 #ifdef ALPACACORE_ENABLE_ASTROASIS
     {
         // astroasis / focuser — explicit hidPath persists through
@@ -4273,6 +4288,10 @@ int main() {
         add("gemini", "switch", "Switch", "pdh-adv3 serial",
             R"({"switchType":"pdh-adv3","connectionType":"serial","portPath":"/dev/ttyUSB3","baudRate":19200,"hubIndex":1})",
             R"({"switchType":"pdh-adv3","connectionType":"serial","portPath":"/dev/ttyUSB3","baudRate":19200,"hubIndex":1})");
+#endif
+
+#ifdef ALPACACORE_ENABLE_ALTAIR
+        add("altair", "camera", "Camera", "", R"({"cameraIndex":3})", R"({"cameraIndex":3})");
 #endif
 
 #ifdef ALPACACORE_ENABLE_ASTROASIS
@@ -6590,8 +6609,8 @@ int main() {
     // open-astro#664 Part B: GET /management/v1/devicecatalog serves the
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
-    // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors plus the "zzz"
+    // deliberate commit). The catalog under test holds the built-in Altair,
+    // Astroasis, SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors plus the "zzz"
     // test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
@@ -6602,12 +6621,19 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 5);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 6);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
         // before the compare; every other byte must match.
         for (auto& entry : fixture) {
+            if (entry.value("vendor", "") == "altair") {
+#ifdef ALPACACORE_ENABLE_ALTAIR
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
             if (entry.value("vendor", "") == "astroasis") {
 #ifdef ALPACACORE_ENABLE_ASTROASIS
                 entry["available"] = true;
@@ -6780,6 +6806,22 @@ int main() {
         EXPECT(persisted.failed_listed);
         EXPECT(!any_warning_contains(persisted.warnings, "config normalized"));
     }
+
+#ifndef ALPACACORE_ENABLE_ALTAIR
+    // With the vendor built out, the catalog path reports "<label> support not
+    // enabled", the label being the display name's first word.
+    {
+        // case: altair built out reports support not enabled
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"altair","deviceType":"camera","deviceNumber":9255,"cameraIndex":0})"),
+            "Camera");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "Altair support not enabled. Rebuild with -DALPACACORE_ENABLE_ALTAIR=ON");
+        EXPECT(listed_entry(router, "Camera", 9255).is_null());
+    }
+#endif
 
 #ifndef ALPACACORE_ENABLE_ASTROASIS
     // open-astro#664 Part C step 3: with the vendor built out, the catalog path

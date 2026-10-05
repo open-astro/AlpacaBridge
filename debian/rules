@@ -17,6 +17,7 @@ ZWO_EAF_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/armv8
 ZWO_CAMERA_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/armv8
 SVBONY_LIB_DIR     := $(CURDIR)/AlpacaCore/external/SVBONY/lib/armv8
 TOUPTEK_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk.20260128/linux/arm64/glibc
+ALTAIR_LIB_DIR     := $(CURDIR)/AlpacaCore/external/Altair/altaircamsdk.20260531/linux/arm64/glibc
 PLAYERONE_LIB_DIR  := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64
 PLAYERONE_PW_LIB_DIR := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64
 
@@ -62,6 +63,9 @@ override_dh_auto_install:
 	# ToupTek Camera shared library
 	cp -a $(TOUPTEK_LIB_DIR)/libtoupcam.so* \
 	  $(STAGING)/usr/lib/alpacabridge/
+	# Altair Camera shared library (ToupTek OEM SDK under Altair's name)
+	cp -a $(ALTAIR_LIB_DIR)/libaltaircam.so* \
+	  $(STAGING)/usr/lib/alpacabridge/
 	# Player One Camera shared library (SmartGuider dlopens this directly)
 	cp -a $(PLAYERONE_LIB_DIR)/libPlayerOneCamera.so* \
 	  $(STAGING)/usr/lib/alpacabridge/
@@ -104,6 +108,9 @@ override_dh_auto_install:
 	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk.20260128/linux/udev/99-toupcam.rules \
+	  $(STAGING)/usr/lib/udev/rules.d/
+	install -m 644 \
+	  $(CURDIR)/AlpacaCore/external/Altair/altaircamsdk.20260531/linux/udev/99-altaircam.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/udev/99-player_one_astronomy.rules \

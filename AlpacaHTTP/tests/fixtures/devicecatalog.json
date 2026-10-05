@@ -1,5 +1,15 @@
 [
   {
+    "vendor": "altair",
+    "deviceType": "camera",
+    "displayName": "Altair Camera",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_ALTAIR",
+    "fields": [
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
     "vendor": "astroasis",
     "deviceType": "focuser",
     "displayName": "Astroasis Oasis Focuser",

@@ -24,6 +24,7 @@ repository root.
 | QHY cameras, integrated CFW, or the Q-Focuser | [QHY](../.github/instructions/qhy.instructions.md) |
 | SVBONY cameras | [SVBONY](../.github/instructions/svbony.instructions.md) |
 | ToupTek cameras, AFW, AAF, StellaVita, or SC715C rebadge | [ToupTek](../.github/instructions/touptek.instructions.md) |
+| Altair Astro cameras (ToupTek OEM, libaltaircam) | [Altair](../.github/instructions/altair.instructions.md) |
 | Player One cameras, Phoenix wheels, thermal switch, iCAM camera backend | [Player One](../.github/instructions/playerone.instructions.md) |
 | SynScan handset path | [SynScan](../.github/instructions/synscan.instructions.md) |
 | SkyWatcher direct motor controller, Wave, EQ-class Synta | [SkyWatcher](../.github/instructions/skywatcher.instructions.md) |
@@ -42,8 +43,9 @@ repository root.
 Vendor instructions apply to implementation, wrapper headers, SDK integration,
 corresponding tests and reports. Shared HTTP routing/configuration changes also
 require the affected vendor instructions. For an SC715C task, read SVBONY and
-ToupTek; for an iCAM task, read iOptron and Player One. A vendor comparison requires
-the files for all vendors being compared. The scoped files contain vendor-specific
+ToupTek; for an Altair task, read Altair and ToupTek; for an iCAM task, read
+iOptron and Player One. A vendor comparison requires the files for all vendors
+being compared. The scoped files contain vendor-specific
 deltas only; a rule affecting a second vendor belongs in `AGENTS.md`.
 
 ## Issue tracker

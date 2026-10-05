@@ -53,6 +53,14 @@ License: ToupTek-SDK
  written redistribution grant accompanies the SDK; it will be removed on
  request by the vendor.
 
+Files: AlpacaCore/external/Altair/*
+Copyright: 2026 Altair Astro Limited
+License: Expat
+Comment: Altair camera SDK (altaircamsdk 60.31589.20260531, ToupTek OEM) —
+ license.txt in the SDK tree. Altair Support confirmed the SDK is MIT
+ licensed and may be redistributed with the copyright notice and license
+ text included.
+
 Files: AlpacaCore/external/SVBONY/*
 Copyright: SVBONY (Hong Kong SVBONY Technology Co., Ltd.)
 License: SVBONY-SDK
