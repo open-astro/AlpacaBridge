@@ -252,6 +252,8 @@ def check_cmake_rules(root: pathlib.Path) -> tuple[list[str], list[str]]:
                 http_cutoff = toks[0][1]
         if http_cutoff is None:
             failures.append(f"L2: {http_rel}: no add_subdirectory(... AlpacaCore ...) call -- rule is vacuous")
+    else:
+        failures.append(f"L2: {http_rel} missing or unreadable -- rule is vacuous")
 
     l1 = l2 = l3 = 0
     add_library_seen = False
@@ -838,6 +840,20 @@ def self_test() -> int:
         rc, err = _run(r, base)
         case("L2: AlpacaHTTP/CMakeLists.txt with no add_subdirectory(AlpacaCore) fails (vacuous)",
              rc == 1 and "no add_subdirectory(" in err)
+
+    t, r = cmake_fixture()
+    with t:
+        (r / "AlpacaHTTP" / "CMakeLists.txt").unlink()
+        rc, err = _run(r, base)
+        case("L2: missing AlpacaHTTP/CMakeLists.txt fails (vacuous)",
+             rc == 1 and "L2: AlpacaHTTP/CMakeLists.txt missing or unreadable" in err)
+
+    t, r = cmake_fixture()
+    with t:
+        (r / "AlpacaHTTP" / "CMakeLists.txt").write_bytes(b"\xff\xfe\x00bad utf8 \xc3\x28\n")
+        rc, err = _run(r, base)
+        case("L2: unreadable AlpacaHTTP/CMakeLists.txt fails (vacuous)",
+             rc == 1 and "L2: AlpacaHTTP/CMakeLists.txt missing or unreadable" in err)
 
     return 1 if failures else 0
 
