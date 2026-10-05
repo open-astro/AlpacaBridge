@@ -954,6 +954,37 @@ int main() {
         }
         EXPECT(!raw_byte_logged('\x1b'));
 
+        // A validation message that quotes a decoded client value (the UTCDate
+        // text) reaches the DEBUG log escaped too: %0A in a form value decodes
+        // to a newline that would otherwise start a forged log line.
+        {
+            const std::string utc_body = "UTCDate=nope%0AHTTP+GET+/forged";
+            send_raw("PUT /api/v1/telescope/" + std::to_string(kStubNumber) +
+                     "/utcdate HTTP/1.1\r\nHost: localhost\r\n"
+                     "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
+                     std::to_string(utc_body.size()) + "\r\n\r\n" + utc_body);
+            EXPECT(count_logged("AlpacaException in telescope method 'utcdate': Invalid UTC date format: "
+                                "nope\\x0aHTTP GET /forged") == 1);
+            EXPECT(!raw_byte_logged('\n'));
+        }
+
+        // configuredevice with a deviceType carrying a newline: the DEBUG
+        // lines in register_device_from_config / sanitize_device_config quote
+        // it and the exception text, both client text.
+        {
+            const std::string cfg_body =
+                "{\"vendor\":\"zwo\",\"deviceType\":\"cam\\nHTTP GET /forged\","
+                "\"deviceNumber\":0}";
+            send_raw(
+                "POST /management/v1/configuredevice HTTP/1.1\r\nHost: localhost\r\n"
+                "Content-Type: application/json\r\nContent-Length: " +
+                std::to_string(cfg_body.size()) + "\r\n\r\n" + cfg_body);
+            EXPECT(count_logged("register_device_from_config: device type \"cam\\x0aHTTP GET /forged\" is not "
+                                "catalog-recognized (Unknown device type: cam\\x0aHTTP GET /forged); falling "
+                                "through to the arm chain") == 1);
+            EXPECT(!raw_byte_logged('\n'));
+        }
+
         registry.unregister_device(alpacacore::DeviceType::Telescope, kStubNumber);
         registry.unregister_device(alpacacore::DeviceType::Camera, kStubNumber);
     }
