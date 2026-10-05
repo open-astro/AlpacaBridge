@@ -3853,4 +3853,26 @@ TEST_CASE("SkyWatcher async - Tracking=false during the West pulse dispatch chec
     driver->set_connected(false);
 }
 
+// open-astro#821: mirror of #770. Tracking=true landing during a pulse that was
+// dispatched with Tracking off started the RA drive, and the pulse's
+// unconditional stop at its end then left RA stopped while Tracking read true.
+TEST_CASE("SkyWatcher async - Tracking=true during a non-restoring RA pulse keeps RA running (#821)",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    REQUIRE_FALSE(driver->get_tracking());
+
+    driver->pulse_guide(2, 2000);  // East, 2 s, Tracking off
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->set_tracking(true);
+    REQUIRE(driver->get_tracking());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));  // pulse over, t = 3 s
+    CHECK(driver->get_tracking());
+    CHECK(mount.axis_running(1));
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
