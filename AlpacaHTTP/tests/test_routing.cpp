@@ -7560,6 +7560,7 @@ int main() {
 #ifndef ALPACACORE_ENABLE_GPHOTO
     // With the vendor built out, the catalog path reports the deleted arm's text.
     {
+        // case: gphoto vendors-OFF refusal text
         alpacahttp::Router router;
         const auto off = api_attempt(
             router, nlohmann::json::parse(R"({"vendor":"gphoto","deviceType":"camera","deviceNumber":9264})"),
