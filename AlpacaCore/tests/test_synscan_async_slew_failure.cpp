@@ -379,8 +379,9 @@ TEST_CASE("SynScan async slew - completion reports the new target after PulseGui
 
     constexpr double target_ra = 6.0;
     constexpr double target_dec = 22.0;
-    CHECK(std::abs(position_before_pulse_ra - target_ra) > 0.1 ||
-          std::abs(position_before_pulse_dec - target_dec) > 1.0);
+    const bool position_is_distinct =
+        std::abs(position_before_pulse_ra - target_ra) > 0.1 || std::abs(position_before_pulse_dec - target_dec) > 1.0;
+    CHECK(position_is_distinct);
     driver->slew_to_coordinates_async(target_ra, target_dec);
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 12000));
