@@ -7512,8 +7512,7 @@ int main() {
         // availability check, so the entry fails to load (listed as failed) in
         // every build, where the deleted arm loaded 1.5 as index 1.
         const auto persisted = persisted_attempt(
-            nlohmann::json::parse(
-                R"({"vendor":"svbony","deviceType":"camera","deviceNumber":9269,"cameraIndex":1.5})"),
+            nlohmann::json::parse(R"({"vendor":"svbony","deviceType":"camera","deviceNumber":9269,"cameraIndex":1.5})"),
             "Camera");
         EXPECT(!persisted.listed);
         EXPECT(persisted.failed_listed);
