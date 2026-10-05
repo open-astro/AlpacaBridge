@@ -1682,14 +1682,21 @@ public:
                     restore_still_wanted = restore;
                 }
                 // open-astro#821: the mirror case. A pulse dispatched with
-                // Tracking off, then Tracking=true landed mid-pulse and
-                // started the RA drive; the end of the pulse must not stop it.
-                bool late_tracking_on = false;
+                // Tracking off, then Tracking=true landed mid-pulse; the end of
+                // the pulse must leave RA on the drive, not stop it. The drive
+                // is re-applied the way set_tracking() applies it, not left
+                // alone: the dispatch may have run after the setter and left
+                // RA at the pulse rate. Decided and applied under one lock, so
+                // a Tracking=false after the read is the setter's stop to make
+                // (#770), not undone by this restart.
                 if (!restore && axis == kAxisRa) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    late_tracking_on = tracking_;
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    if (tracking_) {
+                        apply_ra_drive_locked(lock);
+                        return;
+                    }
                 }
-                if (restore || late_tracking_on) {
+                if (restore) {
                     std::lock_guard<std::mutex> lock(mutex_);
                     ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
                     applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
@@ -1702,12 +1709,7 @@ public:
                     // way at the new rate.
                     ra_reverses = (ra_restore_rate_deg_per_sec > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0);
                 }
-                if (late_tracking_on) {
-                    // The axis is running at the pulse rate, not the drive
-                    // rate: stop-and-restart back to the drive.
-                    std::unique_lock<std::mutex> lock(mutex_);
-                    start_speed_motion_locked(lock, kAxisRa, ra_restore_rate_deg_per_sec);
-                } else if (restore && !pulse_restart && !ra_reverses) {
+                if (restore && !pulse_restart && !ra_reverses) {
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped. Same ":J" kick as
                     // the dispatch above, for the same reason, and skipped

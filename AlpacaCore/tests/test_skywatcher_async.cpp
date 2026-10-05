@@ -3857,20 +3857,34 @@ TEST_CASE("SkyWatcher async - Tracking=false during the West pulse dispatch chec
 // dispatched with Tracking off started the RA drive, and the pulse's
 // unconditional stop at its end then left RA stopped while Tracking read true.
 TEST_CASE("SkyWatcher async - Tracking=true during a non-restoring RA pulse keeps RA running (#821)",
-          "[skywatcher][async]") {
-    FakeSkyWatcherMount mount;
+          "[skywatcher][async][pulseguide]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount);
-    REQUIRE_FALSE(driver->get_tracking());
+    auto driver = connected_driver(mount, clock);
+    // The drive the pulse end must leave RA on: step period and sense.
+    driver->set_tracking(true);
+    const uint32_t drive_period = mount.step_period(1);
+    const double drive_start = mount.physical_degrees(1);
+    clock.advance(std::chrono::seconds(10));
+    const double drive_moved = mount.physical_degrees(1) - drive_start;
+    REQUIRE(drive_moved != 0.0);
+    driver->set_tracking(false);
+    REQUIRE_FALSE(mount.axis_running(1));
 
-    driver->pulse_guide(2, 2000);  // East, 2 s, Tracking off
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->pulse_guide(2, 2000);                     // East, 2 s, Tracking off: software-timed
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     driver->set_tracking(true);
     REQUIRE(driver->get_tracking());
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(2500));  // pulse over, t = 3 s
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(3000)));
     CHECK(driver->get_tracking());
     CHECK(mount.axis_running(1));
+    CHECK(mount.step_period(1) == drive_period);
+    const double start = mount.physical_degrees(1);
+    clock.advance(std::chrono::seconds(10));
+    CHECK((mount.physical_degrees(1) - start > 0.0) == (drive_moved > 0.0));
     driver->set_tracking(false);
     driver->set_connected(false);
 }
