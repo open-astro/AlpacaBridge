@@ -357,6 +357,7 @@ public:
             last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             position_override_until_ = std::chrono::steady_clock::time_point::min();
+            guide_position_valid_ = false;
             last_utc_valid_ = false;
             client_disagreement_warned_ = false;
             equatorial_cache_valid_ = false;
@@ -443,6 +444,7 @@ public:
             last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             position_override_until_ = std::chrono::steady_clock::time_point::min();
+            guide_position_valid_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
         }
@@ -626,9 +628,9 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_ra_set_ && target_dec_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
+        if (guide_position_valid_ && std::chrono::steady_clock::now() < position_override_until_ &&
             !get_slewing_locked()) {
-            return std::clamp(target_dec_degrees_, -90.0, 90.0);
+            return std::clamp(guide_position_dec_degrees_, -90.0, 90.0);
         }
         refresh_equatorial_cache_locked();
         return std::clamp(cached_dec_degrees_, -90.0, 90.0);
@@ -679,6 +681,7 @@ public:
     }
 
     GuideRate get_guide_rate() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         return guide_rate_;
     }
 
@@ -700,9 +703,9 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_ra_set_ && target_dec_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
+        if (guide_position_valid_ && std::chrono::steady_clock::now() < position_override_until_ &&
             !get_slewing_locked()) {
-            return target_ra_hours_;
+            return guide_position_ra_hours_;
         }
         refresh_equatorial_cache_locked();
         return cached_ra_hours_;
@@ -855,6 +858,7 @@ public:
     }
 
     double get_target_declination() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -866,11 +870,13 @@ public:
             throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees",
                                   AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
 
     double get_target_right_ascension() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
@@ -882,6 +888,7 @@ public:
             throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours",
                                   AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }
@@ -1118,6 +1125,9 @@ public:
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
+            guide_position_ra_hours_ = park_ra;
+            guide_position_dec_degrees_ = park_dec;
+            guide_position_valid_ = true;
             position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
             // AtPark and Slewing flip in the same locked step.
             parked_ = true;
@@ -1220,28 +1230,27 @@ public:
             const double duration_sec = duration / 1000.0;
             const auto now = std::chrono::steady_clock::now();
 
-            // Initialize target coords from mount if position override isn't active
-            if (!target_ra_set_ || !target_dec_set_ || now >= position_override_until_) {
+            // Initialize the guide-position estimate from mount position when its override expires.
+            if (!guide_position_valid_ || now >= position_override_until_) {
                 refresh_equatorial_cache_locked();
-                target_ra_hours_ = cached_ra_hours_;
-                target_dec_degrees_ = cached_dec_degrees_;
-                target_ra_set_ = true;
-                target_dec_set_ = true;
+                guide_position_ra_hours_ = cached_ra_hours_;
+                guide_position_dec_degrees_ = cached_dec_degrees_;
+                guide_position_valid_ = true;
             }
 
-            // Accumulate expected pulse delta directly into target coordinates
+            // Accumulate expected pulse delta in the private guide-position estimate.
             if (direction == 0 || direction == 1) {
                 double delta_deg = guide_rate_.dec * duration_sec;
                 if (direction == 1) delta_deg = -delta_deg;
-                target_dec_degrees_ = std::clamp(target_dec_degrees_ + delta_deg, -90.0, 90.0);
+                guide_position_dec_degrees_ = std::clamp(guide_position_dec_degrees_ + delta_deg, -90.0, 90.0);
             } else {
                 double delta_hours = (guide_rate_.ra * duration_sec) / 15.0;
                 if (direction == 3) delta_hours = -delta_hours;
-                target_ra_hours_ = std::fmod(target_ra_hours_ + delta_hours, 24.0);
-                if (target_ra_hours_ < 0.0) target_ra_hours_ += 24.0;
+                guide_position_ra_hours_ = std::fmod(guide_position_ra_hours_ + delta_hours, 24.0);
+                if (guide_position_ra_hours_ < 0.0) guide_position_ra_hours_ += 24.0;
             }
 
-            // Keep position override active so get_ra/get_dec return target coords
+            // Keep position override active so get_ra/get_dec return the estimate.
             position_override_until_ =
                 now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuidePositionGrace;
 
@@ -1453,17 +1462,29 @@ public:
         // members -- 0h/0deg on a fresh connect. Found while splitting the
         // flag for open-astro#346: with one flag the omission was invisible,
         // since any target write at all made the check pass.
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        double ra, dec;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!target_ra_set_ || !target_dec_set_) {
+                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+            }
+            ra = target_ra_hours_;
+            dec = target_dec_degrees_;
         }
-        slew_to_coordinates(target_ra_hours_, target_dec_degrees_);
+        slew_to_coordinates(ra, dec);
     }
 
     void slew_to_target_async() override {
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        double ra, dec;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!target_ra_set_ || !target_dec_set_) {
+                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+            }
+            ra = target_ra_hours_;
+            dec = target_dec_degrees_;
         }
-        slew_to_coordinates_async(target_ra_hours_, target_dec_degrees_);
+        slew_to_coordinates_async(ra, dec);
     }
 
     void sync_to_coordinates(double ra, double dec) override {
@@ -1480,14 +1501,23 @@ public:
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
         target_dec_set_ = true;
+        guide_position_ra_hours_ = ra;
+        guide_position_dec_degrees_ = dec;
+        guide_position_valid_ = true;
         position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     }
 
     void sync_to_target() override {
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        double ra, dec;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!target_ra_set_ || !target_dec_set_) {
+                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+            }
+            ra = target_ra_hours_;
+            dec = target_dec_degrees_;
         }
-        sync_to_coordinates(target_ra_hours_, target_dec_degrees_);
+        sync_to_coordinates(ra, dec);
     }
 
     void unpark() override {
@@ -1901,6 +1931,9 @@ private:
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
         target_dec_set_ = true;
+        guide_position_ra_hours_ = ra;
+        guide_position_dec_degrees_ = dec;
+        guide_position_valid_ = true;
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         parked_ = false;
@@ -2028,6 +2061,9 @@ private:
 
     double target_ra_hours_;
     double target_dec_degrees_;
+    double guide_position_ra_hours_ = 0.0;
+    double guide_position_dec_degrees_ = 0.0;
+    bool guide_position_valid_ = false;
     double aperture_diameter_m_;
     double aperture_area_m2_;
     double focal_length_m_;

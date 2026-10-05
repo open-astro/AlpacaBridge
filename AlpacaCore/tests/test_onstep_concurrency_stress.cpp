@@ -47,6 +47,12 @@ alpacacore::vendor::onstep::ConnectionInfo onstep_endpoint(int port) {
 
 void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
+    guard([&] { scope.set_target_right_ascension(5.0); });
+    guard([&] { scope.set_target_declination(20.0); });
+    guard([&] { static_cast<void>(scope.get_target_right_ascension()); });
+    guard([&] { static_cast<void>(scope.get_target_declination()); });
+    guard([&] { scope.slew_to_target_async(); });
+    guard([&] { scope.sync_to_target(); });
     guard([&] { static_cast<void>(scope.get_tracking()); });
     guard([&] { static_cast<void>(scope.get_right_ascension()); });
     guard([&] { static_cast<void>(scope.get_declination()); });
@@ -84,9 +90,9 @@ TEST_CASE("OnStep telescope - concurrent connect/disconnect/slew/pulse stress", 
     // to be named. A real driver defect would show up as a code outside this
     // set, and guard.report() names every distinct one it saw.
     alpacacore::test::StressCallGuard guard{
-        alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
-        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::NotImplemented,
-        alpacacore::AlpacaError::DriverException};
+        alpacacore::AlpacaError::NotConnected,     alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::ValueNotSet,
+        alpacacore::AlpacaError::NotImplemented,   alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { telescope_operate(guard, d); });
 
     // open-astro#326: settle_connected() rather than a bare set_connected():

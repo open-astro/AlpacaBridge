@@ -50,11 +50,24 @@ alpacacore::vendor::celestron::ConnectionInfo celestron_endpoint(int port) {
 // the trailing '#' terminates every read immediately; payload parse failures
 // remain tolerated by the driver.
 alpacacore::test::FakeMountServer::Responder celestron_responder() {
-    return [](const std::string&) { return std::string("00000000,00000000#"); };
+    return [](const std::string& command) {
+        if (command.size() >= 4 && command[0] == 'P' && static_cast<unsigned char>(command[3]) == 0xFE) {
+            return std::string("\x01\x00#", 3);  // Return a quick firmware response for each AUX probe.
+        }
+        return std::string("00000000,00000000#");
+    };
 }
 
 void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
+    guard([&] { scope.set_target_right_ascension(5.0); });
+    guard([&] { scope.set_target_declination(20.0); });
+    guard([&] { static_cast<void>(scope.get_target_right_ascension()); });
+    guard([&] { static_cast<void>(scope.get_target_declination()); });
+    guard([&] { static_cast<void>(scope.get_guide_rate()); });
+    guard([&] { scope.set_guide_rate({0.004, 0.004}); });
+    guard([&] { scope.slew_to_target_async(); });
+    guard([&] { scope.sync_to_target(); });
     guard([&] { static_cast<void>(scope.get_tracking()); });
     guard([&] { static_cast<void>(scope.get_right_ascension()); });
     guard([&] { static_cast<void>(scope.get_declination()); });
@@ -94,9 +107,9 @@ TEST_CASE("Celestron telescope - concurrent connect/disconnect/slew/pulse stress
     // to be named. A real driver defect would show up as a code outside this
     // set, and guard.report() names every distinct one it saw.
     alpacacore::test::StressCallGuard guard{
-        alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
-        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::NotImplemented,
-        alpacacore::AlpacaError::DriverException};
+        alpacacore::AlpacaError::NotConnected,     alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::ValueNotSet,
+        alpacacore::AlpacaError::NotImplemented,   alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { telescope_operate(guard, d); });
 
     // open-astro#326: settle_connected() rather than a bare set_connected():

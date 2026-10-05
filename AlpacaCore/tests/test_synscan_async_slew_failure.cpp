@@ -41,6 +41,15 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == expected_code);
+    }
+}
+
 struct FakeSynScanState {
     std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
     std::atomic<int> goto_count{0};
@@ -332,6 +341,25 @@ TEST_CASE("SynScan PulseGuide - cross-axis pulses keep the RA tracking restore",
     CHECK(is_zero_rate_command(commands[static_cast<std::size_t>(last_ra)]));
     CHECK(tracking_restored_after_ra_stop);
     CHECK(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan PulseGuide - guide position does not publish as target", "[synscan][telescope][pulseguiding]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    driver->pulse_guide(0, 150);
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    driver->set_target_right_ascension(5.5);
+    driver->set_target_declination(20.0);
+    driver->pulse_guide(1, 150);
+    CHECK(driver->get_target_right_ascension() == 5.5);
+    CHECK(driver->get_target_declination() == 20.0);
     driver->set_connected(false);
 }
 
