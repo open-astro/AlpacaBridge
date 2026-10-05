@@ -302,6 +302,23 @@ else
   record FAIL "stress-test registration"
 fi
 
+# --- gate 2b2: Falsified by: lines for new test cases -----------------------
+
+section "Falsified-by (PR body)"
+if python3 scripts/check_falsified_by.py --self-test; then
+  if [ -n "${PR_BODY_FILE:-}" ] && [ -f "${PR_BODY_FILE}" ]; then
+    if FALSIFIED_BASE="${MERGE_BASE}" python3 scripts/check_falsified_by.py --body-file "${PR_BODY_FILE}"; then
+      record PASS "falsified-by"
+    else
+      record FAIL "falsified-by"
+    fi
+  else
+    record SKIP "falsified-by (no PR body)"
+  fi
+else
+  record FAIL "falsified-by"
+fi
+
 # --- gate 2c: ConformU report validation ------------------------------------
 
 section "ConformU report validation"

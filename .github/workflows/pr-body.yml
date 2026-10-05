@@ -1,0 +1,38 @@
+# PR-body gates. Separate from ci.yml so that editing the PR body re-runs only
+# this job and not the whole CI.
+#
+# Jobs:
+#   falsified-by   every new test case needs a `Falsified by:` line in the PR
+#                  body naming the mutation that fails it
+#                  (scripts/check_falsified_by.py)
+
+name: PR body
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  falsified-by:
+    name: falsified-by (PR body)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check Falsified by lines
+        # The PR body is untrusted text (fork PRs): it reaches the script only
+        # through the environment, never through a `${{ }}` expansion in `run:`.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          FALSIFIED_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 scripts/check_falsified_by.py --self-test
+          python3 scripts/check_falsified_by.py
