@@ -119,8 +119,10 @@ public:
     // One wrapper owns one transport. Drivers own distinct instances; the legacy
     // singleton remains available for standalone protocol callers.
     using SerialRead = std::function<std::ptrdiff_t(int, char*, std::size_t)>;
-    // An optional read seam exercises quiet/hung-up tty behavior without hardware.
-    explicit SkyWatcherProtocolWrapper(SerialRead serial_read = {});
+    using SerialWrite = std::function<std::ptrdiff_t(int, const char*, std::size_t)>;
+    // Optional read/write seams exercise quiet/hung-up tty behavior -- and a
+    // stalled TX buffer (write EAGAIN) -- without hardware.
+    explicit SkyWatcherProtocolWrapper(SerialRead serial_read = {}, SerialWrite serial_write = {});
     virtual ~SkyWatcherProtocolWrapper();
     static SkyWatcherProtocolWrapper& instance();
 

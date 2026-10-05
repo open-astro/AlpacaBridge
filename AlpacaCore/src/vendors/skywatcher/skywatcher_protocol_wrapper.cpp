@@ -688,7 +688,8 @@ std::vector<SkyWatcherHostInfo> discover_skywatcher_hosts(int timeout_ms) {
 
 class SkyWatcherProtocolWrapper::Impl {
 public:
-    explicit Impl(SerialRead serial_read) : serial_read_(std::move(serial_read)) {}
+    explicit Impl(SerialRead serial_read, SerialWrite serial_write)
+        : serial_read_(std::move(serial_read)), serial_write_(std::move(serial_write)) {}
 
     ~Impl() { disconnect(); }
 
@@ -1008,7 +1009,23 @@ private:
             alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
-        if (!util::clear_nonblocking(serial_fd_)) {
+        // Keep the fd NON-blocking (it was opened O_NONBLOCK) and drive every
+        // read through poll() (see poll_serial_readable / exchange_serial /
+        // settle_serial). Some USB CDC-ACM virtual COM ports do NOT honour
+        // VMIN/VTIME as a read timeout -- a blocking read(fd,&ch,1) on a board
+        // that has gone quiet then parks forever in n_tty_read, and because the
+        // worker holds the I/O mutex (and the driver mutex above it) every Alpaca
+        // request blocks until the service is killed. Such a port can also return
+        // a spurious poll() "readable" after which a blocking read still parks, so
+        // poll alone is not enough: the read must be non-blocking so it returns
+        // EAGAIN instead of parking, bounded by the poll deadline. WRITES on the
+        // same non-blocking fd can likewise hit EAGAIN before the first byte when
+        // the TX buffer fills (util::write_all only retries EAGAIN after a partial
+        // write), so frame sends go through write_all_bounded(), which waits for
+        // POLLOUT within the command budget -- the write-side mirror of the reads.
+        // (The other serial vendors keep clear_nonblocking + VTIME; this is a
+        // Sky-Watcher-specific hardening for a tty that ignores VTIME.)
+        if (!util::set_nonblocking(serial_fd_)) {
             close(serial_fd_);
             serial_fd_ = -1;
             alpacacore::util::mark_serial_port_closed(registry_key);
@@ -1100,18 +1117,138 @@ private:
     // shape check in send_command cannot tell it apart either (pty-backed
     // regression in test_skywatcher_serial.cpp). Replies later than the
     // window are only caught when their shape differs.
+    // Wait up to budget_ms for the serial fd to have data. Returns >0 readable,
+    // 0 timed out, <0 poll error (errno set). poll() bounds the wait on the fd
+    // ITSELF, independent of the tty's VMIN/VTIME -- some USB CDC-ACM virtual COM
+    // ports do NOT honour VTIME as a read timeout, so a bare read(fd,&ch,1) on a
+    // board that went quiet (mid-exchange, or after a mis-paired reply) parked
+    // forever in n_tty_read, holding io_mutex_ (and the driver mutex_ above it)
+    // and wedging the whole server until it was killed -- observed as a worker
+    // stuck in settle_serial -> read (/proc/<tid>/syscall = read, wchan =
+    // n_tty_read) with every other worker blocked on the driver mutex. poll()
+    // never relies on VTIME, so the caller's deadline is always enforced, on
+    // every tty.
+    int poll_serial_readable(int budget_ms) {
+#ifndef _WIN32
+        struct pollfd pfd {};
+        pfd.fd = serial_fd_;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        return ::poll(&pfd, 1, budget_ms);
+#else
+        (void)budget_ms;
+        return 0;
+#endif
+    }
+
+    // Mirror of poll_serial_readable for the write side.
+    int poll_serial_writable(int budget_ms) {
+#ifndef _WIN32
+        struct pollfd pfd {};
+        pfd.fd = serial_fd_;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        return ::poll(&pfd, 1, budget_ms);
+#else
+        (void)budget_ms;
+        return 0;
+#endif
+    }
+
+    // Write the whole frame on the non-blocking fd, bounded by a deadline SHARED
+    // with the reply read that follows (so one exchange stays within timeout_ms,
+    // not up to 2x it -- it matters most for the ":K"/":L" stop path's tight cap).
+    // The fd is kept O_NONBLOCK for the read-timeout fix (see connect_serial), so
+    // write() can return EAGAIN -- even before the first byte -- when the TX buffer
+    // fills because the board stopped draining. util::write_all only retries EAGAIN
+    // after a PARTIAL write, so it would fail such a frame fast; here we wait for
+    // POLLOUT until the deadline instead, the write-side mirror of the poll-bounded
+    // reads. errno is left set on failure for the caller's link-loss classification.
+    bool write_all_bounded(const char* data, std::size_t len, std::chrono::steady_clock::time_point deadline) {
+#ifndef _WIN32
+        std::size_t total = 0;
+        while (total < len) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                    .count();
+            if (remaining <= 0) {
+                errno = EAGAIN;
+                return false;
+            }
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- O_NONBLOCK fd, EAGAIN not block
+            const ssize_t n = serial_write_ ? serial_write_(serial_fd_, data + total, len - total)
+                                            : ::write(serial_fd_, data + total, len - total);
+            if (n > 0) {
+                total += static_cast<std::size_t>(n);
+                continue;
+            }
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                const int pr = poll_serial_writable(static_cast<int>(remaining));
+                if (pr < 0) {
+                    if (errno == EINTR) {
+                        continue;  // interrupted: retry, as the read loop does
+                    }
+                    return false;  // poll error: errno set by poll()
+                }
+                if (pr == 0) {
+                    continue;  // timeout: the deadline check above ends the loop
+                }
+                // Writable. A spurious POLLOUT that still EAGAINs next would busy-loop
+                // until the deadline, so yield briefly before retrying.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            if (n == 0) {
+                errno = EIO;  // treat a 0 return as a hard error, like util::write_all
+            }
+            return false;
+        }
+        return true;
+#else
+        (void)data;
+        (void)len;
+        (void)deadline;
+        return false;
+#endif
+    }
+
     void settle_serial(int window_ms) {
 #ifndef _WIN32
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(window_ms);
-        while (std::chrono::steady_clock::now() < deadline) {
+        for (;;) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                    .count();
+            if (remaining <= 0) {
+                break;
+            }
+            // Poll for the WHOLE remaining window so a late reply that has not
+            // STARTED arriving yet is still absorbed (the original behaviour),
+            // but without ever parking a bare read() past the deadline.
+            const int pr = poll_serial_readable(static_cast<int>(remaining));
+            if (pr <= 0) {
+                break;  // quiet for the rest of the window (or poll error): drained
+            }
             char ch = 0;
-            ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            // Same injectable read seam as exchange_serial, so the poll bound is
+            // testable on the settle path that is the one that wedged.
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- O_NONBLOCK fd, returns at once
+            const ssize_t r = serial_read_ ? serial_read_(serial_fd_, &ch, 1) : read(serial_fd_, &ch, 1);
             if (r == 1) {
                 // open-astro#505: a late reply being absorbed is still proof
                 // the board is answering, so it must not count toward silence.
                 exchange_saw_frame_ = true;
             } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                // EOF / EAGAIN: nothing more to drain this instant. If poll()
+                // reported the fd readable but the read then yields EAGAIN (a
+                // spurious-readable tty), this ends the drain early rather than
+                // re-polling for the rest of the window; a straggler that arrives
+                // after this point is caught by the mis-paired/malformed shape
+                // check on the next exchange, which is the real backstop.
+                break;
             }
         }
         tcflush(serial_fd_, TCIFLUSH);
@@ -1142,21 +1279,52 @@ private:
             } else {
                 tcflush(serial_fd_, TCIFLUSH);
             }
-            if (!util::write_all(serial_fd_, frame.data(), frame.size())) {
+            // One deadline shared by the write and the reply read below, so a
+            // single exchange stays bounded by timeout_ms rather than up to 2x it.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+            if (!write_all_bounded(frame.data(), frame.size(), deadline)) {
                 const int err = errno;
                 if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
                     lose_serial_link_locked("Serial write failed: " + util::errno_string(err));
                 }
+                // A non-blocking write can stop part-way (deadline hit after a partial
+                // frame). Discard the queued fragment so it cannot prefix the next
+                // command, and mark the link dirty so the next exchange settles first.
+                tcflush(serial_fd_, TCOFLUSH);
+                serial_dirty_ = true;
                 throw AlpacaException("Serial write failed: " + util::errno_string(err));
             }
             std::string reply;
-            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
             while (std::chrono::steady_clock::now() < deadline) {
+                const auto remaining =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                        .count();
+                if (remaining <= 0) {
+                    break;
+                }
+                // Serialized transport: one in-flight command per link. Wait for
+                // the reply on the fd ITSELF, never on VMIN/VTIME -- a USB
+                // CDC-ACM port does not honour VTIME as a read timeout, so a bare
+                // read() on a board that went quiet mid-reply parked forever in
+                // n_tty_read (see poll_serial_readable). poll() keeps the whole
+                // exchange bounded by timeout_ms and ends the quiet-tty spin.
+                const int pr = poll_serial_readable(static_cast<int>(remaining));
+                if (pr == 0) {
+                    break;  // no (more) reply within the timeout
+                }
+                if (pr < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    const int err = errno;
+                    if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
+                        lose_serial_link_locked("Serial poll failed: " + util::errno_string(err));
+                    }
+                    throw AlpacaException("Serial poll failed: " + util::errno_string(err));
+                }
                 char ch = 0;
-                // Serialized transport: one in-flight command per link, bounded by VTIME.
-                const auto r = serial_read_
-                                   ? serial_read_(serial_fd_, &ch, 1)
-                                   : ::read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+                // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection) -- O_NONBLOCK fd, returns at once
+                const auto r = serial_read_ ? serial_read_(serial_fd_, &ch, 1) : ::read(serial_fd_, &ch, 1);
                 if (r == 1) {
                     exchange_saw_frame_ = true;  // open-astro#505: the board is talking
                     if (ch == kFrameEnd) {
@@ -1174,9 +1342,11 @@ private:
                     }
                     throw AlpacaException("Serial read failed: " + util::errno_string(err));
                 } else {
-                    // VTIME paces a quiet tty, but EOF and nonblocking retries can
-                    // return immediately. Preserve the deadline without burning a
-                    // core while the node still exists (zero alone is not loss).
+                    // poll() reported readable but the read made no progress (EOF,
+                    // EAGAIN, or a read that does not consume the pending byte):
+                    // pace by 1 ms so this cannot spin the core, bounded by the
+                    // deadline, exactly as the pre-poll loop did. The quiet-board
+                    // wedge is handled by poll() returning 0 above, not here.
                     std::this_thread::sleep_until(
                         std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(1)));
                 }
@@ -1419,6 +1589,7 @@ private:
 #endif
 
     SerialRead serial_read_;
+    SerialWrite serial_write_;
     mutable std::mutex io_mutex_;
     // Written only under io_mutex_; atomic so link_alive() can read it without.
     std::atomic<bool> connected_{false};
@@ -1468,8 +1639,8 @@ private:
 
 // ── Public wrapper API ──────────────────────────────────────────────────────
 
-SkyWatcherProtocolWrapper::SkyWatcherProtocolWrapper(SerialRead serial_read)
-    : pimpl_(std::make_unique<Impl>(std::move(serial_read))) {}
+SkyWatcherProtocolWrapper::SkyWatcherProtocolWrapper(SerialRead serial_read, SerialWrite serial_write)
+    : pimpl_(std::make_unique<Impl>(std::move(serial_read), std::move(serial_write))) {}
 SkyWatcherProtocolWrapper::~SkyWatcherProtocolWrapper() = default;
 
 SkyWatcherProtocolWrapper& SkyWatcherProtocolWrapper::instance() {
@@ -1532,28 +1703,51 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
         if (trace_enabled()) {
             ALPACA_LOG_TRACE("SkyWatcher", "MC " + frame.substr(0, frame.size() - 1) + " -> " + reply);
         }
-        // Shape check: an OK reply whose data length does not match the
-        // command is a reply to SOMETHING ELSE (a late frame from a timed-out
-        // exchange). Accepting it would report success for a command the
-        // board may never have applied. Settle the link and resend once.
-        const bool mispaired = expected_len >= 0 && !reply.empty() && reply[0] == kReplyOk &&
-                               static_cast<int>(reply.size()) - 1 != expected_len;
-        if (!mispaired) {
+        // Resend once on any reply that is not a clean, expected-shape answer:
+        //   - MIS-PAIRED: an OK ("=") reply of the wrong data length for the
+        //     command -- a reply to SOMETHING ELSE (a late frame from a
+        //     timed-out exchange). Accepting it would report success for a
+        //     command the board may never have applied (PR #245).
+        //   - MALFORMED: a reply that is neither "=" nor "!", e.g. a truncated
+        //     ":j1" "25278" that dropped a byte. Electrical noise on a serial
+        //     link corrupts a reply now and then, and a single resend recovers
+        //     it instead of failing the whole operation.
+        // A "!" error is a genuine board rejection and is NEVER resent.
+        // This loop also resends a corrupt reply to a SET/motion command
+        // (":G"/":S"/":J"/...), not just an inquiry: the board may already have
+        // applied the first frame, so a resend can double-apply. This is the same
+        // trade-off the mis-pair path already accepted (PR #245) -- these commands
+        // are idempotent in practice (re-issuing the same target/mode/start is a
+        // no-op or a harmless repeat).
+        // In practice this recovery only engages over SERIAL: exchange_udp returns
+        // only a "!" reply or a "=" reply of the expected length and drops any other
+        // datagram, so a malformed/mis-paired reply never reaches this branch on the
+        // UDP (Wi-Fi) transport.
+        // TODO: a resend of a motion command whose FIRST frame was applied can draw
+        // a "!" rejection (e.g. ":J" -> "motor not stopped"), surfacing as
+        // MotorControllerRejected on a move that actually started. If that proves to
+        // matter on a bench, limit the malformed/mis-pair resend to inquiry commands.
+        const bool is_ok = !reply.empty() && reply[0] == kReplyOk;
+        const bool is_error = !reply.empty() && reply[0] == kReplyError;
+        const bool mispaired = is_ok && expected_len >= 0 && static_cast<int>(reply.size()) - 1 != expected_len;
+        const bool malformed = !reply.empty() && !is_ok && !is_error;
+        if (!mispaired && !malformed) {
             break;
         }
-        ALPACA_LOG_WARN("SkyWatcher", "Mis-paired reply to '" + frame.substr(0, frame.size() - 1) + "': got '" + reply +
-                                          "' (expected " + std::to_string(expected_len) +
-                                          " data chars); settling the link and " +
-                                          (attempt == 0 ? "resending" : "giving up"));
-        // Settle before the resend AND before giving up: a mis-pair means a
-        // stale frame is (or was just) in flight, and a caller that catches
-        // the exception and carries on would otherwise have its next
-        // exchange answered by the straggler -- a same-shaped one passes
+        ALPACA_LOG_WARN("SkyWatcher",
+                        std::string(malformed ? "Malformed" : "Mis-paired") + " reply to '" +
+                            frame.substr(0, frame.size() - 1) + "': got '" + reply + "'" +
+                            (mispaired ? " (expected " + std::to_string(expected_len) + " data chars)" : "") +
+                            "; settling the link and " + (attempt == 0 ? "resending" : "giving up"));
+        // Settle before the resend AND before giving up: a corrupt/mis-paired
+        // reply means a stale or partial frame is (or was just) in flight, and a
+        // caller that catches the exception and carries on would otherwise have
+        // its next exchange answered by the straggler -- a same-shaped one passes
         // the shape check (PR #245 review).
         pimpl_->settle_after_mispair();
         if (attempt > 0) {
-            throw AlpacaException("Mis-paired motor controller reply to '" + std::string(1, command) +
-                                  std::to_string(axis) + "': '" + reply + "'");
+            throw AlpacaException(std::string(malformed ? "Malformed" : "Mis-paired") + " motor controller reply to '" +
+                                  std::string(1, command) + std::to_string(axis) + "': '" + reply + "'");
         }
     }
     if (!reply.empty() && reply[0] == kReplyOk) {

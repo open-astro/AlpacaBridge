@@ -303,6 +303,19 @@ datagrams before each send so replies cannot get off-by-one.
   drain-before-send, a settle drain after any timeout, and per-command expected reply
   length validation; (4) run ConformU on the SBC itself (localhost), not across the LAN —
   VM-to-SBC jitter alone produces FAST-target (0.1 s) violations.
+- **The serial fd is kept NON-blocking and every read AND write is `poll()`-bounded**
+  (`skywatcher_protocol_wrapper.cpp`): some USB CDC-ACM virtual COM ports (the STM32 VCP
+  class these boards expose) do not honour `VMIN`/`VTIME`, so a blocking `read()` on a board
+  that has gone quiet parks forever in `n_tty_read` and wedges the whole driver (every worker
+  blocks behind the one holding `io_mutex_`). So `connect_serial()` calls `util::set_nonblocking()`
+  (NOT `clear_nonblocking`), `settle_serial`/`exchange_serial` gate each read on
+  `poll(POLLIN)` within the command budget, and frame sends use a `poll(POLLOUT)`-bounded
+  write (`write_all_bounded`) rather than `util::write_all` — which only retries `EAGAIN`
+  after a partial write and would fail a frame fast once the fd is non-blocking. This is the
+  deliberate exception to the shared "always `clear_nonblocking`" serial rule in `AGENTS.md`;
+  do not revert it. Regression tests (`test_skywatcher_serial.cpp`): a muted board times out
+  within the command budget (catches a revert of the read `poll()`), and a write seam that
+  reports `EAGAIN` is waited out (catches a revert of the bounded write).
 - **Disconnect all stray Alpaca clients before a ConformU run**: the per-client Connected
   registry keeps the device physically connected for other ClientIDs, so leftover test
   sessions carry state (targets, tracking) into ConformU's "first time use" checks.

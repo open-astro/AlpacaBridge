@@ -93,6 +93,19 @@ TEST_CASE("SkyWatcher serial - a mis-paired OK reply is rejected and the command
     REQUIRE(link.board.count_frames('j') == 2);  // rejected once, resent once
 }
 
+TEST_CASE("SkyWatcher serial - a malformed (byte-dropped) reply is resent and recovers", "[skywatcher][serial]") {
+    // A reply with a dropped byte ("25278", neither "=" nor "!") is not a valid
+    // answer. Before this change it threw immediately and failed the whole
+    // operation. Electrical noise on a serial link produces these, so -- like a
+    // mis-paired reply -- the wrapper now settles and resends once, recovering
+    // the clean reply.
+    SerialLink link(300);
+    link.board.set_counts(1, 0x8000FF);
+    link.board.malform_next();
+    REQUIRE(link.proto.inquire_position(1) == 0x8000FF);
+    REQUIRE(link.board.count_frames('j') == 2);  // rejected once, resent once
+}
+
 TEST_CASE("SkyWatcher serial - giving up on a second mis-pair still settles the line", "[skywatcher][serial]") {
     // send_command settles the link before its one resend. It must also
     // settle before it gives up on a second mis-pair: the stale frame behind
@@ -112,6 +125,103 @@ TEST_CASE("SkyWatcher serial - giving up on a second mis-pair still settles the 
     link.board.set_counts(1, 0x812345);
     // The next inquiry must get its OWN reply, not the straggler.
     REQUIRE(link.proto.inquire_position(1) == 0x812345);
+}
+
+TEST_CASE("SkyWatcher serial - a quiet board times out within the command budget, not the broken-read block",
+          "[skywatcher][serial]") {
+    // Regression test for the poll()-bounded reads. Some USB CDC-ACM virtual COM
+    // ports do NOT honour VMIN=0/VTIME=1 as a read() timeout, so a bare read() on a
+    // board that has gone quiet parks forever in n_tty_read, holding io_mutex_ (and
+    // the driver mutex above it) and wedging the whole server until it is killed.
+    // That broken read is modelled through the read seam: it returns at once when
+    // data is present but otherwise blocks (here up to 2 s) rather than timing out.
+    // With the board MUTED (quiet, healthy fd) the exchange read never gets data:
+    //   - WITH the fix: poll(response_timeout) returns 0, the broken read is never
+    //     entered, and the exchange times out at ~response_timeout.
+    //   - WITHOUT it (bare read in exchange_serial): the seam blocks the full 2 s
+    //     before the exchange deadline is even re-checked.
+    // Asserting the call fails well under 2 s fails on the base exchange_serial and
+    // passes on the poll-bounded one -- i.e. it catches a revert of the exchange
+    // poll(), which the old mis-pair-based version did not (it recovered in ms
+    // whether or not the poll was there).
+    FakeSkyWatcherSerialBoard board;
+    auto vtime_ignoring_read = [](int fd, char* buf, std::size_t n) -> std::ptrdiff_t {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        for (;;) {
+            const ssize_t r = ::read(fd, buf, n);
+            if (r > 0) {
+                return r;  // data present: a real tty returns at once here too
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return 0;  // bounded so a regression cannot hang the suite
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    };
+    sw::SkyWatcherProtocolWrapper proto{vtime_ignoring_read};
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Serial;
+    info.port_path = board.slave_path();
+    info.baud_rate = 9600;
+    info.response_timeout_ms = 300;
+    REQUIRE(proto.connect(info));
+
+    board.set_muted(true);  // board goes quiet (healthy fd): reads get no data
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE_THROWS_AS(proto.inquire_position(1), alpacacore::AlpacaException);  // times out, does not hang
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    // WITH the fix: ~response_timeout (300 ms). WITHOUT it: >= the 2 s broken-read
+    // block. The 1500 ms bound fails on the base code and passes on the fix.
+    CHECK(elapsed < std::chrono::milliseconds(1500));
+
+    // The first timeout set serial_dirty_, so a second call (still muted) runs
+    // settle_serial(200) BEFORE its write -- exercising the broken read on the
+    // SETTLE path too, not just exchange. It must also stay bounded; without the
+    // settle poll() gate it would block the seam's full 2 s inside settle_serial.
+    const auto start2 = std::chrono::steady_clock::now();
+    REQUIRE_THROWS_AS(proto.inquire_position(1), alpacacore::AlpacaException);
+    const auto elapsed2 =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start2);
+    CHECK(elapsed2 < std::chrono::milliseconds(1500));
+    proto.disconnect();
+}
+
+TEST_CASE("SkyWatcher serial - a stalled TX buffer (write EAGAIN) is waited out, not failed fast",
+          "[skywatcher][serial]") {
+    // The fd is kept non-blocking for the read fix, so write() can return EAGAIN
+    // before the first byte when the TX buffer is full (a board that stopped
+    // draining). util::write_all only retries EAGAIN AFTER a partial write, so it
+    // would fail such a frame at once ("Serial write failed: Resource temporarily
+    // unavailable"); write_all_bounded instead waits for POLLOUT within the command
+    // budget. Model a write that reports EAGAIN a few times before it succeeds (the
+    // seam is armed only after connect so the handshake writes go through normally).
+    // Without write_all_bounded this throws on the first EAGAIN.
+    FakeSkyWatcherSerialBoard board;
+    bool armed = false;
+    int eagain_left = 0;
+    auto flaky_write = [&](int fd, const char* buf, std::size_t n) -> std::ptrdiff_t {
+        if (armed && eagain_left > 0) {
+            --eagain_left;
+            errno = EAGAIN;
+            return -1;  // TX buffer "full": not writable yet
+        }
+        return ::write(fd, buf, n);
+    };
+    sw::SkyWatcherProtocolWrapper proto{{}, flaky_write};  // default read seam, flaky write seam
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Serial;
+    info.port_path = board.slave_path();
+    info.baud_rate = 9600;
+    info.response_timeout_ms = 300;
+    REQUIRE(proto.connect(info));
+
+    board.set_counts(1, 0x8000FF);
+    armed = true;
+    eagain_left = 3;                                 // first three writes of the ":j1" frame report a full TX buffer
+    REQUIRE(proto.inquire_position(1) == 0x8000FF);  // waited out EAGAIN; reply read normally
+    CHECK(eagain_left == 0);                         // all three EAGAINs consumed (not failed-fast on the first)
+    proto.disconnect();
 }
 
 TEST_CASE("SkyWatcher serial - a transient failure of the ':i' readback does not disable the diagnostic",

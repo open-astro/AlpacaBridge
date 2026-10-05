@@ -160,6 +160,15 @@ public:
         straggler_ms_ = straggler_ms;
     }
 
+    /// Answer the next @p times frames with a MALFORMED reply ("25278" -- no
+    /// leading "=" or "!"), i.e. a reply with a byte dropped on a noisy serial
+    /// link. The wrapper must settle and resend rather than fail the command
+    /// outright.
+    void malform_next(int times = 1) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        malform_left_ = times;
+    }
+
     /// The ":e1" payload (default "033A44": Wave 100i, MC 3.58 / code 0x44).
     void set_version_reply(std::string payload) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -271,6 +280,10 @@ private:
                 straggler_pending_ = true;
             }
             return "=00";  // OK reply, wrong length for anything the wrapper asks
+        }
+        if (malform_left_ > 0) {
+            --malform_left_;
+            return "25278";  // no leading "=" / "!": a byte dropped on a noisy link
         }
         switch (cmd) {
             case 'e':
@@ -409,6 +422,7 @@ private:
     std::string version_reply_ = "033A44";
     int answer_baud_ = 0;
     int mispair_left_ = 0;
+    int malform_left_ = 0;   // frames to answer with a byte-dropped malformed reply
     char drop_command_ = 0;  // frames of this command to lose on the wire (#559)
     int drop_left_ = 0;
     std::string straggler_;

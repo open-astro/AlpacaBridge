@@ -421,6 +421,17 @@ must `clear_nonblocking()` after `tcsetattr` (not just the probe), or reads igno
 `VMIN`/`VTIME` and `write_all` fails on `EAGAIN`. Use the **same abort-on-failure
 pattern** (`close(fd); return false/""`) at every call site.
 
+**Exception — Sky-Watcher direct serial.** On the **connected link**, that driver
+deliberately keeps the fd **non-blocking** and bounds its reads and writes with `poll()`
+instead, because some USB CDC-ACM virtual COM ports do not honour `VMIN`/`VTIME` and a
+blocking `read()` on a board that went quiet parks forever in `n_tty_read`, wedging the
+driver. There `connect_serial()` calls `set_nonblocking()`, `settle_serial`/`exchange_serial`
+reads go through a `poll(POLLIN)`-bounded helper, and frame sends go through a
+`poll(POLLOUT)`-bounded write (not `write_all`, which would fail fast on an `EAGAIN` before
+the first byte). Do **not** "fix" that back to `clear_nonblocking` — see the Sky-Watcher
+scoped instructions. (The auto-detect *probe* path, `probe_skywatcher_port`, still uses a
+blocking `VTIME` read and is not covered by this change.)
+
 ### Camera ROI alignment (all camera vendors)
 
 Every camera SDK constrains ROI geometry, and the pattern is the same everywhere:
