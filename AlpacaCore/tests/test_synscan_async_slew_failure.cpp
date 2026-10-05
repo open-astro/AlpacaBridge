@@ -462,4 +462,34 @@ TEST_CASE("SynScan AbortSlew - does not restore tracking disabled during an RA p
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan PulseGuide - SlewToCoordinates reaps the pulse and clears IsPulseGuiding (#831)",
+          "[synscan][telescope][pulseguiding][reap]") {
+    enum class Op { SlewToCoordinates, SlewToCoordinatesAsync, Park };
+    for (const Op op : {Op::SlewToCoordinates, Op::SlewToCoordinatesAsync, Op::Park}) {
+        auto st = std::make_shared<FakeSynScanState>();
+        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+        driver->pulse_guide(0, 60000);  // outlasts the sync slew, so only the reap can clear it
+        REQUIRE(driver->get_is_pulse_guiding());
+        switch (op) {
+            case Op::SlewToCoordinates:
+                driver->slew_to_coordinates(5.5, 20.0);
+                break;
+            case Op::SlewToCoordinatesAsync:
+                driver->slew_to_coordinates_async(5.5, 20.0);
+                break;
+            case Op::Park:
+                driver->park();
+                break;
+        }
+        INFO("op " << static_cast<int>(op));
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+        driver->set_connected(false);
+    }
+}
+
 #endif  // _WIN32

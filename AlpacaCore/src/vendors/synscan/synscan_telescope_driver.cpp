@@ -1356,6 +1356,7 @@ public:
         reap_pulse_tasks();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
+        clear_pulse_guiding_locked();
         check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
         ilock.unlock();
