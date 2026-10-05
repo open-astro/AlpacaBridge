@@ -2333,6 +2333,41 @@ TEST_CASE("SkyWatcher async - a short RA guide pulse is not stretched by the rat
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J leaves RA stopped",
+          "[skywatcher][async][pulseguide]") {
+    // The pulse task restores the drive with ":I" then ":J", both outside
+    // mutex_. Tracking=false landing between them must still end with RA
+    // stopped, Tracking false and no exception (main CI, test #967).
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    driver->pulse_guide(2, 300);
+    REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 3000));
+    mount.hold_reply_to('I');  // the restore ":I": armed after the dispatch one
+    REQUIRE(mount.wait_reply_held(std::chrono::seconds(5)));
+    REQUIRE(mount.step_period(1) == sidereal_preset);
+
+    std::atomic<bool> threw{false};
+    std::thread off([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+    });
+    mount.release_held_reply();
+    off.join();
+
+    CHECK_FALSE(threw.load());
+    CHECK_FALSE(driver->get_tracking());
+    CHECK(wait_until([&] { return !mount.axis_running(1); }, 3000));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - an RA guide pulse sends no :J re-latch on the EQ-AL55i Pro (#666)",
           "[skywatcher][async][pulseguide][al55i]") {
     // open-astro#666: on the EQ-AL55i Pro (0x09) every ":J" on the tracking RA
