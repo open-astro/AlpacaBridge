@@ -3964,6 +3964,12 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (!Number.isNaN(pwmFreq)) {
                     deviceData.pwmFrequencyHz = pwmFreq;
                 }
+                const duplicateGpio = asiairDuplicateGpioError(
+                    [0, 1, 2, 3].map((i) => Number.parseInt(formData.get('asiairPortGpio' + i), 10)));
+                if (duplicateGpio) {
+                    alert(duplicateGpio);
+                    return;
+                }
                 const ports = [];
                 for (let i = 0; i < 4; i += 1) {
                     const name = formData.get('asiairPortName' + i);

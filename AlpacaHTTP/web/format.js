@@ -417,11 +417,28 @@ function wifiSsidLabel(item, displayCount) {
     return displayCount > 1 && hex ? `${label} (${hex})` : label;
 }
 
+// The server accepts each ASIAIR GPIO line on at most one port (router.cpp).
+// Returns a message naming the first repeated line, or null. `gpios` holds one
+// number per port row in order; NaN (a blank row) is skipped.
+function asiairDuplicateGpioError(gpios) {
+    const firstRow = new Map();
+    for (let i = 0; i < gpios.length; i += 1) {
+        const gpio = gpios[i];
+        if (Number.isNaN(gpio)) continue;
+        if (firstRow.has(gpio)) {
+            return `GPIO ${gpio} is selected for ports ${firstRow.get(gpio) + 1} and ${i + 1}. ` +
+                'Each GPIO line can be used on only one port.';
+        }
+        firstRow.set(gpio, i);
+    }
+    return null;
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
-                        wifiSsidKey, wifiSsidLabel };
+                        wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError };
 }
