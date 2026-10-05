@@ -5,6 +5,9 @@
 #   falsified-by   every new test case needs a `Falsified by:` line in the PR
 #                  body naming the mutation that fails it
 #                  (scripts/check_falsified_by.py)
+#   pr-template    the body keeps every section of
+#                  .github/PULL_REQUEST_TEMPLATE.md, each filled in
+#                  (scripts/check_pr_template.py); bot PRs (Dependabot) skip it
 
 name: PR body
 
@@ -36,3 +39,23 @@ jobs:
         run: |
           python3 scripts/check_falsified_by.py --self-test
           python3 scripts/check_falsified_by.py
+
+  pr-template:
+    name: pr-template (PR body)
+    # Dependabot writes its own body; the template is for people and agents.
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the PR template sections
+        # Untrusted text again: the body reaches the script only through env.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 scripts/check_pr_template.py --self-test
+          python3 scripts/check_pr_template.py
