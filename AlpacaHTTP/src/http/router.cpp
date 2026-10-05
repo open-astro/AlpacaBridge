@@ -4296,7 +4296,7 @@ Response Router::dispatch_telescope_method(
             else if (method_name == "moveaxis") {
                 // Debug logging
                 if (!request.body().empty()) {
-                    util::log_info("moveaxis body: " + request.body());
+                    util::log_info("moveaxis body: " + util::escape_for_log(request.body()));
                 }
                 int axis = parse_int("Axis");
                 double rate = parse_double("Rate");
@@ -4732,8 +4732,9 @@ Response Router::dispatch_camera_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "imagearray") {
-                util::log_debug("Camera imagearray Accept: " +
-                    (request.has_header("accept") ? request.get_header("accept") : "<none>") +
+                util::log_debug(
+                    "Camera imagearray Accept: " +
+                    (request.has_header("accept") ? util::escape_for_log(request.get_header("accept")) : "<none>") +
                     ", imagebytes=" + std::string(accepts_imagebytes(request) ? "true" : "false"));
                 if (accepts_imagebytes(request)) {
                     auto image = camera->get_image_array();
@@ -4748,8 +4749,9 @@ Response Router::dispatch_camera_method(
                 response.set_body(build_image_array_payload(image, 2, client_tx_id, server_tx_id));
                 return response;
             } else if (method_name == "imagearrayvariant") {
-                util::log_debug("Camera imagearrayvariant Accept: " +
-                    (request.has_header("accept") ? request.get_header("accept") : "<none>") +
+                util::log_debug(
+                    "Camera imagearrayvariant Accept: " +
+                    (request.has_header("accept") ? util::escape_for_log(request.get_header("accept")) : "<none>") +
                     ", imagebytes=" + std::string(accepts_imagebytes(request) ? "true" : "false"));
                 if (accepts_imagebytes(request)) {
                     auto image = camera->get_image_array();

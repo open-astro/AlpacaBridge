@@ -50,6 +50,7 @@
 #include <thread>
 #include <vector>
 
+#include "route_table_stubs.h"
 #include "test_assert.h"
 #include "test_catalog_descriptor.h"
 
@@ -881,6 +882,80 @@ int main() {
             }
         }
         EXPECT(matched == 1);
+    }
+
+    // Client text in a log line is escaped (open-astro#753): a request path, a
+    // moveaxis body and an Accept header reach the log with control bytes and
+    // invalid UTF-8 as \xNN, and the 256-byte cut never splits a multi-byte
+    // character. The request line cannot carry a newline (the parser splits it
+    // on whitespace), so the path uses ESC; a body and a header value can.
+    {
+        std::vector<std::string> captured;
+        std::mutex captured_mutex;
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.emplace_back(message);
+            });
+        auto count_logged = [&](const std::string& line) {
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            return std::count(captured.begin(), captured.end(), line);
+        };
+        auto raw_byte_logged = [&](char byte) {
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            return std::any_of(captured.begin(), captured.end(),
+                               [&](const std::string& line) { return line.find(byte) != std::string::npos; });
+        };
+
+        // 255 bytes, then a 2-byte character that would end at byte 257.
+        const std::string head = std::string("/setup/v1/x\x1b[31m") + "\xff";
+        const std::string path = head + std::string(255 - head.size(), 'a') + "\xC3\xA9" + "tail";
+        const std::string shown = "/setup/v1/x\\x1b[31m\\xff" + std::string(255 - head.size(), 'a') + "... (261 bytes)";
+        EXPECT(path.size() == 261);
+        EXPECT(route_request(router, "GET", path).status_code() == 404);
+        EXPECT(count_logged("HTTP GET " + shown) == 1);
+        EXPECT(count_logged("Handling setup endpoint: " + shown) == 1);
+        EXPECT(count_logged("Setup endpoint regex did not match: " + shown) == 1);
+        EXPECT(!raw_byte_logged('\x1b'));
+        EXPECT(!raw_byte_logged('\xff'));
+        EXPECT(!raw_byte_logged('\xC3'));
+
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        constexpr int kStubNumber = 9753;
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::TelescopeStub>(kStubNumber)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::CameraStub>(kStubNumber)));
+        auto send_raw = [&](const std::string& raw) {
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw));
+            return router.route(request, 1);
+        };
+
+        const std::string body = "Axis=0&Rate=0\nHTTP GET /forged";
+        send_raw("PUT /api/v1/telescope/" + std::to_string(kStubNumber) +
+                 "/moveaxis HTTP/1.1\r\nHost: localhost\r\n"
+                 "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
+                 std::to_string(body.size()) + "\r\n\r\n" + body);
+        EXPECT(count_logged("moveaxis body: Axis=0&Rate=0\\x0aHTTP GET /forged") == 1);
+        EXPECT(count_logged("HTTP GET /forged") == 0);
+
+        for (const std::string method : {"imagearray", "imagearrayvariant"}) {
+            send_raw("GET /api/v1/camera/" + std::to_string(kStubNumber) + "/" + method +
+                     " HTTP/1.1\r\nHost: localhost\r\nAccept: x\x1b[2Jy\r\n\r\n");
+            EXPECT(count_logged("Camera " + method + " Accept: x\\x1b[2Jy, imagebytes=false") == 1);
+        }
+        EXPECT(!raw_byte_logged('\x1b'));
+
+        registry.unregister_device(alpacacore::DeviceType::Telescope, kStubNumber);
+        registry.unregister_device(alpacacore::DeviceType::Camera, kStubNumber);
     }
     alpacahttp::Request request;
 
