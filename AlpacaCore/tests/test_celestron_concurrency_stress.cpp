@@ -52,7 +52,9 @@ alpacacore::vendor::celestron::ConnectionInfo celestron_endpoint(int port) {
 alpacacore::test::FakeMountServer::Responder celestron_responder() {
     return [](const std::string& command) {
         if (command.size() >= 4 && command[0] == 'P' && static_cast<unsigned char>(command[3]) == 0xFE) {
-            return std::string("\x01\x00#", 3);  // Return a quick firmware response for each AUX probe.
+            // Guide-rate GETs are part of the connected stress storm and now
+            // take mutex_; keep the connect-time AUX scan they may wait behind fast.
+            return std::string("\x01\x00#", 3);  // Quick firmware response for each AUX probe.
         }
         return std::string("00000000,00000000#");
     };

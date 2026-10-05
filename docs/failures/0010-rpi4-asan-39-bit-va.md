@@ -18,6 +18,6 @@ The running Debian Raspberry Pi kernel was built with `CONFIG_ARM64_VA_BITS=39` 
 
 - Raspberry Pi 4, Debian 13, kernel `6.18.34+rpt-rpi-v8`, GCC 14.2: `/boot/config-6.18.34+rpt-rpi-v8` reports `CONFIG_ARM64_VA_BITS_39=y` and `CONFIG_ARM64_VA_BITS=39`.
 - Both GCC 14.2 and Clang 19.1.7 trivial `-fsanitize=address,undefined` programs fail with `AddressSanitizer: CHECK failed: sanitizer_allocator_primary64.h:131` at `0x500000000000`, returned error `0xfffffffffffffff4` (`-12`), with an empty stack.
-- The repository's ASan+UBSan CI job passed on its native arm64 runner in PR [#842](https://github.com/open-astro/AlpacaBridge/pull/842), consistent with the failure being specific to the Pi kernel VA layout.
+- The ASan+UBSan job passed on the native arm64 runner for PR [#842](https://github.com/open-astro/AlpacaBridge/pull/842) at head `325dd8f3` (workflow run [37255243265](https://github.com/open-astro/AlpacaBridge/actions/runs/37255243265)). This confirms the sanitizer suite runs on a compatible arm64 host; it does not make the Pi's local startup abort a pass.
 - Upstream reports describe the same failure and identify the 39-bit versus 48-bit kernel VA configuration: [LLVM #65144](https://github.com/llvm/llvm-project/issues/65144) and [Google Sanitizers #1674](https://github.com/google/sanitizers/issues/1674).
 - Not verified: rebuilding and booting a 48-bit-VA Pi kernel, then rerunning the full local pre-flight.

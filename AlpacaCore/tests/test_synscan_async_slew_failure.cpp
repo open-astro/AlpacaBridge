@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -360,6 +361,32 @@ TEST_CASE("SynScan PulseGuide - guide position does not publish as target", "[sy
     driver->pulse_guide(1, 150);
     CHECK(driver->get_target_right_ascension() == 5.5);
     CHECK(driver->get_target_declination() == 20.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async slew - completion reports the new target after PulseGuide", "[synscan][telescope][async]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    const double position_before_pulse_ra = driver->get_right_ascension();
+    const double position_before_pulse_dec = driver->get_declination();
+    driver->pulse_guide(0, 1000);  // Establish a distinct private guide-position estimate.
+    REQUIRE(driver->get_is_pulse_guiding());
+
+    constexpr double target_ra = 6.0;
+    constexpr double target_dec = 22.0;
+    CHECK(std::abs(position_before_pulse_ra - target_ra) > 0.1 ||
+          std::abs(position_before_pulse_dec - target_dec) > 1.0);
+    driver->slew_to_coordinates_async(target_ra, target_dec);
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 12000));
+
+    CHECK(std::abs(driver->get_right_ascension() - target_ra) < 1e-6);
+    CHECK(std::abs(driver->get_declination() - target_dec) < 1e-6);
     driver->set_connected(false);
 }
 

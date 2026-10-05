@@ -1402,6 +1402,9 @@ public:
             target_dec_degrees_ = dec;
             target_ra_set_ = true;
             target_dec_set_ = true;
+            guide_position_ra_hours_ = ra;
+            guide_position_dec_degrees_ = dec;
+            guide_position_valid_ = true;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             parked_ = false;
