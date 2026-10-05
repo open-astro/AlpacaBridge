@@ -391,4 +391,37 @@ TEST_CASE("Celestron PulseGuide - an expired unpolled opposite-axis pulse does n
     }
 }
 
+TEST_CASE("Celestron PulseGuide - an operation that reaps the pulse clears IsPulseGuiding (#831)",
+          "[celestron][telescope][pulseguiding][reap]") {
+    enum class Op { SlewToCoordinates, SlewToCoordinatesAsync, FindHome, Park };
+    for (const Op op : {Op::SlewToCoordinates, Op::SlewToCoordinatesAsync, Op::FindHome, Op::Park}) {
+        auto st = std::make_shared<FakeCelestronState>();
+        alpacacore::test::FakeMountServer server(celestron_responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        REQUIRE(driver->get_can_pulse_guide());
+
+        driver->pulse_guide(0, 60000);  // outlasts the sync slew, so only the reap can clear it
+        REQUIRE(driver->get_is_pulse_guiding());
+        switch (op) {
+            case Op::SlewToCoordinates:
+                driver->slew_to_coordinates(5.5, 20.0);
+                break;
+            case Op::SlewToCoordinatesAsync:
+                driver->slew_to_coordinates_async(5.5, 20.0);
+                break;
+            case Op::FindHome:
+                driver->find_home();
+                break;
+            case Op::Park:
+                driver->park();
+                break;
+        }
+        INFO("op " << static_cast<int>(op));
+        CHECK_FALSE(driver->get_is_pulse_guiding());
+        driver->set_connected(false);
+    }
+}
+
 #endif  // _WIN32
