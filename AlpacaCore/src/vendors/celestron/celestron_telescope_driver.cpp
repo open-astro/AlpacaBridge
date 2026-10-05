@@ -263,6 +263,7 @@ public:
         if (connected == connected_) {
             return;
         }
+        ++motion_generation_;
 
         auto& protocol = CelestronProtocolWrapper::instance();
         if (connected) {
@@ -1028,6 +1029,7 @@ public:
         check_connected();
         clear_pulse_guiding_locked();
         check_not_parked_locked("FindHome");
+        ++motion_generation_;
         auto& protocol = CelestronProtocolWrapper::instance();
 
         // MC_LEVEL_START (0x0B) — moves each axis to its hardware home switch.
@@ -1106,6 +1108,7 @@ public:
             // goto failed while it's parking.
             last_slew_error_.clear();
             parking_ = true;
+            ++motion_generation_;
         }
 
         // Join any task that raced in between the reap above and this lock,
@@ -1417,8 +1420,13 @@ public:
         clear_pulse_guiding_locked();
         check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
+        const uint64_t owner_generation = ++motion_generation_;
         ilock.unlock();
-        wait_for_slew_complete(lock);
+        if (!wait_for_slew_complete(lock, owner_generation)) {
+            // Another client's AbortSlew / Park / MoveAxis / FindHome / slew took the
+            // mount: skip the completion tail so it cannot write T2 over their motion.
+            throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+        }
         restore_tracking_after_slew_locked();
         learn_ra_offset_locked(ra);
     }
@@ -1451,6 +1459,7 @@ public:
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             check_slew_safety_locked("SlewToCoordinatesAsync");
             slew_aborted_ = false;
+            ++motion_generation_;
 
             use_passthrough = !hc_available_;
             int bits = use_passthrough ? 24 : (use_precise_commands_ ? 24 : 16);
@@ -1744,6 +1753,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("MoveAxis");
+        ++motion_generation_;
 
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
@@ -1817,6 +1827,7 @@ public:
                 parking_ = false;  // an aborted park never reaches AtPark
                 slewing_cached_ = false;
                 slew_aborted_ = true;
+                ++motion_generation_;
                 flip_in_progress_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
@@ -2300,7 +2311,9 @@ private:
     // 120 s (Bisque's unlock/sleep/relock loop is the reference pattern).
     // `lock` must be held on entry; it is held again on return/throw. The
     // connection state is re-checked after each relock.
-    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock) const {
+    // Returns false when a concurrent motion command bumped motion_generation_
+    // past `owner_generation` while the lock was released (the slew was superseded).
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = std::chrono::steady_clock::now();
         const auto start_grace = std::chrono::seconds(2);
@@ -2313,6 +2326,9 @@ private:
             check_connected();
         };
         while (true) {
+            if (motion_generation_ != owner_generation) {
+                return false;
+            }
             bool slewing = get_slewing_locked();
             if (slewing) {
                 saw_slewing = true;
@@ -2336,6 +2352,7 @@ private:
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
+        return motion_generation_ == owner_generation;
     }
 
     void sync_mount_time_locked() {
@@ -2517,6 +2534,9 @@ private:
     double ra_slew_offset_hours_ = 0.0005; // ~27" initial seed for CGX-L fw 7.18 goto tracking deficit
     int ra_offset_samples_ = 0;
     bool slew_aborted_ = false;
+    // Bumped under mutex_ by every motion initiator; a sync slew waiting with the lock
+    // released compares it to learn it was superseded (Sky-Watcher shape, #832).
+    uint64_t motion_generation_ = 0;
     bool skip_next_ra_learn_ = false;
     mutable bool flip_in_progress_ = false;
 

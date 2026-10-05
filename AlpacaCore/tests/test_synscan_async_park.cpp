@@ -219,7 +219,7 @@ TEST_CASE("SynScan - a garbled echo reply recovers on retry", "[synscan][telesco
     });
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
 
     driver->connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -255,7 +255,7 @@ TEST_CASE("SynScan - a stale reply queued ahead of the echo does not fail the co
     });
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
 
     driver->connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
@@ -283,7 +283,7 @@ TEST_CASE("SynScan - a persistently garbled echo fails the connect rather than p
     });
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
 
     const auto t0 = Clock::now();
     driver->connect();
@@ -303,7 +303,7 @@ TEST_CASE("SynScan - Name carries the model and the (SynScan) suffix once connec
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     CHECK(driver->get_name() == "Sky-Watcher Mount (SynScan)");  // no model known yet
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (SynScan)");  // fake answers model id 50
@@ -315,7 +315,7 @@ TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew 
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE_FALSE(driver->get_at_park());
 
@@ -352,7 +352,7 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     driver->park();
@@ -399,7 +399,7 @@ TEST_CASE("SynScan async - Unpark reports stops it could not send", "[synscan][t
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     driver->park();
@@ -463,6 +463,60 @@ TEST_CASE("SynScan async - a failed park logs the stops it could not send", "[sy
     CHECK_FALSE(driver->get_at_park());
     CHECK(driver->get_slewing());
 
+    driver->set_connected(false);
+}
+
+// #832: a synchronous SlewToCoordinates must notice another client taking the
+// mount (AbortSlew, Park, MoveAxis) and throw InvalidOperation instead of
+// returning success.
+TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws InvalidOperation",
+          "[synscan][telescope][async]") {
+    using alpacacore::AlpacaException;
+    struct Case {
+        const char* name;
+        std::function<void(alpacacore::TelescopeDriver&)> supersede;
+    };
+    const Case cases[] = {
+        {"AbortSlew", [](alpacacore::TelescopeDriver& d) { d.abort_slew(); }},
+        {"Park", [](alpacacore::TelescopeDriver& d) { d.park(); }},
+        {"MoveAxis", [](alpacacore::TelescopeDriver& d) { d.move_axis(0, 0.5); }},
+    };
+    for (const auto& c : cases) {
+        INFO(c.name);
+        auto st = std::make_shared<FakeSynScanState>();
+        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+        std::atomic<int> code{-1};
+        std::thread slewer([&] {
+            try {
+                driver->slew_to_coordinates(5.0, 20.0);
+                code.store(0);
+            } catch (const AlpacaException& e) {
+                code.store(static_cast<int>(e.error_code()));
+            }
+        });
+        REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the GOTO is on the wire
+        c.supersede(*driver);
+        slewer.join();
+        CHECK(code.load() == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("SynScan sync slew - uncontended slew returns normally", "[synscan][telescope][async]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE_NOTHROW(driver->slew_to_coordinates(5.0, 20.0));
+    CHECK(st->goto_count.load() == 1);
+    CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
 
