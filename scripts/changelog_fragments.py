@@ -84,6 +84,9 @@ def parse_body(lines: list[str]) -> tuple[Entries, list[str]]:
         if not in_fence and line.startswith("- "):
             entries[category].append([line])
         elif entries[category]:
+            # a bullet's own text stays on one line; a nested bullet, a fence or a paragraph after a blank line may follow
+            if not in_fence and not pending and not line.lstrip().startswith("- ") and not FENCE_RE.match(line.strip()):
+                problems.append("a bullet is wrapped onto a second line, put it on one line: %r" % line[:60])
             # a blank line stays only inside a bullet: before an indented line or within a fence
             if pending and (in_fence or line[0] in " \t"):
                 entries[category][-1].extend(pending)
@@ -335,7 +338,7 @@ def self_test() -> int:
             failures.append(msg)
 
     # validation
-    good = "### Fixed\n- **x** (issue #1)\n\n### Added (tests)\n- **y**\n  more\n"
+    good = "### Fixed\n- **x** (issue #1)\n\n### Added (tests)\n- **y**\n  - more\n"
     expect(validate("a-b.c-d.md", good) == [], "valid fragment rejected")
     expect(any("file name" in p for p in validate("Bad Name.md", good)), "bad name accepted")
     expect(any("file name" in p for p in validate("-x.md", good)), "leading hyphen accepted")
@@ -344,6 +347,10 @@ def self_test() -> int:
     expect(any("no '- ' bullet" in p for p in validate("a.md", "### Fixed\n\n")), "empty category accepted")
     expect(any("unknown category" in p for p in validate("a.md", "### Stuff\n- x\n")), "unknown category accepted")
     expect(any("unknown category" in p for p in validate("a.md", "### Added (x\n- x\n")), "open paren accepted")
+    expect(any("wrapped" in p for p in validate("a.md", "### Fixed\n- **x**: one\n  two\n")), "wrapped bullet accepted")
+    expect(any("wrapped" in p for p in validate("a.md", "### Fixed\n- x\n  - y\n    z\n")), "wrapped nested bullet accepted")
+    one_line = "### Fixed\n- x\n  - y\n\n  second paragraph\n  ```\n  code\n  ```\n"
+    expect(validate("a.md", one_line) == [], "nested bullet, paragraph or fence rejected as wrapped")
     expect(any("heading" in p for p in validate("a.md", "## [1.0.0] - x\n### Fixed\n- x\n")), "## heading accepted")
     expect(any("heading" in p for p in validate("a.md", "# T\n### Fixed\n- x\n")), "# heading accepted")
     expect(any("before the first" in p for p in validate("a.md", "text\n### Fixed\n- x\n")), "stray text accepted")
