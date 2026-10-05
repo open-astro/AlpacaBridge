@@ -441,6 +441,10 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_config alpacahttp)
     add_test(NAME test_config COMMAND test_config)
 
+    add_executable(test_log_text tests/test_log_text.cpp)
+    target_link_libraries(test_log_text alpacahttp)
+    add_test(NAME test_log_text COMMAND test_log_text)
+
     add_executable(test_yaml_comment tests/test_yaml_comment.cpp)
     target_link_libraries(test_yaml_comment alpacahttp)
     add_test(NAME test_yaml_comment COMMAND test_yaml_comment)

@@ -24,6 +24,7 @@
 #include <alpacahttp/router.h>
 #include <alpacahttp/util/error_mapping.h>
 #include <alpacahttp/util/host_timezone.h>
+#include <alpacahttp/util/log_text.h>
 #include <alpacahttp/util/logging_adapter.h>
 #include <alpacahttp/util/yaml_comment.h>
 #include <alpacahttp/version.h>
@@ -1790,7 +1791,7 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
     std::string method_str = (request.method() == HttpMethod::GET) ? "GET" : 
                            (request.method() == HttpMethod::POST) ? "POST" : 
                            (request.method() == HttpMethod::PUT) ? "PUT" : "UNKNOWN";
-    util::log_debug("HTTP " + method_str + " " + request.path());
+    util::log_debug("HTTP " + method_str + " " + util::escape_for_log(request.path()));
 
     try {
         // open-astro#711: before any regex, static file or setup handler. The
@@ -6793,7 +6794,7 @@ Response Router::handle_static_file(const Request& request) {
 Response Router::handle_setup(const Request& request, std::uint32_t server_tx_id) {
     Response response;
 
-    util::log_info("Handling setup endpoint: " + request.path());
+    util::log_info("Handling setup endpoint: " + util::escape_for_log(request.path()));
 
     // Setup endpoints are expected to return an HTML page.
     // We provide a simple stub page that points users to the web UI.
@@ -6802,14 +6803,8 @@ Response Router::handle_setup(const Request& request, std::uint32_t server_tx_id
     std::smatch matches;
 
     if (!std::regex_match(request.path(), matches, setup_regex)) {
-        // Client input, so DEBUG, and the path is cut to its first 256 bytes (#740).
-        constexpr std::size_t kLoggedPathBytes = 256;
-        const std::string& path = request.path();
-        std::string logged_path = path.substr(0, kLoggedPathBytes);
-        if (path.size() > kLoggedPathBytes) {
-            logged_path += "... (" + std::to_string(path.size()) + " bytes)";
-        }
-        util::log_debug("Setup endpoint regex did not match: " + logged_path);
+        // Client input, so DEBUG, escaped and cut to 256 bytes (#740).
+        util::log_debug("Setup endpoint regex did not match: " + util::escape_for_log(request.path()));
         // Not a valid setup path; return 404 as Alpaca error.
         response.set_status(404, "Not Found");
         AlpacaResponse alpaca_response = make_error_response(
