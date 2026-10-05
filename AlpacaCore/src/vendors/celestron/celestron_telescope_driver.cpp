@@ -1021,6 +1021,7 @@ public:
         reap_pulse_tasks();
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        clear_pulse_guiding_locked();
         check_not_parked_locked("FindHome");
         auto& protocol = CelestronProtocolWrapper::instance();
 
@@ -1069,6 +1070,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
+            clear_pulse_guiding_locked();
             if (parked_ || parking_) {
                 return;  // ASCOM: Park on a parked (or parking) mount is harmless.
             }
@@ -1407,6 +1409,7 @@ public:
         reap_pulse_tasks();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
+        clear_pulse_guiding_locked();
         check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
         ilock.unlock();
@@ -1438,6 +1441,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
+            clear_pulse_guiding_locked();
             check_not_parked_locked("SlewToCoordinatesAsync");
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             check_slew_safety_locked("SlewToCoordinatesAsync");
@@ -1899,6 +1903,11 @@ private:
             prev.join();
         }
         pulse_task_cancel_[index].store(false);
+    }
+
+    void clear_pulse_guiding_locked() {
+        pulse_guide_active_.fill(false);
+        pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
     }
 
     void reap_pulse_tasks() {
