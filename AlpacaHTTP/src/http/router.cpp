@@ -99,9 +99,6 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_SVBONY
-#include <alpacacore/vendor/svbony/svbony_camera_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 #endif
@@ -9407,25 +9404,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "svbony" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_SVBONY
-        int camera_index = config_get(config, "cameraIndex", 0);
-
-        auto camera = alpacacore::vendor::svbony::create_svbony_camera(device_number, camera_index);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered SVBONY camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "SVBONY support not enabled. Rebuild with -DALPACACORE_ENABLE_SVBONY=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "gphoto" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_GPHOTO
         int camera_index = config_get(config, "cameraIndex", 0);
@@ -10213,7 +10191,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "qhy") {
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
-    } else if (vendor == "svbony" || vendor == "gphoto") {
+    } else if (vendor == "gphoto") {
         copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
         if (device_type == "switch") {

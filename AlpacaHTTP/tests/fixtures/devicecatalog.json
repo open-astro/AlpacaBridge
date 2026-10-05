@@ -34,6 +34,16 @@
     ]
   },
   {
+    "vendor": "svbony",
+    "deviceType": "camera",
+    "displayName": "SVBONY Camera",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_SVBONY",
+    "fields": [
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
     "vendor": "weewx",
     "deviceType": "observingconditions",
     "displayName": "WeeWX Observing Conditions",

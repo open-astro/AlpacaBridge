@@ -28,6 +28,7 @@ if(ALPACACORE_ENABLE_SVBONY)
     set(SVBONY_SOURCES
         svbony_sdk_wrapper.cpp
         svbony_camera_driver.cpp
+        svbony_catalog.cpp
     )
 
     add_library(alpacacore_svbony STATIC ${SVBONY_SOURCES})
