@@ -320,6 +320,69 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the WeeWX observin
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// SVBONY camera: schema in every build, factory only when built. gphoto shares
+// the router's legacy cameraIndex sanitize arm with it; that arm now serves
+// gphoto alone, so gphoto must stay out of the catalog until its own slice.
+
+namespace {
+
+const DeviceKey kSvbonyKey{"svbony", DeviceType::Camera};
+
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the SVBONY camera in every build",
+          "[catalog][svbony][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kSvbonyKey);
+    REQUIRE(v != nullptr);
+    CHECK(v->display_name.substr(0, 7) == "SVBONY ");
+    CHECK(v->build_option == "ALPACACORE_ENABLE_SVBONY");
+    CHECK_FALSE(v->available);
+    REQUIRE(v->fields.size() == 1);
+    const FieldRef& index = v->fields[0];
+    CHECK(std::string_view(index.key) == "cameraIndex");
+    CHECK(index.kind == FieldRef::Kind::Int);
+    CHECK(index.role == Role::EnumerationIndex);
+    CHECK_FALSE(index.required);
+    CHECK_FALSE(index.min.has_value());
+    CHECK_FALSE(index.max.has_value());
+    REQUIRE(std::holds_alternative<std::int64_t>(index.default_value));
+    CHECK(std::get<std::int64_t>(index.default_value) == 0);
+
+    // Sanitize keeps cameraIndex and drops undeclared keys (cameraId).
+    DeviceConfig all;
+    all.set("cameraIndex", std::int64_t{2});
+    all.set("cameraId", std::string{"x"});
+    const DeviceConfig sanitized = catalog.sanitize(kSvbonyKey, all);
+    CHECK(sanitized.has("cameraIndex"));
+    CHECK_FALSE(sanitized.has("cameraId"));
+
+    // gphoto is not described here: its sanitize arm is still the router's.
+    CHECK(find_view(views, DeviceKey{"gphoto", DeviceType::Camera}) == nullptr);
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the SVBONY camera available only when built",
+          "[catalog][svbony][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kSvbonyKey);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_SVBONY
+    CHECK(v->available);
+#else
+    CHECK_FALSE(v->available);
+    CHECK_THROWS_AS(catalog.create(kSvbonyKey, DeviceConfig{}, 0), std::runtime_error);
+    try {
+        (void)catalog.create(kSvbonyKey, DeviceConfig{}, 0);
+    } catch (const std::runtime_error& e) {
+        CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_SVBONY") != std::string::npos);
+    }
+#endif
+}
+
 #ifdef ALPACACORE_ENABLE_WEEWX
 
 namespace {

@@ -6591,7 +6591,7 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the SkyWatcher (open-astro#744) and WeeWX descriptors plus the "zzz"
+    // and the SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors plus the "zzz"
     // test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
@@ -6602,7 +6602,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 4);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 5);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -6617,6 +6617,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "skywatcher") {
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "svbony") {
+#ifdef ALPACACORE_ENABLE_SVBONY
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -7497,6 +7504,49 @@ int main() {
         EXPECT(off.message == "WeeWX support not enabled. Rebuild with -DALPACACORE_ENABLE_WEEWX=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "ObservingConditions", 9264).is_null());
+    }
+#endif
+
+    {
+        // Persisted: the wrong-type refusal is thrown before normalize() and the
+        // availability check, so the entry fails to load (listed as failed) in
+        // every build, where the deleted arm loaded 1.5 as index 1.
+        const auto persisted = persisted_attempt(
+            nlohmann::json::parse(R"({"vendor":"svbony","deviceType":"camera","deviceNumber":9269,"cameraIndex":1.5})"),
+            "Camera");
+        EXPECT(!persisted.listed);
+        EXPECT(persisted.failed_listed);
+        EXPECT(any_warning_contains(persisted.errors, "cameraIndex"));
+    }
+
+#ifdef ALPACACORE_ENABLE_SVBONY
+    // The catalog's Int field refuses what the deleted arm's config_get<int>()
+    // truncated (1.5) or coerced (true): not registered, InvalidValue.
+    {
+        const char* const kBadIndexes[] = {"1.5", "true"};
+        int number = 9266;
+        for (const char* bad : kBadIndexes) {
+            nlohmann::json entry = nlohmann::json::parse(std::string(R"({"cameraIndex":)") + bad + "}");
+            entry.update({{"vendor", "svbony"}, {"deviceType", "camera"}, {"deviceNumber", ++number}});
+            alpacahttp::Router router;
+            const auto api = api_attempt(router, entry, "Camera");
+            EXPECT(!api.ok);
+            EXPECT(api.message.find("cameraIndex") != std::string::npos);
+            EXPECT(api.error_number == 0x401);  // InvalidValue
+            EXPECT(listed_entry(router, "Camera", number).is_null());
+        }
+    }
+#else
+    // With the vendor built out, the catalog path reports the deleted arm's text.
+    {
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router, nlohmann::json::parse(R"({"vendor":"svbony","deviceType":"camera","deviceNumber":9265})"),
+            "Camera");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "SVBONY support not enabled. Rebuild with -DALPACACORE_ENABLE_SVBONY=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "Camera", 9265).is_null());
     }
 #endif
 
