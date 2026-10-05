@@ -7507,6 +7507,19 @@ int main() {
     }
 #endif
 
+    {
+        // Persisted: the wrong-type refusal is thrown before normalize() and the
+        // availability check, so the entry fails to load (listed as failed) in
+        // every build, where the deleted arm loaded 1.5 as index 1.
+        const auto persisted = persisted_attempt(
+            nlohmann::json::parse(
+                R"({"vendor":"svbony","deviceType":"camera","deviceNumber":9269,"cameraIndex":1.5})"),
+            "Camera");
+        EXPECT(!persisted.listed);
+        EXPECT(persisted.failed_listed);
+        EXPECT(any_warning_contains(persisted.errors, "cameraIndex"));
+    }
+
 #ifdef ALPACACORE_ENABLE_SVBONY
     // The catalog's Int field refuses what the deleted arm's config_get<int>()
     // truncated (1.5) or coerced (true): not registered, InvalidValue.
