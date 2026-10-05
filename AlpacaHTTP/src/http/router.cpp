@@ -1172,7 +1172,7 @@ bool is_expected_validation_error(const alpacacore::AlpacaException& e) {
 }
 
 void log_alpaca_exception(const std::string& context, const alpacacore::AlpacaException& e) {
-    std::string message = context + ": " + std::string(e.what());
+    std::string message = context + ": " + alpacahttp::util::escape_for_log(e.what(), 4096);
     if (is_expected_not_implemented(e) || is_expected_validation_error(e)) {
         alpacahttp::util::log_debug(message);
     } else {
@@ -8254,8 +8254,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         device_type_key = string_to_device_type(device_type_str);
     } catch (const std::exception& ex) {
         // Unknown device_type_str: fall through to the arm chain.
-        util::log_debug("register_device_from_config: device type \"" + device_type_str +
-                        "\" is not catalog-recognized (" + ex.what() + "); falling through to the arm chain");
+        util::log_debug("register_device_from_config: device type \"" + util::escape_for_log(device_type_str) +
+                        "\" is not catalog-recognized (" + util::escape_for_log(ex.what()) +
+                        "); falling through to the arm chain");
     }
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
@@ -10061,8 +10062,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         }
     } catch (const std::exception& ex) {
         // Unknown device_type: fall through to the vendor-specific chain.
-        util::log_debug("sanitize_device_config: device type \"" + device_type + "\" is not catalog-recognized (" +
-                        ex.what() + "); falling through to the vendor-specific chain");
+        util::log_debug("sanitize_device_config: device type \"" + util::escape_for_log(device_type) +
+                        "\" is not catalog-recognized (" + util::escape_for_log(ex.what()) +
+                        "); falling through to the vendor-specific chain");
     }
 
     if (catalog_handled) {
