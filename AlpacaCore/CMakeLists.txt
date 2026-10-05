@@ -127,6 +127,7 @@ add_library(alpacacore_builtins STATIC
     src/vendors/astroasis/astroasis_schema.cpp
     src/vendors/skywatcher/skywatcher_schema.cpp
     src/vendors/weewx/weewx_schema.cpp
+    src/vendors/svbony/svbony_schema.cpp
 )
 target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
 add_library(AlpacaCore::alpacacore_builtins ALIAS alpacacore_builtins)
@@ -208,6 +209,8 @@ if(ALPACACORE_ENABLE_SVBONY)
     add_subdirectory(src/vendors/svbony)
     if(TARGET alpacacore_svbony)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_svbony)
+        # register_builtin_factories() guards its SVBONY factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_SVBONY)
     endif()
 endif()
 

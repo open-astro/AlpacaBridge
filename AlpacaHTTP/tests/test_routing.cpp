@@ -6560,7 +6560,7 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the SkyWatcher (open-astro#744) and WeeWX descriptors plus the "zzz"
+    // and the SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors plus the "zzz"
     // test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
@@ -6571,7 +6571,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 4);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 5);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -6586,6 +6586,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "skywatcher") {
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "svbony") {
+#ifdef ALPACACORE_ENABLE_SVBONY
                 entry["available"] = true;
 #else
                 entry["available"] = false;
