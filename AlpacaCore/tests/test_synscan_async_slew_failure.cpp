@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -40,6 +41,15 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == expected_code);
+    }
+}
 
 struct FakeSynScanState {
     std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
@@ -332,6 +342,52 @@ TEST_CASE("SynScan PulseGuide - cross-axis pulses keep the RA tracking restore",
     CHECK(is_zero_rate_command(commands[static_cast<std::size_t>(last_ra)]));
     CHECK(tracking_restored_after_ra_stop);
     CHECK(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan PulseGuide - guide position does not publish as target", "[synscan][telescope][pulseguiding]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    driver->pulse_guide(0, 150);
+    require_alpaca_error([&] { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    driver->set_target_right_ascension(5.5);
+    driver->set_target_declination(20.0);
+    driver->pulse_guide(1, 150);
+    CHECK(driver->get_target_right_ascension() == 5.5);
+    CHECK(driver->get_target_declination() == 20.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async slew - completion reports the new target after PulseGuide", "[synscan][telescope][async]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    const double position_before_pulse_ra = driver->get_right_ascension();
+    const double position_before_pulse_dec = driver->get_declination();
+    driver->pulse_guide(0, 1000);  // Establish a distinct private guide-position estimate.
+    REQUIRE(driver->get_is_pulse_guiding());
+
+    constexpr double target_ra = 6.0;
+    constexpr double target_dec = 22.0;
+    const bool position_is_distinct =
+        std::abs(position_before_pulse_ra - target_ra) > 0.1 || std::abs(position_before_pulse_dec - target_dec) > 1.0;
+    CHECK(position_is_distinct);
+    driver->slew_to_coordinates_async(target_ra, target_dec);
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 12000));
+
+    CHECK(std::abs(driver->get_right_ascension() - target_ra) < 1e-6);
+    CHECK(std::abs(driver->get_declination() - target_dec) < 1e-6);
     driver->set_connected(false);
 }
 

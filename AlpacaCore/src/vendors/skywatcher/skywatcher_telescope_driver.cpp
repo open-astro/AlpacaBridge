@@ -789,7 +789,10 @@ public:
         focal_length_m_ = meters;
     }
 
-    GuideRate get_guide_rate() const override { return guide_rate_; }
+    GuideRate get_guide_rate() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return guide_rate_;
+    }
 
     void set_guide_rate(const GuideRate& rate) override {
         if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {

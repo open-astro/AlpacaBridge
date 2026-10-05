@@ -60,6 +60,14 @@ TEST_CASE("Bisque telescope - concurrent connect/disconnect/operate stress (mute
     alpacacore::test::StressCallGuard guard;
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
+        guard([&] { scope.set_target_right_ascension(5.0); });
+        guard([&] { scope.set_target_declination(20.0); });
+        guard([&] { static_cast<void>(scope.get_target_right_ascension()); });
+        guard([&] { static_cast<void>(scope.get_target_declination()); });
+        guard([&] { static_cast<void>(scope.get_guide_rate()); });
+        guard([&] { scope.set_guide_rate({0.004, 0.004}); });
+        guard([&] { scope.slew_to_target_async(); });
+        guard([&] { scope.sync_to_target(); });
         guard([&] { static_cast<void>(scope.get_tracking()); });
         guard([&] { static_cast<void>(scope.get_right_ascension()); });
         guard([&] { static_cast<void>(scope.get_declination()); });
