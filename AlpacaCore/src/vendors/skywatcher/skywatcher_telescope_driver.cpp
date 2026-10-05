@@ -1719,6 +1719,7 @@ public:
                     // on the same boards.
                     proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec),
                                           /*with_readback=*/false);
+                    detail::run_pulse_restore_hook();
                     if (live_rate_relatch_) {
                         proto.start_motion(kAxisRa);
                     }
@@ -4898,6 +4899,29 @@ void set_host_synchronized_probe(std::function<bool()> probe) {
     std::lock_guard<std::mutex> lock(probe_mutex());
     probe_slot() =
         probe ? std::move(probe) : std::function<bool()>(&alpacacore::util::HostClock::kernel_is_synchronized);
+}
+
+namespace {
+std::function<void()>& pulse_restore_hook_slot() {
+    static std::function<void()> hook;
+    return hook;
+}
+}  // namespace
+
+void set_pulse_restore_hook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(probe_mutex());
+    pulse_restore_hook_slot() = std::move(hook);
+}
+
+void run_pulse_restore_hook() {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(probe_mutex());
+        hook = pulse_restore_hook_slot();
+    }
+    if (hook) {
+        hook();
+    }
 }
 
 bool host_synchronized_probe() {

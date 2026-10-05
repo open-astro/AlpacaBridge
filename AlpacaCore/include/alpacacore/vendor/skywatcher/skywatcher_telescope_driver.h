@@ -46,6 +46,12 @@ namespace detail {
 // the default afterwards. Process-wide; tests restore it after use.
 void set_host_synchronized_probe(std::function<bool()> probe);
 bool host_synchronized_probe();
+// Test-only: called by the RA pulse task after the in-place restore ":I" and
+// before the ":J", with no driver lock held, so a test can hold the task in
+// that window. Default empty; a blocking hook must be released before the
+// driver is destroyed. Process-wide; tests clear it afterwards.
+void set_pulse_restore_hook(std::function<void()> hook);
+void run_pulse_restore_hook();
 // open-astro#405: how often the pointing path re-samples discipline while a
 // client offset is armed on a host that was undisciplined at the write
 // (default 30 s; a test shortens it). Zero disables the re-sample.

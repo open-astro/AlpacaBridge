@@ -29,8 +29,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string_view>
 #include <thread>
 
@@ -2336,8 +2338,8 @@ TEST_CASE("SkyWatcher async - a short RA guide pulse is not stretched by the rat
 TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J leaves RA stopped",
           "[skywatcher][async][pulseguide]") {
     // The pulse task restores the drive with ":I" then ":J", both outside
-    // mutex_. Tracking=false landing between them must still end with RA
-    // stopped, Tracking false and no exception (main CI, test #967).
+    // mutex_. The hook parks it between them while Tracking=false sends its
+    // ":K"; the late ":J" then restarts RA after that stop (main CI, test #967).
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
@@ -2345,11 +2347,32 @@ TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J l
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
     const uint32_t sidereal_preset = mount.step_period(1);
 
+    std::mutex m;
+    std::condition_variable cv;
+    bool parked = false;
+    bool released = false;
+    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook([&] {
+        std::unique_lock<std::mutex> lock(m);
+        parked = true;
+        cv.notify_all();
+        cv.wait_for(lock, std::chrono::seconds(15), [&] { return released; });
+    });
+    auto release = [&] {
+        {
+            std::lock_guard<std::mutex> lock(m);
+            released = true;
+        }
+        cv.notify_all();
+    };
+
     driver->pulse_guide(2, 300);
-    REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 3000));
-    mount.hold_reply_to('I');  // the restore ":I": armed after the dispatch one
-    REQUIRE(mount.wait_reply_held(std::chrono::seconds(5)));
+    {
+        std::unique_lock<std::mutex> lock(m);
+        REQUIRE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return parked; }));
+    }
     REQUIRE(mount.step_period(1) == sidereal_preset);
+    const int stops_before = mount.stop_count(1);
+    const int starts_before = mount.start_count(1);
 
     std::atomic<bool> threw{false};
     std::thread off([&] {
@@ -2359,11 +2382,17 @@ TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J l
             threw = true;
         }
     });
-    mount.release_held_reply();
+    // Release once the setter's ":K" is on the board; if the setter never
+    // gets that far the poll gives up and the release is unconditional.
+    wait_until([&] { return mount.stop_count(1) > stops_before; }, 3000);
+    release();
     off.join();
+    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr);
 
     CHECK_FALSE(threw.load());
     CHECK_FALSE(driver->get_tracking());
+    // The task's ':J' did land after the setter's ':K' (the ordering under test).
+    CHECK(wait_until([&] { return mount.start_count(1) > starts_before; }, 3000));
     CHECK(wait_until([&] { return !mount.axis_running(1); }, 3000));
     driver->set_connected(false);
 }

@@ -292,31 +292,6 @@ public:
     /// make Connecting observable.
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
 
-    /// One shot, then spent: the reply to the next ":<cmd>" frame is withheld
-    /// (the command is applied at once) until release_held_reply(). The caller
-    /// is parked mid-exchange with the command already on the board, which
-    /// holds a driver thread between two commands without a sleep.
-    void hold_reply_to(char cmd) {
-        std::lock_guard<std::mutex> lock(hold_mutex_);
-        hold_cmd_ = cmd;
-        hold_active_ = false;
-        hold_released_ = false;
-    }
-
-    /// Blocks until the reply armed by hold_reply_to() is being withheld.
-    bool wait_reply_held(std::chrono::milliseconds real_timeout) {
-        std::unique_lock<std::mutex> lock(hold_mutex_);
-        return hold_cv_.wait_for(lock, real_timeout, [this] { return hold_active_; });
-    }
-
-    void release_held_reply() {
-        {
-            std::lock_guard<std::mutex> lock(hold_mutex_);
-            hold_released_ = true;
-        }
-        hold_cv_.notify_all();
-    }
-
     /// While @p on, answer every ":e" identity request with a reply of the
     /// right length that is not hex, so the driver's identify fails
     /// (open-astro#458 review: an unidentified board loses its measured
@@ -757,16 +732,6 @@ private:
                 frame.pop_back();
             }
             std::string reply = handle(frame) + "\r";
-            {
-                std::unique_lock<std::mutex> lock(hold_mutex_);
-                if (hold_cmd_ != 0 && frame.size() > 1 && frame[1] == hold_cmd_) {
-                    hold_cmd_ = 0;
-                    hold_active_ = true;
-                    hold_cv_.notify_all();
-                    hold_cv_.wait(lock, [this] { return hold_released_ || stop_.load(); });
-                    hold_active_ = false;
-                }
-            }
             if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
             ::sendto(fd_, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr*>(&peer), plen);
@@ -780,11 +745,6 @@ private:
     std::atomic<bool> stop_{false};
     std::thread thread_;
     std::atomic<int> hold_ms_{0};
-    std::mutex hold_mutex_;  // hold_reply_to() state
-    std::condition_variable hold_cv_;
-    char hold_cmd_ = 0;
-    bool hold_active_ = false;
-    bool hold_released_ = false;
     std::mutex mutex_;
     std::condition_variable frames_cv_;
     int total_frames_ = 0;
