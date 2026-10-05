@@ -1959,7 +1959,12 @@ private:
         // tens of degrees).  Wait for position readings to stabilize — two
         // consecutive reads within tolerance of each other — AND target
         // reached.  Uses the slew deadline, not a fixed iteration cap.
-        if (target_ra_set_ && target_dec_set_) {
+        bool has_target = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            has_target = target_ra_set_ && target_dec_set_;
+        }
+        if (has_target) {
             static constexpr double kStableThresholdArcsec = 30.0;
             static constexpr int kRequiredStableReads = 3;
             double prev_ra_hours = std::numeric_limits<double>::quiet_NaN();

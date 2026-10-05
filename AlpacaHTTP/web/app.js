@@ -1218,11 +1218,11 @@ function startEditDevice(device) {
     // Populate the ASIAIR Pro Switch per-port table from the saved config.
     // When the saved device omits ports/gpioChip/pwmFrequencyHz (one-click
     // default flow), the HTML's pre-filled defaults remain in place.
+    // gpioChip is not loaded: the read-only field holds the one chip the
+    // server accepts, so a saved config naming another chip is corrected on
+    // save instead of being refused with a field the user cannot edit.
     if (vendor === 'zwo' &&
         (config.switchType === 'asiair' || config.switchType === 'asiair-plus-picm4')) {
-        if (config.gpioChip !== undefined && config.gpioChip !== null) {
-            setFormValue('asiair-gpio-chip', config.gpioChip);
-        }
         if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
             setFormValue('asiair-pwm-frequency', config.pwmFrequencyHz);
         }
@@ -1233,8 +1233,14 @@ function startEditDevice(device) {
                 if (port.name !== undefined && port.name !== null) {
                     setFormValue('asiair-port-name-' + i, port.name);
                 }
-                if (port.gpio !== undefined && port.gpio !== null) {
-                    setFormValue('asiair-port-gpio-' + i, port.gpio);
+                // A saved line the select does not offer would blank it, and
+                // the submit skips a blank port; keep the row's default.
+                const gpioSelect = document.getElementById('asiair-port-gpio-' + i);
+                if (gpioSelect && port.gpio !== undefined && port.gpio !== null) {
+                    gpioSelect.value = String(port.gpio);
+                    if (gpioSelect.selectedIndex === -1) {
+                        gpioSelect.value = gpioSelect.querySelector('option[selected]').value;
+                    }
                 }
                 const pwmCheckbox = document.getElementById('asiair-port-pwm-' + i);
                 if (pwmCheckbox) {
@@ -1245,12 +1251,9 @@ function startEditDevice(device) {
     }
     // Populate the ASIAIR Plus (RK3568) per-port table from the saved config.
     // The kernel module fixes the per-port hardware mapping, so only the
-    // device path, PWM frequency, channel names and per-port PWM flags are
-    // configurable here.
+    // channel names and per-port PWM flags are configurable here. devicePath
+    // is not loaded, for the same reason as gpioChip above.
     if (vendor === 'zwo' && config.switchType === 'asiair-plus-rk3568') {
-        if (config.devicePath !== undefined && config.devicePath !== null) {
-            setFormValue('asiair-plus-device-path', config.devicePath);
-        }
         // pwmFrequencyHz was previously surfaced here as a user-editable
         // field. It's now auto-managed by the wrapper (defaults to 50 Hz,
         // matching what ZWO's stock zwoair_imager daemon actually uses -
