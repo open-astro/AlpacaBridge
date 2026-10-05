@@ -395,6 +395,10 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     check("scoped block in a helper before main is not a case", not names and not errs)
     names, errs = hand_rolled_cases("@@ -0,0 +6,3 @@\n+    {\n+        x();\n+    }\n", "void f() {}\n")
     check("file without main has no cases", not names and not errs)
+    span = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n        // case: spans main\n    }\n}\n"
+    diff = "@@ -0,0 +1,9 @@\n" + "".join("+" + x + "\n" for x in span.splitlines())
+    names, errs = hand_rolled_cases(diff, span)
+    check("new file with a hunk spanning main counts only blocks after main", set(names) == {"spans main"} and not errs)
 
     # Web tests.
     web = "test('first web', () => {});\ntest(\"second web\", async () => {});\nit('not a test call', f);"
