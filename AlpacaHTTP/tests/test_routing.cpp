@@ -7476,6 +7476,37 @@ int main() {
     }
 #endif
 
+#ifdef ALPACACORE_ENABLE_SVBONY
+    // The catalog's Int field refuses what the deleted arm's config_get<int>()
+    // truncated (1.5) or coerced (true): not registered, InvalidValue.
+    {
+        const char* const kBadIndexes[] = {"1.5", "true"};
+        int number = 9266;
+        for (const char* bad : kBadIndexes) {
+            nlohmann::json entry = nlohmann::json::parse(std::string(R"({"cameraIndex":)") + bad + "}");
+            entry.update({{"vendor", "svbony"}, {"deviceType", "camera"}, {"deviceNumber", ++number}});
+            alpacahttp::Router router;
+            const auto api = api_attempt(router, entry, "Camera");
+            EXPECT(!api.ok);
+            EXPECT(api.message.find("cameraIndex") != std::string::npos);
+            EXPECT(api.error_number == 0x401);  // InvalidValue
+            EXPECT(listed_entry(router, "Camera", number).is_null());
+        }
+    }
+#else
+    // With the vendor built out, the catalog path reports the deleted arm's text.
+    {
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router, nlohmann::json::parse(R"({"vendor":"svbony","deviceType":"camera","deviceNumber":9265})"),
+            "Camera");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "SVBONY support not enabled. Rebuild with -DALPACACORE_ENABLE_SVBONY=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "Camera", 9265).is_null());
+    }
+#endif
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }
