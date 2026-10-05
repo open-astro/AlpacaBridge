@@ -972,11 +972,13 @@ int main() {
         // lines in register_device_from_config / sanitize_device_config quote
         // it and the exception text, both client text.
         {
-            const std::string cfg_body = "{\"vendor\":\"zwo\",\"deviceType\":\"cam\\nHTTP GET /forged\","
-                                         "\"deviceNumber\":0}";
-            send_raw("POST /management/v1/configuredevice HTTP/1.1\r\nHost: localhost\r\n"
-                     "Content-Type: application/json\r\nContent-Length: " +
-                     std::to_string(cfg_body.size()) + "\r\n\r\n" + cfg_body);
+            const std::string cfg_body =
+                "{\"vendor\":\"zwo\",\"deviceType\":\"cam\\nHTTP GET /forged\","
+                "\"deviceNumber\":0}";
+            send_raw(
+                "POST /management/v1/configuredevice HTTP/1.1\r\nHost: localhost\r\n"
+                "Content-Type: application/json\r\nContent-Length: " +
+                std::to_string(cfg_body.size()) + "\r\n\r\n" + cfg_body);
             EXPECT(count_logged("register_device_from_config: device type \"cam\\x0aHTTP GET /forged\" is not "
                                 "catalog-recognized (Unknown device type: cam\\x0aHTTP GET /forged); falling "
                                 "through to the arm chain") == 1);
