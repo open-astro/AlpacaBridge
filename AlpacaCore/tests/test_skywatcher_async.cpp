@@ -2373,6 +2373,10 @@ TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J l
     REQUIRE(mount.step_period(1) == sidereal_preset);
     const int stops_before = mount.stop_count(1);
     const int starts_before = mount.start_count(1);
+    // A real mount brakes over a ramp (#212), so RA is still running when the
+    // setter polls after its ":K": the late ":J" then lands INSIDE the
+    // stop-wait, the order the unramped fake never enters.
+    mount.set_stop_ramp_ms(400);
 
     std::atomic<bool> threw{false};
     std::thread off([&] {
@@ -2382,12 +2386,12 @@ TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J l
             threw = true;
         }
     });
-    // Release once the setter's ":K" is on the board; if the setter never
-    // gets that far the poll gives up and the release is unconditional.
-    wait_until([&] { return mount.stop_count(1) > stops_before; }, 3000);
+    // Release once the setter's ":K" is on the board.
+    const bool k_seen = wait_until([&] { return mount.stop_count(1) > stops_before; }, 3000);
     release();
     off.join();
     alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr);
+    REQUIRE(k_seen);
 
     CHECK_FALSE(threw.load());
     CHECK_FALSE(driver->get_tracking());

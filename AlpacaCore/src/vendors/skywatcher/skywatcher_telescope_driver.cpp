@@ -1609,7 +1609,7 @@ public:
             // the axis now. Called with mutex_ held. Same three attempts as
             // the pulse stop below, and the same runaway flag if all fail.
             auto stop_ra_if_tracking_off_locked = [this, ai]() {
-                if (tracking_ || !connected_ || pulse_task_cancel_[ai].load()) {
+                if ((tracking_ && !tracking_off_pending_) || !connected_ || pulse_task_cancel_[ai].load()) {
                     return;
                 }
                 constexpr int kAttempts = 3;
@@ -1662,7 +1662,7 @@ public:
             // pulse; the end of the pulse then only stops the axis.
             bool restore_still_wanted = restore_tracking;
             auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate,
-                              &restore_still_wanted]() {
+                              &restore_still_wanted, &stop_ra_if_tracking_off_locked]() {
                 auto& proto = *protocol_;
                 // Re-derived here, NOT the value captured at dispatch: since
                 // the drive direction became hemisphere-dependent, a
@@ -1725,6 +1725,10 @@ public:
                     }
                     std::lock_guard<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
+                    // The ":J" above can land inside a Tracking=false
+                    // stop-wait (after its ":K"): stop RA again now, not
+                    // after the verify below.
+                    stop_ra_if_tracking_off_locked();
                 } else if (restore) {
                     // Reversed pulse, or a hemisphere change mid-pulse: full
                     // stop-and-restart back to the drive rate.
@@ -3766,6 +3770,12 @@ private:
             apply_dec_rate_offset_locked(lock);
         } else {
             const uint64_t gen = ++motion_generation_;
+            // Cleared on every exit (success, timeout, supersession).
+            struct PendingOffGuard {
+                bool& flag;
+                ~PendingOffGuard() { flag = false; }
+            } pending_off_guard{tracking_off_pending_};
+            tracking_off_pending_ = true;
             if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
                 // A newer motion command took the axes while the mutex was
                 // released: it owns the tracking state now — do not stomp it.
@@ -4763,6 +4773,12 @@ private:
     mutable std::chrono::steady_clock::time_point last_position_update_{};
 
     bool tracking_ = false;
+    // Set (under mutex_) for the whole of a Tracking=false stop-wait, while
+    // tracking_ still reads true. The RA pulse task's unlocked ":I"+":J"
+    // restore can land inside that wait and restart the axis; it reads this
+    // as "tracking is off" and stops RA again instead of leaving the wait to
+    // time out.
+    bool tracking_off_pending_ = false;
     bool restore_tracking_after_slew_ = false;
     mutable bool parked_ = false;
     mutable bool at_home_ = false;
