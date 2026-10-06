@@ -156,6 +156,15 @@ std::vector<DescriptorView> DeviceCatalog::describe() const {
     return views;
 }
 
+std::vector<DeviceKey> DeviceCatalog::factory_keys() const {
+    std::vector<DeviceKey> keys;
+    keys.reserve(factories_.size());
+    for (const Factory& f : factories_) {
+        if (f.create) keys.push_back(f.key);
+    }
+    return keys;
+}
+
 NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfig& in, Source source) const {
     NormalizeResult result;
     result.config = in;

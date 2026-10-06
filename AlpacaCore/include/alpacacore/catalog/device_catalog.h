@@ -40,6 +40,10 @@ public:
     // registered for this key", so a build with a vendor off still names it.
     std::vector<DescriptorView> describe() const;
 
+    // Every key with a factory, in insertion order, schema or not: a factory whose
+    // schema was never added is unreachable, and describe() cannot show it.
+    std::vector<DeviceKey> factory_keys() const;
+
     // Per-field rules (required, default, enum, range; record lists recurse and
     // messages carry the index, e.g. "ports[1].name is required"), then the
     // schema's cross-field normalize. Source::Api: the first failure becomes
