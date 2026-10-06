@@ -98,7 +98,7 @@
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_SVBONY",
     "fields": [
-      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex", "range": {"min": 0, "max": 2147483647}}
     ]
   },
   {
