@@ -44,17 +44,16 @@ BASE_CATEGORIES = [
 ]
 QUALIFIED_RE = re.compile(r"^(%s)(?: \(([^()]+)\))?$" % "|".join(BASE_CATEGORIES))
 FENCE_RE = re.compile(r"^(`{3,}|~{3,})(.*)$")
-BULLET_CONTENT_COL = 2  # a fragment bullet is "- text", so its content starts at column 2
 BAD_HEADING_RE = re.compile(r"^#{1,2}\s")
 
-def fence_match(line: str) -> re.Match | None:
+def fence_match(line: str, content_col: int = 2) -> re.Match | None:
     """Match a CommonMark fence line, or None for inline code or an indented code block.
 
     A backtick fence's info string cannot hold a backtick (CommonMark 4.5), so a line that
-    starts with inline code is no fence; a line indented 4+ columns past the bullet content
-    column is an indented code block.
+    starts with inline code is no fence; a line indented 4+ columns past ``content_col`` (the
+    content column of the nearest bullet, 2 for "- text") is an indented code block.
     """
-    if len(line) - len(line.lstrip()) >= BULLET_CONTENT_COL + 4:
+    if len(line) - len(line.lstrip()) >= content_col + 4:
         return None
     m = FENCE_RE.match(line.strip())
     if m and m.group(1)[0] == "`" and "`" in m.group(2):
@@ -81,6 +80,7 @@ def parse_body(lines: list[str]) -> tuple[Entries, list[str]]:
     fence = ""  # the opening fence run (``` or ~~~, any length) while inside a fenced block
     in_fence = False
     pending: list[str] = []  # blank lines seen since the last kept line
+    content_col = 2  # content column of the latest bullet line, "- text" at indent n gives n + 2
     for raw in lines:
         line = raw.rstrip()
         if not in_fence:
@@ -101,7 +101,7 @@ def parse_body(lines: list[str]) -> tuple[Entries, list[str]]:
             entries[category].append([line])
         elif entries[category]:
             # a bullet's own text stays on one line; a nested bullet, a fence or a paragraph after a blank line may follow
-            if not in_fence and not pending and not line.lstrip().startswith("- ") and not fence_match(line):
+            if not in_fence and not pending and not line.lstrip().startswith("- ") and not fence_match(line, content_col):
                 problems.append("a bullet is wrapped onto a second line, put it on one line: %r" % line[:60])
             # a blank line stays only inside a bullet: before an indented line or within a fence
             if pending and (in_fence or line[0] in " \t"):
@@ -111,7 +111,9 @@ def parse_body(lines: list[str]) -> tuple[Entries, list[str]]:
             problems.append("'### %s' has text before its first '- ' bullet: %r" % (category, line[:60]))
         pending = []
         if category is not None:
-            m = fence_match(line)
+            if not in_fence and line.lstrip().startswith("- "):
+                content_col = len(line) - len(line.lstrip()) + 2
+            m = fence_match(line, content_col)
             if m and not in_fence:
                 fence, in_fence = m.group(1), True
             elif m and in_fence and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2):
@@ -354,17 +356,20 @@ def self_test() -> int:
             failures.append(msg)
 
     # a line starting with inline code is no fence (CommonMark 4.5)
-    inline = "### Fixed\n- x\n  ```foo``` and more\n"
+    inline = "### Fixed\n- x\n\n  ```foo``` and more\n"
     expect(
-        not any("unclosed" in p for p in validate("a.md", inline)),
+        validate("a.md", inline) == [],
         "inline code at the start of a line read as an opening fence",
     )
     # a fence indented 4+ past the bullet content is an indented code block
     indented = "### Fixed\n- x\n\n          ```\n"
     expect(
-        not any("unclosed" in p for p in validate("a.md", indented)),
+        validate("a.md", indented) == [],
         "indented code block line read as an opening fence",
     )
+    # a fence under a nested bullet measures from that bullet's content column
+    nested = "### Fixed\n- x\n  - y\n\n      ```\n      code\n      ```\n"
+    expect(validate("a.md", nested) == [], "fence under a nested bullet read as an indented code block")
     # validation
     good = "### Fixed\n- **x** (issue #1)\n\n### Added (tests)\n- **y**\n  - more\n"
     expect(validate("a-b.c-d.md", good) == [], "valid fragment rejected")
