@@ -346,10 +346,24 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SVBONY camer
     CHECK(index.kind == FieldRef::Kind::Int);
     CHECK(index.role == Role::EnumerationIndex);
     CHECK_FALSE(index.required);
-    CHECK_FALSE(index.min.has_value());
-    CHECK_FALSE(index.max.has_value());
+    REQUIRE(index.min.has_value());
+    CHECK(*index.min == 0.0);
+    REQUIRE(index.max.has_value());
+    CHECK(*index.max == static_cast<double>(std::numeric_limits<int>::max()));
     REQUIRE(std::holds_alternative<std::int64_t>(index.default_value));
     CHECK(std::get<std::int64_t>(index.default_value) == 0);
+
+    // A negative or above-INT_MAX index is refused at save time, before the
+    // factory's static_cast<int> could wrap it.
+    for (const std::int64_t bad : {std::int64_t{-1}, std::int64_t{std::numeric_limits<int>::max()} + 1}) {
+        DeviceConfig config;
+        config.set("cameraIndex", bad);
+        const auto api = catalog.normalize(kSvbonyKey, config, Source::Api);
+        CHECK(api.rejection.has_value());
+    }
+    DeviceConfig edge;
+    edge.set("cameraIndex", std::int64_t{std::numeric_limits<int>::max()});
+    CHECK_FALSE(catalog.normalize(kSvbonyKey, edge, Source::Api).rejection.has_value());
 
     // Sanitize keeps cameraIndex and drops undeclared keys (cameraId).
     DeviceConfig all;

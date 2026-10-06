@@ -20,6 +20,7 @@
 #include <alpacacore/catalog/device_catalog.h>
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 // Designated initializers of Field<T> leave most members defaulted on purpose
@@ -31,11 +32,15 @@
 
 namespace alpacacore::catalog {
 
-// 0-based SVBONY SDK camera enumeration index. No declared range: the router
-// arm this replaces passed any value through, and the driver refuses an
-// out-of-range index at connect.
-inline const Field<std::int64_t> kSvbonyCameraIndex{
-    .key = "cameraIndex", .default_value = 0, .role = Role::EnumerationIndex};
+// 0-based SVBONY SDK camera enumeration index. Bounded to [0, INT_MAX] so a
+// negative or oversized value is refused at save time instead of wrapping in
+// the factory's static_cast<int>; the driver still refuses an index past the
+// enumerated cameras at connect.
+inline const Field<std::int64_t> kSvbonyCameraIndex{.key = "cameraIndex",
+                                                    .default_value = 0,
+                                                    .role = Role::EnumerationIndex,
+                                                    .min = 0,
+                                                    .max = std::numeric_limits<int>::max()};
 
 inline const std::vector<FieldRef>& svbony_camera_fields() {
     static const std::vector<FieldRef> fields{kSvbonyCameraIndex.ref()};
