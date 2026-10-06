@@ -546,6 +546,19 @@ TEST_CASE("A factory with an empty callable is unavailable and create names the 
     }
 }
 
+TEST_CASE("factory_keys lists a factory with no schema and skips an empty callable", "[catalog]") {
+    DeviceCatalog catalog;
+    const DeviceKey orphan{"orphan", DeviceType::Camera};
+    catalog.add(
+        Factory{orphan, [](const DeviceConfig&, int n) { return std::unique_ptr<AlpacaDriver>(new StubDriver(n)); }});
+    catalog.add(Factory{kStubKey, {}});  // registered, but nothing to call
+
+    CHECK(catalog.describe().empty());  // no schema, so describe() cannot show the orphan
+    const auto keys = catalog.factory_keys();
+    REQUIRE(keys.size() == 1);
+    CHECK(keys[0] == orphan);
+}
+
 TEST_CASE("Sanitize drops a record-list field that holds a non-record value", "[catalog]") {
     DeviceCatalog catalog;
     register_test_descriptors(catalog, true);
