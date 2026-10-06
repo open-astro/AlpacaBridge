@@ -4038,6 +4038,10 @@ private:
 
     // Some controllers stop tracking during a GOTO and do not resume; always
     // re-issue tracking after a completed slew when it was on (project lesson).
+    // No start_limit_guard() here: restore_tracking_after_slew_ is set only
+    // from tracking_ == true, and every path that clears tracking_ during the
+    // slew clears it too, so tracking_ stayed true and the guard body started
+    // by Tracking=true is still running (exempt while the slew owns the axes).
     void restore_tracking_after_slew_locked(std::unique_lock<std::mutex>& lock) {
         if (restore_tracking_after_slew_) {
             restore_tracking_after_slew_ = false;

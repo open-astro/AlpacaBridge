@@ -638,6 +638,32 @@ TEST_CASE("SkyWatcher limits - a guard stop that fails is retried on the next po
     driver->set_connected(false);
 }
 
+// The guard's order (Dec MoveAxis stop, then Tracking=false), driven by hand:
+// the Dec stop task lands while the tracking stop still waits on a slow RA
+// ramp, and must not restore the DeclinationRate offset into that wait.
+TEST_CASE("SkyWatcher limits - a MoveAxis Dec stop does not restore the Dec rate into a tracking stop",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    driver->set_declination_rate(30.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1) && mount.axis_running(2); }, 2000));
+    driver->move_axis(1, kMaxMoveAxisRate);
+    REQUIRE(driver->get_slewing());
+
+    mount.set_stop_ramp_ms(300);  // the Dec stop lands first ...
+    driver->move_axis(1, 0.0);
+    mount.set_stop_ramp_ms(2000);  // ... inside the RA stop-wait
+    CHECK_NOTHROW(driver->set_tracking(false));
+    CHECK_FALSE(driver->get_tracking());
+    mount.set_stop_ramp_ms(0);
+    CHECK(wait_until([&] { return !mount.axis_running(2); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher limits - with no limit set the guard never starts", "[skywatcher][telescope][limits][guard]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
