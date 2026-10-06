@@ -388,7 +388,13 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     tty.c_cflag &= ~HUPCL;
     tcsetattr(fd, TCSANOW, &tty);
 
-    if (!util::clear_nonblocking(fd)) {
+    // Keep the fd non-blocking and bound every read with poll(), as the
+    // connected link does (see SkyWatcherProtocolWrapper::connect): a USB
+    // CDC-ACM port that ignores VMIN/VTIME parks a blocking read() on a
+    // silent candidate forever, hanging the whole auto-detect scan. The
+    // 4-byte ":e1" fits an empty TX buffer; should write_all() still hit
+    // EAGAIN, the probe just reports no board.
+    if (!util::set_nonblocking(fd)) {
         close(fd);
         return "";
     }
@@ -401,16 +407,28 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     }
 
     std::string reply;
-    auto start = std::chrono::steady_clock::now();
-    while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(1500)) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    for (;;) {
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) break;
+        struct pollfd pfd {};
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        const int pr = ::poll(&pfd, 1, static_cast<int>(remaining));
+        if (pr == 0) break;
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
         char ch = 0;
         ssize_t r = read(fd, &ch, 1);
         if (r == 1) {
             if (ch == kFrameEnd) break;
             reply.push_back(ch);
             if (reply.size() > 16) break;
-        } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
-            break;
+        } else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
+            break;  // hangup or read error; EAGAIN is a spurious "readable"
         }
     }
     close(fd);
