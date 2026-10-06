@@ -47,6 +47,49 @@ its base category.
 - **Bisque NaN slew cases** (issue #627): three test cases.
 ```
 
+## Breaking or not
+
+"Breaking" means it breaks an existing user's setup, not a code API. Ask this of every change on
+the branch, fixes included: **could someone who changes nothing but the package version see
+something that worked on the last release stop working?** That means a device that loaded and now
+does not, a call that succeeded and now errors, or a client that got an answer and now gets a
+different one it has to handle. If yes, the change needs a `### Breaking changes` bullet, even when
+it is also a fix. Keep the `Fixed` or `Changed` bullet that explains the fix, and add the Breaking
+bullet for the consequence.
+
+It is breaking when:
+
+- **A saved config that loaded no longer loads.** Saved devices go through the same checks as
+  `configuredevice` at every start-up, so a new range bound, a stricter type, or a new allowlist
+  for a field drops a saved device that the last release accepted. Two examples from 4.3.0: GPIO
+  lines outside the board's allowlist (issue #765), and `9600.5` in a field that is now a whole
+  number.
+- **A request that succeeded now fails**: a new refusal, a removed fallback, a removed retry or
+  a stricter precondition. Examples: SynScan `Tracking=true` with no site latitude, and an iOptron
+  GOTO that the driver used to retry with relaxed limits (issue #763).
+- **A default, a config key, a field, an endpoint, a driver or a platform changes or goes away.**
+- **The user has to act after upgrading**: re-save a device, edit the config, set a value or switch
+  driver. If your bullet says "re-save it", "set X first" or "use Y instead", that bullet belongs
+  under `Breaking changes`.
+
+It is not breaking when:
+
+- the old behaviour could not work for anyone (a value the driver already refused at connect is
+  now refused at save);
+- only the error number changes, to the one the ASCOM contract requires (InvalidValue before
+  NotConnected);
+- only log text or a diagnostic message changes;
+- the change is a new optional feature that is off unless you enable it.
+
+**A Breaking changes bullet** says what stops working, who is affected (the vendor, field or model)
+and what to do, in a bold **After upgrading:** sentence. One `Breaking changes` entry makes the
+release a major version (see Version below), so `/commit` and `/submit-pr` ask this question of
+every fragment.
+
+**An entry belongs to the release its code ships in.** Write it in your fragment; never add it to
+a dated `## [X.Y.Z]` section of `CHANGELOG.md`. Three 4.3.0 entries were written into the
+released 4.2.0 section on 2026-09-30 and had to be moved.
+
 ## Version
 
 The contributor never picks a version. The release derives it from the fragments
