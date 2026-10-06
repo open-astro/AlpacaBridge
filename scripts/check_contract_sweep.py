@@ -19,6 +19,8 @@ DeviceCatalog::describe() instead of parsing the *_catalog.cpp files):
      and every create_* call in a catalog file, is called by some registry
      entry, or is in BACKEND_ALLOWLIST (UNSWEPT BACKEND). A router or registry
      construct the text parser does not follow fails (PARSER LIMIT).
+     ALLOWLIST holds router pairs only: a catalog-built pair cannot be
+     allow-listed, because the C++ cases that check it have no allow-list.
   2. A stale ALLOWLIST or BACKEND_ALLOWLIST entry fails: the pair or backend is
      now swept, or neither the router nor a catalog file constructs it any more.
   3. A registry entry whose pair the router does not construct fails (orphan),
@@ -385,22 +387,26 @@ def check(root: pathlib.Path) -> list[str]:
                 failures.append(
                     "STALE ALLOWLIST ENTRY: %s/%s %s is now swept -- remove %r from BACKEND_ALLOWLIST in %s"
                     % (pair[0], pair[1], fac, key, THIS_SCRIPT))
-    # A catalog file names no pair here, so its backends are matched by factory name alone.
-    catalog_allowed = {key[2]: key for key in BACKEND_ALLOWLIST}
+    # A catalog file names no pair here, so its backends are matched by the file's vendor and the
+    # factory name; the allow-list key's device type is not checked.
+    catalog_allowed = {(key[0], key[2]): key for key in BACKEND_ALLOWLIST}
     for path, want in sorted(cat_backends_by_file.items()):
+        vendor = pathlib.PurePosixPath(path).parent.name
         for fac in sorted(want):
-            key = catalog_allowed.get(fac)
+            key = catalog_allowed.get((vendor, fac))
             if fac not in have and key is None:
                 failures.append(
                     "UNSWEPT BACKEND: %s constructs %s but no registry entry calls it. Add an entry or "
-                    "allow-list (<vendor>, <devicetype>, '%s') with a reason in %s." % (path, fac, fac, THIS_SCRIPT))
+                    "allow-list ('%s', <devicetype>, '%s') with a reason in %s."
+                    % (path, fac, vendor, fac, THIS_SCRIPT))
             if fac in have and key is not None:
                 failures.append(
                     "STALE ALLOWLIST ENTRY: %s is now swept -- remove %r from BACKEND_ALLOWLIST in %s"
                     % (fac, key, THIS_SCRIPT))
     known = {(v, t, f) for (v, t), fs in router_backends(router_text).items() for f in fs}
-    catalog_facs = set().union(*cat_backends_by_file.values()) if cat_backends_by_file else set()
-    known |= {key for key in BACKEND_ALLOWLIST if key[2] in catalog_facs}
+    catalog_facs = {(pathlib.PurePosixPath(path).parent.name, fac)
+                    for path, facs in cat_backends_by_file.items() for fac in facs}
+    known |= {key for key in BACKEND_ALLOWLIST if (key[0], key[2]) in catalog_facs}
     for key in sorted(set(BACKEND_ALLOWLIST) - known):
         failures.append(
             "STALE ALLOWLIST ENTRY: %s/%s %s is no longer constructed -- remove %r from "
@@ -731,6 +737,15 @@ def self_test() -> int:
         expect("catalog create_* call no registry entry calls", _run(catalog={CATALOG_ASTROASIS: FIX_CATALOG.replace(
             "create_astroasis_focuser_by_index(n, 0)", "create_astroasis_focuser_hid2(n)")}, **swept),
                "UNSWEPT BACKEND: %s constructs create_astroasis_focuser_hid2" % CATALOG_ASTROASIS)
+        hid2 = {CATALOG_ASTROASIS: FIX_CATALOG.replace("create_astroasis_focuser_by_index(n, 0)",
+                                                       "create_astroasis_focuser_hid2(n)")}
+        BACKEND_ALLOWLIST = {("astroasis", "focuser", "create_astroasis_focuser_hid2"): "fixture"}
+        expect("catalog backend allow-listed under its own vendor", _run(catalog=hid2, **swept), None)
+        BACKEND_ALLOWLIST = {("gemini", "focuser", "create_astroasis_focuser_hid2"): "fixture"}
+        expect("catalog backend allow-listed under another vendor", _run(catalog=hid2, **swept),
+               "UNSWEPT BACKEND: %s constructs create_astroasis_focuser_hid2" % CATALOG_ASTROASIS)
+        expect("catalog backend allow-listed under another vendor is stale", _run(catalog=hid2, **swept),
+               "STALE ALLOWLIST ENTRY: gemini/focuser create_astroasis_focuser_hid2 is no longer constructed")
         BACKEND_ALLOWLIST = {("astroasis", "focuser", "create_astroasis_focuser"): "fixture"}
         expect("catalog backend allow-listed but swept", _run(catalog={CATALOG_ASTROASIS: FIX_CATALOG}, **swept),
                "STALE ALLOWLIST ENTRY: create_astroasis_focuser is now swept")
