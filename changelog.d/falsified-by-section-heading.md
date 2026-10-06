@@ -1,0 +1,2 @@
+### Fixed (docs)
+- **`Falsified by` is a `## ` section of the PR body** (`AGENTS.md`, `.claude/commands/submit-pr.md`): the rule said to list new test cases "under `Falsified by:`", so PR bodies carried it as a plain line inside What Changed (PR #861), where GitHub renders it as body text rather than a section like the template's. The docs now ask for a `## Falsified by` heading after `## What Changed`; `scripts/check_falsified_by.py` already accepts that form, and the PR template gate allows the extra section.

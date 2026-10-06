@@ -231,7 +231,7 @@ Build the body from the branch's commits and diffs. The body is
 
 ### Falsified by (new test cases)
 
-Run `python3 scripts/check_falsified_by.py --base <merge-base>` first; it lists each new or renamed test case in the diff. For every one, draft a line under a `Falsified by:` heading in the body: `- "<case name>": <production path>:<line> <the one edit that makes the case fail>`. Read the code the case exercises to propose the mutation, then ask the user to confirm or correct each one. Never invent a mutation you have not read in the code. No new cases: omit the section. Before submitting, save the body to a file and run `PR_BODY_FILE=<file> ./scripts/ci_preflight.sh` (or `python3 scripts/check_falsified_by.py --body-file <file>`); the `falsified-by` job in `.github/workflows/pr-body.yml` runs the same check on the PR.
+Run `python3 scripts/check_falsified_by.py --base <merge-base>` first; it lists each new or renamed test case in the diff. For every one, draft a line under a `## Falsified by` heading placed after `## What Changed` in the body: `- "<case name>": <production path>:<line> <the one edit that makes the case fail>`. Read the code the case exercises to propose the mutation, then ask the user to confirm or correct each one. Never invent a mutation you have not read in the code. No new cases: omit the section. Before submitting, save the body to a file and run `PR_BODY_FILE=<file> ./scripts/ci_preflight.sh` (or `python3 scripts/check_falsified_by.py --body-file <file>`); the `falsified-by` job in `.github/workflows/pr-body.yml` runs the same check on the PR.
 
 ### Present for approval
 
