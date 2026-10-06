@@ -17,6 +17,7 @@
 // down, one host per kFakeConnectableRoster row.
 
 #include <alpacacore/alpaca_errors.h>
+#include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/filterwheel_driver.h>
@@ -29,6 +30,7 @@
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <functional>
 #include <limits>
@@ -1541,6 +1543,76 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
     }
 }
 #endif
+
+// Catalog pairs (fork #71): the built-in catalog itself says which (vendor, device type) pairs this
+// build constructs, so scripts/check_contract_sweep.py no longer parses *_catalog.cpp for them. A
+// descriptor is `available` when its vendor's factory is built in, which is also when that vendor's
+// registry entries compile.
+namespace {
+
+using CatalogPair = std::pair<std::string, std::string>;  // (vendor, router deviceType string)
+
+std::vector<alpacacore::catalog::DescriptorView> builtin_catalog_views(alpacacore::catalog::DeviceCatalog& catalog) {
+    alpacacore::catalog::register_builtin_schemas(catalog);
+    alpacacore::catalog::register_builtin_factories(catalog);
+    return catalog.describe();
+}
+
+CatalogPair catalog_pair(const alpacacore::catalog::DescriptorView& view) {
+    std::string type = alpacacore::device_type_to_string(view.key.type);
+    std::transform(type.begin(), type.end(), type.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return {view.key.vendor, type};
+}
+
+}  // namespace
+
+TEST_CASE("Contract sweep - every available catalog descriptor has a registry entry",
+          "[contract][contract-sweep-guard]") {
+    alpacacore::catalog::DeviceCatalog catalog;
+    const auto views = builtin_catalog_views(catalog);
+    std::set<CatalogPair> registered;
+    for (const auto& e : alpacacore::test::contract::contract_entries()) registered.insert({e.vendor, e.device_type});
+    std::set<std::string> described_vendors;
+    for (const auto& v : views) described_vendors.insert(v.key.vendor);
+
+    std::size_t compared = 0;
+    for (const auto& v : views) {
+        if (!v.available) continue;
+        ++compared;
+        const CatalogPair pair = catalog_pair(v);
+        INFO("the catalog constructs " << pair.first << "/" << pair.second << " but contract_sweep.h has no X("
+                                       << pair.first << "_" << pair.second << ") entry");
+        CHECK(registered.count(pair) == 1);
+    }
+    // Not vacuous: a build whose registry holds a catalog vendor's entries has that vendor's factory, so
+    // at least one view was compared (zero means register_builtin_factories() compiled empty).
+    const bool catalog_vendor_built =
+        std::any_of(registered.begin(), registered.end(),
+                    [&](const CatalogPair& p) { return described_vendors.count(p.first) == 1; });
+    if (catalog_vendor_built) CHECK(compared > 0);
+}
+
+// The reverse direction, which the gate's ORPHAN ENTRY rule no longer covers for catalog vendors: a
+// registry entry whose vendor has descriptors names one of them. No vendor builds some device types
+// through the catalog and others through a router arm today; one that does lists its router pairs here.
+TEST_CASE("Contract sweep - every registry entry of a catalog vendor has a descriptor",
+          "[contract][contract-sweep-guard]") {
+    alpacacore::catalog::DeviceCatalog catalog;
+    const auto views = builtin_catalog_views(catalog);
+    std::set<CatalogPair> described;
+    std::set<std::string> described_vendors;
+    for (const auto& v : views) {
+        described.insert(catalog_pair(v));
+        described_vendors.insert(v.key.vendor);
+    }
+    for (const auto& e : alpacacore::test::contract::contract_entries()) {
+        if (described_vendors.count(e.vendor) == 0) continue;
+        INFO(e.id << " is in the registry but the catalog has no " << e.vendor << "/" << e.device_type
+                  << " descriptor");
+        CHECK(described.count({e.vendor, e.device_type}) == 1);
+    }
+}
 
 // Non-vacuity guard. The vendor ALPACACORE_ENABLE_<V> macros are not inherited
 // from the vendor targets: tests/CMakeLists.txt must define them for
