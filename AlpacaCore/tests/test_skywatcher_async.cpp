@@ -2404,8 +2404,8 @@ TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J l
 // Shared body of the Tracking=false-vs-pulse-end cases below: the setter runs
 // with a braking ramp long enough that the pulse task's end-of-pulse restore
 // lands inside its stop-wait, and must still succeed with RA stopped.
-static void expect_tracking_off_succeeds_with_ramp(FakeSkyWatcherMount& mount,
-                                                   alpacacore::TelescopeDriver& driver, int ramp_ms) {
+static void expect_tracking_off_succeeds_with_ramp(FakeSkyWatcherMount& mount, alpacacore::TelescopeDriver& driver,
+                                                   int ramp_ms) {
     mount.set_stop_ramp_ms(ramp_ms);
     std::atomic<bool> threw{false};
     std::string what;
@@ -2434,8 +2434,8 @@ TEST_CASE("SkyWatcher async - Tracking=false as a reversing pulse restore ends s
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
-    driver->set_guide_rate({0.97 * FakeSkyWatcherMount::kSiderealDegPerSec,
-                            0.5 * FakeSkyWatcherMount::kSiderealDegPerSec});
+    driver->set_guide_rate(
+        {0.97 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.5 * FakeSkyWatcherMount::kSiderealDegPerSec});
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
     driver->pulse_guide(2, 1500);
