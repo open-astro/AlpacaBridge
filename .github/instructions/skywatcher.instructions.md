@@ -274,10 +274,12 @@ datagrams before each send so replies cannot get off-by-one.
   `SlewToCoordinatesAsync`'s, covering only the gap before its task sets `goto_in_progress_`;
   every exit of that task clears it, the early return of a reaped task included.
 - **Reap the pulse task at every motion boundary** (slews, park, home,
-  moveaxis, sync, abort): ConformU's dual-axis pulse test leaves a live pulse
+  sync, abort): ConformU's dual-axis pulse test leaves a live pulse
   timer that otherwise fires its stop/step-period restore into the middle of
   the next goto. A CANCELLED pulse task must not touch the hardware -- the
-  canceller stops or re-commands the axes itself.
+  canceller stops or re-commands the axes itself, so a path that commands one
+  axis reaps only that axis's pulse (PulseGuide #620, MoveAxis #630; a no-op
+  `MoveAxis(axis, 0)` reaps none) and sync stops both axes before `:E`.
 - **AbortSlew must cancel the async slew task** (set `slew_task_cancel_`,
   join later via reap) or the landing refinement re-slews after the abort;
   every slew entry point reaps first, which also resets the flag.

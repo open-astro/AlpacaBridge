@@ -1443,7 +1443,7 @@ public:
         // Stop-the-pulse timer thread — joinable member thread, never detached.
         // Reaps only THIS axis's task: a Dec pulse must not cancel a running
         // RA pulse's task (open-astro#620), unlike goto/park/home/abort/
-        // MoveAxis/disconnect, which own and re-command both axes.
+        // sync/disconnect, which own and re-command both axes.
         reap_pulse_task(axis);
         // Join any task that raced in between the reap above and this lock,
         // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
@@ -2092,10 +2092,24 @@ public:
         target_ra_set_ = true;
         target_dec_set_ = true;
         const bool was_tracking = tracking_;
-        if (was_tracking) {
+        // ":E" on EITHER axis needs that motor stopped, and the reap above
+        // cancelled any pulse without touching the hardware (open-astro#630):
+        // stop every axis MoveAxis does not own -- RA's drive or pulse, Dec's
+        // pulse or rate offset. set_tracking_locked(true) below restarts the
+        // drive and the offset; a cancelled pulse is not resumed.
+        const bool stop_ra = was_tracking || !manual_axis_slewing_[0];
+        const bool stop_dec = !manual_axis_slewing_[1];
+        if (stop_ra || stop_dec) {
             const uint64_t gen = ++motion_generation_;
-            if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
+            // Both waits run (dispatch_goto_locked()'s rule): a short-circuit
+            // would skip Dec.
+            const bool ra_stopped = !stop_ra || stop_axis_and_wait_locked(lock, kAxisRa, gen);
+            const bool dec_stopped = !stop_dec || stop_axis_and_wait_locked(lock, kAxisDec, gen);
+            if (!ra_stopped || !dec_stopped) {
                 throw AlpacaException("Sync superseded by a concurrent motion command");
+            }
+            if (stop_dec) {
+                dec_offset_running_ = false;
             }
         }
         // Aim the frame at the expected restart moment (two ":E" writes plus
@@ -2159,13 +2173,32 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        reap_pulse_task();
         // Join any previous stop-completion task for THIS axis first, WITHOUT
         // mutex_ held (the task takes mutex_). axis is not yet validated here
         // (the throw for an out-of-range value happens below, under the
         // lock) -- reap_stop_task() itself is a no-op for anything outside
         // {0, 1}, so this never indexes the per-axis slots out of bounds.
         reap_stop_task(axis);
+        constexpr double kStopEpsilon = 1e-9;
+        {
+            // Gate BEFORE reaping the pulse (open-astro#630): a reaped pulse
+            // task leaves its axis to the reaper, so a refused MoveAxis, or a
+            // MoveAxis(axis, 0) with no manual motion (which commands
+            // nothing), must not cancel a pulse it will never stop.
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("MoveAxis");
+            validate_move_axis(axis, rate);
+            if (std::abs(rate) <= kStopEpsilon && !manual_axis_slewing_[axis]) {
+                invalidate_position_cache_locked();
+                clear_last_slew_error_locked();
+                return;  // the no-op described under the lock below
+            }
+        }
+        // Only THIS axis's pulse (open-astro#630): MoveAxis commands only its
+        // own channel, so a pulse on the other axis runs on and ends itself
+        // (ASCOM allows the axes to move concurrently).
+        reap_pulse_task(axis == 0 ? kAxisRa : kAxisDec);
         bool need_stop_task = false;
         uint64_t stop_task_generation = 0;
         int channel = kAxisRa;
@@ -2173,18 +2206,9 @@ public:
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("MoveAxis");
-            if (axis != 0 && axis != 1) {
-                throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
-            }
-            if (std::isnan(rate) || std::isinf(rate)) {
-                throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
-            }
-            if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
-                throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
-            }
+            validate_move_axis(axis, rate);
 
             channel = axis == 0 ? kAxisRa : kAxisDec;
-            constexpr double kStopEpsilon = 1e-9;
             const bool moving = std::abs(rate) > kStopEpsilon;
             if (moving) {
                 parked_ = false;
@@ -2423,6 +2447,18 @@ private:
         if (parked_) {
             throw AlpacaException(std::string(operation) + " is not allowed while parked",
                                   AlpacaError::InvalidWhileParked);
+        }
+    }
+
+    static void validate_move_axis(int axis, double rate) {
+        if (axis != 0 && axis != 1) {
+            throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
+        }
+        if (std::isnan(rate) || std::isinf(rate)) {
+            throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
+        }
+        if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
+            throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
         }
     }
 
@@ -4658,13 +4694,11 @@ private:
         pulse_task_cancel_[ai].store(false);
     }
 
-    // Both-axes wrapper for every reaper OTHER than pulse_guide() itself,
-    // same as before open-astro#620. goto/park/home/abort/disconnect
-    // re-command or stop both axes afterwards; move_axis() and
-    // sync_to_coordinates() also reap both tasks but re-command only their
-    // own axis (MoveAxis) or RA (sync), so nothing re-commands the other
-    // axis's reaped pulse -- pre-existing, not addressed by the per-axis
-    // split (which fixes pulse-vs-pulse). Cancel BOTH
+    // Both-axes wrapper for the reapers that stop or re-command BOTH axes
+    // afterwards: goto/park/home/abort/disconnect, and sync_to_coordinates(),
+    // which stops both for its ":E" writes. pulse_guide() and move_axis()
+    // command only their own axis and reap only that axis's task
+    // (open-astro#620, open-astro#630). Cancel BOTH
     // flags before joining either (mirrors cancel_async_tasks()): joining
     // RA first would let the still-uncancelled Dec task run to completion
     // (sending its own stop/offset-reapply I/O) while this reaper waits on

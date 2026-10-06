@@ -363,8 +363,8 @@ TEST_CASE("SkyWatcher async - a DeclinationRate write right after IsPulseGuiding
 // whatever pulse task was running regardless of axis, and a cancelled task's
 // cancel path deliberately does not touch the hardware (the reaper is
 // supposed to stop or re-command the axes itself -- see the #559 comment on
-// the pulse task lambda). Every other reaper (goto/park/home/abort/MoveAxis/
-// disconnect) re-commands or stops BOTH axes, but pulse_guide() only
+// the pulse task lambda). goto/park/home/abort/sync/disconnect re-command
+// or stop BOTH axes (MoveAxis is per-axis too, #630), but pulse_guide() only
 // dispatches its OWN axis: an RA pulse arriving mid-Dec pulse reaped the Dec
 // task and only commanded RA, leaving Dec running at guide rate with nothing
 // left to stop it. Pulse tasks are now per-axis (pulse_task_thread_[2]) and
@@ -448,6 +448,92 @@ TEST_CASE("SkyWatcher async - concurrent RA and Dec PulseGuide callers both end 
         REQUIRE(wait_until([&] { return mount.step_period(1) == sidereal_preset; }, 3000));
         CHECK(mount.axis_running(1));  // RA restored to tracking, not stranded stopped
     }
+    driver->set_connected(false);
+}
+
+// open-astro#630: move_axis() and sync_to_coordinates() used to reap BOTH
+// pulse tasks, and a reaped task leaves its axis to the reaper -- but neither
+// re-commanded the other axis, so a Dec pulse was cancelled with Dec still
+// turning at guide rate and IsPulseGuiding false. MoveAxis now reaps only its
+// own axis's pulse (and none for a no-op), so a Dec pulse survives a
+// MoveAxis on RA and ends itself; sync stops Dec before its ":E" writes.
+TEST_CASE("SkyWatcher async - MoveAxis(RA, 0) with no manual motion leaves a running Dec pulse to end itself (#630)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 3000);  // Dec North, 3 s
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->move_axis(0, 0.0);              // RA, no manual motion: commands nothing
+    CHECK(driver->get_is_pulse_guiding());  // the Dec pulse survives
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - MoveAxis(RA, rate) leaves a running Dec pulse to end itself (#630)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 3000);  // Dec North, 3 s
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->move_axis(0, 1.0);              // RA jog: commands RA only
+    CHECK(driver->get_is_pulse_guiding());  // the Dec pulse survives
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(mount.axis_running(1));  // the RA jog is untouched by the pulse end
+    driver->move_axis(0, 0.0);
+    driver->set_connected(false);
+}
+
+// The same-axis no-op: reaping the Dec pulse here would leave Dec turning,
+// because MoveAxis(Dec, 0) with no manual motion commands nothing.
+TEST_CASE("SkyWatcher async - MoveAxis(Dec, 0) with no manual motion leaves a running Dec pulse to end itself (#630)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 3000);  // Dec North, 3 s
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->move_axis(1, 0.0);              // Dec, no manual motion: commands nothing
+    CHECK(driver->get_is_pulse_guiding());  // the Dec pulse survives
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - SyncToCoordinates during a Dec pulse succeeds and does not leave Dec turning (#630)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 3000);  // Dec North, 3 s
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    REQUIRE_NOTHROW(driver->sync_to_coordinates(driver->get_right_ascension(), driver->get_declination()));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(mount.axis_running(1));  // tracking resumed after the sync
     driver->set_connected(false);
 }
 
