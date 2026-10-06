@@ -55,7 +55,9 @@ something that worked on the last release stop working?** That means a device th
 does not, a call that succeeded and now errors, or a client that got an answer and now gets a
 different one it has to handle. If yes, the change needs a `### Breaking changes` bullet, even when
 it is also a fix. Keep the `Fixed` or `Changed` bullet that explains the fix, and add the Breaking
-bullet for the consequence.
+bullet for the consequence. Write the consequence and the upgrade step only in the Breaking bullet;
+the original bullet ends with "for saved entries, see Breaking changes" (or similar) instead of
+repeating them.
 
 It is breaking when:
 
