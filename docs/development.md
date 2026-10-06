@@ -78,7 +78,7 @@ Runs ConformU against a connected AlpacaBridge device and processes the results:
 - Auto-detects direct contributor vs fork and handles both flows
 - Runs the pre-submission checklist (tests, ConformU, changelog fragment, SUPPORTED-DRIVERS, AGENTS.md, license headers, SDK cleanup)
 - Reproduces CI locally via `scripts/ci_preflight.sh` before pushing, so PRs never open red
-- Builds the PR title and a body that follows `.github/PULL_REQUEST_TEMPLATE.md` (thinking path, linked issues, what changed, verification, risks, model used, checklist), then creates the PR via `gh`
+- Builds the PR title and a body that follows `.github/PULL_REQUEST_TEMPLATE.md` (thinking path, linked issues, what changed, verification, risks, model used, checklist), then creates the PR via `gh`; the `pr-template` job in `.github/workflows/pr-body.yml` (`scripts/check_pr_template.py`) fails a PR whose body drops a template section or leaves one unfilled
 - Watches for the automated review verdict and batches fixes into single pushes (every push restarts a full fresh review)
 
 ### AGENTS.md — the knowledge base

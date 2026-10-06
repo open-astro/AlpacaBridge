@@ -304,6 +304,7 @@ public:
         if (connected == connected_) {
             return;
         }
+        ++motion_generation_;
 
         auto& protocol = SynScanProtocolWrapper::instance();
         if (connected) {
@@ -1034,6 +1035,7 @@ public:
             manual_axis_slewing_[1] = false;
             at_home_ = false;
             parking_ = true;
+            ++motion_generation_;
             clear_pulse_guiding_locked();
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that calls Park after a failed GOTO must not be told the OLD
@@ -1359,8 +1361,11 @@ public:
         clear_pulse_guiding_locked();
         check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
+        const uint64_t owner_generation = ++motion_generation_;
         ilock.unlock();
-        wait_for_slew_complete(lock);
+        if (!wait_for_slew_complete(lock, owner_generation)) {
+            throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+        }
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -1384,6 +1389,7 @@ public:
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+            ++motion_generation_;
 
             int bits = use_precise_commands_ ? 24 : 16;
             ra_raw = encode_ra_raw(ra, bits);
@@ -1583,6 +1589,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("MoveAxis");
+        ++motion_generation_;
 
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
@@ -1650,6 +1657,7 @@ public:
                     protocol.set_tracking_mode(tracking_mode_cached_);
                 }
                 parking_ = false;  // an aborted park never reaches AtPark
+                ++motion_generation_;
                 slewing_cached_ = false;
                 clear_pulse_guiding_locked();
                 // open-astro#575: AbortSlew is a valid clearing command for a stored
@@ -1959,7 +1967,9 @@ private:
     // 120 s (Bisque's unlock/sleep/relock loop is the reference pattern).
     // `lock` must be held on entry; it is held again on return/throw. The
     // connection state is re-checked after each relock.
-    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock) const {
+    // Returns false when a concurrent motion command bumped motion_generation_
+    // past `owner_generation` while the lock was released (the slew was superseded).
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = std::chrono::steady_clock::now();
         const auto start_grace = std::chrono::seconds(2);
@@ -1972,6 +1982,9 @@ private:
             check_connected();
         };
         while (true) {
+            if (motion_generation_ != owner_generation) {
+                return false;
+            }
             bool slewing = get_slewing_locked();
             if (slewing) {
                 saw_slewing = true;
@@ -1996,6 +2009,7 @@ private:
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
+        return motion_generation_ == owner_generation;
     }
 
     void sync_mount_time_locked() {
@@ -2141,6 +2155,9 @@ private:
 
     bool park_position_set_ = false;
     mutable bool parking_ = false;  // park task in flight (Slewing true, AtPark false)
+    // Bumped under mutex_ by every motion initiator; a sync slew waiting with the lock
+    // released compares it to learn it was superseded (Sky-Watcher shape, #832).
+    uint64_t motion_generation_ = 0;
     double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
 

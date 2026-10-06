@@ -21,6 +21,7 @@ if(ALPACACORE_ENABLE_GPHOTO)
     set(GPHOTO_SOURCES
         gphoto_sdk_wrapper.cpp
         gphoto_camera_driver.cpp
+        gphoto_catalog.cpp
     )
 
     add_library(alpacacore_gphoto STATIC ${GPHOTO_SOURCES})

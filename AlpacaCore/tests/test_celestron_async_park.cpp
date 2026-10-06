@@ -49,6 +49,10 @@ struct FakeCelestronState {
     // GOTO, which then goes unanswered too, so a park dispatch fails.
     std::atomic<bool> silent{false};
     std::atomic<bool> silent_from_goto{false};
+    // #832: `tracking_on` makes the 't' query answer EQ-North so the completion
+    // tail has a tracking restore to perform; `t_count` counts every 'T' write.
+    std::atomic<bool> tracking_on{false};
+    std::atomic<int> t_count{0};
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (!goto_seen.load()) return false;
@@ -87,7 +91,10 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
             case 'J':  // alignment complete (the slew-safety gate requires it)
                 return "1#";
             case 'T':  // tracking mode write
+                st->t_count.fetch_add(1);
                 return "#";
+            case 't':  // tracking mode query
+                return st->tracking_on.load() ? std::string("\x02#") : std::string("\x00#", 2);
             case 'P': {  // AUX passthrough: P len dev op ...
                 const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
                 if (op == 0x0B) {
@@ -300,6 +307,69 @@ TEST_CASE("Celestron async - a failed park logs the stops a silent handset never
     CHECK_FALSE(driver->get_at_park());
     CHECK(driver->get_slewing());
 
+    driver->set_connected(false);
+}
+
+// #832: a synchronous SlewToCoordinates must notice another client taking the
+// mount (AbortSlew, Park, MoveAxis) and throw InvalidOperation instead of
+// returning success, and must not run its completion tail (the T2 tracking
+// restore) over the superseding motion.
+TEST_CASE("Celestron sync slew - superseded by AbortSlew, Park or MoveAxis throws InvalidOperation",
+          "[celestron][telescope][async]") {
+    using alpacacore::AlpacaException;
+    struct Case {
+        const char* name;
+        std::function<void(alpacacore::TelescopeDriver&)> supersede;
+    };
+    const Case cases[] = {
+        {"AbortSlew", [](alpacacore::TelescopeDriver& d) { d.abort_slew(); }},
+        {"Park", [](alpacacore::TelescopeDriver& d) { d.park(); }},
+        {"MoveAxis", [](alpacacore::TelescopeDriver& d) { d.move_axis(0, 0.5); }},
+    };
+    for (const auto& c : cases) {
+        INFO(c.name);
+        auto st = std::make_shared<FakeCelestronState>();
+        st->tracking_on.store(true);
+        alpacacore::test::FakeMountServer server(celestron_responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+        std::atomic<bool> done{false};
+        std::atomic<int> code{-1};
+        std::atomic<int> t_at_exit{-1};
+        std::thread slewer([&] {
+            try {
+                driver->slew_to_coordinates(5.0, 20.0);
+                code.store(0);
+            } catch (const AlpacaException& e) {
+                code.store(static_cast<int>(e.error_code()));
+            }
+            t_at_exit.store(st->t_count.load());
+            done.store(true);
+        });
+        REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the GOTO is on the wire
+        c.supersede(*driver);
+        const int t_after_supersede = st->t_count.load();
+        slewer.join();
+        CHECK(code.load() == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+        CHECK(t_at_exit.load() == t_after_supersede);  // no tracking restore after the supersede
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("Celestron sync slew - uncontended slew returns and runs the tracking restore",
+          "[celestron][telescope][async]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    st->tracking_on.store(true);
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int t_before = st->t_count.load();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates(5.0, 20.0));
+    CHECK(st->goto_count.load() == 1);
+    CHECK(st->t_count.load() > t_before);  // the completion tail restored tracking
     driver->set_connected(false);
 }
 

@@ -132,9 +132,13 @@ entry.
    ```
 
    Then commit (with the session's attribution trailer) and push the branch.
-3. Open the PR with `gh pr create` titled `Release X.Y.Z`, body = the two-sentence summary from
-   the notes plus "Notes for the GitHub Release: `docs/releases/X.Y.Z.md`." Do not go through
-   `/submit-pr`'s release question; this skill already did that work.
+3. Open the PR with `gh pr create` titled `Release X.Y.Z`. The body is
+   `.github/PULL_REQUEST_TEMPLATE.md` filled in (the `pr-template` job refuses any other shape):
+   the two-sentence summary from the notes under **What Changed**, plus "Notes for the GitHub
+   Release: `docs/releases/X.Y.Z.md`."; "No issue exists" and the release under **Linked Issues
+   or Issue Description**; the checks this skill ran under **Verification**. Check it with
+   `python3 scripts/check_pr_template.py --body-file <file>`. Do not go through `/submit-pr`'s
+   release question; this skill already did that work.
 4. Run the `/pr-checker` loop on the PR until it is merged. A docs-only release PR should be one
    round; the bot's notes on wording of the release notes are the user's call, not defects.
 

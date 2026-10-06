@@ -1,0 +1,3 @@
+### Fixed
+
+- **A synchronous `SlewToCoordinates` on Celestron and SynScan now fails when another client supersedes it** (issue #832). `AbortSlew`, `Park` or `MoveAxis` (and, on Celestron, `FindHome`) during the wait made the call return success for a slew that never reached its target; it now throws `InvalidOperation` ("Slew superseded by a concurrent motion command"), and Celestron no longer writes the tracking restore (T2) over the park or jog. Both drivers use a `motion_generation_` counter bumped under the driver mutex by each motion initiator, the Sky-Watcher shape. Covered by "Celestron sync slew - superseded by AbortSlew, Park or MoveAxis throws InvalidOperation" and "SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws InvalidOperation".

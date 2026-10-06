@@ -320,6 +320,24 @@ else
   record FAIL "falsified-by"
 fi
 
+# --- gate 2b3: PR body follows the PR template ------------------------------
+
+section "PR template (PR body)"
+if python3 scripts/check_pr_template.py --self-test; then
+  if [ -z "${PR_BODY_FILE:-}" ]; then
+    record SKIP "pr-template (no PR body)"
+  elif [ ! -f "${PR_BODY_FILE}" ]; then
+    echo "pr-template: PR_BODY_FILE is set but ${PR_BODY_FILE} does not exist"
+    record FAIL "pr-template"
+  elif python3 scripts/check_pr_template.py --body-file "${PR_BODY_FILE}"; then
+    record PASS "pr-template"
+  else
+    record FAIL "pr-template"
+  fi
+else
+  record FAIL "pr-template"
+fi
+
 # --- gate 2c: ConformU report validation ------------------------------------
 
 section "ConformU report validation"
