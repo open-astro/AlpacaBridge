@@ -556,6 +556,26 @@ TEST_CASE("SkyWatcher async - a refused SyncToCoordinates during a Dec pulse lea
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a refused MoveAxis(Dec) during a Dec pulse leaves the pulse to end itself (#630)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 3000);  // Dec North, 3 s
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    // Above the advertised AxisRates maximum (800x sidereal, ~3.34 deg/s).
+    expect_alpaca_error([&] { driver->move_axis(1, 1000.0); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_is_pulse_guiding());  // the refusal cancelled nothing
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
 // open-astro#306: the CONTROL for the hardware measurement on that issue.
 // An EQ-AL55i Pro delivers 99.0% of a 5000 ms Dec pulse but only 47.6% of a
 // 500 ms one, which fits a fixed per-start cost rather than a rate error.
