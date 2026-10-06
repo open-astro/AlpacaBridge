@@ -14,7 +14,7 @@ Connection types: TCP only. TheSkyX acts as middleware between the driver and th
 - Commands are strings terminated with `#`. Responses are prefixed with `|No error. Error = 0.` on success, terminated with `#`.
 - Special case: Handshake (`ConnectAndDoNotUnpark`/`IsConnected`) returns just `1` with no prefix.
 - Slew is async: set `sky6RASCOMTele.Asynchronous = true`, call `SlewToRaDec`, poll `IsSlewComplete`.
-- Pulse guiding uses `sky6DirectGuide.MoveTelescope(dRA, dDec)` with arcsecond displacement.
+- Pulse guiding uses `sky6DirectGuide.MoveTelescope(dRA, dDec)` with arcsecond displacement. `sky6DirectGuide.lAsynchronous=0` makes that call wait for completion; keep it on a joinable driver worker so `PulseGuide()` returns promptly while `IsPulseGuiding` remains observable.
 - Open loop motion for MoveAxis uses `DoCommand(9, 'direction|rate')` and `DoCommand(10, '')`.
 - Park uses `ParkAndDoNotDisconnect()` to keep TCP connection alive (not `Park()` which disconnects).
 - Pier side is read-only via `DoCommand(11, 'Pier Side')` — returns 1 for west of pier, else east.

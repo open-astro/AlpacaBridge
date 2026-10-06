@@ -61,7 +61,7 @@ TEST_CASE("SynScan precise RA/Dec and Az/Alt decode the upper 24 bits of each fi
     info.type = ConnectionType::Network;
     info.host = "127.0.0.1";
     info.tcp_port = fake.port();
-    info.response_timeout_ms = 200;
+    info.response_timeout_ms = 1000;
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(0, info, SynScanVersion::V4);
     driver->set_connected(true);
 

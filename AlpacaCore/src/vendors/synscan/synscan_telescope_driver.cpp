@@ -16,6 +16,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
@@ -29,6 +30,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <ctime>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <numbers>
@@ -42,6 +44,7 @@ namespace {
 
 constexpr double kHoursToDegrees = 15.0;
 constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
+constexpr int kPositionLinkFailureThreshold = 3;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
@@ -363,6 +366,7 @@ public:
             client_disagreement_warned_ = false;
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
+            position_link_health_.reset();
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
             try {
@@ -448,6 +452,7 @@ public:
             guide_position_valid_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            position_link_health_.reset();
         }
     }
 
@@ -500,7 +505,9 @@ public:
     }
 
     AlignmentMode get_alignment_mode() const override {
-        return AlignmentMode::GermanPolar;
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        return alignment_mode_locked();
     }
 
     double get_altitude() const override {
@@ -629,8 +636,8 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (guide_position_valid_ && std::chrono::steady_clock::now() < position_override_until_ &&
-            !get_slewing_locked()) {
+        if (!position_link_health_.faulted() && guide_position_valid_ &&
+            std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
             return std::clamp(guide_position_dec_degrees_, -90.0, 90.0);
         }
         refresh_equatorial_cache_locked();
@@ -660,9 +667,16 @@ public:
         }
         auto& protocol = SynScanProtocolWrapper::instance();
         if (tracking) {
-            // TODO: Confirm correct SynScan tracking mode for specific mount types.
-            protocol.set_tracking_mode(2);
-            tracking_mode_cached_ = 2;
+            const AlignmentMode alignment = alignment_mode_locked();
+            if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
+                ensure_site_info_cached_locked();
+            }
+            if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
+                throw AlpacaException("Set SiteLatitude before enabling equatorial tracking", AlpacaError::ValueNotSet);
+            }
+            const int mode = alignment == AlignmentMode::AltAz ? 1 : (site_latitude_cached_ < 0.0 ? 3 : 2);
+            protocol.set_tracking_mode(mode);
+            tracking_mode_cached_ = mode;
         } else {
             protocol.set_tracking_mode(0);
             tracking_mode_cached_ = 0;
@@ -704,8 +718,8 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (guide_position_valid_ && std::chrono::steady_clock::now() < position_override_until_ &&
-            !get_slewing_locked()) {
+        if (!position_link_health_.faulted() && guide_position_valid_ &&
+            std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
             return guide_position_ra_hours_;
         }
         refresh_equatorial_cache_locked();
@@ -1005,8 +1019,9 @@ public:
                 return;  // calling Park twice (or while parking) is harmless
             }
         }
-        double park_ra = 0.0;
-        double park_dec = 0.0;
+        bool park_altaz = false;
+        double park_target_first = 0.0;
+        double park_target_second = 0.0;
         // Cancel + join any previous slew task first. Must run without mutex_
         // held: the task takes mutex_.
         reap_slew_task();
@@ -1018,19 +1033,37 @@ public:
                 return;  // ASCOM: Park on a parked (or parking) mount is harmless.
             }
             if (!park_position_set_) {
-                refresh_equatorial_cache_locked();
-                park_ra_hours_ = cached_ra_hours_;
-                park_dec_degrees_ = cached_dec_degrees_;
-                park_position_set_ = true;
+                store_park_position_locked();
             }
-            park_ra = park_ra_hours_;
-            park_dec = park_dec_degrees_;
-            validate_ra_dec(park_ra, park_dec, "Park");
+            park_altaz = park_alignment_mode_ == AlignmentMode::AltAz;
+            if (park_altaz) {
+                park_target_first = park_azimuth_degrees_;
+                park_target_second = park_altitude_degrees_;
+            } else if (!park_ra_uses_hour_angle_) {
+                park_target_first = park_ra_hours_;
+                park_target_second = park_dec_degrees_;
+            } else {
+                if (!site_info_valid_) {
+                    ensure_site_info_cached_locked();
+                }
+                // An hour angle is saved only while a site is known, so a
+                // handset that has since stopped reporting one (a reconnect
+                // without location) still leaves the last known longitude here.
+                const double lst =
+                    compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+                park_target_first = std::fmod(lst - park_hour_angle_hours_, 24.0);
+                if (park_target_first < 0.0) {
+                    park_target_first += 24.0;
+                }
+                park_target_second = park_dec_degrees_;
+                validate_ra_dec(park_target_first, park_target_second, "Park");
+            }
             // Publish the slewing state before the task starts so a poller
             // never sees Slewing false between Park returning and dispatch.
             slewing_cached_ = true;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             position_override_until_ = std::chrono::steady_clock::time_point::min();
+            guide_position_valid_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             at_home_ = false;
@@ -1056,14 +1089,18 @@ public:
             slew_task_cancel_.store(false);
             tlock.lock();
         }
-        slew_task_thread_ = std::thread([this, park_ra, park_dec]() {
+        slew_task_thread_ = std::thread([this, park_altaz, park_target_first, park_target_second]() {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!connected_ || slew_task_cancel_.load() || !parking_) {
                 parking_ = false;
                 return;
             }
             try {
-                do_slew_to_coordinates_locked(park_ra, park_dec);
+                if (park_altaz) {
+                    do_slew_to_altaz_locked(park_target_second, park_target_first);
+                } else {
+                    do_slew_to_coordinates_locked(park_target_first, park_target_second);
+                }
             } catch (const std::exception& ex) {
                 fail_park_locked(std::string("Park slew dispatch failed: ") + ex.what());
                 return;
@@ -1127,10 +1164,7 @@ public:
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
-            guide_position_ra_hours_ = park_ra;
-            guide_position_dec_degrees_ = park_dec;
-            guide_position_valid_ = true;
-            position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            guide_position_valid_ = false;
             // AtPark and Slewing flip in the same locked step.
             parked_ = true;
             parking_ = false;
@@ -1340,10 +1374,7 @@ public:
     void set_park() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        refresh_equatorial_cache_locked();
-        park_ra_hours_ = cached_ra_hours_;
-        park_dec_degrees_ = cached_dec_degrees_;
-        park_position_set_ = true;
+        store_park_position_locked();
     }
 
     void slew_to_coordinates(double ra, double dec) override {
@@ -1405,13 +1436,11 @@ public:
             last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             position_override_until_ = std::chrono::steady_clock::time_point::min();
+            guide_position_valid_ = false;
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
             target_ra_set_ = true;
             target_dec_set_ = true;
-            guide_position_ra_hours_ = ra;
-            guide_position_dec_degrees_ = dec;
-            guide_position_valid_ = true;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             parked_ = false;
@@ -1816,7 +1845,8 @@ private:
 
     void refresh_equatorial_cache_locked() const {
         auto now = std::chrono::steady_clock::now();
-        if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
+        if (!position_link_health_.faulted() && equatorial_cache_valid_ &&
+            (now - last_equatorial_update_) < kPositionCacheTtl) {
             return;
         }
         auto& protocol = SynScanProtocolWrapper::instance();
@@ -1827,16 +1857,20 @@ private:
             cached_dec_degrees_ = decode_angle(raw.second, bits);
             equatorial_cache_valid_ = true;
             last_equatorial_update_ = now;
-        } catch (...) {
-            if (!equatorial_cache_valid_) {
-                throw;
+            note_position_reply_locked();
+        } catch (const std::exception& e) {
+            equatorial_cache_valid_ = false;
+            note_position_failure_locked(e);
+            if (position_link_health_.faulted()) {
+                throw_position_link_fault_locked();
             }
+            throw;
         }
     }
 
     void refresh_altaz_cache_locked() const {
         auto now = std::chrono::steady_clock::now();
-        if (altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
+        if (!position_link_health_.faulted() && altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
             return;
         }
         auto& protocol = SynScanProtocolWrapper::instance();
@@ -1847,11 +1881,36 @@ private:
             cached_alt_degrees_ = decode_angle(raw.second, bits);
             altaz_cache_valid_ = true;
             last_altaz_update_ = now;
-        } catch (...) {
-            if (!altaz_cache_valid_) {
-                throw;
+            note_position_reply_locked();
+        } catch (const std::exception& e) {
+            altaz_cache_valid_ = false;
+            note_position_failure_locked(e);
+            if (position_link_health_.faulted()) {
+                throw_position_link_fault_locked();
             }
+            throw;
         }
+    }
+
+    void note_position_reply_locked() const {
+        if (position_link_health_.on_reply()) {
+            ALPACA_LOG_INFO("SynScan", "Position link recovered; mount readback is available again");
+        }
+    }
+
+    void note_position_failure_locked(const std::exception& e) const {
+        if (auto fault = position_link_health_.note_failure(e.what(), kPositionLinkFailureThreshold)) {
+            ALPACA_LOG_ERROR("SynScan", "Position link faulted: " + *fault);
+        } else {
+            ALPACA_LOG_WARN("SynScan", "Position read failed (" +
+                                           std::to_string(position_link_health_.consecutive_failures()) +
+                                           " consecutive failures): " + e.what());
+        }
+    }
+
+    [[noreturn]] void throw_position_link_fault_locked() const {
+        throw AlpacaException("SynScan mount communications compromised: " + position_link_health_.fault(),
+                              AlpacaError::DriverException);
     }
 
     bool get_slewing_locked() const {
@@ -1879,7 +1938,7 @@ private:
         if (was_slewing && !slewing_cached_) {
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
-            position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            guide_position_valid_ = false;
         }
         return slewing_cached_;
     }
@@ -1890,6 +1949,35 @@ private:
             tracking_mode_valid_ = true;
         }
         return tracking_mode_cached_ != 0;
+    }
+
+    AlignmentMode alignment_mode_locked() const {
+        const int model_id = mount_model_id_.load();
+        switch (model_id) {
+            case 0:
+            case 1:
+            case 2:
+            case 3:
+            case 4:
+            case 50:
+            case 56:
+                return AlignmentMode::GermanPolar;
+            case 160:
+                return AlignmentMode::AltAz;
+            case 5:
+            case 6:
+                throw AlpacaException(
+                    "SynScan cannot report whether this AZ-EQ mount is currently configured "
+                    "for Alt-Az or equatorial alignment",
+                    AlpacaError::DriverException);
+            default:
+                if ((model_id >= 128 && model_id <= 159)) {
+                    return AlignmentMode::AltAz;
+                }
+                throw AlpacaException(
+                    "SynScan cannot determine AlignmentMode for mount model ID " + std::to_string(model_id),
+                    AlpacaError::DriverException);
+        }
     }
 
     void ensure_site_info_cached_locked() const {
@@ -1911,6 +1999,52 @@ private:
         } catch (...) {
             site_info_valid_ = false;
         }
+    }
+
+    // Saves the current RA/Dec as the park target, as main did for every mount.
+    void store_legacy_park_position_locked() {
+        refresh_equatorial_cache_locked();
+        park_alignment_mode_ = AlignmentMode::GermanPolar;
+        park_ra_uses_hour_angle_ = false;
+        park_ra_hours_ = cached_ra_hours_;
+        park_dec_degrees_ = cached_dec_degrees_;
+        park_position_set_ = true;
+    }
+
+    void store_park_position_locked() {
+        try {
+            park_alignment_mode_ = alignment_mode_locked();
+        } catch (const AlpacaException&) {
+            // Dual-mode and unidentified handsets cannot tell us whether the
+            // saved RA/Dec needs sidereal conversion. Keep their prior usable
+            // park behavior instead of making SetPark and Park unavailable.
+            store_legacy_park_position_locked();
+            return;
+        }
+        if (park_alignment_mode_ == AlignmentMode::AltAz) {
+            refresh_altaz_cache_locked();
+            park_azimuth_degrees_ = cached_az_degrees_;
+            park_altitude_degrees_ = cached_alt_degrees_;
+            park_ra_uses_hour_angle_ = false;
+        } else {
+            if (!site_info_valid_) {
+                ensure_site_info_cached_locked();
+            }
+            if (!site_info_valid_) {
+                // No longitude, so no LST for an hour angle: keep the prior
+                // park behavior rather than making SetPark and Park unavailable.
+                store_legacy_park_position_locked();
+                return;
+            }
+            refresh_equatorial_cache_locked();
+            const double lst =
+                compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+            park_hour_angle_hours_ = shortest_ra_delta_hours(lst, cached_ra_hours_);
+            park_ra_hours_ = cached_ra_hours_;
+            park_dec_degrees_ = cached_dec_degrees_;
+            park_ra_uses_hour_angle_ = true;
+        }
+        park_position_set_ = true;
     }
 
     LocationInfo current_location_locked() const {
@@ -1938,14 +2072,12 @@ private:
         last_slew_error_.clear();
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         position_override_until_ = std::chrono::steady_clock::time_point::min();
+        guide_position_valid_ = false;
         protocol.goto_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_);
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
         target_dec_set_ = true;
-        guide_position_ra_hours_ = ra;
-        guide_position_dec_degrees_ = dec;
-        guide_position_valid_ = true;
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         parked_ = false;
@@ -1957,6 +2089,13 @@ private:
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t az_raw = encode_angle(azimuth, bits);
         uint32_t alt_raw = encode_angle(altitude, bits);
+        equatorial_cache_valid_ = false;
+        altaz_cache_valid_ = false;
+        slewing_cached_ = true;
+        last_slew_error_.clear();
+        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        guide_position_valid_ = false;
         protocol.goto_alt_az_raw(az_raw, alt_raw, use_precise_commands_);
         parked_ = false;
         at_home_ = false;
@@ -2005,7 +2144,8 @@ private:
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
-        position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        guide_position_valid_ = false;
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
@@ -2081,7 +2221,7 @@ private:
     double target_dec_degrees_;
     double guide_position_ra_hours_ = 0.0;
     double guide_position_dec_degrees_ = 0.0;
-    bool guide_position_valid_ = false;
+    mutable bool guide_position_valid_ = false;
     double aperture_diameter_m_;
     double aperture_area_m2_;
     double focal_length_m_;
@@ -2091,6 +2231,7 @@ private:
     mutable double cached_az_degrees_ = 0.0;
     mutable bool equatorial_cache_valid_ = false;
     mutable bool altaz_cache_valid_ = false;
+    mutable util::PolledLinkHealth position_link_health_;
     mutable std::chrono::steady_clock::time_point last_equatorial_update_;
     mutable std::chrono::steady_clock::time_point last_altaz_update_;
 
@@ -2155,11 +2296,16 @@ private:
 
     bool park_position_set_ = false;
     mutable bool parking_ = false;  // park task in flight (Slewing true, AtPark false)
+    AlignmentMode park_alignment_mode_ = AlignmentMode::GermanPolar;
+    bool park_ra_uses_hour_angle_ = false;
+    double park_hour_angle_hours_ = 0.0;
     // Bumped under mutex_ by every motion initiator; a sync slew waiting with the lock
     // released compares it to learn it was superseded (Sky-Watcher shape, #832).
     uint64_t motion_generation_ = 0;
     double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
+    double park_azimuth_degrees_ = 0.0;
+    double park_altitude_degrees_ = 0.0;
 
     // Background task threads — see the helpers above. task_mutex_ only guards
     // thread handles and the cv; it is never held across protocol I/O.

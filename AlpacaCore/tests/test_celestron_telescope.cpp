@@ -254,10 +254,7 @@ TEST_CASE("Celestron Telescope Driver - Telescope Properties", "[celestron][tele
            eq == alpacacore::EquatorialSystem::J2000 ||
            eq == alpacacore::EquatorialSystem::Other));
 
-    auto align = driver->get_alignment_mode();
-    CHECK((align == alpacacore::AlignmentMode::AltAz ||
-           align == alpacacore::AlignmentMode::Polar ||
-           align == alpacacore::AlignmentMode::GermanPolar));
+    require_alpaca_error([&] { (void)driver->get_alignment_mode(); }, alpacacore::AlpacaError::NotConnected);
 
     auto rates = driver->get_tracking_rates();
     CHECK_FALSE(rates.empty());

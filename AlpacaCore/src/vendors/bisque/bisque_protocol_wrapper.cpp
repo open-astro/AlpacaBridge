@@ -311,7 +311,8 @@ public:
         send_ok_command_internal(
             "sky6RASCOMTele.FindHome();"
             "while(!sky6RASCOMTele.IsSlewComplete) {"
-            "sky6Web.Sleep(1000);}", 60);
+            "sky6Web.Sleep(1000);}",
+            60000);
     }
 
     int get_pier_side() {
@@ -347,13 +348,16 @@ public:
         send_ok_command_internal("sky6RASCOMTele.DoCommand(10,'');", 0);
     }
 
-    void guide(double ra_arcsec, double dec_arcsec) {
+    void guide(double ra_arcsec, double dec_arcsec, int timeout_ms) {
         char body[256];
+        // The driver owns the asynchronous operation state on a worker thread.
+        // Keep DirectGuide synchronous here so return means the displacement
+        // has completed; sky6RASCOMTele.Asynchronous does not govern this API.
         std::snprintf(body, sizeof(body),
-                      "sky6RASCOMTele.Asynchronous = true;"
+                      "sky6DirectGuide.lAsynchronous = 0;"
                       "sky6DirectGuide.MoveTelescope(%g, %g);",
                       ra_arcsec, dec_arcsec);
-        send_ok_command_internal(body, 0);
+        send_ok_command_internal(body, timeout_ms);
     }
 
     std::string send_command(const std::string& js_body, int timeout_ms) {
@@ -441,7 +445,7 @@ private:
         throw AlpacaException("TheSkyX error: " + response);
     }
 
-    void send_ok_command_internal(const std::string& js_body, int timeout_seconds) {
+    void send_ok_command_internal(const std::string& js_body, int timeout_ms) {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected_locked();
 
@@ -453,9 +457,7 @@ private:
             "Out  = 'OK#'; }"
             "catch (err) {Out = err; }";
 
-        int effective_timeout = timeout_seconds > 0
-            ? timeout_seconds * 1000
-            : connection_info_.response_timeout_ms;
+        int effective_timeout = timeout_ms > 0 ? timeout_ms : connection_info_.response_timeout_ms;
 
         write_locked(cmd);
         std::string response = read_until_hash_locked(effective_timeout);
@@ -500,7 +502,7 @@ void BisqueProtocolWrapper::find_home() { pimpl_->find_home(); }
 int BisqueProtocolWrapper::get_pier_side() { return pimpl_->get_pier_side(); }
 void BisqueProtocolWrapper::start_open_loop_motion(int dir, int rate) { pimpl_->start_open_loop_motion(dir, rate); }
 void BisqueProtocolWrapper::stop_open_loop_motion() { pimpl_->stop_open_loop_motion(); }
-void BisqueProtocolWrapper::guide(double ra, double dec) { pimpl_->guide(ra, dec); }
+void BisqueProtocolWrapper::guide(double ra, double dec, int timeout_ms) { pimpl_->guide(ra, dec, timeout_ms); }
 std::string BisqueProtocolWrapper::send_command(const std::string& js, int t) { return pimpl_->send_command(js, t); }
 void BisqueProtocolWrapper::send_ok_command(const std::string& js, int t) { pimpl_->send_ok_command(js, t); }
 

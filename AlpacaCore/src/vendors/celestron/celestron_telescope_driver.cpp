@@ -16,6 +16,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
@@ -24,16 +25,19 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <ctime>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <numbers>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <thread>
 
 namespace alpacacore::vendor::celestron {
@@ -42,6 +46,7 @@ namespace {
 
 constexpr double kHoursToDegrees = 15.0;
 constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
+constexpr int kPositionLinkFailureThreshold = 3;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
@@ -302,6 +307,7 @@ public:
             client_disagreement_warned_ = false;
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
+            position_link_health_.reset();
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
             last_slew_error_.clear();
 
@@ -450,6 +456,7 @@ public:
             skip_next_ra_learn_ = false;
             flip_in_progress_ = false;
             last_slew_error_.clear();
+            position_link_health_.reset();
         }
     }
 
@@ -502,9 +509,9 @@ public:
     }
 
     AlignmentMode get_alignment_mode() const override {
-        // Most Celestron NexStar mounts are Alt/Az, but CGE and Advanced GT are GEM.
-        // TODO: Detect alignment mode from mount model for GEM mounts (CGE, Advanced GT, CGEM, AVX).
-        return AlignmentMode::GermanPolar;
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        return alignment_mode_locked();
     }
 
     double get_altitude() const override {
@@ -638,19 +645,19 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_ra_set_ && target_dec_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
-            !get_slewing_locked()) {
+        if (!position_link_health_.faulted() && target_ra_set_ && target_dec_set_ &&
+            std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
             return std::clamp(target_dec_degrees_, -90.0, 90.0);
         }
         const auto now = std::chrono::steady_clock::now();
         double dec_value;
-        if (pg_hold_dec_valid_ && now < pg_hold_dec_until_) {
+        if (!position_link_health_.faulted() && pg_hold_dec_valid_ && now < pg_hold_dec_until_) {
             dec_value = pg_hold_dec_degrees_;
         } else {
             refresh_equatorial_cache_locked();
             dec_value = cached_dec_degrees_;
         }
-        if (pg_dec_correction_valid_ && now < pg_dec_correction_until_) {
+        if (!position_link_health_.faulted() && pg_dec_correction_valid_ && now < pg_dec_correction_until_) {
             dec_value = pg_dec_baseline_degrees_ + pg_dec_expected_delta_degrees_;
             pg_dec_correction_valid_ = false;
         }
@@ -677,10 +684,16 @@ public:
         check_connected();
         auto& protocol = CelestronProtocolWrapper::instance();
         if (tracking) {
-            // Default to EQ North tracking; user can override via tracking rate/mode if needed.
-            // TODO: Auto-detect Alt/Az vs EQ mode from mount model.
-            protocol.set_tracking_mode(2);
-            tracking_mode_cached_ = 2;
+            const AlignmentMode alignment = alignment_mode_locked();
+            if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
+                ensure_site_info_cached_locked();
+            }
+            if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
+                throw AlpacaException("Set SiteLatitude before enabling equatorial tracking", AlpacaError::ValueNotSet);
+            }
+            const int mode = tracking_mode_for_alignment_locked(alignment);
+            protocol.set_tracking_mode(mode);
+            tracking_mode_cached_ = mode;
         } else {
             protocol.set_tracking_mode(0);
             tracking_mode_cached_ = 0;
@@ -727,19 +740,19 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_ra_set_ && target_dec_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
-            !get_slewing_locked()) {
+        if (!position_link_health_.faulted() && target_ra_set_ && target_dec_set_ &&
+            std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
             return target_ra_hours_;
         }
         const auto now = std::chrono::steady_clock::now();
         double ra_value;
-        if (pg_hold_ra_valid_ && now < pg_hold_ra_until_) {
+        if (!position_link_health_.faulted() && pg_hold_ra_valid_ && now < pg_hold_ra_until_) {
             ra_value = pg_hold_ra_hours_;
         } else {
             refresh_equatorial_cache_locked();
             ra_value = cached_ra_hours_;
         }
-        if (pg_ra_correction_valid_ && now < pg_ra_correction_until_) {
+        if (!position_link_health_.faulted() && pg_ra_correction_valid_ && now < pg_ra_correction_until_) {
             ra_value = std::fmod(pg_ra_baseline_hours_ + pg_ra_expected_delta_hours_, 24.0);
             if (ra_value < 0.0) ra_value += 24.0;
             pg_ra_correction_valid_ = false;
@@ -1969,7 +1982,8 @@ private:
 
     void refresh_equatorial_cache_locked() const {
         auto now = std::chrono::steady_clock::now();
-        if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
+        if (!position_link_health_.faulted() && equatorial_cache_valid_ &&
+            (now - last_equatorial_update_) < kPositionCacheTtl) {
             return;
         }
         auto& protocol = CelestronProtocolWrapper::instance();
@@ -1987,16 +2001,20 @@ private:
             }
             equatorial_cache_valid_ = true;
             last_equatorial_update_ = now;
-        } catch (...) {
-            if (!equatorial_cache_valid_) {
-                throw;
+            note_position_reply_locked();
+        } catch (const std::exception& e) {
+            equatorial_cache_valid_ = false;
+            note_position_failure_locked(e);
+            if (position_link_health_.faulted()) {
+                throw_position_link_fault_locked();
             }
+            throw;
         }
     }
 
     void refresh_altaz_cache_locked() const {
         auto now = std::chrono::steady_clock::now();
-        if (altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
+        if (!position_link_health_.faulted() && altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
             return;
         }
         auto& protocol = CelestronProtocolWrapper::instance();
@@ -2007,11 +2025,36 @@ private:
             cached_alt_degrees_ = decode_angle(raw.second, bits);
             altaz_cache_valid_ = true;
             last_altaz_update_ = now;
-        } catch (...) {
-            if (!altaz_cache_valid_) {
-                throw;
+            note_position_reply_locked();
+        } catch (const std::exception& e) {
+            altaz_cache_valid_ = false;
+            note_position_failure_locked(e);
+            if (position_link_health_.faulted()) {
+                throw_position_link_fault_locked();
             }
+            throw;
         }
+    }
+
+    void note_position_reply_locked() const {
+        if (position_link_health_.on_reply()) {
+            ALPACA_LOG_INFO("Celestron", "Position link recovered; mount readback is available again");
+        }
+    }
+
+    void note_position_failure_locked(const std::exception& e) const {
+        if (auto fault = position_link_health_.note_failure(e.what(), kPositionLinkFailureThreshold)) {
+            ALPACA_LOG_ERROR("Celestron", "Position link faulted: " + *fault);
+        } else {
+            ALPACA_LOG_WARN("Celestron", "Position read failed (" +
+                                             std::to_string(position_link_health_.consecutive_failures()) +
+                                             " consecutive failures): " + e.what());
+        }
+    }
+
+    [[noreturn]] void throw_position_link_fault_locked() const {
+        throw AlpacaException("Celestron mount communications compromised: " + position_link_health_.fault(),
+                              AlpacaError::DriverException);
     }
 
     bool get_slewing_locked() const {
@@ -2076,6 +2119,76 @@ private:
             tracking_mode_valid_ = true;
         }
         return tracking_mode_cached_ != 0;
+    }
+
+    AlignmentMode alignment_mode_locked() const {
+        switch (mount_model_id_) {
+            case 5:   // CGE
+            case 6:   // Advanced GT
+            case 13:  // CGE Pro
+            case 14:  // CGEM DX
+            case 20:  // Advanced VX
+            case 23:  // CGX
+            case 24:  // CGX-L
+                return AlignmentMode::GermanPolar;
+            case 1:   // NexStar GPS
+            case 3:   // NexStar i-Series
+            case 4:   // NexStar i-Series SE
+            case 7:   // SLT
+            case 9:   // CPC
+            case 10:  // NexStar GT
+            case 11:  // NexStar 4/5 SE
+            case 12:  // NexStar 6/8 SE
+            case 15:  // LCM
+            case 16:  // Sky Prodigy
+            case 17:  // CPC Deluxe
+            case 18:  // GT 16
+            case 19:  // StarSeeker
+            case 21:  // Cosmos
+            case 22:  // NexStar Evolution
+            case 25:  // Astro Fi
+                return AlignmentMode::AltAz;
+            default:
+                throw AlpacaException(
+                    "Celestron cannot determine AlignmentMode for mount model ID " + std::to_string(mount_model_id_),
+                    AlpacaError::DriverException);
+        }
+    }
+
+    int tracking_mode_for_alignment_locked(AlignmentMode alignment) const {
+        if (alignment == AlignmentMode::AltAz) {
+            return 1;
+        }
+        const bool south = site_latitude_cached_ < 0.0;
+        if (mount_model_id_ == 5 || mount_model_id_ == 6) {
+            // CGE / Advanced GT HC firmware 3.01-3.04 uses 1=EQ north and
+            // 2=EQ south; later firmware uses the standard 2/3 assignments.
+            if (mount_firmware_version_.empty() || mount_firmware_version_ == "0.0") {
+                throw AlpacaException("Celestron handset firmware is unavailable; cannot select EQ tracking mode",
+                                      AlpacaError::DriverException);
+            }
+            const std::string_view firmware = mount_firmware_version_;
+            const auto separator = firmware.find('.');
+            if (separator == std::string_view::npos) {
+                throw AlpacaException("Cannot parse Celestron handset firmware; cannot select EQ tracking mode",
+                                      AlpacaError::DriverException);
+            }
+            int major = 0;
+            int minor = 0;
+            const auto major_text = firmware.substr(0, separator);
+            const auto minor_text = firmware.substr(separator + 1);
+            const auto major_result = std::from_chars(major_text.data(), major_text.data() + major_text.size(), major);
+            const auto minor_result = std::from_chars(minor_text.data(), minor_text.data() + minor_text.size(), minor);
+            if (major_result.ec != std::errc{} || major_result.ptr != major_text.data() + major_text.size() ||
+                minor_result.ec != std::errc{} || minor_result.ptr != minor_text.data() + minor_text.size()) {
+                throw AlpacaException("Cannot parse Celestron handset firmware; cannot select EQ tracking mode",
+                                      AlpacaError::DriverException);
+            }
+            if (major == 3 && minor >= 1 && minor <= 4) {
+                return south ? 2 : 1;
+            }
+        }
+        return south ? 3 : 2;
     }
 
     void ensure_site_info_cached_locked() const {
@@ -2430,6 +2543,7 @@ private:
     mutable double cached_az_degrees_ = 0.0;
     mutable bool equatorial_cache_valid_ = false;
     mutable bool altaz_cache_valid_ = false;
+    mutable util::PolledLinkHealth position_link_health_;
     mutable std::chrono::steady_clock::time_point last_equatorial_update_;
     mutable std::chrono::steady_clock::time_point last_altaz_update_;
 

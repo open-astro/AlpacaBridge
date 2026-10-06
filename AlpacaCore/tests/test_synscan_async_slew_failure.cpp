@@ -53,6 +53,8 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
 
 struct FakeSynScanState {
     std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
+    std::atomic<bool> mute{false};
+    std::atomic<unsigned char> model_id{50};
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
     std::atomic<bool> goto_stopped{false};
@@ -82,6 +84,7 @@ struct FakeSynScanState {
 
 alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
     return [st](const std::string& chunk) -> std::string {
+        if (st->mute.load()) return "";
         if (chunk.empty()) return "0#";
         if (chunk[0] == 'P' || chunk[0] == 'T' || chunk[0] == 'r' || chunk[0] == 'R') {
             st->record(chunk);
@@ -115,19 +118,23 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 }
                 return "#";
             case 'm':
-                return std::string(1, static_cast<char>(50)) + "#";  // EQM-35 Pro
+                return std::string(1, static_cast<char>(st->model_id.load())) + "#";
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'W':
+                return "#";
             default:
                 return "0#";
         }
     };
 }
 
-alpacacore::vendor::synscan::ConnectionInfo endpoint(int port) {
+alpacacore::vendor::synscan::ConnectionInfo endpoint(int port, int timeout_ms = 1000) {
     alpacacore::vendor::synscan::ConnectionInfo info;
     info.type = alpacacore::vendor::synscan::ConnectionType::Network;
     info.host = "127.0.0.1";
     info.tcp_port = port;
-    info.response_timeout_ms = 1000;
+    info.response_timeout_ms = timeout_ms;
     return info;
 }
 
@@ -364,7 +371,7 @@ TEST_CASE("SynScan PulseGuide - guide position does not publish as target", "[sy
     driver->set_connected(false);
 }
 
-TEST_CASE("SynScan async slew - completion reports the new target after PulseGuide", "[synscan][telescope][async]") {
+TEST_CASE("SynScan async slew - position reports mount feedback after PulseGuide", "[synscan][telescope][async]") {
     auto st = std::make_shared<FakeSynScanState>();
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
@@ -386,8 +393,99 @@ TEST_CASE("SynScan async slew - completion reports the new target after PulseGui
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 12000));
 
-    CHECK(std::abs(driver->get_right_ascension() - target_ra) < 1e-6);
-    CHECK(std::abs(driver->get_declination() - target_dec) < 1e-6);
+    // The fake mount acknowledges the GOTO but stays at its fixed position.
+    // Completion must not make the requested target masquerade as readback.
+    CHECK(std::abs(driver->get_right_ascension() - position_before_pulse_ra) < 1e-6);
+    CHECK(std::abs(driver->get_declination() - position_before_pulse_dec) < 1e-6);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan position - stale cache faults after repeated failed polls and recovers",
+          "[synscan][telescope][link]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const double ra = driver->get_right_ascension();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // expire the 2 s position cache
+    st->mute.store(true);
+
+    std::string last_error;
+    for (int i = 0; i < 3; ++i) {
+        try {
+            (void)driver->get_right_ascension();
+            FAIL("stale position must not be served after a failed mount read");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+            last_error = e.what();
+        }
+    }
+    CHECK(driver->get_connected());
+    CHECK(last_error.find("communications compromised") != std::string::npos);
+
+    // The faulted cache is not served for Alt/Az either; a good request clears the latch.
+    try {
+        (void)driver->get_altitude();
+        FAIL("faulted position cache must force a hardware poll");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    st->mute.store(false);
+    CHECK(std::abs(driver->get_right_ascension() - ra) < 1e-6);
+
+    st->mute.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // expire the recovered position cache
+    try {
+        (void)driver->get_right_ascension();
+        FAIL("an unavailable mount must not return cached coordinates");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(std::string(e.what()).find("communications compromised") == std::string::npos);
+    }
+    st->mute.store(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan tracking - mode follows mount geometry and site hemisphere", "[synscan][telescope][tracking]") {
+    struct Expected {
+        unsigned char model_id;
+        alpacacore::AlignmentMode alignment;
+        unsigned char tracking_mode;
+    };
+    for (const auto& expected : {Expected{50, alpacacore::AlignmentMode::GermanPolar, 2},
+                                 Expected{50, alpacacore::AlignmentMode::GermanPolar, 3},
+                                 Expected{128, alpacacore::AlignmentMode::AltAz, 1}}) {
+        auto st = std::make_shared<FakeSynScanState>();
+        st->model_id.store(expected.model_id);
+        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        driver->set_site_latitude(expected.tracking_mode == 2 ? 41.3 : -41.3);
+        driver->set_site_longitude(174.8);
+        CHECK(driver->get_alignment_mode() == expected.alignment);
+        driver->set_tracking(true);
+
+        const auto commands = st->command_snapshot();
+        const auto tracking = std::find_if(commands.rbegin(), commands.rend(), [](const std::string& command) {
+            return command.size() >= 2 && command[0] == 'T';
+        });
+        REQUIRE(tracking != commands.rend());
+        CHECK(static_cast<unsigned char>((*tracking)[1]) == expected.tracking_mode);
+        driver->set_connected(false);
+    }
+
+    auto st = std::make_shared<FakeSynScanState>();
+    st->model_id.store(5);  // AZ-EQ can be used in two alignment configurations; the HC does not report which.
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK_THROWS_AS(driver->get_alignment_mode(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
     driver->set_connected(false);
 }
 

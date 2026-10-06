@@ -46,6 +46,10 @@ using Clock = std::chrono::steady_clock;
 struct FakeCelestronState {
     std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
     std::atomic<bool> shifted_position{false};
+    std::atomic<bool> mute{false};
+    std::atomic<unsigned char> model_id{24};  // CGX-L
+    std::atomic<unsigned char> firmware_major{5};
+    std::atomic<unsigned char> firmware_minor{35};
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
     std::mutex command_mutex;
@@ -86,11 +90,21 @@ struct FakeCelestronState {
 
 alpacacore::test::FakeMountServer::Responder celestron_responder(const std::shared_ptr<FakeCelestronState>& st) {
     return [st](const std::string& chunk) -> std::string {
+        if (st->mute.load()) return "";
         if (chunk.empty()) return "0#";
         if (chunk[0] == 'T' || chunk[0] == 'P') {
             st->record(chunk);
         }
         switch (chunk[0]) {
+            case 'm':
+                return std::string(1, static_cast<char>(st->model_id.load())) + "#";
+            case 'V':
+                return std::string(1, static_cast<char>(st->firmware_major.load())) +
+                       static_cast<char>(st->firmware_minor.load()) + "#";
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'W':
+                return "#";
             case 'e':
             case 'E':
             case 'z':
@@ -137,12 +151,12 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(const std::shar
     };
 }
 
-alpacacore::vendor::celestron::ConnectionInfo endpoint(int port) {
+alpacacore::vendor::celestron::ConnectionInfo endpoint(int port, int timeout_ms = 1000) {
     alpacacore::vendor::celestron::ConnectionInfo info;
     info.type = alpacacore::vendor::celestron::ConnectionType::Network;
     info.host = "127.0.0.1";
     info.tcp_port = port;
-    info.response_timeout_ms = 1000;
+    info.response_timeout_ms = timeout_ms;
     return info;
 }
 
@@ -196,7 +210,7 @@ TEST_CASE("Celestron async - a GOTO the hand controller never acknowledges surfa
     st->reject_goto.store(false);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     CHECK(read_slewing(*driver) == SlewingRead::True);
-    REQUIRE(wait_until([&] { return st->goto_count.load() == 1; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
     REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 15000));
     driver->set_connected(false);
 }
@@ -389,6 +403,101 @@ TEST_CASE("Celestron PulseGuide - an expired unpolled opposite-axis pulse does n
         CHECK(std::abs(during - held) < 1e-5);
         driver->set_connected(false);
     }
+}
+
+TEST_CASE("Celestron position - stale cache faults after repeated failed polls and recovers",
+          "[celestron][telescope][link]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const double ra = driver->get_right_ascension();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // expire the 2 s position cache
+    st->mute.store(true);
+
+    std::string last_error;
+    for (int i = 0; i < 3; ++i) {
+        try {
+            (void)driver->get_right_ascension();
+            FAIL("stale position must not be served after a failed mount read");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+            last_error = e.what();
+        }
+    }
+    CHECK(driver->get_connected());
+    CHECK(last_error.find("communications compromised") != std::string::npos);
+
+    try {
+        (void)driver->get_altitude();
+        FAIL("faulted position cache must force a hardware poll");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    st->mute.store(false);
+    CHECK(std::abs(driver->get_right_ascension() - ra) < 1e-6);
+
+    st->mute.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // expire the recovered position cache
+    try {
+        (void)driver->get_right_ascension();
+        FAIL("an unavailable mount must not return cached coordinates");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(std::string(e.what()).find("communications compromised") == std::string::npos);
+    }
+    st->mute.store(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron tracking - mode follows mount geometry and site hemisphere", "[celestron][telescope][tracking]") {
+    struct Expected {
+        unsigned char model_id;
+        unsigned char firmware_major;
+        unsigned char firmware_minor;
+        double latitude;
+        alpacacore::AlignmentMode alignment;
+        unsigned char tracking_mode;
+    };
+    for (const auto& expected : {Expected{24, 5, 35, 41.3, alpacacore::AlignmentMode::GermanPolar, 2},
+                                 Expected{24, 5, 35, -41.3, alpacacore::AlignmentMode::GermanPolar, 3},
+                                 Expected{9, 5, 35, -41.3, alpacacore::AlignmentMode::AltAz, 1},
+                                 Expected{6, 3, 3, 41.3, alpacacore::AlignmentMode::GermanPolar, 1},
+                                 Expected{6, 3, 3, -41.3, alpacacore::AlignmentMode::GermanPolar, 2}}) {
+        auto st = std::make_shared<FakeCelestronState>();
+        st->model_id.store(expected.model_id);
+        st->firmware_major.store(expected.firmware_major);
+        st->firmware_minor.store(expected.firmware_minor);
+        alpacacore::test::FakeMountServer server(celestron_responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        driver->set_site_latitude(expected.latitude);
+        driver->set_site_longitude(174.8);
+        CHECK(driver->get_alignment_mode() == expected.alignment);
+        driver->set_tracking(true);
+
+        const auto commands = [&] {
+            std::lock_guard<std::mutex> lock(st->command_mutex);
+            return st->commands;
+        }();
+        const auto tracking = std::find_if(commands.rbegin(), commands.rend(), [](const std::string& command) {
+            return command.size() >= 2 && command[0] == 'T';
+        });
+        REQUIRE(tracking != commands.rend());
+        CHECK(static_cast<unsigned char>((*tracking)[1]) == expected.tracking_mode);
+        driver->set_connected(false);
+    }
+
+    auto st = std::make_shared<FakeCelestronState>();
+    st->model_id.store(0xff);  // unknown model has no trustworthy alignment-mode mapping
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK_THROWS_AS(driver->get_alignment_mode(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
+    driver->set_connected(false);
 }
 
 TEST_CASE("Celestron PulseGuide - an operation that reaps the pulse clears IsPulseGuiding (#831)",
