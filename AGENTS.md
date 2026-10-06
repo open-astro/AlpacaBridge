@@ -942,7 +942,8 @@ floor. `/commit` and `/submit-pr` check the fragment's categories.
 ### Changelog fragments (one file per PR)
 
 Every PR that changes code, tests, scripts, CI or docs adds `changelog.d/<branch-slug>.md` (the
-branch name after its last `/`, lowercased) and **never edits `CHANGELOG.md`**: parallel PRs that all edited
+branch name after its last `/`, lowercased) and **never edits `CHANGELOG.md`** (except to correct a misfiled or wrong entry, which the PR
+description says): parallel PRs that all edited
 its one UNRELEASED section conflicted on every merge to main. Format, categories and commands are
 in [`changelog.d/README.md`](changelog.d/README.md), including its "Breaking or not" test, which
 applies to fixes too: a saved config that no longer loads or a call that now fails is breaking even

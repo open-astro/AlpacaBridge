@@ -63,7 +63,7 @@ It is breaking when:
 
 - **A saved config that loaded no longer loads.** Saved devices go through the same checks as
   `configuredevice` at every start-up, so a new range bound, a stricter type, or a new allowlist
-  for a field drops a saved device that the last release accepted. Two examples from 4.3.0: GPIO
+  for a field drops a saved device that the last release accepted. Two examples from the release after 4.2.0: GPIO
   lines outside the board's allowlist (issue #765), and `9600.5` in a field that is now a whole
   number.
 - **A request that succeeded now fails**: a new refusal, a removed fallback, a removed retry or
@@ -89,8 +89,10 @@ release a major version (see Version below), so `/commit` and `/submit-pr` ask t
 every fragment.
 
 **An entry belongs to the release its code ships in.** Write it in your fragment; never add it to
-a dated `## [X.Y.Z]` section of `CHANGELOG.md`. Three 4.3.0 entries were written into the
-released 4.2.0 section on 2026-09-30 and had to be moved.
+a dated `## [X.Y.Z]` section of `CHANGELOG.md`. Three entries for the release after 4.2.0 were
+written into the released 4.2.0 section on 2026-09-30 and had to be moved. The one exception is a
+correction: a PR may edit `CHANGELOG.md` to move a misfiled entry or fix a wrong one, and its
+description must say so.
 
 ## Version
 

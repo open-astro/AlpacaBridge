@@ -135,7 +135,8 @@ setup. Bump relative to the last **released** version:
 A branch that adds a new driver MUST have an unqualified `### Added` entry, never only a
 `Fixed`/`Changed` one. If the fragment undershoots, flag it and recommend running `/commit` to
 correct it before opening the PR — don't open a PR whose fragment misrepresents the change. The
-branch must not edit `CHANGELOG.md`; run `python3 scripts/changelog_fragments.py --check`.
+branch must not edit `CHANGELOG.md`, except to correct a misfiled or wrong entry (say so in the PR
+description); run `python3 scripts/changelog_fragments.py --check`.
 
 ### Release version bump (ask the user — MANDATORY, every run)
 
