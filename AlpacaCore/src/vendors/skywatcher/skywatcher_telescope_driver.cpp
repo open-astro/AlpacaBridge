@@ -1530,6 +1530,7 @@ public:
                         if (live_rate_relatch_) {  // open-astro#666
                             proto.start_motion(kAxisRa);
                         }
+                        anchor_model_locked();  // the rate change applies from now, not from the last anchor
                         cmd_axis_rate_deg_s_[0] = restore_rate;
                         return;
                     } catch (const std::exception& e) {
@@ -1738,6 +1739,15 @@ public:
                         proto.start_motion(kAxisRa);
                     }
                     std::lock_guard<std::mutex> lock(mutex_);
+                    // Fold the pulse rate into the model up to now first: a
+                    // rate change applied from an older anchor (one the limit
+                    // guard takes mid-pulse) drops the pulse distance driven
+                    // since it, and the next hardware read jumps (EQM-35 Pro,
+                    // PulseGuide RA change short by up to 1.07 s with a floor
+                    // set). No anchor at dispatch: pulse_guide() invalidated
+                    // the cache, and a hardware read there would lengthen the
+                    // pulse.
+                    anchor_model_locked();
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
                     // The ":J" above can land inside a Tracking=false
                     // stop-wait (after its ":K"): stop RA again now, not

@@ -586,6 +586,48 @@ TEST_CASE("SkyWatcher limits - a sync below the floor does not stop tracking",
     driver->set_connected(false);
 }
 
+// The guard re-anchors the position cache on hardware every 2 s while
+// tracking. An RA guide pulse that changed the dead-reckoning rate without
+// re-anchoring then lost the pulse distance driven since that anchor: the read
+// after the pulse extrapolated the whole interval at the restored rate, and
+// the next hardware read jumped back (EQM-35 Pro ConformU with a floor set:
+// PulseGuide RA change short by up to 1.07 s of the 2.51 s expected).
+TEST_CASE("SkyWatcher limits - an RA guide pulse under the guard keeps the reported RA continuous",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    // Far below anything the tube reaches: the guard polls but never fires.
+    auto driver = connected_driver(mount, floor_deg(-80.0));
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+    REQUIRE(wait_until([&] { return sw::detail::limit_guard_bodies_running() == 1; }, 2000));
+
+    // Nothing but the guard reads the position from here on. Start the pulse
+    // just after one of its hardware anchors: the poll 4 s later re-anchors
+    // (whatever the pulse dispatch did to the cache) about a second before
+    // the pulse ends, and the read below falls inside that anchor's lifetime.
+    const int anchors = mount.frames_seen('j');
+    REQUIRE(mount.wait_for_frames('j', anchors + 1, std::chrono::milliseconds(3000)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    driver->pulse_guide(2, 5000);  // East, in place on the tracking axis: ConformU's length
+    REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 2000));
+    REQUIRE(wait_until([&] { return mount.step_period(1) == sidereal_preset; }, 6000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const double ra_after_pulse = driver->get_right_ascension();
+
+    // Past the cache lifetime: this read re-anchors on the axis counts.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2200));
+    const double ra_reanchored = driver->get_right_ascension();
+    const double jump_arcsec = (ra_reanchored - ra_after_pulse) * 15.0 * 3600.0;
+    INFO("RA jump at the re-anchor: " << jump_arcsec << " arcsec");
+    // Tracking holds RA still; a lost second of a 0.5x guide pulse is 7.5".
+    CHECK(std::abs(jump_arcsec) < 2.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher limits - motion that starts outside a limit is not stopped",
           "[skywatcher][telescope][limits][guard]") {
     FakeSkyWatcherMount mount;
