@@ -1,0 +1,5 @@
+### Fixed
+- **Sky-Watcher: the serial auto-detect scan no longer hangs on a silent port whose adapter ignores VTIME** (AlpacaCore): the `:e1` probe and the SynScan hand-controller echo guard it runs first at 115200 both cleared O_NONBLOCK and relied on VTIME for their read timeout, so on a USB-serial adapter that does not honour VMIN/VTIME a candidate port that never answered parked the read forever and hung the connect and the auto-detect scan. Both now keep the fd non-blocking and bound every read with `poll()` against their budget (1500 ms for `:e1`, 300 ms for the echo guard), as the connected link already does. The SynScan driver's own connect shares the echo helper, so its echo read is bounded the same way; its behaviour is otherwise unchanged.
+
+### Added (tests)
+- **Sky-Watcher probe read bound** (AlpacaCore): two pty cases whose fake board rewrites the line to VMIN=1/VTIME=0 and stays silent, asserting that the 9600 `:e1` probe and the full dual-baud scan (9600, echo guard, 115200) each give up within their budget.

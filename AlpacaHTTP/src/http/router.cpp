@@ -102,9 +102,6 @@
 #ifdef ALPACACORE_ENABLE_CELESTRON
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_BISQUE
-#include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
@@ -8827,56 +8824,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "bisque" && device_type_str == "telescope") {
-#ifdef ALPACACORE_ENABLE_BISQUE
-        alpacacore::vendor::bisque::ConnectionInfo conn_info;
-        conn_info.host = config_get(config, "host", "localhost");
-        conn_info.tcp_port = config_get(config, "tcpPort", 3040);
-        conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
-
-        if (conn_info.host.empty() && reject_invalid_config(source, "Host is required for Bisque/TheSkyX connection",
-                                                            vendor, device_type_str, device_number, error_message)) {
-            return false;
-        }
-
-        std::optional<double> site_latitude;
-        std::optional<double> site_longitude;
-        std::optional<double> site_elevation;
-
-        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
-            return false;
-        }
-        if (config_has(config, "siteElevation")) {
-            site_elevation = config_get(config, "siteElevation", 0.0);
-        }
-
-        auto telescope = alpacacore::vendor::bisque::create_bisque_telescope_with_site(
-            device_number, conn_info, site_latitude, site_longitude, site_elevation);
-
-        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
-            telescope->set_aperture_diameter(aperture);
-        }
-        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
-            telescope->set_focal_length(focal);
-        }
-        if (site_elevation.has_value()) {
-            telescope->set_site_elevation(site_elevation.value());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
-            util::log_info("Registered Bisque/Paramount telescope");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Bisque support not enabled. Rebuild with -DALPACACORE_ENABLE_BISQUE=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "zwo" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_ZWO
         int camera_id = config_get(config, "cameraId", -1);
@@ -10168,9 +10115,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("portPath");
             copy_if_present("baudRate");
         }
-    } else if (vendor == "bisque") {
-        copy_if_present("host");
-        copy_if_present("tcpPort");
     }
 
     copy_if_present("responseTimeoutMs");

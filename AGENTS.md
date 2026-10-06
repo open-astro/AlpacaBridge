@@ -429,8 +429,10 @@ driver. There `connect_serial()` calls `set_nonblocking()`, `settle_serial`/`exc
 reads go through a `poll(POLLIN)`-bounded helper, and frame sends go through a
 `poll(POLLOUT)`-bounded write (not `write_all`, which would fail fast on an `EAGAIN` before
 the first byte). Do **not** "fix" that back to `clear_nonblocking` — see the Sky-Watcher
-scoped instructions. (The auto-detect *probe* path, `probe_skywatcher_port`, still uses a
-blocking `VTIME` read and is not covered by this change.)
+scoped instructions. The auto-detect *probe* path, `probe_skywatcher_port`, keeps its fd
+non-blocking and bounds each read with `poll(POLLIN)` against its 1500 ms budget the same way,
+and so does the SynScan echo guard it runs first at 115200 (`exchange_synscan_echo_on_fd` in
+`util/synscan_handset_probe.h`), so a silent candidate on such an adapter cannot hang the scan.
 
 ### Camera ROI alignment (all camera vendors)
 

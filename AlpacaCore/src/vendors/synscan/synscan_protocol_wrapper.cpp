@@ -77,9 +77,9 @@ std::string probe_synscan_port(const std::string& port_path) {
     tty.c_oflag &= ~OPOST;
     tty.c_oflag &= ~ONLCR;
     tty.c_cc[VMIN] = 0;
-    // 100 ms per read(): the echo helper below and the version loop after it
-    // both check their deadline only BETWEEN reads, so the per-read timeout
-    // is the granularity at which those deadlines are honoured. The previous
+    // 100 ms per read(): the version loop below checks its deadline only
+    // BETWEEN reads, so the per-read timeout is the granularity at which it
+    // is honoured (the echo helper bounds its reads with poll()). The previous
     // 2 s (VTIME=20) let a silent port overrun a 3 s budget by up to another
     // 2 s (review finding on PR #3); the deadlines bound the loops, not this.
     tty.c_cc[VTIME] = 1;

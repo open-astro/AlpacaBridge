@@ -22,10 +22,10 @@ Protocol documentation: `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller
 
 Connection types: Serial (the mount's own USB port or an EQDIR-class adapter, 8N1; the scan probes
 9600 then 115200 per port, because an EQ board's built-in PL2303 port answers only at 115200,
-so a silent Prolific/FTDI/CH340-class port costs at least about 3.3 s per scan: 1.5 s at 9600, the
-300 ms SynScan echo guard, 1.5 s at 115200, and up to roughly 4.4 s because the read loops only
-check their deadline between `VTIME` reads; multiplied by every such adapter on the rig; #403
-records the measurement) and Network (built-in Wi-Fi module,
+so a silent Prolific/FTDI/CH340-class port costs about 3.3 s per scan: 1.5 s at 9600, the
+300 ms SynScan echo guard, 1.5 s at 115200, each read bounded by `poll(POLLIN)` against its
+deadline so a port that ignores `VTIME` cannot stretch it; multiplied by every such adapter on the
+rig; #403 records the measurement) and Network (built-in Wi-Fi module,
 **UDP** port 11880 — one command per datagram, one reply per datagram; AP-mode address
 192.168.4.1). The wrapper retransmits up to 3 times on UDP timeout and drains stale
 datagrams before each send so replies cannot get off-by-one.
@@ -318,7 +318,12 @@ datagrams before each send so replies cannot get off-by-one.
   deliberate exception to the shared "always `clear_nonblocking`" serial rule in `AGENTS.md`;
   do not revert it. Regression tests (`test_skywatcher_serial.cpp`): a muted board times out
   within the command budget (catches a revert of the read `poll()`), and a write seam that
-  reports `EAGAIN` is waited out (catches a revert of the bounded write).
+  reports `EAGAIN` is waited out (catches a revert of the bounded write). The auto-detect
+  probe follows the same rule: `probe_skywatcher_port` and the SynScan echo guard it runs at
+  115200 (`util::exchange_synscan_echo_on_fd`) keep a non-blocking fd and gate each read on
+  `poll(POLLIN)`; the `[skywatcher][serial][probe]` cases whose fake board forces
+  `VMIN=1`/`VTIME=0` (`set_reads_ignore_vtime`) fail when either goes back to the old
+  VTIME-only read loop.
 - **Disconnect all stray Alpaca clients before a ConformU run**: the per-client Connected
   registry keeps the device physically connected for other ClientIDs, so leftover test
   sessions carry state (targets, tracking) into ConformU's "first time use" checks.
