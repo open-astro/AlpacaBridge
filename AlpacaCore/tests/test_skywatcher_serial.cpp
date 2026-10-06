@@ -29,6 +29,7 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -329,6 +330,34 @@ TEST_CASE("SkyWatcher serial - the dual-baud probe finds a Synta EQ board at 115
         REQUIRE(board.frames().empty());
         alpacacore::util::mark_serial_port_closed(key);
     }
+}
+
+TEST_CASE("SkyWatcher serial - the probe gives up within its budget when reads ignore VTIME",
+          "[skywatcher][serial][probe]") {
+    // #836 bounded the connected link's reads with poll() because some USB
+    // CDC-ACM ports ignore VMIN/VTIME and a bare read() then parks forever.
+    // The ":e1" probe must hold its 1500 ms budget on such a port too: a
+    // silent candidate must not hang the auto-detect scan.
+    FakeSkyWatcherSerialBoard board;
+    board.set_muted(true);
+    board.set_reads_ignore_vtime(true);
+
+    std::promise<std::string> result;
+    auto done = result.get_future();
+    const auto start = std::chrono::steady_clock::now();
+    std::thread prober([&] { result.set_value(sw::probe_skywatcher_port(board.slave_path(), 9600)); });
+    // Budget 1500 ms plus margin; a parked read never gets there.
+    const bool finished = done.wait_for(std::chrono::milliseconds(3000)) == std::future_status::ready;
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    if (!finished) {
+        board.release_blocked_reader();  // unpark the read so the thread can be joined
+    }
+    prober.join();
+    INFO("probe elapsed " << elapsed << " ms");
+    REQUIRE(finished);
+    CHECK(done.get().empty());
+    CHECK(board.count_frames('e') == 1);  // the probe was sent and went unanswered
 }
 
 // ── open-astro#445: Connected follows the serial link ──────────────────────

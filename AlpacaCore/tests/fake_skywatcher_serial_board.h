@@ -92,6 +92,20 @@ public:
         muted_ = muted;
     }
 
+    /// A muted board on an adapter whose driver does not honour VMIN/VTIME
+    /// (#836): a read with no data parks instead of timing out. After each
+    /// silent frame the fake rewrites the line to VMIN=1 / VTIME=0 (every
+    /// slave fd shares one termios), so any blocking read on it waits for a
+    /// byte. Only a poll()-bounded read on a non-blocking fd keeps its budget.
+    void set_reads_ignore_vtime(bool ignore) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        reads_ignore_vtime_ = ignore;
+    }
+
+    /// Release a reader parked by set_reads_ignore_vtime(): one CR ends the
+    /// probe's read loop, so a test that saw the hang can still join.
+    void release_blocked_reader() { pty_write_bounded(pty_.master_fd(), std::string("\r"), stop_); }
+
     /// open-astro#521: start an axis in the running state, as a board whose
     /// motion outlived the driver's link does. @p speed_mode true models a
     /// MoveAxis or tracking drive — the case the driver classifies as NOT
@@ -251,6 +265,14 @@ private:
         }
     }
 
+    void force_blocking_reads() const {
+        struct termios tty {};
+        if (pty_.keepalive_fd() < 0 || tcgetattr(pty_.keepalive_fd(), &tty) != 0) return;
+        tty.c_cc[VMIN] = 1;
+        tty.c_cc[VTIME] = 0;
+        tcsetattr(pty_.keepalive_fd(), TCSANOW, &tty);
+    }
+
     // Returns the reply for one frame (without the trailing CR), or an empty
     // string for "stay silent".
     std::string handle(const std::string& frame) {
@@ -264,6 +286,9 @@ private:
             // driver kept talking while faulted — which is what lets the next
             // good reply clear the latch without a reconnect.
             frames_.push_back(frame);
+            if (reads_ignore_vtime_) {
+                force_blocking_reads();
+            }
             return "";
         }
         frames_.push_back(frame);
@@ -433,6 +458,7 @@ private:
     // Defaults reproduce the fixed "=101" this fake used to answer for ":f":
     // speed mode, not running, initialized.
     bool muted_ = false;
+    bool reads_ignore_vtime_ = false;
     bool running_[2] = {false, false};
     bool speed_mode_[2] = {true, true};
     bool init_done_[2] = {true, true};
