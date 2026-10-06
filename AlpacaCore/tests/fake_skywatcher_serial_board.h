@@ -93,10 +93,11 @@ public:
     }
 
     /// A muted board on an adapter whose driver does not honour VMIN/VTIME
-    /// (#836): a read with no data parks instead of timing out. After each
-    /// silent frame the fake rewrites the line to VMIN=1 / VTIME=0 (every
-    /// slave fd shares one termios), so any blocking read on it waits for a
-    /// byte. Only a poll()-bounded read on a non-blocking fd keeps its budget.
+    /// (#836): a read with no data parks instead of timing out. Whenever
+    /// bytes arrive (a `:` frame or the SynScan echo guard's bare "KB") the
+    /// fake rewrites the line to VMIN=1 / VTIME=0 (every slave fd shares one
+    /// termios), after the reader's own tcsetattr, so any blocking read on
+    /// it waits for a byte. Only a poll()-bounded read keeps its budget.
     void set_reads_ignore_vtime(bool ignore) {
         std::lock_guard<std::mutex> lock(mutex_);
         reads_ignore_vtime_ = ignore;
@@ -286,9 +287,6 @@ private:
             // driver kept talking while faulted — which is what lets the next
             // good reply clear the latch without a reconnect.
             frames_.push_back(frame);
-            if (reads_ignore_vtime_) {
-                force_blocking_reads();
-            }
             return "";
         }
         frames_.push_back(frame);
@@ -386,6 +384,10 @@ private:
             const int r = poll(&pfd, 1, 10);
             if (r <= 0) continue;
             const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
+            if (n > 0) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (muted_ && reads_ignore_vtime_) force_blocking_reads();
+            }
             for (ssize_t i = 0; i < n; ++i) {
                 const char ch = buf[i];
                 if (ch == ':') {
