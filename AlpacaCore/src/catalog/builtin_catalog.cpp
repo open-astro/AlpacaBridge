@@ -21,6 +21,7 @@ void register_builtin_schemas(DeviceCatalog& catalog) {
     register_skywatcher_schema(catalog);
     register_weewx_schema(catalog);
     register_svbony_schema(catalog);
+    register_gphoto_schema(catalog);
 }
 
 void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
@@ -35,6 +36,9 @@ void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
 #endif
 #ifdef ALPACACORE_ENABLE_SVBONY
     register_svbony_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_GPHOTO
+    register_gphoto_factory(catalog);
 #endif
 }
 

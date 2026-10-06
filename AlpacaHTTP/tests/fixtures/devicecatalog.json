@@ -11,6 +11,16 @@
     ]
   },
   {
+    "vendor": "gphoto",
+    "deviceType": "camera",
+    "displayName": "gphoto Camera (libgphoto2)",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_GPHOTO",
+    "fields": [
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
     "vendor": "skywatcher",
     "deviceType": "telescope",
     "displayName": "SkyWatcher direct (motor controller)",
