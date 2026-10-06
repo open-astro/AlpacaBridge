@@ -557,6 +557,35 @@ TEST_CASE("SkyWatcher limits - tracking past the meridian limit stops tracking",
     driver->set_connected(false);
 }
 
+// Sync moves the frame, not the axes: the guard must not read the jump in the
+// reported position as motion across a limit. The floor carries the case: a
+// sync always lands counterweight-down (|a1| <= 90), so it can never put the
+// frame past a meridian limit.
+TEST_CASE("SkyWatcher limits - a sync below the floor does not stop tracking",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg);
+    auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    // The guard's first sample, above the floor, is its baseline.
+    REQUIRE(wait_until([&] { return sw::detail::limit_guard_bodies_running() == 1; }, 2000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Ten degrees less declination at the same hour angle: about 29 deg of
+    // altitude, below the floor, with neither axis moved.
+    driver->sync_to_coordinates(driver->get_right_ascension(), driver->get_declination() - 10.0);
+    const double altitude = driver->get_altitude();
+    INFO("altitude after the sync: " << altitude);
+    REQUIRE(altitude < kGuardAltitudeDeg - 3.0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(4500));  // two 2 s polls
+    CHECK(driver->get_tracking());
+    CHECK(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher limits - motion that starts outside a limit is not stopped",
           "[skywatcher][telescope][limits][guard]") {
     FakeSkyWatcherMount mount;
