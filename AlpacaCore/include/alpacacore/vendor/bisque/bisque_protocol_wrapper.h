@@ -87,7 +87,7 @@ public:
 
     // Direct guide via sky6DirectGuide.MoveTelescope.
     // ra_arcsec/dec_arcsec: displacement in arcseconds.
-    void guide(double ra_arcsec, double dec_arcsec);
+    void guide(double ra_arcsec, double dec_arcsec, int timeout_ms);
 
     // Low-level command execution.
     // Wraps js_body in TheSkyX boilerplate, sends over TCP, reads response.

@@ -200,8 +200,8 @@ TEST_CASE("ZWO async - a GOTO the mount rejects surfaces through Slewing (#575)"
     CHECK(message.find("Slew") != std::string::npos);
     CHECK(read_slewing(*driver) == SlewingRead::Threw);  // preserved, not one-shot
 
-    // Only Slewing reports the failure: the rejected GOTO's pending
-    // post-slew adjustment must not turn a position read into that error.
+    // Only Slewing reports the failure: a rejected GOTO must not turn a
+    // position read into that error.
     // (This fake serves no :GR/:GD, so the read may still fail to parse.)
     const auto position_read_error = [&](const std::function<void()>& read) {
         try {
@@ -343,8 +343,7 @@ TEST_CASE("ZWO async - MoveAxis stop during GOTO setup cancels the pending GOTO 
 }
 
 // open-astro#720: the cancelled GOTO never slewed, so it must not leave its
-// bookkeeping behind: neither the 5 s Slewing force window nor the post-slew
-// adjustment that would report the abandoned target as the mount's position.
+// 5 s Slewing force window behind or report the abandoned target as position.
 TEST_CASE("ZWO async - a GOTO cancelled during setup leaves no slew bookkeeping (#720)",
           "[zwo][telescope][async][slewfailure]") {
     auto st = std::make_shared<FakeZwoState>();
@@ -435,6 +434,41 @@ TEST_CASE("ZWO async - Disconnect during the GOTO's site/time sync sends no targ
     CHECK(st->sr_count.load() == 0);
     CHECK(st->sd_count.load() == 0);
     CHECK(st->goto_count.load() == 0);
+}
+
+TEST_CASE("ZWO async - position reports mount feedback after GOTO", "[zwo][telescope][async][position]") {
+    auto st = std::make_shared<FakeZwoState>();
+    st->serve_position.store(true);
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    const double mount_ra = driver->get_right_ascension();
+    const double mount_dec = driver->get_declination();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 22.0));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 8000));
+
+    CHECK(std::abs(driver->get_right_ascension() - mount_ra) < 1e-6);
+    CHECK(std::abs(driver->get_declination() - mount_dec) < 1e-6);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO blocking slew - position reports mount feedback after GOTO", "[zwo][telescope][position]") {
+    auto st = std::make_shared<FakeZwoState>();
+    st->serve_position.store(true);
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    const double mount_ra = driver->get_right_ascension();
+    const double mount_dec = driver->get_declination();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates(4.0, -12.0));
+
+    CHECK(std::abs(driver->get_right_ascension() - mount_ra) < 1e-6);
+    CHECK(std::abs(driver->get_declination() - mount_dec) < 1e-6);
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32

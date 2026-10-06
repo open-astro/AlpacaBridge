@@ -274,10 +274,6 @@ public:
           cached_status_at_(std::chrono::steady_clock::time_point{}),
           cached_pier_side_at_(std::chrono::steady_clock::time_point{}),
           park_state_at_(std::chrono::steady_clock::time_point{}),
-          pending_slew_adjust_(false),
-          pending_slew_ra_hours_(0.0),
-          pending_slew_dec_degrees_(0.0),
-          pending_slew_at_(std::chrono::steady_clock::time_point{}),
           poll_stop_(false),
           poll_pause_(false),
           last_utc_set_(std::chrono::system_clock::time_point{}),
@@ -444,10 +440,6 @@ public:
                     tracking_state_valid_ = false;
                     tracking_rate_valid_ = false;
                     tracking_state_at_ = std::chrono::steady_clock::time_point{};
-                    pending_slew_adjust_ = false;
-                    pending_slew_ra_hours_ = 0.0;
-                    pending_slew_dec_degrees_ = 0.0;
-                    pending_slew_at_ = std::chrono::steady_clock::time_point{};
                     manual_axis_tracking_restore_[0] = std::nullopt;
                     manual_axis_tracking_restore_[1] = std::nullopt;
                     target_ra_hours_ = 0.0;
@@ -529,10 +521,6 @@ public:
                 tracking_state_at_ = std::chrono::steady_clock::time_point{};
             }
             tracking_rate_valid_ = false;
-            pending_slew_adjust_ = false;
-            pending_slew_ra_hours_ = 0.0;
-            pending_slew_dec_degrees_ = 0.0;
-            pending_slew_at_ = std::chrono::steady_clock::time_point{};
             manual_axis_tracking_restore_[0] = std::nullopt;
             manual_axis_tracking_restore_[1] = std::nullopt;
             target_ra_hours_ = 0.0;
@@ -928,7 +916,6 @@ public:
 
     double get_declination() const override {
         check_connected();
-        apply_pending_slew_adjustment();
         EquatorialCoordinates eq;
         double offset = 0.0;
         bool has_eq = false;
@@ -1154,7 +1141,6 @@ public:
 
     double get_right_ascension() const override {
         check_connected();
-        apply_pending_slew_adjustment();
         EquatorialCoordinates eq;
         double offset = 0.0;
         bool has_eq = false;
@@ -1982,38 +1968,6 @@ public:
                     std::this_thread::sleep_for(std::chrono::seconds(settle));
                 }
                 refresh_cached_values();
-                EquatorialCoordinates raw;
-                bool has_raw = false;
-                const auto now = std::chrono::steady_clock::now();
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (cached_equatorial_.has_value() && (now - cached_equatorial_at_) <= kFastEquatorialTtl) {
-                        raw = cached_equatorial_.value();
-                        has_raw = true;
-                    }
-                }
-                if (!has_raw) {
-                    try {
-                        raw = ZWOMountProtocolWrapper::instance().get_current_equatorial();
-                        has_raw = true;
-                    } catch (const std::exception&) {
-                    }
-                }
-                if (has_raw) {
-                    const double target_ra = get_target_right_ascension();
-                    const double target_dec = get_target_declination();
-                    const double ra_delta = normalize_hour_angle_hours(target_ra - raw.ra_hours);
-                    const double dec_delta = target_dec - raw.dec_degrees;
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    ra_offset_hours_ = std::fmod(ra_offset_hours_ + ra_delta, 24.0);
-                    if (ra_offset_hours_ < 0.0) {
-                        ra_offset_hours_ += 24.0;
-                    }
-                    dec_offset_deg_ = std::clamp(dec_offset_deg_ + dec_delta, -90.0, 90.0);
-                    cached_equatorial_ = raw;
-                    cached_equatorial_at_ = now;
-                    pending_slew_adjust_ = false;
-                }
                 return;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -2077,10 +2031,6 @@ public:
             park_motion_seen_ = false;
             cached_equatorial_.reset();
             cached_equatorial_at_ = std::chrono::steady_clock::time_point{};
-            pending_slew_adjust_ = true;
-            pending_slew_ra_hours_ = target_ra;
-            pending_slew_dec_degrees_ = target_dec;
-            pending_slew_at_ = std::chrono::steady_clock::now();
         }
 
         // Joinable member thread, NOT detached (H1): cancel + join any
@@ -2106,15 +2056,12 @@ public:
             auto resume_poll = [this]() { poll_pause_.store(false); };
             // open-astro#720: a cancelled GOTO started no slew (it exits before
             // ":MS", or after the mount rejected it), so it must not leave its
-            // bookkeeping behind: the 5 s Slewing force window, or the
-            // post-slew adjustment that would report the abandoned target as
-            // the mount's position. A newer SlewToTargetAsync has already
-            // moved the epoch on and owns both.
+            // 5 s Slewing force window behind. A newer SlewToTargetAsync has
+            // already moved the epoch on and owns the state.
             auto abandon = [this, slew_epoch, &resume_poll]() {
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (slew_error_epoch_ == slew_epoch) {
-                        pending_slew_adjust_ = false;
                         slew_force_until_ = std::chrono::steady_clock::time_point{};
                     }
                 }
@@ -2225,10 +2172,6 @@ public:
                             std::lock_guard<std::mutex> lock(mutex_);
                             if (slew_error_epoch_ == slew_epoch) {
                                 last_slew_error_ = "SlewToTargetAsync failed: " + std::string(ex.what());
-                                // No slew landed, so there is nothing to adjust;
-                                // left set, the next RA/Dec read would throw
-                                // this error via get_slewing().
-                                pending_slew_adjust_ = false;
                             }
                         }
                         resume_poll();
@@ -2250,7 +2193,6 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (slew_error_epoch_ == slew_epoch) {
                         last_slew_error_ = "SlewToTargetAsync failed: " + std::string(ex.what());
-                        pending_slew_adjust_ = false;  // no slew landed (see above)
                     }
                 }
             }
@@ -2803,50 +2745,6 @@ private:
         }
     }
 
-    void apply_pending_slew_adjustment() const {
-        double target_ra = 0.0;
-        double target_dec = 0.0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!pending_slew_adjust_) {
-                return;
-            }
-            pending_slew_adjust_ = false;
-            target_ra = pending_slew_ra_hours_;
-            target_dec = pending_slew_dec_degrees_;
-        }
-        if (get_slewing()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            pending_slew_adjust_ = true;
-            return;
-        }
-
-        EquatorialCoordinates raw;
-        bool has_raw = false;
-        try {
-            raw = ZWOMountProtocolWrapper::instance().get_current_equatorial();
-            has_raw = true;
-        } catch (const std::exception&) {
-        }
-        if (!has_raw) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            pending_slew_adjust_ = true;
-            return;
-        }
-
-        const double ra_delta = normalize_hour_angle_hours(target_ra - raw.ra_hours);
-        const double dec_delta = target_dec - raw.dec_degrees;
-        const auto now = std::chrono::steady_clock::now();
-        std::lock_guard<std::mutex> lock(mutex_);
-        ra_offset_hours_ = std::fmod(ra_offset_hours_ + ra_delta, 24.0);
-        if (ra_offset_hours_ < 0.0) {
-            ra_offset_hours_ += 24.0;
-        }
-        dec_offset_deg_ = std::clamp(dec_offset_deg_ + dec_delta, -90.0, 90.0);
-        cached_equatorial_ = raw;
-        cached_equatorial_at_ = now;
-    }
-
     void start_poll_thread() {
         stop_poll_thread();
         poll_stop_.store(false);
@@ -3124,10 +3022,6 @@ private:
     mutable std::chrono::steady_clock::time_point cached_status_at_;
     mutable std::chrono::steady_clock::time_point cached_pier_side_at_;
     mutable std::chrono::steady_clock::time_point park_state_at_;
-    mutable bool pending_slew_adjust_;
-    mutable double pending_slew_ra_hours_;
-    mutable double pending_slew_dec_degrees_;
-    mutable std::chrono::steady_clock::time_point pending_slew_at_;
     std::thread poll_thread_;
     std::atomic<bool> poll_stop_;
     std::atomic<bool> poll_pause_;
