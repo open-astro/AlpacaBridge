@@ -8,6 +8,7 @@ if(ALPACACORE_ENABLE_BISQUE)
     set(BISQUE_SOURCES
         bisque_protocol_wrapper.cpp
         bisque_telescope_driver.cpp
+        bisque_catalog.cpp
     )
 
     add_library(alpacacore_bisque STATIC ${BISQUE_SOURCES})

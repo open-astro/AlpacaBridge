@@ -11,6 +11,23 @@
     ]
   },
   {
+    "vendor": "bisque",
+    "deviceType": "telescope",
+    "displayName": "Bisque Paramount (TheSkyX)",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_BISQUE",
+    "fields": [
+      {"key": "host", "type": "string", "default": "localhost", "required": false, "secret": false, "role": "Host"},
+      {"key": "tcpPort", "type": "int", "default": 3040, "required": false, "secret": false, "role": "Plain"},
+      {"key": "responseTimeoutMs", "type": "int", "default": 3000, "required": false, "secret": false, "role": "Plain"},
+      {"key": "siteLatitude", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": -90.0, "max": 90.0}},
+      {"key": "siteLongitude", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": -180.0, "max": 180.0}},
+      {"key": "siteElevation", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"},
+      {"key": "apertureDiameter", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"},
+      {"key": "focalLength", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"}
+    ]
+  },
+  {
     "vendor": "gphoto",
     "deviceType": "camera",
     "displayName": "gphoto Camera (libgphoto2)",
