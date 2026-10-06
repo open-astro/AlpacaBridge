@@ -4685,12 +4685,14 @@ private:
                 }
             }
             if (crossing != util::LimitCrossing::None && ctx.stop_reason() != util::StopReason::Cancelled) {
-                std::string what = crossing == util::LimitCrossing::AltitudeFloor
-                                       ? "Minimum altitude limit (" + limit_number(*motion_limits_.min_altitude_deg) +
-                                             " deg) crossed at altitude " + limit_number(sample.altitude_deg) + " deg"
-                                       : "Meridian limit (" + limit_number(*motion_limits_.meridian_limit_minutes) +
-                                             " min) crossed at " + limit_number(sample.counterweight_up_deg * 4.0) +
-                                             " min past the meridian";
+                const bool at_floor = crossing == util::LimitCrossing::AltitudeFloor;
+                const std::string what =
+                    at_floor
+                        ? "Minimum altitude limit (" + limit_number(motion_limits_.min_altitude_deg.value_or(0.0)) +
+                              " deg) crossed at altitude " + limit_number(sample.altitude_deg) + " deg"
+                        : "Meridian limit (" + limit_number(motion_limits_.meridian_limit_minutes.value_or(0.0)) +
+                              " min) crossed at " + limit_number(sample.counterweight_up_deg * 4.0) +
+                              " min past the meridian";
                 ALPACA_LOG_WARN("SkyWatcher", what + ": stopping" + (stop_tracking ? " tracking" : "") +
                                                   (stop_ra || stop_dec ? " MoveAxis" : ""));
                 try {
