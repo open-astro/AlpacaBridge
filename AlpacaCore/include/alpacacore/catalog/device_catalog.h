@@ -31,6 +31,7 @@ struct DescriptorView {
     std::string_view build_option;
     bool available;
     std::span<const FieldRef> fields;
+    std::string_view vendor_label;  // Schema::vendor_label, empty when the schema sets none
 };
 
 class DeviceCatalog {
@@ -38,6 +39,10 @@ public:
     // Every key with a schema, in insertion order. available means "a factory is
     // registered for this key", so a build with a vendor off still names it.
     std::vector<DescriptorView> describe() const;
+
+    // Every key with a factory, in insertion order, schema or not: a factory whose
+    // schema was never added is unreachable, and describe() cannot show it.
+    std::vector<DeviceKey> factory_keys() const;
 
     // Per-field rules (required, default, enum, range; record lists recurse and
     // messages carry the index, e.g. "ports[1].name is required"), then the
