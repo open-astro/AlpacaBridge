@@ -1609,7 +1609,7 @@ public:
             // the axis now. Called with mutex_ held. Same three attempts as
             // the pulse stop below, and the same runaway flag if all fail.
             auto stop_ra_if_tracking_off_locked = [this, ai]() {
-                if ((tracking_ && !tracking_off_pending_) || !connected_ || pulse_task_cancel_[ai].load()) {
+                if (tracking_effectively_on_locked() || !connected_ || pulse_task_cancel_[ai].load()) {
                     return;
                 }
                 constexpr int kAttempts = 3;
@@ -1681,7 +1681,7 @@ public:
                 bool restore = restore_tracking;
                 if (restore) {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    restore = tracking_;
+                    restore = tracking_effectively_on_locked();
                     restore_still_wanted = restore;
                 }
                 // open-astro#821: the mirror case. A pulse dispatched with
@@ -1694,7 +1694,7 @@ public:
                 // (#770), not undone by this restart.
                 if (!restore && axis == kAxisRa) {
                     std::unique_lock<std::mutex> lock(mutex_);
-                    if (tracking_) {
+                    if (tracking_effectively_on_locked()) {
                         apply_ra_drive_locked(lock);
                         return;
                     }
@@ -1746,7 +1746,7 @@ public:
                     // A Dec pulse pre-empted any DeclinationRate offset
                     // motion: re-apply it so guiding corrections don't
                     // silently cancel comet/satellite tracking.
-                    if (axis == kAxisDec && tracking_ && dec_rate_arcsec_per_sec_ != 0.0) {
+                    if (axis == kAxisDec && tracking_effectively_on_locked() && dec_rate_arcsec_per_sec_ != 0.0) {
                         try {
                             apply_dec_rate_offset_locked(lock);
                         } catch (const std::exception& e) {
@@ -3772,10 +3772,10 @@ private:
             const uint64_t gen = ++motion_generation_;
             // Cleared on every exit (success, timeout, supersession).
             struct PendingOffGuard {
-                bool& flag;
-                ~PendingOffGuard() { flag = false; }
+                int& depth;
+                ~PendingOffGuard() { --depth; }
             } pending_off_guard{tracking_off_pending_};
-            tracking_off_pending_ = true;
+            ++tracking_off_pending_;
             if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
                 // A newer motion command took the axes while the mutex was
                 // released: it owns the tracking state now — do not stomp it.
@@ -4773,12 +4773,17 @@ private:
     mutable std::chrono::steady_clock::time_point last_position_update_{};
 
     bool tracking_ = false;
-    // Set (under mutex_) for the whole of a Tracking=false stop-wait, while
-    // tracking_ still reads true. The RA pulse task's unlocked ":I"+":J"
-    // restore can land inside that wait and restart the axis; it reads this
-    // as "tracking is off" and stops RA again instead of leaving the wait to
-    // time out.
-    bool tracking_off_pending_ = false;
+    // Number of Tracking=false stop-waits in flight (under mutex_), while
+    // tracking_ still reads true. A counter, not a flag: a second setter can
+    // enter the wait while the first is in its unlocked poll, and the first
+    // one's exit must not clear the second's pending state. The RA pulse
+    // task's unlocked restore can land inside such a wait; every pulse-task
+    // read of "tracking is on" goes through tracking_effectively_on_locked(),
+    // so it stops RA instead of restarting it (which would supersede the
+    // setter or leave its wait to time out).
+    int tracking_off_pending_ = 0;
+    // Caller holds mutex_.
+    bool tracking_effectively_on_locked() const { return tracking_ && tracking_off_pending_ == 0; }
     bool restore_tracking_after_slew_ = false;
     mutable bool parked_ = false;
     mutable bool at_home_ = false;
