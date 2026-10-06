@@ -45,6 +45,7 @@ if(ALPACACORE_ENABLE_PLAYERONE)
         playerone_switch_driver.cpp
         playerone_pw_wrapper.cpp
         playerone_filterwheel_driver.cpp
+        playerone_catalog.cpp
     )
 
     add_library(alpacacore_playerone STATIC ${PLAYERONE_SOURCES})

@@ -150,7 +150,8 @@ std::vector<DescriptorView> DeviceCatalog::describe() const {
     std::vector<DescriptorView> views;
     views.reserve(schemas_.size());
     for (const Schema& s : schemas_) {
-        views.push_back({s.key, s.display_name, s.build_option, find_factory(s.key) != nullptr, s.fields});
+        views.push_back(
+            {s.key, s.display_name, s.build_option, find_factory(s.key) != nullptr, s.fields, s.vendor_label});
     }
     return views;
 }

@@ -21,6 +21,7 @@
 // index is far beyond any bus.
 
 #include <alpacacore/catalog/builtin_catalog.h>
+#include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -433,6 +434,113 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the gphoto camera 
     } catch (const std::runtime_error& e) {
         CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_GPHOTO") != std::string::npos);
     }
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Player One camera, Phoenix filter wheel and thermal switch: schemas in every
+// build, factories only when built.
+
+namespace {
+
+const DeviceKey kPlayerOneCameraKey{"playerone", DeviceType::Camera};
+const DeviceKey kPlayerOneWheelKey{"playerone", DeviceType::FilterWheel};
+const DeviceKey kPlayerOneSwitchKey{"playerone", DeviceType::Switch};
+
+void check_index_field(const FieldRef& f, std::string_view key) {
+    CHECK(std::string_view(f.key) == key);
+    CHECK(f.kind == FieldRef::Kind::Int);
+    CHECK(f.role == Role::EnumerationIndex);
+    CHECK_FALSE(f.required);
+    CHECK_FALSE(f.min.has_value());
+    CHECK_FALSE(f.max.has_value());
+    REQUIRE(std::holds_alternative<std::int64_t>(f.default_value));
+    CHECK(std::get<std::int64_t>(f.default_value) == 0);
+}
+
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the Player One devices in every build",
+          "[catalog][playerone][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kPlayerOneCameraKey, kPlayerOneWheelKey, kPlayerOneSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        // Two words: the router's first-word default would say "Player".
+        CHECK(v->vendor_label == "Player One");
+        CHECK(v->build_option == "ALPACACORE_ENABLE_PLAYERONE");
+        CHECK_FALSE(v->available);
+    }
+
+    const DescriptorView* camera = find_view(views, kPlayerOneCameraKey);
+    REQUIRE(camera->fields.size() == 1);
+    check_index_field(camera->fields[0], "cameraIndex");
+    // The thermal switch binds to a camera by its index.
+    const DescriptorView* sw = find_view(views, kPlayerOneSwitchKey);
+    REQUIRE(sw->fields.size() == 1);
+    check_index_field(sw->fields[0], "cameraIndex");
+
+    const DescriptorView* wheel = find_view(views, kPlayerOneWheelKey);
+    REQUIRE(wheel->fields.size() == 2);
+    check_index_field(wheel->fields[0], "filterwheelIndex");
+    const FieldRef& names = wheel->fields[1];
+    CHECK(std::string_view(names.key) == "filterNames");
+    CHECK(names.kind == FieldRef::Kind::StringList);
+    CHECK_FALSE(names.required);
+    REQUIRE(std::holds_alternative<std::vector<std::string>>(names.default_value));
+    CHECK(std::get<std::vector<std::string>>(names.default_value).empty());
+
+    // Sanitize keeps each type's own fields, as the deleted router branch did.
+    DeviceConfig all;
+    all.set("cameraIndex", std::int64_t{3});
+    all.set("filterwheelIndex", std::int64_t{2});
+    all.set("filterNames", std::vector<std::string>{"L", "R"});
+    all.set("switchType", std::string{"x"});
+    const DeviceConfig cam_cfg = catalog.sanitize(kPlayerOneCameraKey, all);
+    CHECK(cam_cfg.has("cameraIndex"));
+    CHECK_FALSE(cam_cfg.has("filterwheelIndex"));
+    CHECK_FALSE(cam_cfg.has("filterNames"));
+    const DeviceConfig sw_cfg = catalog.sanitize(kPlayerOneSwitchKey, all);
+    CHECK(sw_cfg.has("cameraIndex"));
+    CHECK_FALSE(sw_cfg.has("switchType"));
+    const DeviceConfig wheel_cfg = catalog.sanitize(kPlayerOneWheelKey, all);
+    CHECK(wheel_cfg.has("filterwheelIndex"));
+    CHECK_FALSE(wheel_cfg.has("cameraIndex"));
+    const ConfigValue* kept = wheel_cfg.find_value("filterNames");
+    REQUIRE(kept != nullptr);
+    REQUIRE(std::holds_alternative<std::vector<std::string>>(*kept));
+    CHECK(std::get<std::vector<std::string>>(*kept) == std::vector<std::string>{"L", "R"});
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the Player One devices available only when built",
+          "[catalog][playerone][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kPlayerOneCameraKey, kPlayerOneWheelKey, kPlayerOneSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() without a Player One factory must throw");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_PLAYERONE") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+    // filterNames reaches the driver, as the deleted arm's set_names() did.
+    DeviceConfig cfg;
+    cfg.set("filterNames", std::vector<std::string>{"L", "R", "G"});
+    auto driver = catalog.create(kPlayerOneWheelKey, cfg, 0);
+    auto* wheel = dynamic_cast<FilterWheelDriver*>(driver.get());
+    REQUIRE(wheel != nullptr);
+    CHECK(wheel->get_names() == std::vector<std::string>{"L", "R", "G"});
 #endif
 }
 

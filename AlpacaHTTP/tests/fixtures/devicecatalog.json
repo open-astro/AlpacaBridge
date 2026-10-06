@@ -21,6 +21,37 @@
     ]
   },
   {
+    "vendor": "playerone",
+    "deviceType": "camera",
+    "displayName": "Player One Camera",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_PLAYERONE",
+    "fields": [
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
+    "vendor": "playerone",
+    "deviceType": "filterwheel",
+    "displayName": "Player One Phoenix Filter Wheel",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_PLAYERONE",
+    "fields": [
+      {"key": "filterwheelIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"},
+      {"key": "filterNames", "type": "stringList", "required": false, "secret": false, "role": "Plain"}
+    ]
+  },
+  {
+    "vendor": "playerone",
+    "deviceType": "switch",
+    "displayName": "Player One Thermal Switch (dew heater/fan)",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_PLAYERONE",
+    "fields": [
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
     "vendor": "skywatcher",
     "deviceType": "telescope",
     "displayName": "SkyWatcher direct (motor controller)",

@@ -6591,7 +6591,7 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the gphoto, SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors plus the "zzz"
+    // and the gphoto, Player One, SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors plus the "zzz"
     // test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
@@ -6602,7 +6602,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 6);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 9);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -6617,6 +6617,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "gphoto") {
 #ifdef ALPACACORE_ENABLE_GPHOTO
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "playerone") {
+#ifdef ALPACACORE_ENABLE_PLAYERONE
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -7569,6 +7576,26 @@ int main() {
         EXPECT(off.message == "gphoto support not enabled. Rebuild with -DALPACACORE_ENABLE_GPHOTO=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "Camera", 9264).is_null());
+    }
+#endif
+
+#ifndef ALPACACORE_ENABLE_PLAYERONE
+    // With the vendor built out, the catalog path reports the deleted arms' text
+    // for each Player One type: the two-word label comes from Schema::vendor_label.
+    {
+        // case: Player One vendors-OFF refusal text
+        alpacahttp::Router router;
+        const std::pair<const char*, const char*> types[] = {
+            {"camera", "Camera"}, {"filterwheel", "FilterWheel"}, {"switch", "Switch"}};
+        for (const auto& [device_type, listed_type] : types) {
+            const auto off = api_attempt(
+                router, nlohmann::json{{"vendor", "playerone"}, {"deviceType", device_type}, {"deviceNumber", 9265}},
+                listed_type);
+            EXPECT(!off.ok);
+            EXPECT(off.message == "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON");
+            EXPECT(off.error_number == 0x400);  // NotImplemented
+            EXPECT(listed_entry(router, listed_type, 9265).is_null());
+        }
     }
 #endif
 

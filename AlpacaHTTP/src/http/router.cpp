@@ -115,9 +115,8 @@
 #endif
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
+// The ioptron/camera (iCAM) arm only; the playerone pairs are catalog descriptors.
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
-#include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
-#include <alpacacore/vendor/playerone/playerone_switch_driver.h>
 #endif
 
 namespace {
@@ -8181,11 +8180,11 @@ std::optional<alpacacore::catalog::DescriptorView> find_descriptor(const alpacac
     return std::nullopt;
 }
 
-// "Astroasis Oasis Focuser" -> "Astroasis": the arm text this replaces spelled
-// the vendor as the first word of its display name. Assumption (open-astro#664
-// D1): true for every descriptor except "Player One", whose own slice must
-// either add a Schema::vendor_label or accept the text change.
+// The vendor as the deleted arm texts spelled it: Schema::vendor_label when the
+// descriptor sets one ("Player One"), else the first word of its display name
+// ("Astroasis Oasis Focuser" -> "Astroasis").
 std::string vendor_label(const alpacacore::catalog::DescriptorView& view) {
+    if (!view.vendor_label.empty()) return std::string(view.vendor_label);
     const std::string name(view.display_name);
     const auto space = name.find(' ');
     return space == std::string::npos ? name : name.substr(0, space);
@@ -9564,78 +9563,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "playerone" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_PLAYERONE
-        int camera_index = config_get(config, "cameraIndex", 0);
-
-        auto camera = alpacacore::vendor::playerone::create_playerone_camera(device_number, camera_index);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered Player One camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "playerone" && device_type_str == "filterwheel") {
-#ifdef ALPACACORE_ENABLE_PLAYERONE
-        int wheel_index = config_get(config, "filterwheelIndex", 0);
-
-        auto wheel = alpacacore::vendor::playerone::create_playerone_filterwheel(device_number, wheel_index);
-
-        if (config_has(config, "filterNames")) {
-            const auto& names_value = config.at("filterNames");
-            if (!names_value.is_array()) {
-                error_message = "Player One filter wheel filterNames must be an array";
-                return false;
-            }
-            for (const auto& name : names_value) {
-                if (!name.is_string()) {
-                    error_message = "Player One filter wheel filterNames must be an array of strings";
-                    return false;
-                }
-            }
-            wheel->set_names(names_value.get<std::vector<std::string>>());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
-            util::log_info("Registered Player One Phoenix filter wheel");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "playerone" && device_type_str == "switch") {
-#ifdef ALPACACORE_ENABLE_PLAYERONE
-        int camera_index = config_get(config, "cameraIndex", 0);
-
-        auto sw = alpacacore::vendor::playerone::create_playerone_switch(device_number, camera_index);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
-            util::log_info("Registered Player One thermal switch (dew heater/fan)");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "gemini" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_GEMINI
         std::string conn_type = config_get(config, "connectionType", "auto");
@@ -10196,14 +10123,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("cameraIndex");
             copy_if_present("focuserIndex");
             copy_if_present("focuserId");
-        }
-    } else if (vendor == "playerone") {
-        if (device_type == "filterwheel") {
-            copy_if_present("filterwheelIndex");
-            copy_if_present("filterNames");
-        } else {
-            // Camera and the thermal switch both bind by camera index.
-            copy_if_present("cameraIndex");
         }
     } else if (vendor == "celestron") {
         copy_if_present("connectionType");

@@ -31,6 +31,7 @@ struct DescriptorView {
     std::string_view build_option;
     bool available;
     std::span<const FieldRef> fields;
+    std::string_view vendor_label;  // Schema::vendor_label, empty when the schema sets none
 };
 
 class DeviceCatalog {
