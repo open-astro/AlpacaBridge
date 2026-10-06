@@ -8,6 +8,7 @@
 // with an additional permission allowing combination with proprietary
 // device-vendor SDKs. See the LICENSE file in this repository for the full
 // license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
 
 // The Bisque / Paramount (TheSkyX) telescope factory, doing what the router
 // arm it replaces did. Compiled only under ALPACACORE_ENABLE_BISQUE (unlike
