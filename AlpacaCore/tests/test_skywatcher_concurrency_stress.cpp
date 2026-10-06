@@ -24,6 +24,7 @@
 #ifndef _WIN32
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/motion_limits.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
 #include <atomic>
@@ -51,8 +52,20 @@ sw::ConnectionInfo endpoint_for_port(int port) {
 
 sw::ConnectionInfo endpoint(const FakeSkyWatcherMount& mount) { return endpoint_for_port(mount.port()); }
 
+// open-astro#436: both limits set, so every MoveAxis and Tracking start in the
+// storm also starts (and supersedes) a live limit guard body, and every
+// disconnect and destruction must join it. The floor sits below anything the
+// storm's goto target (Dec 20) can reach here, so no goto is refused for it;
+// the meridian limit can fire on a MoveAxis and exercises the guard's stop.
+alpacacore::util::MotionLimits stress_limits() {
+    alpacacore::util::MotionLimits limits;
+    limits.min_altitude_deg = -45.0;
+    limits.meridian_limit_minutes = 15.0;
+    return limits;
+}
+
 std::unique_ptr<alpacacore::TelescopeDriver> make_driver(const FakeSkyWatcherMount& mount) {
-    return sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
+    return sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0, {}, stress_limits());
 }
 
 // Hammers every worker thread the driver's disconnect/destructor path must

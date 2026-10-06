@@ -25,6 +25,9 @@
 // (50 deg): a floor of 15 deg with a target at Dec -89 would be just as
 // refused after the fix, but before it the sync form would run a 55 s goto
 // to prove the point, and a 55 s RED is a bad test.
+//
+// The live guard (436b) cases at the end drive the axes across a limit and
+// expect the driver to stop the motion on its own.
 
 #ifndef _WIN32
 
@@ -485,6 +488,139 @@ TEST_CASE("SkyWatcher limits - Park and FindHome are exempt from the floor", "[s
     // the exemption is Park/FindHome's, not the session's.
     require_below_floor_refusal([&] { driver->slew_to_coordinates_async(near_pole_ra(*driver), kNearPoleDec); });
     driver->set_connected(false);
+}
+
+// ── Live guard (436b) ───────────────────────────────────────────────────────
+//
+// Geometry: with the RA axis at home (a1 = 0) the tube sits six hours of hour
+// angle from the meridian, where altitude depends on declination alone:
+// sin(alt) = sin(dec) sin(lat). Dec axis at 30 deg is dec 60, altitude 33.6
+// at this latitude whatever the time of day; driving that axis further out
+// lowers the tube about 0.4 deg of altitude per degree of axis. The meridian
+// limit is read off the RA axis alone: a1 = 92 deg is the counterweight 2 deg
+// above horizontal, 8 minutes past the meridian.
+
+namespace {
+
+constexpr double kGuardDecAxisDeg = 30.0;
+constexpr double kGuardAltitudeDeg = 33.6;                   // at kGuardDecAxisDeg, see above
+const double kMaxMoveAxisRate = 800.0 * 360.0 / 86164.0905;  // the advertised AxisRates maximum
+
+MotionLimits meridian_minutes(double minutes) {
+    MotionLimits limits;
+    limits.meridian_limit_minutes = minutes;
+    return limits;
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher limits - MoveAxis carrying the tube below the floor is stopped",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    // Before the connect, which warms the position cache: a jump after it
+    // would not be read back until the cache expires.
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg);
+    auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
+    REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
+
+    driver->move_axis(1, kMaxMoveAxisRate);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
+    // About 1.4 deg of altitude per second: the floor is reached in about a
+    // second, and nothing but the guard stops the axis before the timeout.
+    CHECK(wait_until([&] { return !mount.axis_running(2); }, 6000));
+    CHECK(wait_until([&] { return !driver->get_slewing(); }, 6000));
+    // Stopped at the floor, not somewhere far below it: one 250 ms poll and
+    // the stop ramp past the crossing.
+    const double altitude = driver->get_altitude();
+    INFO("altitude after the stop: " << altitude);
+    CHECK(altitude < kGuardAltitudeDeg - 1.5);
+    CHECK(altitude > kGuardAltitudeDeg - 3.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - tracking past the meridian limit stops tracking",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.jump_axis_degrees(1, 92.0);  // 8 min past the meridian: inside the limit
+    auto driver = connected_driver(mount, meridian_minutes(10.0));
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    // Let the guard take its first sample inside the limit, then carry the
+    // axis past it: tracking alone would take minutes to cover the distance.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    mount.jump_axis_degrees(1, 94.0);  // 16 min past the meridian
+
+    CHECK(wait_until([&] { return !driver->get_tracking(); }, 8000));
+    CHECK(wait_until([&] { return !mount.axis_running(1); }, 6000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - motion that starts outside a limit is not stopped",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    MotionLimits limits = floor_deg(kGuardAltitudeDeg + 5.0);  // the tube starts below it
+    limits.meridian_limit_minutes = 10.0;
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg);
+    auto driver = connected_driver(mount, limits);
+    REQUIRE(driver->get_altitude() < kGuardAltitudeDeg + 5.0);
+
+    // Further below the floor: recovery moves out of a limit must stay
+    // possible, and so must any move that never crossed one.
+    driver->move_axis(1, kMaxMoveAxisRate);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    CHECK(mount.axis_running(2));
+    CHECK(driver->get_slewing());
+    driver->move_axis(1, 0.0);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 6000));
+
+    // Already past the meridian limit when tracking starts.
+    mount.jump_axis_degrees(1, 95.0);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    mount.jump_axis_degrees(1, 96.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(4500));  // two 2 s polls
+    CHECK(driver->get_tracking());
+    CHECK(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - with no limit set the guard never starts", "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    const auto started = sw::detail::limit_guard_bodies_started();
+
+    driver->move_axis(1, kMaxMoveAxisRate);
+    driver->set_tracking(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    CHECK(sw::detail::limit_guard_bodies_started() == started);
+    CHECK(sw::detail::limit_guard_bodies_running() == 0);
+    driver->move_axis(1, 0.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - disconnect during a guarded MoveAxis joins the guard",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    // Far below anything the axis reaches: the guard runs but never fires.
+    auto driver = connected_driver(mount, floor_deg(-80.0));
+    driver->move_axis(0, kMaxMoveAxisRate);
+    REQUIRE(wait_until([&] { return sw::detail::limit_guard_bodies_running() == 1; }, 2000));
+
+    driver->set_connected(false);
+    // Joined, not merely asked to stop: the body sleeps 250 ms between
+    // polls, so a disconnect that only flagged it would return first.
+    CHECK(sw::detail::limit_guard_bodies_running() == 0);
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(driver->get_connected());
+    driver.reset();
+    CHECK(sw::detail::limit_guard_bodies_running() == 0);
 }
 
 #endif  // _WIN32
