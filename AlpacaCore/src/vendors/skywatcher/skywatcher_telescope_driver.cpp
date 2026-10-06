@@ -2066,6 +2066,14 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        {
+            // A refused sync must not cancel a pulse in flight (open-astro#630),
+            // so gate BEFORE reaping (the copies below re-check after it).
+            std::lock_guard<std::mutex> gate(mutex_);
+            check_connected();
+            check_not_parked_locked("SyncToCoordinates");
+            validate_ra_dec(ra, dec, "SyncToCoordinates");
+        }
         reap_pulse_task();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();

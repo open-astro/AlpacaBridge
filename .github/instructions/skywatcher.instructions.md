@@ -280,6 +280,7 @@ datagrams before each send so replies cannot get off-by-one.
   canceller stops or re-commands the axes itself, so a path that commands one
   axis reaps only that axis's pulse (PulseGuide #620, MoveAxis #630; a no-op
   `MoveAxis(axis, 0)` reaps none) and sync stops both axes before `:E`.
+  Gate before reaping: a refused slew, MoveAxis or sync cancels nothing.
 - **AbortSlew must cancel the async slew task** (set `slew_task_cancel_`,
   join later via reap) or the landing refinement re-slews after the abort;
   every slew entry point reaps first, which also resets the flag.
