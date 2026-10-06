@@ -40,6 +40,7 @@
 
 #include <alpacacore/util/serial_io.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -54,10 +55,10 @@ namespace alpacacore::util {
  *        open, already-configured (9600 8N1, non-canonical) fd and wait up
  *        to @p timeout_ms for the exact reply (the same byte followed by
  *        '#'). Leaves the fd open; the caller owns it before and after.
- *        The deadline is checked between reads, so the caller's VTIME is the
- *        granularity at which it is honoured: configure a short one (100 ms,
- *        as both callers do), or a silent port overruns @p timeout_ms by up
- *        to one read timeout.
+ *        Every read waits on poll(POLLIN) for the time left before the
+ *        deadline, so the bound holds even on a USB-serial adapter that
+ *        ignores VMIN/VTIME, where a bare read() on a silent port parks
+ *        forever (#836). The fd may be blocking or non-blocking.
  *
  * Strict, and tolerant of noise ahead of the real reply: only an exact
  * `#`-terminated token that is the echoed byte followed by '#' counts as a
@@ -84,7 +85,25 @@ inline bool exchange_synscan_echo_on_fd(int fd, int timeout_ms) {
 
     std::string token;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
+    for (;;) {
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) {
+            break;
+        }
+        struct pollfd pfd {};
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        const int pr = ::poll(&pfd, 1, static_cast<int>(remaining));
+        if (pr == 0) {
+            break;
+        }
+        if (pr < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
         char ch = 0;
         const ssize_t r = read(fd, &ch, 1);
         if (r == 1) {
@@ -97,8 +116,8 @@ inline bool exchange_synscan_echo_on_fd(int fd, int timeout_ms) {
             } else if (token.size() > 8) {
                 token.clear();  // runaway garbage ahead of '#', not our echo either
             }
-        } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
-            break;
+        } else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
+            break;  // hangup or read error; EAGAIN is a spurious "readable"
         }
     }
     return false;
@@ -131,8 +150,11 @@ inline bool port_answers_synscan_echo(const std::string& port_path, int timeout_
     tty.c_cflag &= ~CRTSCTS;
     tty.c_cflag &= ~HUPCL;  // do not drop DTR on close: some adapters reset the far end on it
     tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 1;  // 100 ms per read, the deadline below bounds the loop
-    if (tcsetattr(fd, TCSANOW, &tty) != 0 || !clear_nonblocking(fd)) {
+    tty.c_cc[VTIME] = 1;
+    // Stay non-blocking, as the Sky-Watcher ":e1" probe does: the echo
+    // helper's poll() bounds the wait, and a read after a spurious
+    // "readable" returns EAGAIN instead of parking.
+    if (tcsetattr(fd, TCSANOW, &tty) != 0 || !set_nonblocking(fd)) {
         close(fd);
         return false;
     }
