@@ -17,8 +17,8 @@
 // down, one host per kFakeConnectableRoster row.
 
 #include <alpacacore/alpaca_errors.h>
-#include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/focuser_driver.h>
@@ -1587,9 +1587,9 @@ TEST_CASE("Contract sweep - every available catalog descriptor has a registry en
     }
     // Not vacuous: a build whose registry holds a catalog vendor's entries has that vendor's factory, so
     // at least one view was compared (zero means register_builtin_factories() compiled empty).
-    const bool catalog_vendor_built =
-        std::any_of(registered.begin(), registered.end(),
-                    [&](const CatalogPair& p) { return described_vendors.count(p.first) == 1; });
+    const bool catalog_vendor_built = std::any_of(registered.begin(), registered.end(), [&](const CatalogPair& p) {
+        return described_vendors.count(p.first) == 1;
+    });
     if (catalog_vendor_built) CHECK(compared > 0);
 }
 
