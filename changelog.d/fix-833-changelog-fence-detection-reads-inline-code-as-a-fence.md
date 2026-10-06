@@ -1,0 +1,2 @@
+### Fixed
+- **Changelog fragment check no longer reads inline code as a code fence** (scripts): a continuation line that starts with inline code (three backticks, text, three backticks) is not an opening fence, because a backtick fence's info string cannot hold a backtick, and a fence-looking line indented 4 or more columns past the bullet content is an indented code block; both cases are pinned in `scripts/changelog_fragments.py --self-test`.
