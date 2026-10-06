@@ -1339,3 +1339,70 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory warns about a saved config w
 }
 
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
+
+// ---------------------------------------------------------------------------
+// Bisque / Paramount (TheSkyX) telescope
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const DeviceKey kBisqueKey{"bisque", DeviceType::Telescope};
+const std::string kBisqueHostMissing = "Host is required for Bisque/TheSkyX connection";
+
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the Bisque telescope in every build",
+          "[catalog][bisque][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kBisqueKey);
+    REQUIRE(v != nullptr);
+    // The first word is exactly "Bisque" so vendor_label() keeps the arm's texts.
+    CHECK(v->display_name == "Bisque Paramount (TheSkyX)");
+    CHECK(v->build_option == "ALPACACORE_ENABLE_BISQUE");
+
+    // An absent host reads as the arm's default "localhost", so it is not refused.
+    CHECK_FALSE(catalog.normalize(kBisqueKey, DeviceConfig{}, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the Bisque telescope available only when built",
+          "[catalog][bisque][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kBisqueKey);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_BISQUE
+    CHECK(v->available);
+#else
+    CHECK_FALSE(v->available);
+    try {
+        (void)catalog.create(kBisqueKey, DeviceConfig{}, 0);
+        FAIL("create() must throw when Bisque is not built");
+    } catch (const std::runtime_error& e) {
+        CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_BISQUE") != std::string::npos);
+    }
+#endif
+}
+
+TEST_CASE("Builtin catalog - Bisque normalize refuses an empty host from the API and warns for a saved config",
+          "[catalog][bisque][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    DeviceConfig config;
+    config.set("host", std::string{""});
+
+    const auto api = catalog.normalize(kBisqueKey, config, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(*api.rejection == kBisqueHostMissing);
+
+    // A saved config is registered anyway so it stays editable in the web UI.
+    const auto persisted = catalog.normalize(kBisqueKey, config, Source::Persisted);
+    CHECK_FALSE(persisted.rejection.has_value());
+    CHECK(any_contains(persisted.warnings, kBisqueHostMissing));
+
+    config.set("host", std::string{"skyx.local"});
+    const auto ok = catalog.normalize(kBisqueKey, config, Source::Api);
+    CHECK_FALSE(ok.rejection.has_value());
+    CHECK(string_at(ok.config, "host") == "skyx.local");
+}
