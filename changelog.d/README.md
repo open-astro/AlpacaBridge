@@ -19,8 +19,11 @@ fragment, so keep scratch files elsewhere.
 
 One or more `### <Category>` subsections, each with at least one `- ` bullet. A
 bullet uses the existing entry style: a bold summary, the component and the
-upstream issue (`issue #N`), then the detail. A fragment has no `#` or `##`
-heading, no version and no date; the release supplies them.
+upstream issue (`issue #N`), then the detail. Write each bullet on one line, however
+long; do not wrap it. A nested `- ` bullet, a fenced code block, or a paragraph
+after a blank line may follow a bullet; `--check` refuses any other line that
+continues one. A fragment has no `#` or `##` heading, no version and no date; the
+release supplies them.
 
 Categories, in the order the release writes them:
 
@@ -38,8 +41,7 @@ its base category.
 
 ```markdown
 ### Fixed
-- **Bisque/TheSkyX: slew refuses NaN and infinity** (AlpacaCore, issue #627): what
-  was wrong, what it does now.
+- **Bisque/TheSkyX: slew refuses NaN and infinity** (AlpacaCore, issue #627): what was wrong, what it does now.
 
 ### Added (tests)
 - **Bisque NaN slew cases** (issue #627): three test cases.

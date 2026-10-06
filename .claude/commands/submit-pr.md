@@ -227,6 +227,7 @@ Build the body from the branch's commits and diffs. The body is
 - Driver PRs: the vendor and device model, the unit-test case and assertion counts, the ConformU result and the report path (`AlpacaCore/conformu/<Vendor>/<Model>/<arch>/`) go under **Verification**.
 - Web UI Before / After tables go under **Verification**.
 - The body ends with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+- Check the shape before you submit: save the body to a file and run `python3 scripts/check_pr_template.py --body-file <file>` (pre-flight runs it when `PR_BODY_FILE` is set). The `pr-template` job in `.github/workflows/pr-body.yml` runs the same check on the PR.
 
 ### Falsified by (new test cases)
 
