@@ -2145,7 +2145,10 @@ public:
         // after its motor commands (open-astro#459).
         remember_command_branch_locked(axis2);
         // open-astro#436: the axes did not move, the frame did; the live
-        // guard must not read the jump as a crossing.
+        // guard must not read the jump as a crossing. The cache goes first:
+        // set_tracking_locked() can release mutex_, and a guard poll in that
+        // window must read the new frame, not take the old one as its baseline.
+        invalidate_position_cache_locked();
         limit_guard_baseline_.reset();
         if (was_tracking) {
             set_tracking_locked(lock, true);
@@ -2365,9 +2368,12 @@ public:
                     ALPACA_LOG_WARN("SkyWatcher",
                                     std::string("MoveAxis stop: failed to restore tracking: ") + e.what());
                 }
-            } else if (channel == kAxisDec && tracking_ && dec_rate_arcsec_per_sec_ != 0.0 && generation_ok) {
+            } else if (channel == kAxisDec && tracking_effectively_on_locked() && dec_rate_arcsec_per_sec_ != 0.0 &&
+                       generation_ok) {
                 // Same restore contract for Dec: a manual nudge must not
-                // silently cancel an active DeclinationRate offset.
+                // silently cancel an active DeclinationRate offset. Not while
+                // a Tracking=false is in flight (the limit guard stops Dec
+                // before tracking): the restore would supersede its stop-wait.
                 try {
                     apply_dec_rate_offset_locked(lock);
                 } catch (const std::exception& e) {
@@ -4600,9 +4606,15 @@ private:
     // superseded between two polls never takes an edge with it. Goto, Park
     // and FindHome are exempt: while one owns the axes the baseline is
     // dropped, and the first sample after it starts a new one. A crossing
-    // stops tracking first, then each MoveAxis axis, through the public entry
-    // points with mutex_ released (tracking off before the MoveAxis stop, so
-    // the stop task finds tracking off and does not restore it).
+    // stops the motion through the public entry points with mutex_ released:
+    // the Dec MoveAxis stop first (an asynchronous initiator, so a slow
+    // tracking stop never holds it back), then tracking, then the RA MoveAxis
+    // stop (tracking off before it, so its stop task finds tracking off and
+    // does not restore it, #535). Each stop is tried on its own, and the
+    // crossing is consumed only once every stop has landed in a body that is
+    // still current: a stop that throws, or one a superseded body skips,
+    // leaves the inside baseline in place, so the current body's next poll
+    // sees the same crossing and stops again.
 
     // Call without mutex_ held (AsyncOperation rule 10), and never from the
     // body.
@@ -4671,7 +4683,11 @@ private:
                         if (limit_guard_baseline_) {
                             crossing = util::crossed(motion_limits_, *limit_guard_baseline_, sample);
                         }
-                        limit_guard_baseline_ = sample;
+                        // On a crossing the inside baseline stays until the
+                        // stops have landed (below).
+                        if (crossing == util::LimitCrossing::None) {
+                            limit_guard_baseline_ = sample;
+                        }
                     } catch (const std::exception& e) {
                         // No sample this poll: the read paths report the
                         // link fault; keep the last good baseline.
@@ -4695,18 +4711,34 @@ private:
                               " min past the meridian";
                 ALPACA_LOG_WARN("SkyWatcher", what + ": stopping" + (stop_tracking ? " tracking" : "") +
                                                   (stop_ra || stop_dec ? " MoveAxis" : ""));
-                try {
-                    if (stop_tracking) {
-                        set_tracking(false);
+                bool all_stopped = true;
+                const auto stop = [&](bool wanted, const auto& command) {
+                    if (!wanted) {
+                        return;
                     }
-                    if (stop_ra) {
-                        move_axis(0, 0.0);
+                    // A superseded body leaves the stop to the current one,
+                    // which may own a MoveAxis started since the decision.
+                    if (ctx.stop_reason() != util::StopReason::None) {
+                        all_stopped = false;
+                        return;
                     }
-                    if (stop_dec) {
-                        move_axis(1, 0.0);
+                    try {
+                        command();
+                    } catch (const std::exception& e) {
+                        all_stopped = false;
+                        ALPACA_LOG_ERROR("SkyWatcher", std::string("Motion limit guard: stop failed: ") + e.what());
                     }
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_ERROR("SkyWatcher", std::string("Motion limit guard: stop failed: ") + e.what());
+                };
+                stop(stop_dec, [this] { move_axis(1, 0.0); });
+                stop(stop_tracking, [this] { set_tracking(false); });
+                stop(stop_ra, [this] { move_axis(0, 0.0); });
+                if (all_stopped) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    // Not when a sync, goto or newer body has reset or taken
+                    // the baseline since the decision.
+                    if (ctx.stop_reason() == util::StopReason::None && limit_guard_baseline_) {
+                        limit_guard_baseline_ = sample;
+                    }
                 }
             }
             if (!ctx.wait_for(poll)) {

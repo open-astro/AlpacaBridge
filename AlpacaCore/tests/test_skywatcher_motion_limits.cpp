@@ -589,6 +589,55 @@ TEST_CASE("SkyWatcher limits - motion that starts outside a limit is not stopped
     driver->set_connected(false);
 }
 
+// Tracking on, then MoveAxis on the Dec axis across a floor 1.5 deg below the
+// start, with every ":K" from here on ramping for 7 s: longer than the 5 s the
+// tracking stop waits for the RA axis, so that stop always times out.
+// Returns the Dec and RA stop counts at the moment the Dec axis started.
+std::pair<int, int> start_guarded_move_with_slow_stops(FakeSkyWatcherMount& mount,
+                                                       alpacacore::TelescopeDriver& driver) {
+    driver.set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    mount.set_stop_ramp_ms(7000);
+    driver.move_axis(1, kMaxMoveAxisRate);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
+    return {mount.stop_count(2), mount.stop_count(1)};
+}
+
+TEST_CASE("SkyWatcher limits - a tracking stop that times out does not hold back the MoveAxis stop",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg);
+    auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
+    const auto [dec_stops, ra_stops] = start_guarded_move_with_slow_stops(mount, *driver);
+    static_cast<void>(ra_stops);
+
+    // The floor is reached in about a second; the Dec stop must follow at
+    // the next poll, not after the tracking stop's 5 s wait gives up.
+    CHECK(wait_until([&] { return mount.stop_count(2) > dec_stops; }, 3000));
+    mount.set_stop_ramp_ms(0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher limits - a guard stop that fails is retried on the next poll",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg);
+    auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
+    const auto [dec_stops, ra_stops] = start_guarded_move_with_slow_stops(mount, *driver);
+    static_cast<void>(dec_stops);
+
+    // The first tracking stop has reached the RA axis and will time out on
+    // its 7 s ramp. A stop sent from now on lands at once, so only a retry
+    // can turn tracking off.
+    REQUIRE(wait_until([&] { return mount.stop_count(1) > ra_stops; }, 4000));
+    mount.set_stop_ramp_ms(0);
+    CHECK(wait_until([&] { return !driver->get_tracking(); }, 12000));
+    CHECK_FALSE(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher limits - with no limit set the guard never starts", "[skywatcher][telescope][limits][guard]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
