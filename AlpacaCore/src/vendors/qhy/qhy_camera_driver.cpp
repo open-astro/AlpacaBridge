@@ -1461,8 +1461,7 @@ public:
             exposure_failure_.clear();
             exposure_status_ = QHYExposureStatus::Working;
             exposure_deadline_ = std::chrono::steady_clock::now() +
-                                 std::chrono::microseconds(static_cast<long long>(exposure_us)) +
-                                 watchdog_margin_;
+                                 std::chrono::microseconds(static_cast<long long>(exposure_us)) + watchdog_margin_;
             exposure_deadline_valid_ = true;
             exposure_buffer_.clear();
             exposure_width_ = 0;

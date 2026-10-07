@@ -15,8 +15,8 @@
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
