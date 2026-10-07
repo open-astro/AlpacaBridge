@@ -61,11 +61,13 @@ repeating them.
 
 It is breaking when:
 
-- **A saved config that loaded no longer loads.** Saved devices go through the same checks as
-  `configuredevice` at every start-up, so a new range bound, a stricter type, or a new allowlist
-  for a field drops a saved device that the last release accepted. Two examples from the release after 4.2.0: GPIO
-  lines outside the board's allowlist (issue #765), and `9600.5` in a field that is now a whole
-  number.
+- **A saved config that loaded no longer loads.** Saved devices are checked again at every
+  start-up. A new allowlist or a stricter type in a `register_device_from_config()` arm, or a
+  stricter type in a catalog field, drops a saved device that the last release accepted. Two
+  examples from the release after 4.2.0: GPIO lines outside the board's allowlist (issue #765),
+  and `9600.5` in a catalog field that is now a whole number. A catalog field's out-of-range
+  saved value is not dropped: start-up replaces it with the field's default ("config
+  normalized" in the log). That is still a visible change, so say it in the entry.
 - **A request that succeeded now fails**: a new refusal, a removed fallback, a removed retry or
   a stricter precondition. Examples: SynScan `Tracking=true` with no site latitude, and an iOptron
   GOTO that the driver used to retry with relaxed limits (issue #763).
