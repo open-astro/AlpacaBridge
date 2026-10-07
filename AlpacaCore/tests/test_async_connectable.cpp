@@ -93,6 +93,7 @@ public:
     // This double is not an AlpacaDriver, so there is no virtual to forward
     // to -- it reads the protected accessor directly. A real driver uses
     // ALPACA_EXPOSE_CONNECT_ERROR().
+    using alpacacore::AsyncConnectable::connecting_error;
     using alpacacore::AsyncConnectable::last_connect_error;
 
     void connect() { start_connection_task(true); }
@@ -329,4 +330,56 @@ TEST_CASE("AsyncConnectable - a failed disconnect does not write the connect rea
     wait_until_idle(d);
     CHECK(!d.get_connected());
     CHECK(d.last_connect_error().empty());
+}
+
+// Issue #776: after a failed Connect(), the completion property (Connecting)
+// has to report the failure until the client's next Connect or Disconnect,
+// not fall back to false as if the connect had simply finished.
+TEST_CASE("AsyncConnectable - a failed connect stands until the next request", "[async_connectable][unit]") {
+    TestConnectable d;
+    CHECK(d.connecting_error().empty());
+
+    d.fail_connect_.store(true);
+    d.connect();
+    wait_until_idle(d);
+    REQUIRE_FALSE(d.get_connecting());
+    CHECK(d.connecting_error() == "site latitude and longitude must be set before connecting");
+    // Read twice: reporting it is not consuming it.
+    CHECK(d.connecting_error() == "site latitude and longitude must be set before connecting");
+
+    // A Disconnect resets it; LastConnectError (the management API's copy)
+    // keeps the reason, as before.
+    d.disconnect();
+    wait_until_idle(d);
+    CHECK(d.connecting_error().empty());
+    CHECK(d.last_connect_error() == "site latitude and longitude must be set before connecting");
+
+    // A new Connect resets it at once, before the attempt finishes.
+    d.connect();
+    wait_until_idle(d);
+    REQUIRE(!d.connecting_error().empty());
+    d.fail_connect_.store(false);
+    d.op_delay_ = 200ms;
+    d.connect();
+    CHECK(d.connecting_error().empty());
+    wait_until_idle(d);
+    CHECK(d.get_connected());
+    CHECK(d.connecting_error().empty());
+}
+
+TEST_CASE("AsyncConnectable - a connect failure superseded by a disconnect is not reported",
+          "[async_connectable][unit]") {
+    TestConnectable d;
+    d.op_delay_ = 200ms;
+    d.fail_connect_.store(true);
+    d.connect();
+    std::this_thread::sleep_for(20ms);
+    REQUIRE(d.get_connecting());
+    // The client has moved on: its newest request is the Disconnect, which
+    // succeeds, so Connecting must not then raise the older connect's error.
+    d.disconnect();
+    wait_until_idle(d);
+    CHECK_FALSE(d.get_connected());
+    CHECK(d.connecting_error().empty());
+    CHECK(d.last_connect_error() == "site latitude and longitude must be set before connecting");
 }

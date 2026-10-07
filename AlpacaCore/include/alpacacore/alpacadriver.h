@@ -152,6 +152,19 @@ public:
     virtual std::string get_last_connect_error() const { return {}; }
 
     /**
+     * @brief The failure GET Connecting raises, or "" when none stands.
+     *
+     * Issue #776: after a failed Connect() the completion property must report
+     * the failure, not plain false, until the client's next Connect or
+     * Disconnect. Differs from get_last_connect_error(), which the management
+     * API keeps across a Disconnect: this one is reset by every new request,
+     * and a failure the client already superseded is never stored. Forwarded
+     * by ALPACA_EXPOSE_CONNECT_ERROR(); a driver without AsyncConnectable
+     * connects synchronously and reports its failure from Connect() itself.
+     */
+    virtual std::string get_connecting_error() const { return {}; }
+
+    /**
      * @brief Get the device state snapshot.
      */
     virtual std::vector<DeviceState> get_device_state() const { return {}; }

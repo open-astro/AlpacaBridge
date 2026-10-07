@@ -5928,7 +5928,7 @@ int main() {
     // produced #130 and is deliberately NOT one of them any more: that fix
     // made its getter a bare atomic load. The router must poll
     // get_connecting(), the non-blocking signal, so GET connected/connecting
-    // answer at once mid-connect and the PUT connected wait honours its 8 s
+    // answer at once mid-connect and the PUT connected wait honours its
     // deadline instead of stalling for the whole handshake.
     {
         auto& registry = alpacacore::management::DeviceRegistry::instance();
@@ -5971,23 +5971,51 @@ int main() {
         EXPECT(!stub->get_connected());
 
         // The PUT connected wait: its first get_connected() call used to block
-        // on the driver mutex for the entire connect, so the 8 s deadline
-        // never fired. With a 9.5 s handshake the reply must come back at the
-        // deadline with Connecting still true, and the link comes up after.
-        // (Deliberately ~10 s of wall clock: the deadline is the thing under
-        // test.)
+        // on the driver mutex for the entire connect, so the wait deadline
+        // never fired. Issue #776: PUT Connected=true now returns only once
+        // the connect has finished, so a 9.5 s handshake (past the old 8 s
+        // reply) answers success with the link already up and Connecting
+        // false. (Deliberately ~10 s of wall clock: the old 8 s reply is the
+        // thing under test.)
         auto slow = std::make_shared<LockedSlowConnectStubDriver>(9703, Ms(9500));
         EXPECT(registry.register_device(slow));
         const std::string slow_base = "/api/v1/covercalibrator/9703";
         const auto put_started = std::chrono::steady_clock::now();
         put_connected(router, slow_base, "1", true);
-        EXPECT(elapsed_ms(put_started) < 9200);
-        EXPECT(slow->get_connecting());
-        std::this_thread::sleep_for(Ms(2000));
+        EXPECT(elapsed_ms(put_started) >= 9500);
         EXPECT(!slow->get_connecting());
+        EXPECT(slow->get_connected());
         EXPECT(get_connected_value(router, slow_base, "1"));
         put_connected(router, slow_base, "1", false);
         EXPECT(!slow->get_connected());
+
+        // The wait still has a bound, and #130 still matters for it: with a
+        // 1 s limit and a 4 s handshake that holds the driver mutex, the reply
+        // comes back near the limit (not after the handshake) as a
+        // DriverException, and the abandoned connect is withdrawn so the
+        // device does not come up behind a client that was told it failed.
+        alpacahttp::Router wait_router;
+        wait_router.set_connect_wait_limit(Ms(1000));
+        auto capped = std::make_shared<LockedSlowConnectStubDriver>(9704, Ms(4000));
+        EXPECT(registry.register_device(capped));
+        const std::string capped_base = "/api/v1/covercalibrator/9704";
+        const auto capped_started = std::chrono::steady_clock::now();
+        {
+            const auto resp =
+                route_request(wait_router, "PUT", capped_base + "/connected", "Connected=true&ClientID=1");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            EXPECT(json.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::DriverException));
+            EXPECT(json.value("ErrorMessage", "").find("still connecting") != std::string::npos);
+        }
+        EXPECT(elapsed_ms(capped_started) < 2500);
+        EXPECT(!get_connected_value(wait_router, capped_base, "1"));
+        for (int i = 0; i < 100 && capped->get_connecting(); ++i) {
+            std::this_thread::sleep_for(Ms(100));
+        }
+        EXPECT(!capped->get_connecting());
+        EXPECT(!capped->get_connected());
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9704);
     }
 
     // open-astro#289: the description carries the host-clock state, and the
@@ -6069,8 +6097,10 @@ int main() {
         const auto response = route_request(router, "PUT", "/api/v1/covercalibrator/9650/connected", "Connected=true");
         const auto json = nlohmann::json::parse(response.body(), nullptr, false);
         EXPECT(!json.is_discarded());
-        // Error NUMBER unchanged -- a client matching on it is unaffected.
-        EXPECT(json.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::NotConnected));
+        // Issue #776: a DriverException. ASCOM Connected says "Do not use a
+        // NotConnectedException here": the device refused, it was not asked
+        // to work while disconnected.
+        EXPECT(json.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::DriverException));
         EXPECT(json.value("ErrorMessage", "") == std::string(RefusingConnectStubDriver::kReason));
 
         // The Platform 7 path has no slot for this: PUT /connect returns
@@ -6087,6 +6117,20 @@ int main() {
         EXPECT(!refusing->get_connecting());
         EXPECT(!refusing->get_connected());
 
+        // Issue #776: the completion property reports the failure. GET
+        // Connecting raises the driver's reason as a DriverException, on every
+        // read, until the client's next Connect or Disconnect.
+        const auto connecting_reply = [&router]() {
+            return nlohmann::json::parse(route_request(router, "GET", "/api/v1/covercalibrator/9650/connecting").body(),
+                                         nullptr, false);
+        };
+        for (int read = 0; read < 2; ++read) {
+            const auto failed = connecting_reply();
+            EXPECT(!failed.is_discarded());
+            EXPECT(failed.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::DriverException));
+            EXPECT(failed.value("ErrorMessage", "") == std::string(RefusingConnectStubDriver::kReason));
+        }
+
         const auto listed = nlohmann::json::parse(
             route_request(router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
         EXPECT(!listed.is_discarded() && listed.contains("Value"));
@@ -6097,6 +6141,20 @@ int main() {
             }
         }
         EXPECT(found_reason);
+
+        // Disconnect resets the Connecting error; LastConnectError stays.
+        EXPECT(nlohmann::json::parse(route_request(router, "PUT", "/api/v1/covercalibrator/9650/disconnect", "").body(),
+                                     nullptr, false)
+                   .value("ErrorNumber", -1) == 0);
+        for (int i = 0; i < 100 && refusing->get_connecting(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        {
+            const auto cleared = connecting_reply();
+            EXPECT(!cleared.is_discarded() && cleared.value("ErrorNumber", -1) == 0);
+            EXPECT(cleared.contains("Value") && cleared["Value"] == false);
+        }
+        EXPECT(refusing->get_last_connect_error() == std::string(RefusingConnectStubDriver::kReason));
 
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9650);
     }

@@ -151,6 +151,14 @@ public:
         return std::chrono::milliseconds(motion_watchdog_ms_.load(std::memory_order_relaxed));
     }
 
+    // open-astro#776: how long PUT Connected=true waits for a connect task.
+    void set_connect_wait_limit(std::chrono::milliseconds limit) {
+        connect_wait_limit_ms_.store(limit.count(), std::memory_order_relaxed);
+    }
+    std::chrono::milliseconds connect_wait_limit() const {
+        return std::chrono::milliseconds(connect_wait_limit_ms_.load(std::memory_order_relaxed));
+    }
+
     // open-astro#392: extra names route() accepts as a request's Host, on
     // top of the built-in ones (IP literals, localhost, this machine's name,
     // *.local, *.home.arpa, *.internal). An entry with a leading dot is a
@@ -216,6 +224,9 @@ private:
     // open-astro#547.
     std::atomic<std::chrono::milliseconds::rep> motion_watchdog_ms_{
         std::chrono::duration_cast<std::chrono::milliseconds>(alpacacore::util::kClientSilenceStopInterval).count()};
+
+    // open-astro#776.
+    std::atomic<std::chrono::milliseconds::rep> connect_wait_limit_ms_{60000};
 
     // Lazily constructed on first /management/v1/wifi/* request so setups
     // without NetworkManager (or without a wifi adapter) pay no cost.

@@ -125,6 +125,17 @@ protected:
         return last_connect_error_;
     }
 
+    /// The failure GET Connecting raises, or "" (issue #776). Set when a
+    /// connect fails, but only when that connect is still the newest request:
+    /// a client that has since asked for a Disconnect must not have the older
+    /// connect's error raised at it. Reset by every Connect/Disconnect that
+    /// start_connection_task() accepts, unlike last_connect_error(), which
+    /// the management API keeps across a Disconnect.
+    std::string connecting_error() const {
+        std::lock_guard<std::mutex> lock(connect_error_mutex_);
+        return connecting_error_;
+    }
+
     explicit AsyncConnectable(std::string log_tag) : log_tag_(std::move(log_tag)) {}
 
     // Destructor intentionally does NOT stop the thread: by the time this
@@ -166,12 +177,14 @@ protected:
             // recorded against a non-Idle state is guaranteed to be seen.
             std::lock_guard<std::mutex> pending_lock(pending_mutex_);
             if (!connect) {
+                begin_request();
                 pending_connect_ = false;
                 if (inflight == kConnConnect) {
                     pending_disconnect_ = true;
                     ALPACA_LOG_TRACE(log_tag_, "start_connection_task: disconnect recorded against in-flight connect");
                 }
             } else if (inflight == kConnDisconnect && !pending_disconnect_) {
+                begin_request();
                 pending_connect_ = true;
                 ALPACA_LOG_TRACE(log_tag_, "start_connection_task: connect recorded against in-flight disconnect");
             } else {
@@ -186,9 +199,10 @@ protected:
         if (connection_thread_.joinable()) {
             connection_thread_.join();  // finished task; reap before reuse
         }
+        const std::uint64_t request = begin_request();
         conn_task_.store(connect ? kConnConnect : kConnDisconnect);
         try {
-            connection_thread_ = std::thread(&AsyncConnectable::run_connection_task, this, connect);
+            connection_thread_ = std::thread(&AsyncConnectable::run_connection_task, this, connect, request);
         } catch (...) {
             // std::thread ctor can throw (e.g. OS thread limit). Roll back the
             // in-flight publish or conn_task_ stays non-Idle forever and every
@@ -294,7 +308,7 @@ protected:
     }
 
 private:
-    void run_connection_task(bool connect) {
+    void run_connection_task(bool connect, std::uint64_t request) {
         ALPACA_LOG_TRACE(log_tag_, std::string("run_connection_task: entry connect=") + (connect ? "true" : "false"));
         bool last_failed = false;
         // Cleared at the start of the attempt, not at the end of the previous
@@ -306,7 +320,7 @@ private:
             set_connected(connect);
         } catch (const std::exception& e) {
             last_failed = true;
-            record_connect_error(connect, e.what());
+            record_connect_error(connect, e.what(), request);
             ALPACA_LOG_ERROR(log_tag_, std::string("Connection task failed: ") + e.what());
         } catch (...) {
             last_failed = true;
@@ -314,7 +328,7 @@ private:
             // std::terminate. Every driver throws std:: exceptions today, but
             // this base is now the single chokepoint for EVERY driver's
             // connect path — swallow-and-log rather than bet on that forever.
-            record_connect_error(connect, "the driver threw a non-std exception");
+            record_connect_error(connect, "the driver threw a non-std exception", request);
             ALPACA_LOG_ERROR(log_tag_, "Connection task failed: non-std exception");
         }
         // Tail under connection_mutex_: see the class comment for why the
@@ -402,16 +416,19 @@ private:
             }
             last_failed = false;
             clear_last_connect_error(need_connect);
+            // The deferred transition answers the newest request: every
+            // start_connection_task() waits on connection_mutex_, held here.
+            request = current_request();
             try {
                 set_connected(need_connect);
             } catch (const std::exception& e) {
                 last_failed = true;
-                record_connect_error(need_connect, e.what());
+                record_connect_error(need_connect, e.what(), request);
                 ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") + (need_connect ? "connect" : "disconnect") +
                                                " failed: " + e.what());
             } catch (...) {
                 last_failed = true;
-                record_connect_error(need_connect, "the driver threw a non-std exception");
+                record_connect_error(need_connect, "the driver threw a non-std exception", request);
                 ALPACA_LOG_ERROR(log_tag_, std::string("Deferred ") + (need_connect ? "connect" : "disconnect") +
                                                " failed: non-std exception");
             }
@@ -423,12 +440,29 @@ private:
     // reported on its own path and has no client waiting on a reason here;
     // letting it overwrite the string would replace the connect reason a
     // client is about to read with an unrelated teardown message.
-    void record_connect_error(bool connect, const std::string& reason) {
+    void record_connect_error(bool connect, const std::string& reason, std::uint64_t request) {
         if (!connect) {
             return;
         }
         std::lock_guard<std::mutex> lock(connect_error_mutex_);
         last_connect_error_ = reason;
+        if (request == request_seq_) {
+            connecting_error_ = reason;
+        }
+    }
+
+    // A Connect or Disconnect the client sent and this base accepted (spawned
+    // or queued, not dropped): it supersedes any failure GET Connecting was
+    // reporting (issue #776).
+    std::uint64_t begin_request() {
+        std::lock_guard<std::mutex> lock(connect_error_mutex_);
+        connecting_error_.clear();
+        return ++request_seq_;
+    }
+
+    std::uint64_t current_request() const {
+        std::lock_guard<std::mutex> lock(connect_error_mutex_);
+        return request_seq_;
     }
 
     void clear_last_connect_error(bool connect) {
@@ -452,6 +486,8 @@ private:
     // mutable so the accessor can stay const.
     mutable std::mutex connect_error_mutex_;
     std::string last_connect_error_;  // under connect_error_mutex_
+    std::string connecting_error_;    // under connect_error_mutex_
+    std::uint64_t request_seq_ = 0;   // under connect_error_mutex_
     std::thread connection_thread_;
 };
 
@@ -462,5 +498,6 @@ private:
 /// public section; a driver that omits it silently reports no reason and the
 /// client is back to the bare "Connection failed" (issue #358). Enforced by
 /// scripts/check_connect_error_hook.py.
-#define ALPACA_EXPOSE_CONNECT_ERROR() \
-    std::string get_last_connect_error() const override { return AsyncConnectable::last_connect_error(); }
+#define ALPACA_EXPOSE_CONNECT_ERROR()                                                                      \
+    std::string get_last_connect_error() const override { return AsyncConnectable::last_connect_error(); } \
+    std::string get_connecting_error() const override { return AsyncConnectable::connecting_error(); }

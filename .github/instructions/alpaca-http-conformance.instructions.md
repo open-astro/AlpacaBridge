@@ -51,8 +51,8 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   went stale for SynScan** -- answer `get_connected()` under the state mutex that their
   `set_connected(true)` holds for the entire handshake, so a
   `get_connected()` call from the `PUT connected` wait or from a `GET
-  connected` blocked for the whole connect and the wait's 8 s deadline never
-  fired (25 s on a silent handset: five 5 s query timeouts). The
+  connected` blocked for the whole connect and the wait's deadline (8 s then)
+  never fired (25 s on a silent handset: five 5 s query timeouts). The
   wrapper-backed switch drivers (iMate PowerBox, StellaVita, ASIAIR, ASIAIR
   Plus) used to block too, inside the wrapper's `is_open()`; since issue #382
   each wrapper publishes its open state as an atomic written only inside its
@@ -80,15 +80,18 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   correcting the others. State the rule, not the arithmetic. Regression tests:
   `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and
   `AlpacaCore/tests/test_synscan_async_park.cpp`.
-  **Known trade-off:** while a task is in flight, `Connected` reports false
-  for every client, including one whose `PUT connected` reply already came
-  back at the 8 s deadline with the connect still proceeding — a Platform 6
-  client that treats that combination as a hard failure gives up on a
-  connect that may still succeed moments later. Accepted because the
-  alternative (reading `get_connected()` directly) is the phantom-link bug
-  this rule fixes; there is no per-driver signal yet for which
-  `get_connected()` implementations are safe to read mid-task (the lock-free
-  majority) versus which aren't (the telescopes above).
+  **`PUT connected` returns the outcome (issue #776).** It waits for the
+  connect task to end (bounded by `Router::connect_wait_limit()`, 60 s) and
+  replies success only when the device is connected; a failed connect is a
+  `DriverException` carrying the driver's reason (ASCOM `Connected`: "Do not
+  use a NotConnectedException here"), and a connect still running at the limit
+  is a `DriverException` and is withdrawn when no other client holds the
+  device. The old 8 s reply with the connect still proceeding is gone. After a
+  failed Platform 7 `Connect()`, `GET connecting` raises the stored failure
+  (`AlpacaDriver::get_connecting_error()`, kept by `AsyncConnectable`) as a
+  `DriverException` on every read until the client's next accepted Connect or
+  Disconnect; `LastConnectError` on the management API is separate and keeps
+  the reason across a Disconnect.
   **Known gap (narrow, code review on PR #3):** `get_connecting()` and
   `get_connected()` are two separate calls, not one atomic snapshot — if a
   connect task starts in the gap between them, the `get_connected()` call
