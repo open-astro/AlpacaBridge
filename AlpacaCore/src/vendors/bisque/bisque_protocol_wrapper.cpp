@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -404,11 +405,34 @@ private:
     }
 
     void write_locked(const std::string& data) {
+        discard_stale_input_locked();
         // send_all loops over partial/interrupted sends so a trailing '#'
         // terminator is never dropped; MSG_NOSIGNAL keeps a dropped peer from
         // delivering SIGPIPE and killing the server.
         if (!util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL)) {
             throw AlpacaException("Failed to send command to TheSkyX");
+        }
+    }
+
+    // Anything already in the receive buffer before a command is sent is not
+    // that command's reply: a reply that arrived after its request timed out,
+    // or the rest of one read only in part. Left there, it is read as the next
+    // command's reply and every later reply stays one behind (issue #772).
+    void discard_stale_input_locked() {
+        char buf[256];
+        std::size_t discarded = 0;
+        while (true) {
+            // MSG_DONTWAIT: never waits, so holding mutex_ here is fine.
+            // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+            const ssize_t n = recv(socket_fd_, buf, sizeof(buf), MSG_DONTWAIT);
+            if (n <= 0) {
+                break;  // empty (EAGAIN) or closed; a closed peer fails the read that follows
+            }
+            discarded += static_cast<std::size_t>(n);
+        }
+        if (discarded > 0) {
+            ALPACA_LOG_WARN("Bisque", "Discarded " + std::to_string(discarded) +
+                                          " stale bytes from TheSkyX before the next command");
         }
     }
 

@@ -203,6 +203,29 @@ public:
             ps->stop.store(false);
         }
         if (request_ != nullptr) {
+            // Preserve-power policy (AGENTS.md "Never power-cycle on
+            // disconnect"): a PWM worker stops wherever it is in the cycle,
+            // so its line may be low. Drive each PWM line to the steady level
+            // of its duty before releasing -- duty > 0 stays on, duty == 0
+            // stays off. Boolean ports already hold their commanded level.
+            for (std::size_t i = 0; i < ports_.size(); ++i) {
+                if (!ports_[i].pwm_enabled) {
+                    continue;
+                }
+                const int d = port_states_[i]->value.load();
+                int rc;
+                {
+                    std::lock_guard<std::mutex> io(io_mutex_);
+                    rc = ::gpiod_line_request_set_value(request_, ports_[i].gpio_line, to_line_value(d > 0 ? 1 : 0));
+                }
+                if (rc != 0) {
+                    const int err = errno;
+                    ALPACA_LOG_WARN(kLogCategory, "ASIAIR: failed to settle PWM port on GPIO " +
+                                                      std::to_string(ports_[i].gpio_line) +
+                                                      " before release: " + util::errno_string(err) +
+                                                      " (port may be left in an indeterminate state)");
+                }
+            }
             ::gpiod_line_request_release(request_);
             request_ = nullptr;
         }

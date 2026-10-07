@@ -126,9 +126,9 @@ public:
     /// caller by sever() clearing the member.
     std::string slave_path() const { return slave_path_; }
 
-    /// Close both ends now: the driver's reads and writes on the slave fail
-    /// with EIO from here on, which is what a USB unplug looks like
-    /// (issue #237). Not reversible, and slave_path() is cleared here (not
+    /// Close both ends now: the driver's writes on the slave fail with EIO
+    /// and its reads return 0 at once from here on, which is what a USB
+    /// unplug looks like (issues #237, #772). Not reversible, and slave_path() is cleared here (not
     /// in close_all(), which the destructor also runs) so a test that tried
     /// to reopen the severed pty fails on an empty path rather than on
     /// ENOENT, or on a recycled /dev/pts/N belonging to someone else.

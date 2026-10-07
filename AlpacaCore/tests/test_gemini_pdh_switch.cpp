@@ -306,6 +306,8 @@ TEST_CASE("Gemini PDH Protocol Wrapper - Status frame parsing", "[gemini][switch
 // streamed frames vs. pending requests, and the commanded-value write paths.
 // ---------------------------------------------------------------------------
 
+#include <time.h>
+
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -556,7 +558,7 @@ TEST_CASE("Gemini PDH Switch Driver - Dead serial link (EIO) faults the link ins
     driver->set_switch_value(0, 0.0);  // a commanded value that must NOT survive the fault
     CHECK(driver->get_switch_value(0) == 0.0);
 
-    hub.sever_link();  // master side closed: every read/write on the slave is EIO now
+    hub.sever_link();  // master side closed: writes on the slave are EIO, reads return 0
     auto value_read_throws = [&] {
         try {
             (void)driver->get_switch_value(0);
@@ -574,6 +576,28 @@ TEST_CASE("Gemini PDH Switch Driver - Dead serial link (EIO) faults the link ins
     // Disconnect is still clean with a dead fd.
     CHECK_NOTHROW(driver->set_connected(false));
     CHECK_FALSE(driver->get_connected());
+}
+
+// Issue #772 (CC-18): once the master side is gone the slave is hung up, and
+// a read on it returns 0 at once instead of waiting out VTIME. The reader
+// thread must back off on that early 0 rather than spin a full core.
+TEST_CASE("Gemini PDH Switch Driver - Reader does not spin on a hung-up serial link", "[gemini][switch][unit][fake]") {
+    FakeGeminiPdh hub;
+    auto driver = connect_fake_hub(hub);
+    auto process_cpu_s = [] {
+        timespec ts{};
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+        return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) / 1e9;
+    };
+
+    hub.sever_link();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const double start = process_cpu_s();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    const double used = process_cpu_s() - start;
+    INFO("process CPU over 2 s after the cut: " << used << " s");
+    CHECK(used < 0.5);
+    CHECK_NOTHROW(driver->set_connected(false));
 }
 
 TEST_CASE("Gemini PDH Switch Driver - Old firmware is refused at connect", "[gemini][switch][unit][fake]") {

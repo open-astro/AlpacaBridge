@@ -182,8 +182,11 @@ std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry
             if (frame.size() > kMaxFrameLen) {
                 frame.clear();  // garbage -- resynchronise on the next terminator
             }
-        } else if (r < 0 && errno != EINTR) {
-            // Persistent read error (e.g. unplugged): back off instead of spinning.
+        } else if (r == 0 || errno != EINTR) {
+            // Persistent read error, or no byte: VTIME expired, or the tty is
+            // hung up (unplugged adapter, closed pty master), where read()
+            // returns 0 at once (issue #772). Back off instead of spinning.
+            // Connected stays true; the unanswered polls latch the fault (#237).
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }

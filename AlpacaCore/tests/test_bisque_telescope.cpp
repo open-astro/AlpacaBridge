@@ -12,6 +12,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 #include <alpacacore/version.h>
 
@@ -557,6 +558,36 @@ TEST_CASE("Bisque Telescope Driver - async handshake timeout releases the wrappe
     CHECK_NOTHROW(retry->set_connected(true));
     CHECK(retry->get_connected());
     retry->set_connected(false);
+}
+
+// Issue #772 (CC-19): a reply that lands after its request timed out must not
+// be read as the answer to the next request, or every later reply stays one
+// behind. Each query carries its number; the fake answers query 1 late.
+TEST_CASE("Bisque protocol wrapper - a reply that arrives after its timeout is not given to the next command",
+          "[bisque][telescope][unit][resync]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) -> std::string {
+        const auto at = command.find("Out = 'R");
+        if (at == std::string::npos) {
+            return "1#";
+        }
+        const std::string id(1, command[at + 8]);
+        if (id == "1") {
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));  // past the 300 ms timeout
+        }
+        return "|No error. Error = 0.R" + id + "#";
+    });
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::bisque::BisqueProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(loopback(server.port())));
+    struct Disconnect {
+        alpacacore::vendor::bisque::BisqueProtocolWrapper& w;
+        ~Disconnect() { w.disconnect(); }
+    } disconnect_at_exit{wrapper};
+
+    CHECK_THROWS_AS(wrapper.send_command("Out = 'R1#';", 0), alpacacore::AlpacaException);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));  // the late reply is now in the socket
+    CHECK(wrapper.send_command("Out = 'R2#';", 0) == "R2");
+    CHECK(wrapper.send_command("Out = 'R3#';", 0) == "R3");
 }
 
 TEST_CASE("Bisque PulseGuide - async status remains readable and negative duration is InvalidValue",

@@ -557,7 +557,7 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
 - **Recovery is automatic**: keep polling/reading at the normal cadence while faulted so the
   first frame clears the latch without a reconnect (a re-plugged hub on the same node).
 - **Test it hardware-free** with the pty fakes: `set_muted(true)` (hung MCU, healthy fd) and
-  `sever_link()` (master closed, reads/writes EIO) — `tests/fake_serial_streamer.h` for any
+  `sever_link()` (master closed: writes fail with EIO, reads return 0 at once) — `tests/fake_serial_streamer.h` for any
   streaming device, `fake_gemini_pdh.h` for the polled one. Assert: fault latches within the
   threshold, `Connected` still true, static metadata OK, nothing on the wire while faulted,
   and the next frame restores service.
