@@ -491,7 +491,8 @@ private:
     // mutable so the const get_position() can populate it on a cache miss.
     mutable std::optional<int> cached_position_;
     // Set by set_position() to the commanded slot while a move is in flight;
-    // cleared once a live read confirms arrival. See get_position().
+    // cleared once a live read confirms arrival, when the wheel rests on a
+    // non-target slot (rest rule), or when move_cfw throws. See get_position().
     mutable std::optional<int> pending_target_;
     // Rest detection for a move that ends on a non-target slot (guarded by mutex_).
     mutable std::optional<int> rest_candidate_;
