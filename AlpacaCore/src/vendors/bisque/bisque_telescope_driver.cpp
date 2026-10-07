@@ -674,6 +674,16 @@ public:
         if (direction < 0 || direction > 3 || duration < 0) {
             throw AlpacaException("PulseGuide direction or duration is invalid", AlpacaError::InvalidValue);
         }
+        // Cap: DirectGuide is a synchronous MoveTelescope that holds the
+        // protocol wrapper (and so the socket) until TheSkyX replies, and
+        // AbortSlew cannot interrupt it without interleaving replies on the
+        // same socket. Real guiding pulses are milliseconds to a few seconds;
+        // 30 s is well above any guide client's longest pulse, and bounds how
+        // long an AbortSlew or any other command can wait behind a guide.
+        constexpr int kMaxPulseGuideMs = 30000;
+        if (duration > kMaxPulseGuideMs) {
+            throw AlpacaException("PulseGuide duration must be at most 30000 ms", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("PulseGuide");
@@ -723,9 +733,7 @@ public:
         // MoveTelescope runs at TheSkyX's fixed speed, so its run time only
         // roughly tracks `duration`; never wait less than the configured bound.
         constexpr int kResponseMarginMs = 1000;
-        const int duration_bound_ms = duration > std::numeric_limits<int>::max() - kResponseMarginMs
-                                          ? std::numeric_limits<int>::max()
-                                          : duration + kResponseMarginMs;
+        const int duration_bound_ms = duration + kResponseMarginMs;  // no overflow: duration <= kMaxPulseGuideMs
         const int guide_timeout_ms = std::max(connection_info_.response_timeout_ms, duration_bound_ms);
         try {
             pulse_guide_thread_ = std::thread([this, generation, ra_arcsec, dec_arcsec, guide_timeout_ms] {
@@ -932,19 +940,22 @@ public:
         ++pulse_guide_generation_;
         pulse_guiding_ = false;
         pulse_guide_error_.clear();
-        auto& protocol = BisqueProtocolWrapper::instance();
-        std::exception_ptr error;
-        try {
-            protocol.abort();
-        } catch (...) {
-            error = std::current_exception();
-        }
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         std::thread pulse_thread = std::move(pulse_guide_thread_);
+        // Release the driver mutex before the abort: protocol.abort() waits on
+        // the wrapper mutex, which a pending pulse guide holds until TheSkyX
+        // replies, and getters must not stall behind that wait. The abort is
+        // sent only after the guide reply, never on the busy socket.
         lock.unlock();
+        std::exception_ptr error;
+        try {
+            BisqueProtocolWrapper::instance().abort();
+        } catch (...) {
+            error = std::current_exception();
+        }
         if (pulse_thread.joinable()) {
             pulse_thread.join();
         }
