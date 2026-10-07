@@ -771,12 +771,12 @@ public:
             // From rest: the last guarded motion's sample is no baseline for
             // this one (its body may not have polled since it ended).
             const bool from_rest = !manual_axis_slewing_[0] && !manual_axis_slewing_[1];
+            if (tracking && from_rest) {
+                seed_limit_guard_baseline_locked();
+            }
             set_tracking_locked(lock, tracking);
             need_duty = tracking_ && (ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0);
             started = tracking_;
-            if (started && from_rest) {
-                limit_guard_baseline_.reset();
-            }
         }
         if (need_duty) {
             start_duty_thread();
@@ -2267,12 +2267,12 @@ public:
                 // From rest: as in set_tracking(), no baseline carries over
                 // from a guarded motion that has already ended.
                 const bool from_rest = !tracking_ && !manual_axis_slewing_[0] && !manual_axis_slewing_[1];
+                if (from_rest) {
+                    seed_limit_guard_baseline_locked();
+                }
                 start_speed_motion_locked(lock, channel, rate);
                 manual_axis_slewing_[axis] = true;
                 started = true;
-                if (from_rest) {
-                    limit_guard_baseline_.reset();
-                }
             } else if (manual_axis_slewing_[axis]) {
                 // MoveAxis(axis, 0) on a moving axis is an asynchronous
                 // initiator: issue the stop and return inside the STANDARD
@@ -4662,6 +4662,27 @@ private:
         const double a1 = dead_reckoned_axes_locked().first;
         auto [alt, az] = compute_alt_az_locked();
         return {alt, az, std::abs(a1) - 90.0};
+    }
+
+    // A guarded motion started from rest takes its baseline BEFORE the first
+    // command goes out (open-astro#886): the guard's own first sample comes
+    // after the start, and a position already outside by then would otherwise
+    // become the baseline and never read as a crossing. The cache is reused
+    // (no extra board round trips under the lock): the axes are at rest, so a
+    // cached position within its TTL is the position the motion starts from.
+    // No sample (limits off, or a link fault) leaves no baseline, and the
+    // guard's first sample then seeds it as before. Caller holds mutex_.
+    void seed_limit_guard_baseline_locked() {
+        limit_guard_baseline_.reset();
+        if (!motion_limits_.enabled()) {
+            return;
+        }
+        try {
+            refresh_position_cache_locked(false);
+            limit_guard_baseline_ = limit_sample_locked();
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("SkyWatcher", std::string("Motion limit guard: no pre-dispatch sample: ") + e.what());
+        }
     }
 
     static std::string limit_number(double v) {

@@ -539,6 +539,26 @@ TEST_CASE("SkyWatcher limits - MoveAxis carrying the tube below the floor is sto
     driver->set_connected(false);
 }
 
+// The mount crosses the floor between the position the driver last knew and
+// the guard's first sample (the cache still holds the inside position, the
+// board is already outside). The baseline must come from before the dispatch,
+// or the outside first sample is accepted unchecked and nothing stops the axis.
+TEST_CASE("SkyWatcher limits - a floor crossed before the guard's first sample is stopped",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg);
+    auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
+    REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
+
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg + 10.0);  // about 4 deg below the floor
+    driver->move_axis(1, kMaxMoveAxisRate);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
+    CHECK(wait_until([&] { return !mount.axis_running(2); }, 6000));
+    CHECK(wait_until([&] { return !driver->get_slewing(); }, 6000));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher limits - tracking past the meridian limit stops tracking",
           "[skywatcher][telescope][limits][guard]") {
     FakeSkyWatcherMount mount;
