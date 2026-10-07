@@ -192,9 +192,6 @@ inline const char* invalid_probe_reason_for(DeviceType t) {
         case DeviceType::Focuser:
             return "no argument with a static out-of-range value that is validated before the connection check "
                    "(assumption)";
-        case DeviceType::ObservingConditions:
-            return "weewx answers every sensor name it is not currently serving with PropertyNotImplemented, "
-                   "including unknown ones (assumption, not checked against ConformU)";
         default:
             return "";
     }

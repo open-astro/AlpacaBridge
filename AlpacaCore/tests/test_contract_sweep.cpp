@@ -176,6 +176,15 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
             p.push_back({"calibrator_on(-1)", [&] { c.calibrator_on(-1); }});
             break;
         }
+        case DeviceType::ObservingConditions: {
+            // A sensor name IObservingConditions does not define is InvalidValue, never NotImplemented.
+            auto& o = dynamic_cast<alpacacore::ObservingConditionsDriver&>(d);
+            p.push_back({"get_time_since_last_update(NoSuchSensor)",
+                         [&] { (void)o.get_time_since_last_update("NoSuchSensor"); }});
+            p.push_back(
+                {"get_sensor_description(NoSuchSensor)", [&] { (void)o.get_sensor_description("NoSuchSensor"); }});
+            break;
+        }
         case DeviceType::Rotator: {
             // NaN is a static invalid argument: InvalidValue must win over NotConnected.
             auto& r = dynamic_cast<alpacacore::RotatorDriver&>(d);
