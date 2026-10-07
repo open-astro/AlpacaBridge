@@ -800,8 +800,19 @@ private:
         return response;
     }
 
+    // Drop input already queued: a reply that landed after its own command's
+    // read timed out would otherwise be read as the next command's reply.
+    void discard_stale_input_locked() {
+#ifdef _WIN32
+        PurgeComm(serial_handle_, PURGE_RXCLEAR);
+#else
+        tcflush(serial_fd_, TCIFLUSH);
+#endif
+    }
+
     std::string send_command_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("Gemini", "Command: " + cmd);
+        discard_stale_input_locked();
         write_data(cmd);
         std::this_thread::sleep_for(std::chrono::milliseconds(COMMAND_DELAY_MS));
         return read_response();
@@ -809,6 +820,7 @@ private:
 
     void send_command_blind_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("Gemini", "Command (blind): " + cmd);
+        discard_stale_input_locked();
         write_data(cmd);
     }
 
