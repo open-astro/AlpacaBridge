@@ -89,9 +89,11 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     QHYCameraDriver(int device_number, std::optional<std::string> camera_id, std::optional<int> camera_index,
-                    QHYSDK& sdk, QHYWorkerStartHook on_worker_start = {})
+                    QHYSDK& sdk, QHYWorkerStartHook on_worker_start = {},
+                    std::chrono::seconds watchdog_margin = std::chrono::seconds(60))
         : AsyncConnectable("QHY"),
           sdk_(sdk),
+          watchdog_margin_(watchdog_margin),
           on_worker_start_(std::move(on_worker_start)),
           device_number_(device_number),
           camera_id_(std::move(camera_id)),
@@ -530,6 +532,24 @@ public:
         set_bin_locked(bin_y, bin_y);
     }
 
+    // Watchdog (SVBONY/ToupTek shape): if GetQHYCCDSingleFrame hangs past the
+    // exposure duration + margin, mark the exposure Failed instead of reporting
+    // Exposing forever. Every getter a client may poll (CameraState, ImageReady,
+    // ImageArray) runs it so none of them keeps answering "not ready". Caller
+    // holds mutex_. Returns true when it just expired the exposure.
+    bool expire_overdue_exposure_locked() const {
+        if (exposure_status_ != QHYExposureStatus::Working || !exposure_deadline_valid_ ||
+            std::chrono::steady_clock::now() < exposure_deadline_) {
+            return false;
+        }
+        ALPACA_LOG_WARN("QHY", "Exposure deadline exceeded; marking exposure failed.");
+        exposure_status_ = QHYExposureStatus::Failed;
+        exposure_failure_ = "Exposure timed out: the camera did not deliver the frame in time";
+        image_ready_ = false;
+        exposure_deadline_valid_ = false;
+        return true;
+    }
+
     CameraState get_camera_state() const override {
         if (!connected_.load()) {
             return CameraState::Idle;
@@ -537,23 +557,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         switch (exposure_status_) {
         case QHYExposureStatus::Working:
-            // Watchdog (SVBONY/ToupTek shape): if GetQHYCCDSingleFrame hangs
-            // past the exposure duration + margin, mark the exposure Failed
-            // instead of reporting Exposing forever. Failed maps to Idle below
-            // on the next poll; ImageArray throws for this exposure.
-            if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
-                ALPACA_LOG_WARN("QHY", "Exposure deadline exceeded; marking exposure failed.");
-                exposure_status_ = QHYExposureStatus::Failed;
-                exposure_failure_ = "Exposure timed out: the camera did not deliver the frame in time";
-                image_ready_ = false;
-                exposure_deadline_valid_ = false;
+            if (expire_overdue_exposure_locked()) {
                 return CameraState::Idle;
             }
             return CameraState::Exposing;
         case QHYExposureStatus::Failed:
             // A failed exposure leaves the camera fully ready for the next
-            // one — the failure surfaces through ImageReady staying false and
-            // ImageArray throwing. A sticky Error state poisons every
+            // one — the failure is raised by ImageReady and ImageArray until the
+            // next StartExposure. A sticky Error state poisons every
             // subsequent operation (same class ConformU exposed on the ZWO
             // camera: one transient failure cascaded into 18 issues).
             return CameraState::Idle;
@@ -778,6 +789,7 @@ public:
     }
 
     double get_electrons_per_adu() const override {
+        ensure_connected();
         // The QHY SDK does not expose e-/ADU, so there is no honest value.
         throw AlpacaException("ElectronsPerADU is not available for QHY cameras", AlpacaError::PropertyNotImplemented);
     }
@@ -814,6 +826,7 @@ public:
     }
 
     double get_full_well_capacity() const override {
+        ensure_connected();
         // TODO: QHY SDK exposes this via CAM_CurveFullWell on supported cameras
         throw AlpacaException("FullWellCapacity is not available for QHY cameras", AlpacaError::PropertyNotImplemented);
     }
@@ -877,6 +890,7 @@ public:
     }
 
     double get_heat_sink_temperature() const override {
+        ensure_connected();
         // No heat-sink sensor is read; the CCD temperature is not a substitute.
         throw AlpacaException("HeatSinkTemperature is not available for QHY cameras",
                               AlpacaError::PropertyNotImplemented);
@@ -886,6 +900,7 @@ public:
         ensure_connected();
 
         std::lock_guard<std::mutex> lock(mutex_);
+        expire_overdue_exposure_locked();
         if (!last_exposure_valid_) {
             throw AlpacaException("No exposure has been taken", AlpacaError::InvalidOperation);
         }
@@ -909,6 +924,7 @@ public:
         ALPACA_LOG_TRACE("QHY", "get_image_ready entry");
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        expire_overdue_exposure_locked();
         if (!last_exposure_valid_) {
             ALPACA_LOG_TRACE("QHY", "get_image_ready exit (no exposure)");
             return false;
@@ -1446,7 +1462,7 @@ public:
             exposure_status_ = QHYExposureStatus::Working;
             exposure_deadline_ = std::chrono::steady_clock::now() +
                                  std::chrono::microseconds(static_cast<long long>(exposure_us)) +
-                                 std::chrono::seconds(60);
+                                 watchdog_margin_;
             exposure_deadline_valid_ = true;
             exposure_buffer_.clear();
             exposure_width_ = 0;
@@ -1785,6 +1801,7 @@ private:
     // and that is UB either way. Bound these workers' lifetimes; do not read
     // the raw-pointer rule as making detachment safe.
     QHYSDK& sdk_;
+    const std::chrono::seconds watchdog_margin_;
     // Test-only (issue #510): see QHYWorkerStartHook in the header. Empty in
     // production, and never reassigned after construction.
     const QHYWorkerStartHook on_worker_start_;
@@ -2686,8 +2703,10 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
 }
 
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk,
-                                                QHYWorkerStartHook on_worker_start) {
-    return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt, sdk, std::move(on_worker_start));
+                                                QHYWorkerStartHook on_worker_start,
+                                                std::chrono::seconds watchdog_margin) {
+    return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt, sdk, std::move(on_worker_start),
+                                             watchdog_margin);
 }
 
 } // namespace alpacacore::vendor::qhy

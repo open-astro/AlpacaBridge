@@ -176,7 +176,7 @@ TEST_CASE("QHY Camera Driver - Disconnected state", "[qhy][camera][unit]") {
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_can_abort_exposure() == true);
-    CHECK(driver->get_can_stop_exposure() == true);
+    CHECK(driver->get_can_stop_exposure() == false);
     CHECK(driver->get_can_asymmetric_bin() == false);
     CHECK(driver->get_has_shutter() == false);
 }
@@ -219,7 +219,7 @@ TEST_CASE("QHY Camera Driver - State Machine Contracts", "[qhy][camera][unit]") 
     REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
-    REQUIRE(driver->get_can_stop_exposure() == true);
+    REQUIRE(driver->get_can_stop_exposure() == false);
 }
 
 // ── Connect path (over the SDK seam, issue #321) ────────────────────────────
@@ -657,6 +657,32 @@ TEST_CASE("QHY Camera Driver - a failed exposure is raised by ImageReady and Ima
     fake.frame_ok = true;
     driver->start_exposure(0.05, true);
     CHECK(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == 0; }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - a watchdog timeout is raised by ImageReady and ImageArray without CameraState",
+          "[qhy][camera][unit]") {
+    std::atomic<bool> in_frame{false};
+    std::atomic<bool> release{false};
+    auto fake = make_fake();
+    fake.before_call = [&](const std::string& fn) {
+        if (fn == "get_single_frame") {
+            in_frame = true;
+            while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, std::chrono::seconds(1));
+    driver->set_connected(true);
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] { return in_frame.load(); }));
+    // Only the two image getters are polled: CameraState is never read.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    const int ready_code = error_code_of([&] { (void)driver->get_image_ready(); });
+    const int array_code = error_code_of([&] { (void)driver->get_image_array(); });
+    release = true;
+    CHECK(ready_code == alpacacore::AlpacaError::DriverException);
+    CHECK(array_code == alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
 }
 
