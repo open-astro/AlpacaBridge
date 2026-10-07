@@ -314,6 +314,18 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - close settles a partial-duty PWM port
     REQUIRE(tfd >= 0);
     ::close(tfd);
     auto& st = ioctl_stub();
+    // Clear the stub and remove the temp file even when a REQUIRE below throws.
+    struct Cleanup {
+        const char* path;
+        IoctlStub& stub;
+        ~Cleanup() {
+            {
+                std::lock_guard<std::mutex> lock(stub.m);
+                stub.path.clear();
+            }
+            ::unlink(path);
+        }
+    } cleanup{tmpl, st};
     {
         std::lock_guard<std::mutex> lock(st.m);
         st.path = tmpl;
@@ -340,9 +352,7 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - close settles a partial-duty PWM port
     {
         std::lock_guard<std::mutex> lock(st.m);
         levels = st.levels;
-        st.path.clear();
     }
-    ::unlink(tmpl);
     REQUIRE_FALSE(levels.empty());
     CHECK(levels.back() == 0);  // duty 50 settles logically ON (raw 0)
 }
