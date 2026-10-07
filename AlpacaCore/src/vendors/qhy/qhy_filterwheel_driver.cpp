@@ -260,8 +260,9 @@ public:
         // "moving" signal instead of a real but unrelated slot number
         // flashing by (NINA in particular read a mid-rotation digit as the
         // arrived filter and surfaced a spurious mismatch error). Only once
-        // a live read matches the commanded target do we consider the wheel
-        // settled and start serving it from cache.
+        // a live read matches the commanded target, or the wheel rests on
+        // another slot (below), do we consider it settled and start serving
+        // it from cache.
         if (cached_position_.has_value() && !pending_target_.has_value()) {
             return cached_position_.value();
         }
@@ -332,11 +333,12 @@ public:
                                   AlpacaError::InvalidValue);
         }
         // Set BEFORE issuing the move (not after): if move_cfw throws mid-
-        // call, we can't be sure whether the wheel physically started moving,
-        // so get_position() must fall back to live reads either way until a
-        // read confirms where the wheel actually ended up. (That conservative
-        // fallback is deliberate for SDK-level failures; the guard above
-        // keeps the never-issued-move case from ever reaching this point.)
+        // call the catch below clears it again. Assumption: a failing
+        // SendOrder2QHYCCDCFW means the order never reached the wheel, so
+        // Position goes back to live reads. If the wheel did start moving,
+        // the first live read of 0 or more is cached and Position can sit on
+        // a transit slot until the next move; that trade-off is accepted
+        // over reporting -1 forever for a target no read can match.
         cached_position_.reset();
         pending_target_ = position;
         rest_candidate_.reset();

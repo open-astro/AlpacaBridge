@@ -221,9 +221,22 @@ TEST_CASE("WandererAstro Rotator Driver - No completion report keeps Position an
     // One step: the monitor budget is the 5 s floor, the shortest the driver allows.
     driver->move_absolute(0.001);
     REQUIRE(driver->get_is_moving());
-    std::this_thread::sleep_for(std::chrono::milliseconds(5600));
-
+    // Poll rather than sleep: the monitor exits between 5 s and about 6 s
+    // depending on read-window rounding, so wait up to 10 s for the fault.
+    bool faulted = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        try {
+            (void)driver->get_is_moving();
+        } catch (const alpacacore::AlpacaException& e) {
+            REQUIRE(e.error_code() == alpacacore::AlpacaError::DriverException);
+            faulted = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     // No report: IsMoving names the fault instead of claiming an arrival.
+    REQUIRE(faulted);
     require_alpaca_error([&]() { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::DriverException);
     // Position stays at the last confirmed angle (the move start).
     CHECK(std::abs(driver->get_position() - start) < 1e-9);
