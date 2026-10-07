@@ -123,7 +123,10 @@ AlpacaBridge is an end-user appliance, so "breaking" means breaks an existing us
 setup. Bump relative to the last **released** version:
 
 - **MAJOR** `x.0.0` — breaks an existing user (drop a platform, remove a driver, config-format
-  change needing migration, change a default that alters behavior): `### Breaking changes`.
+  change needing migration, change a default that alters behavior, a saved config that loaded is
+  now refused at start-up, a call that succeeded is now refused): `### Breaking changes`. Apply the
+  "Breaking or not" test in `changelog.d/README.md` to every change, fixes included; a fix with a
+  breaking consequence keeps its `Fixed` bullet and adds a `Breaking changes` one.
 - **MINOR** `x.Y.0` — new backward-compatible capability: **a new driver**, new device/model
   support, a new optional feature/flag. Resets patch to 0: an unqualified `### Added`.
 - **PATCH** `x.y.Z` — no new capability: bug fix to an existing driver, ConformU re-validation,
@@ -132,7 +135,8 @@ setup. Bump relative to the last **released** version:
 A branch that adds a new driver MUST have an unqualified `### Added` entry, never only a
 `Fixed`/`Changed` one. If the fragment undershoots, flag it and recommend running `/commit` to
 correct it before opening the PR — don't open a PR whose fragment misrepresents the change. The
-branch must not edit `CHANGELOG.md`; run `python3 scripts/changelog_fragments.py --check`.
+branch must not edit `CHANGELOG.md`, except to correct a misfiled or wrong entry (say so in the PR
+description); run `python3 scripts/changelog_fragments.py --check`.
 
 ### Release version bump (ask the user — MANDATORY, every run)
 
