@@ -53,12 +53,12 @@ struct LandingOffsetHandset {
     // Each GOTO lands this many counts past the commanded RA; multiplied by the GOTO ordinal when `growing`.
     std::atomic<uint32_t> ra_offset_counts{kRaOffsetCounts};
     std::atomic<bool> growing{false};
-    static constexpr auto kGotoDuration = std::chrono::milliseconds(300);
+    std::atomic<int> goto_ms{300};
 
     bool goto_in_progress() const {
         if (goto_count.load() == 0) return false;
         const auto started = Clock::time_point(Clock::duration(goto_started.load()));
-        return !goto_stopped.load() && Clock::now() - started < kGotoDuration;
+        return !goto_stopped.load() && Clock::now() - started < std::chrono::milliseconds(goto_ms.load());
     }
 };
 
@@ -236,6 +236,71 @@ TEST_CASE("SynScan GOTO landing - AbortSlew during a refinement pass stops it (#
     CHECK_FALSE(driver->get_slewing());
     CHECK(st->goto_count.load() == 2);
     driver->set_connected(false);
+}
+
+
+namespace {
+
+// A GOTO that stays in progress for 6 s, started asynchronously. Every stop path below must return at once
+// while the async slew task is still waiting on the handset (the Platform 7 Disconnect budget is 5 s).
+constexpr auto kStopBudget = std::chrono::milliseconds(1500);
+
+struct LongGoto {
+    std::shared_ptr<LandingOffsetHandset> st = std::make_shared<LandingOffsetHandset>();
+    std::unique_ptr<alpacacore::test::FakeMountServer> server;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    LongGoto() {
+        st->goto_ms.store(6000);
+        server = std::make_unique<alpacacore::test::FakeMountServer>(responder(st));
+        REQUIRE(server->ok());
+        driver = alpacacore::vendor::synscan::create_synscan_telescope(
+            0, endpoint(server->port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        REQUIRE(st->goto_count.load() == 1);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("SynScan GOTO landing - Disconnect during an async GOTO returns at once (#880)",
+          "[synscan][telescope][goto-landing]") {
+    LongGoto g;
+    const auto t0 = Clock::now();
+    g.driver->set_connected(false);
+    CHECK(Clock::now() - t0 < kStopBudget);
+}
+
+TEST_CASE("SynScan GOTO landing - MoveAxis during an async GOTO returns at once (#880)",
+          "[synscan][telescope][goto-landing]") {
+    LongGoto g;
+    const auto t0 = Clock::now();
+    try {
+        g.driver->move_axis(0, 1.0);
+    } catch (const alpacacore::AlpacaException&) {
+        // the call may refuse the rate; only its latency is under test
+    }
+    CHECK(Clock::now() - t0 < kStopBudget);
+    g.driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - a second async slew replaces a waiting one at once (#880)",
+          "[synscan][telescope][goto-landing]") {
+    LongGoto g;
+    const auto t0 = Clock::now();
+    REQUIRE_NOTHROW(g.driver->slew_to_coordinates_async(kTargetRa + 1.0, kTargetDec));
+    CHECK(Clock::now() - t0 < kStopBudget);
+    g.driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - destroying the driver during an async GOTO returns at once (#880)",
+          "[synscan][telescope][goto-landing]") {
+    LongGoto g;
+    const auto t0 = Clock::now();
+    g.driver.reset();
+    CHECK(Clock::now() - t0 < kStopBudget);
 }
 
 #endif  // !_WIN32

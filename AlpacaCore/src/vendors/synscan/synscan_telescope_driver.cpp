@@ -1412,10 +1412,11 @@ public:
         // Slewing stays true from the first GOTO to the end of the last refinement pass (open-astro#880).
         const RefineScope refine_scope(*this, owner_generation, !use_precise_commands_);
         ilock.unlock();
-        if (!wait_for_slew_complete(lock, owner_generation)) {
+        if (!wait_for_slew_complete(lock, owner_generation, false)) {
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
         }
-        if (!refine_goto_landing_locked(lock, ra, dec, owner_generation, false)) {
+        if (!refine_goto_landing_locked(lock, ra, dec, owner_generation, false) ||
+            !settle_after_slew_locked(lock, owner_generation)) {
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
         }
     }
@@ -1498,7 +1499,7 @@ public:
                 SynScanProtocolWrapper::instance().goto_ra_dec_raw(ra_raw, dec_raw, precise);
                 // Slewing stays true across the refinement passes: the first wait ends when the handset reports
                 // the GOTO done, then the landing is read back and corrected (open-astro#880).
-                if (precise && wait_for_slew_complete(lock, owner_generation, false)) {
+                if (precise && wait_for_slew_complete(lock, owner_generation, false, &slew_task_cancel_)) {
                     refine_goto_landing_locked(lock, ra, dec, owner_generation, true);
                 }
             } catch (const std::exception& ex) {
@@ -2150,21 +2151,28 @@ private:
     // connection state is re-checked after each relock.
     // Returns false when a concurrent motion command bumped motion_generation_
     // past `owner_generation` while the lock was released (the slew was superseded).
+    // `cancel` (async slew task only) makes every sleep interruptible through task_wait_for(), the way the park
+    // task waits, so a join by Disconnect, MoveAxis, a new slew or the destructor returns at once; the wait then
+    // returns false.
     bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation,
-                                bool apply_settle = true) const {
+                                bool apply_settle = true, std::atomic<bool>* cancel = nullptr) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = std::chrono::steady_clock::now();
         const auto start_grace = std::chrono::seconds(2);
         bool saw_slewing = false;
         auto sleep_unlocked = [&](std::chrono::milliseconds d) {
             lock.unlock();
-            std::this_thread::sleep_for(d);
+            if (cancel != nullptr) {
+                task_wait_for(d, *cancel);
+            } else {
+                std::this_thread::sleep_for(d);
+            }
             lock.lock();
             // The mount may have been disconnected while the lock was released.
             check_connected();
         };
         while (true) {
-            if (motion_generation_ != owner_generation) {
+            if (motion_generation_ != owner_generation || (cancel != nullptr && cancel->load())) {
                 return false;
             }
             // The hardware answer, not get_slewing_locked(): a refinement scope holds the public Slewing true.
@@ -2192,6 +2200,18 @@ private:
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         if (apply_settle && slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
+        }
+        return motion_generation_ == owner_generation && (cancel == nullptr || !cancel->load());
+    }
+
+    // The configured settle time, applied once after the LAST GOTO pass (open-astro#880). `lock` held on entry
+    // and on return; false when a concurrent motion command superseded the slew meanwhile.
+    bool settle_after_slew_locked(std::unique_lock<std::mutex>& lock, uint64_t owner_generation) const {
+        if (slew_settle_time_seconds_ > 0) {
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
+            lock.lock();
+            check_connected();
         }
         return motion_generation_ == owner_generation;
     }
@@ -2274,7 +2294,7 @@ private:
             slew_force_until_ = std::chrono::steady_clock::now() + kRefineStartForce;
             guide_position_valid_ = false;
             protocol.goto_ra_dec_raw(encode_ra_raw(aim_ra, 24), encode_angle(aim_dec, 24), true);
-            if (!wait_for_slew_complete(lock, owner_generation, false)) {
+            if (!wait_for_slew_complete(lock, owner_generation, false, async_task ? &slew_task_cancel_ : nullptr)) {
                 return false;
             }
         }
