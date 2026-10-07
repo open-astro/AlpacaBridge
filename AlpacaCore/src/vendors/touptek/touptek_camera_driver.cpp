@@ -1322,6 +1322,7 @@ public:
             } catch (const ExposureAborted&) {
                 // Aborted before the frame started: the abort already forced the
                 // next exposure to re-init the stream; nothing to re-mark.
+                ALPACA_LOG_DEBUG("ToupTek", "Exposure aborted before the frame started");
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ToupTek", "Exposure failed: " + std::string(e.what()));
                 // Re-mark only the stage that did NOT complete, so the next
