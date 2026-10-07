@@ -19,7 +19,7 @@ Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., 
 ## Why AlpacaBridge
 
 - **Proven, not promised.** Every driver is [validated with ASCOM ConformU](SUPPORTED-DRIVERS.md), on the actual hardware it supports.
-- **80 validated devices. Fifteen brands. One server.** Astroasis, Celestron, Gemini, iOptron, Canon and Nikon DSLRs, OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
+- **81 validated devices. Fifteen brands. One server.** Astroasis, Celestron, Gemini, iOptron, Canon and Nikon DSLRs, OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
 - **Plug in and go.** Vendor SDKs and udev rules come bundled. USB and Wi-Fi devices are auto-detected. No port hunting.
 - **Manage it from a browser.** Configure every device from the built-in web UI, from any machine on your network.
 - **Set it and forget it.** Installs from the OpenAstro APT repository, runs as a systemd service, starts on boot, updates with `apt upgrade`.
