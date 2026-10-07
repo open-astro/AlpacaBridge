@@ -759,6 +759,28 @@ TEST_CASE("QHY Camera Driver - CCDTemperature is not invented", "[qhy][camera][u
         driver->set_connected(false);
         fake.throw_from.clear();
     }
+    SECTION("a good reading is dropped once the CURTEMP read starts failing") {
+        std::atomic<bool> fail_reads{false};
+        auto fake = FakeQHYSDK::with_one_cooled_camera();
+        fake.before_call = [&](const std::string& fn) {
+            if (fail_reads.load() && fn == "get_param") {
+                throw alpacacore::AlpacaException("fake: injected failure in get_param",
+                                                  alpacacore::AlpacaError::DriverException);
+            }
+        };
+        LockedQHYSDK sdk(fake);
+        auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+        driver->set_connected(true);
+        REQUIRE(eventually([&] {
+            return error_code_of([&] { (void)driver->get_ccd_temperature(); }) == 0;
+        }));
+        fail_reads = true;
+        CHECK(eventually([&] {
+            return error_code_of([&] { (void)driver->get_ccd_temperature(); }) ==
+                   alpacacore::AlpacaError::InvalidOperation;
+        }));
+        driver->set_connected(false);
+    }
 }
 
 TEST_CASE("QHY Camera Driver - StartExposure above ExposureMax is InvalidValue", "[qhy][camera][unit]") {
