@@ -455,6 +455,10 @@ public:
         // The previous monitor has finished (moving == false) but may not have
         // been joined yet.
         join_monitor();
+        {
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
+            state_.completion_missing = false;
+        }
 
         const int steps = static_cast<int>(delta_degrees * kRotatorMiniStepsPerDegree);
         if (steps == 0) {
@@ -480,12 +484,20 @@ public:
 #endif
     }
 
+    // Acknowledge a missing completion report (Sync does this: the client has
+    // re-established where the rotator is).
+    void clear_completion_missing() {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        state_.completion_missing = false;
+    }
+
     void halt() {
 #ifndef _WIN32
         std::lock_guard<std::mutex> lock(io_mutex_);
         ensure_connected_locked();
         {
             std::lock_guard<std::mutex> state_lock(state_mutex_);
+            state_.completion_missing = false;
             if (!state_.moving) {
                 return;  // nothing in flight — ASCOM Halt when idle is a no-op
             }
@@ -647,12 +659,14 @@ private:
                 state_.mechanical_angle = std::fabs(value) / 1000.0;
             }
         } else if (monitor_running_.load()) {
-            // No report inside the budget: assume the commanded sweep happened
-            // but warn — the classic cause is missing DC power (motor dead, MCU
-            // alive). ConformU will surface any real position error.
-            state_.mechanical_angle = move_start_angle_ + move_delta_;
-            ALPACA_LOG_WARN("WandererAstro",
-                            "Rotator move completion report not received; check DC power. Position estimated.");
+            // No report inside the budget: the classic cause is missing DC power
+            // (motor dead, MCU alive). The real angle is unknown, so keep the
+            // last confirmed one (the move start) and let IsMoving report the
+            // fault instead of claiming an arrival that never happened.
+            state_.completion_missing = true;
+            ALPACA_LOG_WARN(
+                "WandererAstro",
+                "Rotator move completion report not received; check DC power. Position kept at move start.");
         }
         state_.moving = false;
     }
@@ -751,6 +765,8 @@ std::optional<std::string> WandererRotatorProtocolWrapper::get_firmware_date() c
 void WandererRotatorProtocolWrapper::move_relative(double delta_degrees) { impl_->move_relative(delta_degrees); }
 
 void WandererRotatorProtocolWrapper::halt() { impl_->halt(); }
+
+void WandererRotatorProtocolWrapper::clear_completion_missing() { impl_->clear_completion_missing(); }
 
 void WandererRotatorProtocolWrapper::set_reverse(bool reverse) { impl_->set_reverse(reverse); }
 

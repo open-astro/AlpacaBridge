@@ -15,6 +15,8 @@
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
+#include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -57,5 +59,13 @@ std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_nu
  */
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id, QHYSDK& sdk);
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_number, int camera_index, QHYSDK& sdk);
+
+/// Clock the driver uses to time a wheel at rest on a non-target slot.
+using SettleClock = std::function<std::chrono::steady_clock::time_point()>;
+
+/// As the by-id test overload, with an injected clock so a test can span the
+/// settle time without sleeping.
+std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id, QHYSDK& sdk,
+                                                          SettleClock clock);
 
 }  // namespace alpacacore::vendor::qhy

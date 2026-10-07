@@ -108,3 +108,10 @@ TEST_CASE("ZWO CAA Rotator Driver - Unique IDs", "[zwo][rotator][unit]") {
 
     CHECK(driver0->get_unique_id() != driver1->get_unique_id());
 }
+
+// Falsified by: zwo_rotator_driver.cpp get_step_size() returning 0.0 again
+// instead of throwing PropertyNotImplemented.
+TEST_CASE("ZWO CAA Rotator Driver - StepSize is not implemented", "[zwo][rotator][unit]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0);
+    require_alpaca_error([&]() { (void)driver->get_step_size(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}

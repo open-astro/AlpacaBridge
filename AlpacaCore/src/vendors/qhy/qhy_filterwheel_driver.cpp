@@ -24,15 +24,24 @@
 
 namespace alpacacore::vendor::qhy {
 
+// How long the wheel must keep reporting the same non-target slot before the
+// move counts as ended there. Transit readings (observed 4,5,6,-1,0,1,2,3)
+// change within a fraction of a second per slot, so a read that repeats for
+// this long is a wheel at rest, not one passing by.
+constexpr std::chrono::milliseconds kSettleTime{2000};
+// Minimum identical reads inside that window, so one slow poll cannot settle.
+constexpr int kSettleMinReads = 3;
+
 class QHYFilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     QHYFilterWheelDriver(int device_number, std::optional<std::string> camera_id, std::optional<int> camera_index,
-                         QHYSDK& sdk)
+                         QHYSDK& sdk, SettleClock clock = &std::chrono::steady_clock::now)
         : AsyncConnectable("QHY"),
           sdk_(sdk),
+          clock_(std::move(clock)),
           device_number_(device_number),
           camera_id_(std::move(camera_id)),
           camera_index_(camera_index),
@@ -261,6 +270,26 @@ public:
             if (pos == pending_target_.value()) {
                 cached_position_ = pos;
                 pending_target_.reset();
+                rest_candidate_.reset();
+                return pos;
+            }
+            // Not the target. A repeating reading held for kSettleTime is the
+            // wheel at rest on another slot (stalled or stopped short): end
+            // the pending state and report where it is, instead of -1 forever.
+            const auto now = clock_();
+            if (!rest_candidate_.has_value() || rest_candidate_.value() != pos) {
+                rest_candidate_ = pos;
+                rest_since_ = now;
+                rest_reads_ = 1;
+            } else {
+                ++rest_reads_;
+            }
+            if (pos >= 0 && rest_reads_ >= kSettleMinReads && now - rest_since_ >= kSettleTime) {
+                ALPACA_LOG_WARN("QHY", "CFW settled on slot " + std::to_string(pos) + " instead of target " +
+                                           std::to_string(pending_target_.value()));
+                cached_position_ = pos;
+                pending_target_.reset();
+                rest_candidate_.reset();
                 return pos;
             }
             return -1;
@@ -310,7 +339,15 @@ public:
         // keeps the never-issued-move case from ever reaching this point.)
         cached_position_.reset();
         pending_target_ = position;
-        sdk_.move_cfw(camera_id_.value(), position);
+        rest_candidate_.reset();
+        try {
+            sdk_.move_cfw(camera_id_.value(), position);
+        } catch (...) {
+            // The move failed, so no pending target exists: Position goes back
+            // to live reads instead of -1 until a slot that can never match.
+            pending_target_.reset();
+            throw;
+        }
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -438,6 +475,7 @@ private:
     }
 
     QHYSDK& sdk_;
+    SettleClock clock_;
     int device_number_;
     std::optional<std::string> camera_id_;
     std::optional<int> camera_index_;
@@ -453,6 +491,10 @@ private:
     // Set by set_position() to the commanded slot while a move is in flight;
     // cleared once a live read confirms arrival. See get_position().
     mutable std::optional<int> pending_target_;
+    // Rest detection for a move that ends on a non-target slot (guarded by mutex_).
+    mutable std::optional<int> rest_candidate_;
+    mutable std::chrono::steady_clock::time_point rest_since_{};
+    mutable int rest_reads_ = 0;
     std::atomic<bool> connected_;
     mutable std::mutex mutex_;
 };
@@ -478,6 +520,11 @@ std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_nu
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id,
                                                           QHYSDK& sdk) {
     return std::make_unique<QHYFilterWheelDriver>(device_number, camera_id, std::nullopt, sdk);
+}
+
+std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id, QHYSDK& sdk,
+                                                          SettleClock clock) {
+    return std::make_unique<QHYFilterWheelDriver>(device_number, camera_id, std::nullopt, sdk, std::move(clock));
 }
 
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_number, int camera_index, QHYSDK& sdk) {

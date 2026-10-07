@@ -252,7 +252,9 @@ public:
     }
 
     double get_step_size() const override {
-        return 0.0;
+        // The CAA SDK exposes no step size; ASCOM says PropertyNotImplemented
+        // rather than a made-up 0.
+        throw AlpacaException("StepSize is not available from the ZWO CAA SDK", AlpacaError::PropertyNotImplemented);
     }
 
     double get_target_position() const override {
