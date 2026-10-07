@@ -49,6 +49,18 @@ constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
+// open-astro#880: a GOTO can land tens of arcseconds off (EQM-35 Pro: 29.4" in RA) and the driver reports the
+// handset's own position afterwards. Refinement re-issues the GOTO until the readback is inside the tolerance,
+// well inside ConformU's +/-10", for at most this many extra passes. A residual still above the failure
+// threshold after the last pass is reported as a slew failure rather than as a success.
+constexpr double kLandingToleranceArcsec = 3.0;
+constexpr double kLandingFailureArcsec = 10.0;
+constexpr int kMaxLandingRefinePasses = 3;
+// A readback this far from the target is not a landing error a fine re-GOTO corrects (a refused or limit-stopped
+// GOTO, a mount that never moved): it is left as it was before refinement existed and logged, not chased.
+constexpr double kLandingRefineLimitArcsec = 600.0;
+// How long a refinement GOTO forces Slewing true while the handset starts moving (the first GOTO uses 8 s).
+constexpr auto kRefineStartForce = std::chrono::seconds(2);
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
 constexpr auto kPulseGuidePositionGrace = std::chrono::milliseconds(3000);
 
@@ -360,6 +372,7 @@ public:
             at_home_ = false;
             clear_pulse_guiding_locked();
             slewing_cached_ = false;
+            refining_generation_ = 0;
             last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             position_override_until_ = std::chrono::steady_clock::time_point::min();
@@ -448,6 +461,7 @@ public:
             at_home_ = false;
             clear_pulse_guiding_locked();
             slewing_cached_ = false;
+            refining_generation_ = 0;
             last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             position_override_until_ = std::chrono::steady_clock::time_point::min();
@@ -1395,8 +1409,13 @@ public:
         check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
         const uint64_t owner_generation = ++motion_generation_;
+        // Slewing stays true from the first GOTO to the end of the last refinement pass (open-astro#880).
+        const RefineScope refine_scope(*this, owner_generation, !use_precise_commands_);
         ilock.unlock();
         if (!wait_for_slew_complete(lock, owner_generation)) {
+            throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+        }
+        if (!refine_goto_landing_locked(lock, ra, dec, owner_generation, false)) {
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
         }
     }
@@ -1413,6 +1432,7 @@ public:
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
         bool precise = false;
+        uint64_t owner_generation = 0;
         // Cancel + join any previous slew dispatch task first. Must run
         // without mutex_ held: the task takes mutex_.
         reap_slew_task();
@@ -1422,7 +1442,10 @@ public:
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
-            ++motion_generation_;
+            owner_generation = ++motion_generation_;
+            if (use_precise_commands_) {
+                refining_generation_ = owner_generation;
+            }
 
             int bits = use_precise_commands_ ? 24 : 16;
             ra_raw = encode_ra_raw(ra, bits);
@@ -1465,13 +1488,19 @@ public:
             slew_task_cancel_.store(false);
             tlock.lock();
         }
-        slew_task_thread_ = std::thread([this, ra_raw, dec_raw, precise]() {
-            std::lock_guard<std::mutex> lock(mutex_);
+        slew_task_thread_ = std::thread([this, ra, dec, ra_raw, dec_raw, precise, owner_generation]() {
+            std::unique_lock<std::mutex> lock(mutex_);
+            const RefineScope refine_scope(*this, owner_generation, true);  // armed by the initiator; this only clears
             if (!connected_ || slew_task_cancel_.load()) {
                 return;
             }
             try {
                 SynScanProtocolWrapper::instance().goto_ra_dec_raw(ra_raw, dec_raw, precise);
+                // Slewing stays true across the refinement passes: the first wait ends when the handset reports
+                // the GOTO done, then the landing is read back and corrected (open-astro#880).
+                if (precise && wait_for_slew_complete(lock, owner_generation, false)) {
+                    refine_goto_landing_locked(lock, ra, dec, owner_generation, true);
+                }
             } catch (const std::exception& ex) {
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
@@ -1921,6 +1950,9 @@ private:
         if (parking_) {
             return true;
         }
+        if (refining_generation_ != 0 && refining_generation_ == motion_generation_) {
+            return true;  // a GOTO whose landing is still being refined (open-astro#880)
+        }
         return poll_hardware_slewing_locked();
     }
 
@@ -2118,7 +2150,8 @@ private:
     // connection state is re-checked after each relock.
     // Returns false when a concurrent motion command bumped motion_generation_
     // past `owner_generation` while the lock was released (the slew was superseded).
-    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation) const {
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation,
+                                bool apply_settle = true) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = std::chrono::steady_clock::now();
         const auto start_grace = std::chrono::seconds(2);
@@ -2134,7 +2167,8 @@ private:
             if (motion_generation_ != owner_generation) {
                 return false;
             }
-            bool slewing = get_slewing_locked();
+            // The hardware answer, not get_slewing_locked(): a refinement scope holds the public Slewing true.
+            bool slewing = poll_hardware_slewing_locked();
             if (slewing) {
                 saw_slewing = true;
             }
@@ -2156,10 +2190,94 @@ private:
         altaz_cache_valid_ = false;
         guide_position_valid_ = false;
         position_override_until_ = std::chrono::steady_clock::time_point::min();
-        if (slew_settle_time_seconds_ > 0) {
+        if (apply_settle && slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
         return motion_generation_ == owner_generation;
+    }
+
+    // Marks a GOTO whose landing will be refined: get_slewing_locked() reports true while the scope's generation
+    // is current, so Slewing cannot dip between the passes. Cleared on every exit; a newer motion command (or
+    // AbortSlew) bumps motion_generation_, which ends it on its own. `skip` leaves it unset (no refinement).
+    class RefineScope {
+    public:
+        RefineScope(const SynScanTelescopeDriver& driver, uint64_t generation, bool skip)
+            : driver_(driver), generation_(generation) {
+            if (!skip) {
+                driver_.refining_generation_ = generation;
+            }
+        }
+        ~RefineScope() {
+            if (driver_.refining_generation_ == generation_) {
+                driver_.refining_generation_ = 0;
+            }
+        }
+        RefineScope(const RefineScope&) = delete;
+        RefineScope& operator=(const RefineScope&) = delete;
+
+    private:
+        const SynScanTelescopeDriver& driver_;
+        uint64_t generation_;
+    };
+
+    // After a GOTO completes, read the handset's own position and re-issue the GOTO while RA or Dec is off by
+    // more than kLandingToleranceArcsec, at most kMaxLandingRefinePasses times (open-astro#880). Each pass aims at
+    // the target corrected by the residual just read, so a systematic landing offset is cancelled rather than
+    // repeated. 16-bit handsets (V3) step ~19.8" in RA, so they are not refined. `lock` is held on entry and on
+    // return. Returns false when the slew was superseded, aborted or cancelled; throws when a pass fails or the
+    // last pass still leaves more than kLandingFailureArcsec.
+    bool refine_goto_landing_locked(std::unique_lock<std::mutex>& lock, double ra, double dec,
+                                    uint64_t owner_generation, bool async_task) {
+        if (!use_precise_commands_) {
+            return true;
+        }
+        auto& protocol = SynScanProtocolWrapper::instance();
+        double aim_ra = ra;
+        double aim_dec = dec;
+        for (int pass = 0;; ++pass) {
+            if (motion_generation_ != owner_generation || (async_task && slew_task_cancel_.load())) {
+                return false;
+            }
+            check_connected();
+            const auto raw = protocol.get_ra_dec_raw(true);
+            double ra_error_hours = ra - decode_ra_hours(raw.first, 24);
+            if (ra_error_hours > 12.0) ra_error_hours -= 24.0;
+            if (ra_error_hours < -12.0) ra_error_hours += 24.0;
+            const double dec_error_degrees = dec - decode_angle(raw.second, 24);
+            const double ra_error_arcsec = std::abs(ra_error_hours) * kHoursToDegrees * 3600.0;
+            const double dec_error_arcsec = std::abs(dec_error_degrees) * 3600.0;
+            if (ra_error_arcsec <= kLandingToleranceArcsec && dec_error_arcsec <= kLandingToleranceArcsec) {
+                return true;
+            }
+            if (ra_error_arcsec > kLandingRefineLimitArcsec || dec_error_arcsec > kLandingRefineLimitArcsec) {
+                ALPACA_LOG_WARN("SynScan", "GOTO ended " + std::to_string(ra_error_arcsec) + " arcsec (RA) and " +
+                                               std::to_string(dec_error_arcsec) +
+                                               " arcsec (Dec) from the target; too far for a landing refinement");
+                return true;
+            }
+            if (pass == kMaxLandingRefinePasses) {
+                const std::string detail = "SynScan GOTO landed " + std::to_string(ra_error_arcsec) +
+                                           " arcsec (RA) and " + std::to_string(dec_error_arcsec) +
+                                           " arcsec (Dec) off target after " + std::to_string(kMaxLandingRefinePasses) +
+                                           " refinement passes";
+                if (ra_error_arcsec > kLandingFailureArcsec || dec_error_arcsec > kLandingFailureArcsec) {
+                    throw AlpacaException(detail, AlpacaError::DriverException);
+                }
+                ALPACA_LOG_WARN("SynScan", detail);
+                return true;
+            }
+            aim_ra = std::fmod(aim_ra + ra_error_hours + 24.0, 24.0);
+            aim_dec = std::clamp(aim_dec + dec_error_degrees, -90.0, 90.0);
+            equatorial_cache_valid_ = false;
+            altaz_cache_valid_ = false;
+            slewing_cached_ = true;
+            slew_force_until_ = std::chrono::steady_clock::now() + kRefineStartForce;
+            guide_position_valid_ = false;
+            protocol.goto_ra_dec_raw(encode_ra_raw(aim_ra, 24), encode_angle(aim_dec, 24), true);
+            if (!wait_for_slew_complete(lock, owner_generation, false)) {
+                return false;
+            }
+        }
     }
 
     void sync_mount_time_locked() {
@@ -2271,6 +2389,8 @@ private:
     mutable bool parked_;
     mutable bool at_home_;
     mutable bool slewing_cached_ = false;
+    // motion_generation_ of the GOTO whose landing refinement is under way; 0 when none (open-astro#880).
+    mutable uint64_t refining_generation_ = 0;
     // open-astro#575: an async slew dispatch that fails AFTER
     // slew_to_coordinates_async() returned used to be logged and forgotten,
     // leaving Slewing read FALSE -- indistinguishable from a landed goto. Set
