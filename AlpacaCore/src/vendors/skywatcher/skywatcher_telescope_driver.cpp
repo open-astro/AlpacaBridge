@@ -768,9 +768,15 @@ public:
                 // the restart and calls set_tracking_locked directly.
                 return;
             }
+            // From rest: the last guarded motion's sample is no baseline for
+            // this one (its body may not have polled since it ended).
+            const bool from_rest = !manual_axis_slewing_[0] && !manual_axis_slewing_[1];
             set_tracking_locked(lock, tracking);
             need_duty = tracking_ && (ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0);
             started = tracking_;
+            if (started && from_rest) {
+                limit_guard_baseline_.reset();
+            }
         }
         if (need_duty) {
             start_duty_thread();
@@ -2258,9 +2264,15 @@ public:
                 // transport throws (seen as UDP timeouts over a flaky Wi-Fi
                 // link), a pre-set flag is never cleared and Slewing wedges
                 // true forever (ConformU Wi-Fi finding).
+                // From rest: as in set_tracking(), no baseline carries over
+                // from a guarded motion that has already ended.
+                const bool from_rest = !tracking_ && !manual_axis_slewing_[0] && !manual_axis_slewing_[1];
                 start_speed_motion_locked(lock, channel, rate);
                 manual_axis_slewing_[axis] = true;
                 started = true;
+                if (from_rest) {
+                    limit_guard_baseline_.reset();
+                }
             } else if (manual_axis_slewing_[axis]) {
                 // MoveAxis(axis, 0) on a moving axis is an asynchronous
                 // initiator: issue the stop and return inside the STANDARD
@@ -4617,7 +4629,9 @@ private:
     // false -> true starts a new one, superseding the last, and the body
     // returns once neither runs. The previous sample lives in the driver
     // (limit_guard_baseline_, under mutex_), not in the body, so a body
-    // superseded between two polls never takes an edge with it. Goto, Park
+    // superseded between two polls never takes an edge with it; a motion
+    // that starts from rest drops it, since the last body may not have
+    // polled since its own motion ended. Goto, Park
     // and FindHome are exempt: while one owns the axes the baseline is
     // dropped, and the first sample after it starts a new one. A crossing
     // stops the motion through the public entry points with mutex_ released:

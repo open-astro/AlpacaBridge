@@ -660,6 +660,60 @@ TEST_CASE("SkyWatcher limits - motion that starts outside a limit is not stopped
     driver->set_connected(false);
 }
 
+// A guard body sleeps up to a whole poll before it sees its motion end, and
+// a newer motion supersedes it in that window. The newer body must not take
+// the finished motion's last sample as its baseline: here that sample is
+// inside the meridian limit and tracking restarts past it, which reads as a
+// crossing although nothing carried the axis across one while guarded.
+TEST_CASE("SkyWatcher limits - a motion started from rest takes no baseline from the last one",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, meridian_minutes(10.0));  // RA axis home: inside
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    REQUIRE(wait_until([&] { return sw::detail::limit_guard_bodies_running() == 1; }, 2000));
+    // Just after one of the guard's 2 s polls, so the next one is far off:
+    // the restart below lands while the old body still sleeps.
+    const int anchors = mount.frames_seen('j');
+    REQUIRE(mount.wait_for_frames('j', anchors + 1, std::chrono::milliseconds(3000)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    driver->set_tracking(false);
+    mount.jump_axis_degrees(1, 95.0);  // 20 min past the meridian
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(4500));  // two 2 s polls
+    CHECK(driver->get_tracking());
+    CHECK(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
+// The same window, closed by a MoveAxis instead of a Tracking restart.
+TEST_CASE("SkyWatcher limits - a MoveAxis started from rest takes no baseline from tracking",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, meridian_minutes(10.0));
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    REQUIRE(wait_until([&] { return sw::detail::limit_guard_bodies_running() == 1; }, 2000));
+    const int anchors = mount.frames_seen('j');
+    REQUIRE(mount.wait_for_frames('j', anchors + 1, std::chrono::milliseconds(3000)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    driver->set_tracking(false);
+    mount.jump_axis_degrees(1, 95.0);
+    driver->move_axis(1, kMaxMoveAxisRate / 10.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));  // four 250 ms polls
+    CHECK(mount.axis_running(2));
+    CHECK(driver->get_slewing());
+    driver->move_axis(1, 0.0);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 6000));
+    driver->set_connected(false);
+}
+
 // Tracking on, then MoveAxis on the Dec axis across a floor 1.5 deg below the
 // start, with every ":K" from here on ramping for 7 s: longer than the 5 s the
 // tracking stop waits for the RA axis, so that stop always times out.
