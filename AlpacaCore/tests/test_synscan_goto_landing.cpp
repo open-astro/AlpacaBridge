@@ -214,6 +214,35 @@ TEST_CASE("SynScan GOTO landing - a landing that never converges is bounded and 
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan GOTO landing - an async landing that never converges is bounded and reported (#880)",
+          "[synscan][telescope][goto-landing]") {
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->growing.store(true);  // every GOTO lands further off than the last
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+    const auto deadline = Clock::now() + std::chrono::seconds(60);
+    bool reported = false;
+    while (!reported && Clock::now() < deadline) {
+        try {
+            if (!driver->get_slewing()) {
+                break;
+            }
+        } catch (const alpacacore::AlpacaException& ex) {
+            reported = ex.error_code() == alpacacore::AlpacaError::DriverException;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(reported);
+    CHECK(st->goto_count.load() == 4);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SynScan GOTO landing - AbortSlew during a refinement pass stops it (#880)",
           "[synscan][telescope][goto-landing]") {
     auto st = std::make_shared<LandingOffsetHandset>();
