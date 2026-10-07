@@ -16,6 +16,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -30,7 +31,7 @@ enum class SynScanVersion {
 /// Configured geometry of an AZ-EQ mount (model IDs 5/6), whose handset does
 /// not report whether it is set up Alt-Az or equatorial (#860). Auto keeps the
 /// driver's refusal to guess; other models ignore the setting.
-enum class SynScanAlignmentSetting { Auto, AltAz, Equatorial };
+enum class SynScanAlignmentSetting : std::uint8_t { Auto, AltAz, Equatorial };
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope(
     int device_number,

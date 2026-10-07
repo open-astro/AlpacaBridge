@@ -16,6 +16,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -24,7 +25,7 @@ namespace alpacacore::vendor::celestron {
 /// Configured geometry of a fork mount, which the handset classifies as Alt-Az
 /// although it can sit on a wedge (#860). Auto keeps the nominal Alt-Az answer;
 /// German equatorial models ignore the setting.
-enum class CelestronAlignmentSetting { Auto, AltAz, Equatorial };
+enum class CelestronAlignmentSetting : std::uint8_t { Auto, AltAz, Equatorial };
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope(
     int device_number,
