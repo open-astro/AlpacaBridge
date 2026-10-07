@@ -771,9 +771,7 @@ TEST_CASE("QHY Camera Driver - CCDTemperature is not invented", "[qhy][camera][u
         LockedQHYSDK sdk(fake);
         auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
         driver->set_connected(true);
-        REQUIRE(eventually([&] {
-            return error_code_of([&] { (void)driver->get_ccd_temperature(); }) == 0;
-        }));
+        REQUIRE(eventually([&] { return error_code_of([&] { (void)driver->get_ccd_temperature(); }) == 0; }));
         fail_reads = true;
         CHECK(eventually([&] {
             return error_code_of([&] { (void)driver->get_ccd_temperature(); }) ==
