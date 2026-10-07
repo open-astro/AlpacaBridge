@@ -246,6 +246,7 @@ TEST_CASE("SynScan GOTO landing - an async landing that never converges is bound
 TEST_CASE("SynScan GOTO landing - AbortSlew during a refinement pass stops it (#880)",
           "[synscan][telescope][goto-landing]") {
     auto st = std::make_shared<LandingOffsetHandset>();
+    st->growing.store(true);  // left alone, the refinement would go on to a third GOTO
     alpacacore::test::FakeMountServer server(responder(st));
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
