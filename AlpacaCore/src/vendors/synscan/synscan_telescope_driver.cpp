@@ -1978,7 +1978,7 @@ private:
                 }
                 throw AlpacaException(
                     "SynScan cannot report whether this AZ-EQ mount is currently configured "
-                    "for Alt-Az or equatorial alignment; set Alignment Mode in the device settings",
+                    "for Alt-Az or equatorial alignment",
                     AlpacaError::DriverException);
             default:
                 if ((model_id >= 128 && model_id <= 159)) {
