@@ -1,0 +1,2 @@
+### Changed
+- **Issue priority scale** (docs): `docs/agents/issue-tracker.md` defines the `[P1]`-`[P5]` title prefix every issue carries, with a test and examples per level, a hardware-safety rule (anything that can move a device unasked or keep it moving after a stop is never below `[P2]`), and the rule to set the level from verified impact rather than a reporter's or review bot's label; `AGENTS.md` points to it.

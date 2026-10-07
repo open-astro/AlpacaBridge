@@ -1,0 +1,2 @@
+### Changed
+- **SynScan: document the handset recovery when the SBC powers it over USB** (docs, issue #881): a mount power-cycle with the handset's USB still plugged into the SBC does not restart the handset, so a stuck handset stays stuck; `SUPPORTED-DRIVERS.md` and the SynScan instructions now give the recovery order (unplug USB, power-cycle the mount, main screen, wait 30 s, replug), and `/conformu` checks that a SynScan handset answers a position query before a run.
