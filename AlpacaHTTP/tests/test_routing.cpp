@@ -667,6 +667,42 @@ private:
     int number_;
 };
 
+// Issue #776: a driver whose synchronous connect() throws NotConnected (the
+// default AlpacaDriver::connect() is set_connected(true)), counting disconnects.
+class ThrowingSyncConnectStubDriver final : public alpacacore::AlpacaDriver {
+public:
+    static constexpr const char* kReason = "Serial port is busy: another program holds it";
+    int disconnect_calls = 0;
+
+    explicit ThrowingSyncConnectStubDriver(int number) : number_(number) {}
+
+    int get_device_number() const override { return number_; }
+    std::string get_name() const override { return "Throwing Sync Connect Stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::CoverCalibrator; }
+    std::string get_unique_id() const override { return "throwing-sync-stub-" + std::to_string(number_); }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 1; }
+    bool get_connected() const override { return false; }
+    bool get_connecting() const override { return false; }
+    void set_connected(bool connected) override {
+        if (connected) {
+            throw alpacacore::AlpacaException(kReason, alpacacore::AlpacaError::NotConnected);
+        }
+    }
+    void disconnect() override { ++disconnect_calls; }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return ""; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return ""; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return ""; }
+
+private:
+    int number_;
+};
+
 // GET .../connected for a given ClientID (no ClientID when client_id is empty)
 // and return the reported Value.
 bool get_connected_value(alpacahttp::Router& router, const std::string& path_base, const std::string& client_id,
@@ -6157,6 +6193,33 @@ int main() {
         EXPECT(refusing->get_last_connect_error() == std::string(RefusingConnectStubDriver::kReason));
 
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9650);
+    }
+
+    // Issue #776: a synchronous connect() that throws NotConnected is reported
+    // as a DriverException, and the failed client's registration is dropped.
+    {
+        // case: sync connect failure
+        alpacahttp::Router router;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ThrowingSyncConnectStubDriver>(9651);
+        EXPECT(registry.register_device(stub));
+
+        const auto failed = nlohmann::json::parse(
+            route_request(router, "PUT", "/api/v1/covercalibrator/9651/connected", "Connected=true&ClientID=1").body(),
+            nullptr, false);
+        EXPECT(!failed.is_discarded());
+        EXPECT(failed.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::DriverException));
+        EXPECT(failed.value("ErrorMessage", "") == std::string(ThrowingSyncConnectStubDriver::kReason));
+
+        // Client 1 holds no registration, so another client's disconnect is
+        // the last one out and reaches the driver.
+        const auto released = nlohmann::json::parse(
+            route_request(router, "PUT", "/api/v1/covercalibrator/9651/connected", "Connected=false&ClientID=2").body(),
+            nullptr, false);
+        EXPECT(!released.is_discarded() && released.value("ErrorNumber", -1) == 0);
+        EXPECT(stub->disconnect_calls == 1);
+
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9651);
     }
 
     // Issue #384: the cross-origin 403 echoes the client's transaction id.
