@@ -8,6 +8,7 @@ if(ALPACACORE_ENABLE_ONSTEP)
     set(ONSTEP_SOURCES
         onstep_protocol_wrapper.cpp
         onstep_telescope_driver.cpp
+        onstep_catalog.cpp
     )
 
     add_library(alpacacore_onstep STATIC ${ONSTEP_SOURCES})

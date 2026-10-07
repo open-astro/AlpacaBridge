@@ -1406,3 +1406,168 @@ TEST_CASE("Builtin catalog - Bisque normalize refuses an empty host from the API
     CHECK_FALSE(ok.rejection.has_value());
     CHECK(string_at(ok.config, "host") == "skyx.local");
 }
+
+// ---------------------------------------------------------------------------
+// OnStep telescope. Serial only (no "network"); the auto-detect factory
+// constructs without a scan (#659), so no port is opened here.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const DeviceKey kOnStepKey{"onstep", DeviceType::Telescope};
+
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the OnStep telescope in every build",
+          "[catalog][onstep][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kOnStepKey);
+    REQUIRE(v != nullptr);
+    // The first word is exactly "OnStep" so vendor_label() keeps the arm's texts.
+    CHECK(v->display_name == "OnStep");
+    CHECK(v->build_option == "ALPACACORE_ENABLE_ONSTEP");
+    CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+
+    const std::vector<std::string_view> expected_keys{
+        "connectionType", "mountIndex",    "portPath",          "baudRate",         "responseTimeoutMs", "siteLatitude",
+        "siteLongitude",  "siteElevation", "syncTimeOnConnect", "apertureDiameter", "focalLength"};
+    REQUIRE(v->fields.size() == expected_keys.size());
+    for (std::size_t i = 0; i < expected_keys.size(); ++i) {
+        CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
+    }
+    const FieldRef* type = find_field(v->fields, "connectionType");
+    REQUIRE(type != nullptr);
+    CHECK(type->allowed_values.empty());  // normalize owns the rule (#380)
+    CHECK(same_scalar(type->default_value, std::string{"auto"}));
+    const FieldRef* timeout = find_field(v->fields, "responseTimeoutMs");
+    REQUIRE(timeout != nullptr);
+    CHECK(same_scalar(timeout->default_value, std::int64_t{5000}));
+    const FieldRef* port = find_field(v->fields, "portPath");
+    REQUIRE(port != nullptr);
+    REQUIRE(port->applies_when.has_value());
+    CHECK(std::string_view(port->applies_when->value) == "serial");
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the OnStep telescope available only when built",
+          "[catalog][onstep][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kOnStepKey);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_ONSTEP
+    CHECK(v->available);
+    // Auto-detect is lazy: constructing it scans nothing and succeeds with no mount.
+    DeviceConfig config;
+    config.set("connectionType", std::string{"auto"});
+    auto driver = catalog.create(kOnStepKey, config, 4);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_type() == DeviceType::Telescope);
+    CHECK(driver->get_device_number() == 4);
+    CHECK_FALSE(driver->get_connected());
+
+    DeviceConfig serial;
+    serial.set("connectionType", std::string{"serial"});
+    serial.set("portPath", std::string{"/dev/ttyUSB-no-such-onstep"});
+    auto serial_driver = catalog.create(kOnStepKey, serial, 5);
+    REQUIRE(serial_driver != nullptr);
+    CHECK(serial_driver->get_device_number() == 5);
+#else
+    CHECK_FALSE(v->available);
+    try {
+        (void)catalog.create(kOnStepKey, DeviceConfig{}, 0);
+        FAIL("create() must throw when OnStep is not built");
+    } catch (const std::runtime_error& e) {
+        CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_ONSTEP") != std::string::npos);
+    }
+#endif
+}
+
+TEST_CASE("Builtin catalog - OnStep normalize accepts '', auto and serial, and refuses network from the API",
+          "[catalog][onstep][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    for (const char* type : {"", "auto", "serial"}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig config;
+        config.set("connectionType", std::string{type});
+        config.set("portPath", std::string{"/dev/ttyUSB3"});
+        const auto api = catalog.normalize(kOnStepKey, config, Source::Api);
+        CHECK_FALSE(api.rejection.has_value());
+        CHECK(string_at(api.config, "connectionType") == type);
+        const auto persisted = catalog.normalize(kOnStepKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        CHECK(persisted.warnings.empty());
+    }
+
+    // No site is required: the arm never asked for one.
+    DeviceConfig no_site;
+    no_site.set("connectionType", std::string{"auto"});
+    CHECK_FALSE(catalog.normalize(kOnStepKey, no_site, Source::Api).rejection.has_value());
+
+    for (const char* type : {"network", "carrier-pigeon", "SERIAL"}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig config;
+        config.set("connectionType", std::string{type});
+        config.set("portPath", std::string{"/dev/ttyUSB3"});
+        const auto api = catalog.normalize(kOnStepKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "Invalid connection type. Use 'auto' or 'serial'");
+
+        // #380: a saved one is read as serial, never auto.
+        const auto persisted = catalog.normalize(kOnStepKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        CHECK(string_at(persisted.config, "connectionType") == "serial");
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0].find(std::string("has connectionType \"") + type + "\"") != std::string::npos);
+        CHECK(persisted.warnings[0].find("treating it as \"serial\"") != std::string::npos);
+    }
+}
+
+TEST_CASE("Builtin catalog - OnStep normalize requires a serial port path from the API only",
+          "[catalog][onstep][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    for (bool set_empty : {true, false}) {
+        INFO(std::string(set_empty ? "empty" : "absent") + " portPath");
+        DeviceConfig config;
+        config.set("connectionType", std::string{"serial"});
+        if (set_empty) config.set("portPath", std::string{});
+        const auto api = catalog.normalize(kOnStepKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "Serial port path is required");
+        const auto persisted = catalog.normalize(kOnStepKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == "Serial port path is required");
+    }
+
+    // A saved unknown type is read as serial, so it is warned about the port too.
+    DeviceConfig unknown;
+    unknown.set("connectionType", std::string{"network"});
+    const auto persisted = catalog.normalize(kOnStepKey, unknown, Source::Persisted);
+    CHECK(any_contains(persisted.warnings, "has connectionType \"network\""));
+    CHECK(any_contains(persisted.warnings, "Serial port path is required"));
+
+    // Auto never needs a port.
+    DeviceConfig automatic;
+    automatic.set("connectionType", std::string{"auto"});
+    CHECK_FALSE(catalog.normalize(kOnStepKey, automatic, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - OnStep site range is per-field", "[catalog][onstep][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    DeviceConfig config;
+    config.set("connectionType", std::string{"auto"});
+    config.set("siteLatitude", 91.0);
+    const auto api = catalog.normalize(kOnStepKey, config, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(*api.rejection == "siteLatitude is out of range (min -90) (max 90)");
+    config.set("siteLatitude", 90.0);
+    config.set("siteLongitude", -180.0);
+    CHECK_FALSE(catalog.normalize(kOnStepKey, config, Source::Api).rejection.has_value());
+}

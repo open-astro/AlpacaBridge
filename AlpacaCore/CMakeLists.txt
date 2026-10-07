@@ -131,6 +131,7 @@ add_library(alpacacore_builtins STATIC
     src/vendors/gphoto/gphoto_schema.cpp
     src/vendors/playerone/playerone_schema.cpp
     src/vendors/bisque/bisque_schema.cpp
+    src/vendors/onstep/onstep_schema.cpp
 )
 target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
 add_library(AlpacaCore::alpacacore_builtins ALIAS alpacacore_builtins)
@@ -180,6 +181,8 @@ if(ALPACACORE_ENABLE_ONSTEP)
     add_subdirectory(src/vendors/onstep)
     if(TARGET alpacacore_onstep)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_onstep)
+        # register_builtin_factories() guards its OnStep factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_ONSTEP)
     endif()
 endif()
 
