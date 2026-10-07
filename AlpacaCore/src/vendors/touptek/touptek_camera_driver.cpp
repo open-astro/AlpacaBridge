@@ -1633,6 +1633,7 @@ private:
         // exposure must restart it, so mark format/ROI dirty.
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            abort_generation_.fetch_add(1);
             if (handle_) {
                 try {
                     sdk_.stop(handle_);
