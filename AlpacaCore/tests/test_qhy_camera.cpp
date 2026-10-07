@@ -14,6 +14,7 @@
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -572,5 +573,53 @@ TEST_CASE("QHY Camera Driver - a disconnect inside a temperature-worker start do
     sdk.set_param("fake-qhy-0", CURTEMP, 10.0);
     CHECK(eventually([&]() { return sdk.get_param("fake-qhy-0", CURTEMP) < 10.0; }));
 
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - BinX write during an exposure fails at once", "[qhy][camera][unit][cc05]") {
+    std::atomic<bool> armed{false};
+    std::atomic<bool> in_frame{false};
+    std::atomic<bool> release{false};
+    auto fake = alpacacore::test::FakeQHYSDK::with_one_camera();
+    // Model the production wrapper: the frame download holds the per-handle call
+    // mutex for the whole frame (LockedQHYSDK's one mutex plays that role).
+    fake.before_call = [&](const std::string& fn) {
+        if (armed.load() && fn == "get_single_frame") {
+            in_frame = true;
+            while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    alpacacore::test::LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    armed = true;
+    driver->start_exposure(1.0, true);
+    REQUIRE(eventually([&]() { return in_frame.load(); }));
+
+    std::atomic<int> bin_code{-2};  // -2 = still blocked
+    std::thread binner([&] {
+        try {
+            driver->set_bin_x(2);
+            bin_code = -1;
+        } catch (const alpacacore::AlpacaException& e) {
+            bin_code = e.error_code();
+        }
+    });
+    std::atomic<bool> state_done{false};
+    std::thread reader([&] {
+        (void)driver->get_camera_state();
+        state_done = true;
+    });
+    const bool state_ok = eventually([&]() { return state_done.load(); });
+    const bool bin_done = eventually([&]() { return bin_code.load() != -2; });
+    const int code = bin_code.load();
+    release = true;
+    binner.join();
+    reader.join();
+    CHECK(state_ok);
+    CHECK(bin_done);
+    CHECK(code == alpacacore::AlpacaError::InvalidOperation);
     driver->set_connected(false);
 }

@@ -1210,8 +1210,10 @@ public:
             exposure_active_.store(true);
         }
 
-        exposure_thread_ = std::thread([this, handle, exposure_us, active_bin, active_num_x, active_num_y, roi_x, roi_y,
-                                        roi_w, roi_h, dirty_format, dirty_roi, active_16bit]() {
+        const uint64_t abort_generation = abort_generation_.load();
+        exposure_thread_ = std::thread([this, handle, abort_generation, exposure_us, active_bin, active_num_x,
+                                        active_num_y, roi_x, roi_y, roi_w, roi_h, dirty_format, dirty_roi,
+                                        active_16bit]() {
             auto& sdk_local = sdk_;
             // Track which reconfigure stages actually completed, so the catch
             // re-marks ONLY the stage that failed — re-marking an
@@ -1231,7 +1233,15 @@ public:
                     }
                     sdk_local.put_binning(handle, active_bin);
                     sdk_local.put_trigger_mode(handle, 1);
-                    sdk_local.start_pull_mode(handle, &ToupTekCameraDriver::on_event_static, this);
+                    {
+                        // An abort that landed during the restart stopped the stream
+                        // already; starting it again would undo the abort and park
+                        // the worker in a frame wait. Check under mutex_ (the abort
+                        // bumps the generation under the same lock as its stop()).
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        if (abort_generation_.load() != abort_generation) throw ExposureAborted{};
+                        sdk_local.start_pull_mode(handle, &ToupTekCameraDriver::on_event_static, this);
+                    }
                     format_applied = true;  // flag cleared at snapshot time
                 }
 
@@ -1249,9 +1259,10 @@ public:
                 // LastExposureStartTime accuracy check.
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
+                    if (abort_generation_.load() != abort_generation) throw ExposureAborted{};
                     last_exposure_start_ = std::chrono::system_clock::now();
+                    sdk_local.trigger(handle, 1);
                 }
-                sdk_local.trigger(handle, 1);
 
                 unsigned timeout_ms = (exposure_us / 1000) + 10000;
                 // Buffer is num_x * num_y pixels at the sensor's byte depth
@@ -1308,6 +1319,9 @@ public:
                     // captured, so remaining Exposing during this build is fine.
                 }
                 frame_ready = true;
+            } catch (const ExposureAborted&) {
+                // Aborted before the frame started: the abort already forced the
+                // next exposure to re-init the stream; nothing to re-mark.
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ToupTek", "Exposure failed: " + std::string(e.what()));
                 // Re-mark only the stage that did NOT complete, so the next
@@ -1350,6 +1364,7 @@ public:
         // the frame is still live.
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            abort_generation_.fetch_add(1);
             if (handle_) {
                 try {
                     sdk_.stop(handle_);
@@ -1387,6 +1402,11 @@ private:
     std::string firmware_version_;
 
     std::atomic<bool> connected_;
+    // Bumped by stop_exposure() under mutex_, together with its stop(). The
+    // exposure worker compares it under mutex_ before restarting the stream and
+    // before the trigger, so an abort landing mid-restart is not undone.
+    std::atomic<uint64_t> abort_generation_{0};
+    struct ExposureAborted {};
     mutable std::mutex mutex_;
     // Serialises the exposure thread's LIFECYCLE: spawn (start_exposure) vs
     // join + handle close (set_connected(false)) vs join (stop_exposure). Without
