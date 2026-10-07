@@ -2469,6 +2469,11 @@ private:
         // and releases the wrapper mutex before its blocking PID call, so
         // these are all fast register writes with brief wrapper-mutex holds.
         std::lock_guard<std::mutex> lock(mutex_);
+        // Check for a live exposure BEFORE the bin query: bin_is_supported() is an
+        // SDK call that waits on the per-handle call mutex the exposure worker
+        // holds for the whole frame, and mutex_ is held here, so asking first
+        // blocked CameraState, AbortExposure and Disconnect behind the frame.
+        ensure_not_exposing_locked();
         const std::string id = camera_id_.value_or("");
         const int max_w = static_cast<int>(camera_info_.max_width) / bin_x;
         const int max_h = static_cast<int>(camera_info_.max_height) / bin_y;
@@ -2476,7 +2481,6 @@ private:
             throw AlpacaException("Bin value not supported: " + std::to_string(bin_x),
                                   AlpacaError::InvalidValue);
         }
-        ensure_not_exposing_locked();
         try {
             sdk_.set_bin_mode(id, static_cast<uint32_t>(bin_x), static_cast<uint32_t>(bin_y));
             sdk_.set_resolution(id, 0, 0, static_cast<uint32_t>(max_w), static_cast<uint32_t>(max_h));

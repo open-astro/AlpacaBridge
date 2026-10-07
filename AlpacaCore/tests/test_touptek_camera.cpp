@@ -14,9 +14,13 @@
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <thread>
 
 #include "catch2_compat.h"
+#include "fake_touptek_sdk.h"
 
 namespace {
 
@@ -168,4 +172,75 @@ TEST_CASE("ToupTek Camera Driver - Offset (black level)", "[touptek][camera][uni
     require_alpaca_error([&]() { driver->get_offset_min(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_offset_max(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_offsets(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}
+
+TEST_CASE("ToupTek Camera Driver - AbortExposure during the stream restart is not undone",
+          "[touptek][camera][unit][cc16]") {
+    using Clock = std::chrono::steady_clock;
+    std::atomic<bool> armed{false};
+    std::atomic<bool> in_restart{false};
+    std::atomic<bool> abort_stop{false};
+    alpacacore::test::FakeToupTekSDK fake;
+    fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    fake.before_call = [&](const std::string& fn) {
+        if (!armed.load()) return;
+        if (fn == "stop" && in_restart.load()) abort_stop = true;  // the abort's stop
+        if (fn == "put_binning") {
+            in_restart = true;
+            while (!abort_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (fn == "start_pull_mode") fake.hold_wait_image(true);  // a restarted stream waits for its frame
+    };
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->abort_exposure();  // marks the format dirty: the next exposure restarts the stream
+
+    armed = true;
+    driver->start_exposure(3.0, true);
+    for (int i = 0; i < 5000 && !in_restart.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    REQUIRE(in_restart.load());
+    const auto t0 = Clock::now();
+    driver->abort_exposure();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+    armed = false;
+    fake.release_wait_image();
+    CHECK(ms < 1000);
+    CHECK(fake.call_count("trigger") == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - Disconnect during the stream restart is not undone",
+          "[touptek][camera][unit][cc16]") {
+    using Clock = std::chrono::steady_clock;
+    std::atomic<bool> armed{false};
+    std::atomic<bool> in_restart{false};
+    std::atomic<bool> abort_stop{false};
+    alpacacore::test::FakeToupTekSDK fake;
+    fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    fake.before_call = [&](const std::string& fn) {
+        if (!armed.load()) return;
+        if (fn == "stop" && in_restart.load()) abort_stop = true;  // the abort's stop
+        if (fn == "put_binning") {
+            in_restart = true;
+            while (!abort_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (fn == "start_pull_mode") fake.hold_wait_image(true);  // a restarted stream waits for its frame
+    };
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->abort_exposure();  // marks the format dirty: the next exposure restarts the stream
+
+    armed = true;
+    driver->start_exposure(3.0, true);
+    for (int i = 0; i < 5000 && !in_restart.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    REQUIRE(in_restart.load());
+    const auto t0 = Clock::now();
+    driver->set_connected(false);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+    armed = false;
+    fake.release_wait_image();
+    CHECK(ms < 1000);
+    CHECK(fake.call_count("trigger") == 0);
 }
