@@ -677,12 +677,22 @@ TEST_CASE("QHY Camera Driver - a watchdog timeout is raised by ImageReady and Im
     driver->start_exposure(0.05, true);
     REQUIRE(eventually([&] { return in_frame.load(); }));
     // Only the two image getters are polled: CameraState is never read.
-    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
-    const int ready_code = error_code_of([&] { (void)driver->get_image_ready(); });
-    const int array_code = error_code_of([&] { (void)driver->get_image_array(); });
+    const auto code_of_ready = [&] { return error_code_of([&] { (void)driver->get_image_ready(); }); };
+    const auto code_of_array = [&] { return error_code_of([&] { (void)driver->get_image_array(); }); };
+    REQUIRE(eventually([&] { return code_of_ready() == alpacacore::AlpacaError::DriverException; },
+                       std::chrono::seconds(5)));
+    CHECK(code_of_array() == alpacacore::AlpacaError::DriverException);
+    // The frame arrives late: the stored failure must stand, not turn into a
+    // ready image without a new StartExposure.
     release = true;
-    CHECK(ready_code == alpacacore::AlpacaError::DriverException);
-    CHECK(array_code == alpacacore::AlpacaError::DriverException);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+    bool stayed_failed = true;
+    while (std::chrono::steady_clock::now() < until) {
+        stayed_failed = stayed_failed && code_of_ready() == alpacacore::AlpacaError::DriverException &&
+                        code_of_array() == alpacacore::AlpacaError::DriverException;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(stayed_failed);
     driver->set_connected(false);
 }
 

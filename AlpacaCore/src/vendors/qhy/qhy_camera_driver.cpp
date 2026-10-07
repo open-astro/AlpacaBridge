@@ -1730,6 +1730,12 @@ public:
             if (exposure_superseded->load()) {
                 return;
             }
+            // The watchdog may have already marked this exposure Failed: that
+            // failure stands until the next StartExposure, so a late frame
+            // (or a late error) must not overwrite it.
+            if (exposure_status_ != QHYExposureStatus::Working) {
+                return;
+            }
             if (ok) {
                 exposure_buffer_ = std::move(local_buf);
                 exposure_width_    = w;
