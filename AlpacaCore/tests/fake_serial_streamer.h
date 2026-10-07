@@ -18,8 +18,9 @@
 // interval and records every '\n'-terminated command line it receives. Two
 // failure modes for the issue #237 link-health tests:
 //   - set_muted(true): the stream stops, the fd stays healthy (hung MCU);
-//   - sever_link(): the pty master closes, so the driver's reads and writes
-//     fail with EIO from then on (USB re-enumeration / unplug), and
+//   - sever_link(): the pty master closes, so the driver's writes fail with
+//     EIO and its reads return 0 at once from then on (USB re-enumeration /
+//     unplug), and
 //     slave_path() is empty afterwards: the path named a pty that no longer
 //     exists, so copy it before the cut if the test still needs it.
 

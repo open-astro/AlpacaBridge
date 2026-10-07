@@ -11,12 +11,136 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/zwo/zwo_asiair_protocol_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #include <alpacacore/version.h>
+#include <dlfcn.h>
+#include <gpiod.h>
 
+#include <array>
+#include <cerrno>
+#include <chrono>
+#include <cstring>
 #include <functional>
+#include <mutex>
+#include <thread>
 
 #include "catch2_compat.h"
+
+// ---------------------------------------------------------------------------
+// libgpiod stub (issue #772). This binary defines the five libgpiod calls that
+// reach a GPIO chip, so the wrappers linked into it call these instead of the
+// shared library's. For the chip path kStubChip they model a chip in memory
+// and record the level each line held when its request was released; for any
+// other chip, request or path they forward to the real libgpiod (found with
+// RTLD_NEXT), so every other test in the binary sees the real library. The
+// settings and config objects are plain user-space structs and stay real.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr const char* kStubChip = "/dev/gpiochip-asiair-stub";
+constexpr unsigned int kStubLines = 64;
+
+struct GpiodStub {
+    std::mutex m;
+    std::array<int, kStubLines> level{};
+    std::array<int, kStubLines> level_at_release{};
+    char chip = 0;     // identity of the stub chip
+    char request = 0;  // identity of the stub request
+};
+
+GpiodStub& stub() {
+    static GpiodStub s;
+    return s;
+}
+
+gpiod_chip* stub_chip() { return reinterpret_cast<gpiod_chip*>(&stub().chip); }
+gpiod_line_request* stub_request() { return reinterpret_cast<gpiod_line_request*>(&stub().request); }
+
+template <typename Fn>
+Fn real_gpiod(const char* name) {
+    return reinterpret_cast<Fn>(dlsym(RTLD_NEXT, name));
+}
+
+int stub_level_at_release(unsigned int offset) {
+    std::lock_guard<std::mutex> lock(stub().m);
+    return offset < kStubLines ? stub().level_at_release[offset] : -1;
+}
+
+}  // namespace
+
+extern "C" {
+
+gpiod_chip* gpiod_chip_open(const char* path) {
+    if (path != nullptr && std::strcmp(path, kStubChip) == 0) {
+        return stub_chip();
+    }
+    static const auto real = real_gpiod<gpiod_chip* (*)(const char*)>("gpiod_chip_open");
+    if (real == nullptr) {
+        errno = ENOSYS;
+        return nullptr;
+    }
+    return real(path);
+}
+
+void gpiod_chip_close(gpiod_chip* chip) {
+    if (chip == stub_chip()) {
+        return;
+    }
+    static const auto real = real_gpiod<void (*)(gpiod_chip*)>("gpiod_chip_close");
+    if (real != nullptr) {
+        real(chip);
+    }
+}
+
+gpiod_line_request* gpiod_chip_request_lines(gpiod_chip* chip, gpiod_request_config* req_cfg,
+                                             gpiod_line_config* line_cfg) {
+    if (chip == stub_chip()) {
+        std::lock_guard<std::mutex> lock(stub().m);
+        stub().level.fill(1);  // every ASIAIR line is requested high
+        stub().level_at_release.fill(-1);
+        return stub_request();
+    }
+    static const auto real =
+        real_gpiod<gpiod_line_request* (*)(gpiod_chip*, gpiod_request_config*, gpiod_line_config*)>(
+            "gpiod_chip_request_lines");
+    if (real == nullptr) {
+        errno = ENOSYS;
+        return nullptr;
+    }
+    return real(chip, req_cfg, line_cfg);
+}
+
+int gpiod_line_request_set_value(gpiod_line_request* request, unsigned int offset, gpiod_line_value value) {
+    if (request == stub_request()) {
+        std::lock_guard<std::mutex> lock(stub().m);
+        if (offset < kStubLines) {
+            stub().level[offset] = value == GPIOD_LINE_VALUE_ACTIVE ? 1 : 0;
+        }
+        return 0;
+    }
+    static const auto real =
+        real_gpiod<int (*)(gpiod_line_request*, unsigned int, gpiod_line_value)>("gpiod_line_request_set_value");
+    if (real == nullptr) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return real(request, offset, value);
+}
+
+void gpiod_line_request_release(gpiod_line_request* request) {
+    if (request == stub_request()) {
+        std::lock_guard<std::mutex> lock(stub().m);
+        stub().level_at_release = stub().level;
+        return;
+    }
+    static const auto real = real_gpiod<void (*)(gpiod_line_request*)>("gpiod_line_request_release");
+    if (real != nullptr) {
+        real(request);
+    }
+}
+
+}  // extern "C"
 
 namespace {
 
@@ -222,4 +346,35 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - Constructor rejects invalid configs",
         require_alpaca_error([&]() { alpacacore::vendor::zwo::create_zwo_asiair_switch(0, bad_chip); },
                              alpacacore::AlpacaError::InvalidValue);
     }
+}
+
+// Issue #772 (CC-15): close() stops the PWM workers wherever they are in the
+// cycle, so without a settle step a port at 50 % duty is released low about
+// half the time and the heater on it loses power at disconnect. AGENTS.md
+// "Never power-cycle on disconnect": duty > 0 is released high, duty 0 low.
+TEST_CASE("ZWO ASIAIR Pro protocol wrapper - close releases each PWM line at its steady level",
+          "[zwo][switch][asiair][unit][gpio]") {
+    constexpr unsigned int kHalfLine = 5;
+    constexpr unsigned int kOffLine = 6;
+    constexpr int kCloses = 20;
+    int half_released_low = 0;
+    int off_released_high = 0;
+    int not_released = 0;
+    for (int i = 0; i < kCloses; ++i) {
+        alpacacore::vendor::zwo::AsiairProtocolWrapper wrapper(
+            kStubChip, {{"DC1", kHalfLine, true}, {"DC2", kOffLine, true}}, 100);
+        wrapper.open();
+        wrapper.set_value(0, 50);
+        wrapper.set_value(1, 0);
+        // Vary where in the 10 ms period close() lands.
+        std::this_thread::sleep_for(std::chrono::milliseconds(30 + (i * 7) % 20));
+        wrapper.close();
+        half_released_low += stub_level_at_release(kHalfLine) == 0 ? 1 : 0;
+        off_released_high += stub_level_at_release(kOffLine) == 1 ? 1 : 0;
+        not_released += stub_level_at_release(kHalfLine) < 0 ? 1 : 0;
+    }
+    INFO(half_released_low << "/" << kCloses << " closes released the 50 % port low");
+    CHECK(not_released == 0);
+    CHECK(half_released_low == 0);
+    CHECK(off_released_high == 0);
 }
