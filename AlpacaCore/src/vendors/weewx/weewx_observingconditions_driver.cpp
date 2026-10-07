@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -64,6 +65,16 @@ std::string normalize_property_name(std::string_view name) {
         }
     }
     return normalized;
+}
+
+// The sensor names IObservingConditions defines, normalized. A name outside
+// this set is InvalidValue; one inside it that the station does not serve is
+// NotImplemented.
+bool is_ascom_sensor_name(const std::string& normalized) {
+    static const std::unordered_set<std::string> kSensorNames = {
+        "cloudcover",     "dewpoint", "humidity",    "pressure",      "rainrate", "skybrightness", "skyquality",
+        "skytemperature", "starfwhm", "temperature", "winddirection", "windgust", "windspeed"};
+    return kSensorNames.count(normalized) != 0;
 }
 
 std::optional<std::string_view> extract_object_block(std::string_view payload, std::string_view key) {
@@ -290,7 +301,6 @@ public:
           device_number_(device_number),
           config_(std::move(config)),
           connected_(false),
-          average_period_hours_(0.0),
           poll_running_(false) {
         if (config_.url.empty()) {
             throw AlpacaException("WeeWX URL is required", AlpacaError::InvalidValue);
@@ -411,17 +421,14 @@ public:
         throw AlpacaException("Command not supported", AlpacaError::NotImplemented);
     }
 
-    double get_average_period() const override {
-        std::lock_guard<std::mutex> lock(data_mutex_);
-        return average_period_hours_;
-    }
+    // WeeWX serves instantaneous readings, so the only valid AveragePeriod is 0.
+    double get_average_period() const override { return 0.0; }
 
     void set_average_period(double period) override {
-        if (period < 0.0) {
-            throw AlpacaException("AveragePeriod must be non-negative", AlpacaError::InvalidValue);
+        if (period != 0.0) {
+            throw AlpacaException("AveragePeriod must be 0: WeeWX readings are instantaneous",
+                                  AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(data_mutex_);
-        average_period_hours_ = period;
     }
 
     double get_cloud_cover() const override {
@@ -482,26 +489,42 @@ public:
 
     double get_time_since_last_update(std::string_view property_name) const override {
         const std::string key = normalize_property_name(property_name);
-        if (key.empty()) {
-            return -1.0;
+        if (!key.empty() && !is_ascom_sensor_name(key)) {
+            throw AlpacaException("Unknown sensor property", AlpacaError::InvalidValue);
         }
         // supported_properties_ is mutated by the poll thread under data_mutex_;
         // every read must hold the same lock.
         std::lock_guard<std::mutex> lock(data_mutex_);
-        if (!supported_properties_.count(key)) {
-            throw AlpacaException("Sensor not implemented", AlpacaError::PropertyNotImplemented);
+        std::optional<std::chrono::system_clock::time_point> last_update;
+        if (key.empty()) {
+            // An empty name asks for the most recent update of any sensor.
+            for (const auto& entry : property_last_update_) {
+                if (!last_update || entry.second > *last_update) {
+                    last_update = entry.second;
+                }
+            }
+        } else {
+            if (!supported_properties_.count(key)) {
+                throw AlpacaException("Sensor not implemented", AlpacaError::PropertyNotImplemented);
+            }
+            auto it = property_last_update_.find(key);
+            if (it != property_last_update_.end()) {
+                last_update = it->second;
+            }
         }
-        auto it = property_last_update_.find(key);
-        if (it == property_last_update_.end()) {
+        if (!last_update) {
             return -1.0;
         }
         auto now = std::chrono::system_clock::now();
-        std::chrono::duration<double> elapsed = now - it->second;
+        std::chrono::duration<double> elapsed = now - *last_update;
         return elapsed.count();
     }
 
     std::string get_sensor_description(std::string_view property_name) const override {
         const std::string key = normalize_property_name(property_name);
+        if (!is_ascom_sensor_name(key)) {
+            throw AlpacaException("Unknown sensor property", AlpacaError::InvalidValue);
+        }
         // supported_properties_ is mutated by the poll thread under data_mutex_;
         // every read must hold the same lock.
         std::lock_guard<std::mutex> lock(data_mutex_);
@@ -634,9 +657,7 @@ private:
         {"windspeed", "Wind speed (WeeWX wind_speed)"},
         {"pressure", "Barometric pressure (WeeWX barometer)"},
         {"skyquality", "Sky quality (WeeWX sqm)"},
-        {"skytemperature", "Sky sensor temperature (WeeWX sqmTemp)"}
-    };
-    double average_period_hours_;
+        {"skytemperature", "Sky sensor temperature (WeeWX sqmTemp)"}};
 
     std::mutex poll_mutex_;
     // Guards set_connected() against a concurrent set_connected() only (#528).
