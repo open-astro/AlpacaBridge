@@ -1,0 +1,2 @@
+### Added (tests)
+- **Celestron per-axis pulse guiding cases** (AlpacaCore, issue #813): two FakeMountServer cases in `test_celestron_telescope.cpp` pin that a Dec PulseGuide during an RA pulse neither cuts the RA MC_AUX_GUIDE chunk chain (a 5 s RA pulse still sends its 255 cs and 245 cs chunks) nor ends `IsPulseGuiding` while RA is still guiding. The per-axis pulse threads and state they cover shipped with issue #812.
