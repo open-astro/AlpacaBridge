@@ -686,6 +686,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Post-slew tracking**: Tracking is re-asserted via the top-level `T` set-tracking-mode command after each slew completes; CGX-L fw 7.18 does not auto-resume tracking after goto.
 - **Pulse guiding**: Uses native MC_AUX_GUIDE (0x26) hardware command via the autoguider port. The firmware times the pulse internally — no software sleep or encoder math required. Position hold/correction pattern bridges the gap between the low-level firmware command and ASCOM coordinate expectations.
 - **Pier side**: `SideOfPier` reports actual pier side via the HC `p` command (`W` = pierWest, `E` = pierEast).
+- **Fork mounts on a wedge (not hardware-validated)**: with the device's Alignment Mode setting at `equatorial`, a fork model reports `AlignmentMode` Polar and `Tracking=true` selects EQ tracking (mode 2 north, 3 south). This is covered by unit tests on the fake mount only; there is no ConformU run on a wedged fork mount yet, so `SideOfPier` and `DestinationSideOfPier` on a wedge are unchecked. The default (`auto`) keeps the nominal Alt-Az classification for forks.
 
 </details>
 
@@ -771,6 +772,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Hand controller setup**: the driver reads pointing and `SideOfPier` from the hand controller's own model, so set the handset's date, time, time zone and site correctly, and power the mount on at its home position (counterweight bar down, pointing at the pole). On an EQM-35 Pro at latitude -37 with a wrong handset date, time and site and a board powered on away from home, `SideOfPier` read `pierWest` on both sides of the meridian. With the handset set up correctly, the same driver passed ConformU's SideOfPier checks (issue #243).
 - **Sky-Watcher HEQ5 PRO Firmware**: Hand controller firmware 4.42.00, motor controller firmware 3.46
 - **Pulse guiding**: Software-timed variable-rate slew (SynScan has no hardware pulse guide command). Driver issues a variable-rate axis slew at the configured guide rate, times the pulse duration in a background thread, then stops the axis and restores sidereal tracking. GEM pier-side DEC direction flip applied automatically. Position reporting uses accumulated `rate × duration` deltas in the target coordinate frame for ConformU tolerance compliance.
+- **AZ-EQ mounts (model IDs 5/6, not hardware-validated)**: with the device's Alignment Mode setting at `altaz` or `equatorial`, `AlignmentMode`, the tracking mode (1 for Alt-Az; 2 north, 3 south for equatorial) and the park position follow the setting. This is covered by unit tests on the fake mount only; there is no ConformU run on an AZ-EQ mount yet. Unset (`auto`) keeps today's behaviour: `AlignmentMode` and `Tracking=true` throw `DriverException`, because the hand controller does not report the active geometry.
 - **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues (pulse guide tested across N/S/E/W at declinations -9, +9, -3, +3).
 
 </details>
