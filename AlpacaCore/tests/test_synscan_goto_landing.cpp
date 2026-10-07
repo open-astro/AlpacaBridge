@@ -238,7 +238,6 @@ TEST_CASE("SynScan GOTO landing - AbortSlew during a refinement pass stops it (#
     driver->set_connected(false);
 }
 
-
 namespace {
 
 // A GOTO that stays in progress for 6 s, started asynchronously. Every stop path below must return at once
@@ -254,8 +253,8 @@ struct LongGoto {
         st->goto_ms.store(6000);
         server = std::make_unique<alpacacore::test::FakeMountServer>(responder(st));
         REQUIRE(server->ok());
-        driver = alpacacore::vendor::synscan::create_synscan_telescope(
-            0, endpoint(server->port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        driver = alpacacore::vendor::synscan::create_synscan_telescope(0, endpoint(server->port()),
+                                                                       alpacacore::vendor::synscan::SynScanVersion::V4);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
         std::this_thread::sleep_for(std::chrono::milliseconds(500));

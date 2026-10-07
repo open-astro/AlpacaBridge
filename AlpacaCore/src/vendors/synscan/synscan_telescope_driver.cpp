@@ -2154,8 +2154,8 @@ private:
     // `cancel` (async slew task only) makes every sleep interruptible through task_wait_for(), the way the park
     // task waits, so a join by Disconnect, MoveAxis, a new slew or the destructor returns at once; the wait then
     // returns false.
-    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation,
-                                bool apply_settle = true, std::atomic<bool>* cancel = nullptr) const {
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation, bool apply_settle = true,
+                                std::atomic<bool>* cancel = nullptr) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = std::chrono::steady_clock::now();
         const auto start_grace = std::chrono::seconds(2);
