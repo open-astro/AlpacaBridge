@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
@@ -251,6 +252,14 @@ uint32_t degrees_to_counts(double degrees, uint32_t cpr) {
 }
 
 }  // namespace
+
+namespace detail {
+namespace {
+// Read by limit_guard_bodies_started() / limit_guard_bodies_running().
+std::atomic<std::uint64_t> g_limit_guard_started{0};
+std::atomic<int> g_limit_guard_running{0};
+}  // namespace
+}  // namespace detail
 
 class SkyWatcherTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
 public:
@@ -745,6 +754,7 @@ public:
 
     void set_tracking(bool tracking) override {
         bool need_duty = false;
+        bool started = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
@@ -758,11 +768,21 @@ public:
                 // the restart and calls set_tracking_locked directly.
                 return;
             }
+            // From rest: the last guarded motion's sample is no baseline for
+            // this one (its body may not have polled since it ended).
+            const bool from_rest = !manual_axis_slewing_[0] && !manual_axis_slewing_[1];
             set_tracking_locked(lock, tracking);
             need_duty = tracking_ && (ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0);
+            started = tracking_;
+            if (started && from_rest) {
+                limit_guard_baseline_.reset();
+            }
         }
         if (need_duty) {
             start_duty_thread();
+        }
+        if (started) {
+            start_limit_guard();
         }
     }
 
@@ -1516,6 +1536,7 @@ public:
                         if (live_rate_relatch_) {  // open-astro#666
                             proto.start_motion(kAxisRa);
                         }
+                        anchor_model_locked();  // the rate change applies from now, not from the last anchor
                         cmd_axis_rate_deg_s_[0] = restore_rate;
                         return;
                     } catch (const std::exception& e) {
@@ -1724,6 +1745,15 @@ public:
                         proto.start_motion(kAxisRa);
                     }
                     std::lock_guard<std::mutex> lock(mutex_);
+                    // Fold the pulse rate into the model up to now first: a
+                    // rate change applied from an older anchor (one the limit
+                    // guard takes mid-pulse) drops the pulse distance driven
+                    // since it, and the next hardware read jumps (EQM-35 Pro,
+                    // PulseGuide RA change short by up to 1.07 s with a floor
+                    // set). No anchor at dispatch: pulse_guide() invalidated
+                    // the cache, and a hardware read there would lengthen the
+                    // pulse.
+                    anchor_model_locked();
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
                     // The ":J" above can land inside a Tracking=false
                     // stop-wait (after its ":K"): stop RA again now, not
@@ -2130,6 +2160,12 @@ public:
         // After the writes, for the same reason dispatch_goto_locked() records
         // after its motor commands (open-astro#459).
         remember_command_branch_locked(axis2);
+        // open-astro#436: the axes did not move, the frame did; the live
+        // guard must not read the jump as a crossing. The cache goes first:
+        // set_tracking_locked() can release mutex_, and a guard poll in that
+        // window must read the new frame, not take the old one as its baseline.
+        invalidate_position_cache_locked();
+        limit_guard_baseline_.reset();
         if (was_tracking) {
             set_tracking_locked(lock, true);
         }
@@ -2208,6 +2244,7 @@ public:
         // (ASCOM allows the axes to move concurrently).
         reap_pulse_task(axis == 0 ? kAxisRa : kAxisDec);
         bool need_stop_task = false;
+        bool started = false;
         uint64_t stop_task_generation = 0;
         int channel = kAxisRa;
         {
@@ -2227,8 +2264,15 @@ public:
                 // transport throws (seen as UDP timeouts over a flaky Wi-Fi
                 // link), a pre-set flag is never cleared and Slewing wedges
                 // true forever (ConformU Wi-Fi finding).
+                // From rest: as in set_tracking(), no baseline carries over
+                // from a guarded motion that has already ended.
+                const bool from_rest = !tracking_ && !manual_axis_slewing_[0] && !manual_axis_slewing_[1];
                 start_speed_motion_locked(lock, channel, rate);
                 manual_axis_slewing_[axis] = true;
+                started = true;
+                if (from_rest) {
+                    limit_guard_baseline_.reset();
+                }
             } else if (manual_axis_slewing_[axis]) {
                 // MoveAxis(axis, 0) on a moving axis is an asynchronous
                 // initiator: issue the stop and return inside the STANDARD
@@ -2257,6 +2301,9 @@ public:
             // that jogs an axis after a failed GOTO must not be told the OLD
             // goto failed.
             clear_last_slew_error_locked();
+        }
+        if (started) {
+            start_limit_guard();
         }
         if (!need_stop_task) {
             return;
@@ -2343,9 +2390,12 @@ public:
                     ALPACA_LOG_WARN("SkyWatcher",
                                     std::string("MoveAxis stop: failed to restore tracking: ") + e.what());
                 }
-            } else if (channel == kAxisDec && tracking_ && dec_rate_arcsec_per_sec_ != 0.0 && generation_ok) {
+            } else if (channel == kAxisDec && tracking_effectively_on_locked() && dec_rate_arcsec_per_sec_ != 0.0 &&
+                       generation_ok) {
                 // Same restore contract for Dec: a manual nudge must not
-                // silently cancel an active DeclinationRate offset.
+                // silently cancel an active DeclinationRate offset. Not while
+                // a Tracking=false is in flight (the limit guard stops Dec
+                // before tracking): the restore would supersede its stop-wait.
                 try {
                     apply_dec_rate_offset_locked(lock);
                 } catch (const std::exception& e) {
@@ -2712,6 +2762,7 @@ private:
         goto_overhead_seconds_ = kGotoRampSeconds;
         last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
         last_landing_time_ = std::chrono::steady_clock::time_point{};
+        limit_guard_baseline_.reset();
     }
 
     // True once both coordinates have a provenance: either the device config
@@ -2910,6 +2961,17 @@ private:
     // direction, and transcribing it cost this fix a wrong sign that only
     // the rig caught. The table above is the reference.
 
+    // The axis angles {a1, a2} in degrees from home, extrapolated from the
+    // cache as described in compute_ra_dec_locked().
+    std::pair<double, double> dead_reckoned_axes_locked() const {
+        double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - last_position_update_).count();
+        // Offsets hold the model anchor for the whole offset session; without
+        // offsets the cache re-anchors within seconds, so clamp tight.
+        dt = std::clamp(dt, 0.0, rate_offsets_active_locked() && tracking_ ? 3600.0 : 5.0);
+        return {cached_ra_axis_deg_ + cmd_axis_rate_deg_s_[0] * dt,
+                cached_dec_axis_deg_ + cmd_axis_rate_deg_s_[1] * dt};
+    }
+
     std::pair<double, double> compute_ra_dec_locked() const {
         // Dead-reckon between hardware reads: while an axis runs at a
         // commanded speed rate, extrapolate the cached angle by rate x
@@ -2918,12 +2980,7 @@ private:
         // steady under tracking (no LST-vs-stale-HA sawtooth) and resolves
         // sub-count offset rates. Goto/stop paths zero the commanded rates,
         // so a slewing or idle axis reports the raw cached angle.
-        double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - last_position_update_).count();
-        // Offsets hold the model anchor for the whole offset session; without
-        // offsets the cache re-anchors within seconds, so clamp tight.
-        dt = std::clamp(dt, 0.0, rate_offsets_active_locked() && tracking_ ? 3600.0 : 5.0);
-        double a1 = cached_ra_axis_deg_ + cmd_axis_rate_deg_s_[0] * dt;
-        double a2 = cached_dec_axis_deg_ + cmd_axis_rate_deg_s_[1] * dt;
+        auto [a1, a2] = dead_reckoned_axes_locked();
         // dec_mech = 90 - |a2| on both branches; the branch decides only the
         // sign of the 6 h home term, and at the pole it is the remembered one
         // (see branch_from_axis_locked, open-astro#459).
@@ -4003,6 +4060,10 @@ private:
 
     // Some controllers stop tracking during a GOTO and do not resume; always
     // re-issue tracking after a completed slew when it was on (project lesson).
+    // No start_limit_guard() here: restore_tracking_after_slew_ is set only
+    // from tracking_ == true, and every path that clears tracking_ during the
+    // slew clears it too, so tracking_ stayed true and the guard body started
+    // by Tracking=true is still running (exempt while the slew owns the axes).
     void restore_tracking_after_slew_locked(std::unique_lock<std::mutex>& lock) {
         if (restore_tracking_after_slew_) {
             restore_tracking_after_slew_ = false;
@@ -4558,6 +4619,162 @@ private:
         return !expected_generation || motion_generation_ == *expected_generation;
     }
 
+    // ── Live limit guard (open-astro#436) ───────────────────────────────────
+    //
+    // Watches a MoveAxis or tracking motion while a limit is set and stops it
+    // the moment it carries the tube from inside a limit to outside it (the
+    // edge rule of util::crossed: motion that starts outside a limit is never
+    // stopped, so a mount below the floor can always be driven back up).
+    // One body per guarded motion: every MoveAxis start and every Tracking
+    // false -> true starts a new one, superseding the last, and the body
+    // returns once neither runs. The previous sample lives in the driver
+    // (limit_guard_baseline_, under mutex_), not in the body, so a body
+    // superseded between two polls never takes an edge with it; a motion
+    // that starts from rest drops it, since the last body may not have
+    // polled since its own motion ended. Goto, Park
+    // and FindHome are exempt: while one owns the axes the baseline is
+    // dropped, and the first sample after it starts a new one. A crossing
+    // stops the motion through the public entry points with mutex_ released:
+    // the Dec MoveAxis stop first (an asynchronous initiator, so a slow
+    // tracking stop never holds it back), then tracking, then the RA MoveAxis
+    // stop (tracking off before it, so its stop task finds tracking off and
+    // does not restore it, #535). Each stop is tried on its own, and the
+    // crossing is consumed only once every stop has landed in a body that is
+    // still current: a stop that throws, or one a superseded body skips,
+    // leaves the inside baseline in place, so the current body's next poll
+    // sees the same crossing and stops again.
+
+    // Call without mutex_ held (AsyncOperation rule 10), and never from the
+    // body.
+    void start_limit_guard() {
+        if (!motion_limits_.enabled()) {
+            return;
+        }
+        try {
+            limit_guard_.start([this](util::OperationContext& ctx) { run_limit_guard(ctx); });
+        } catch (const std::exception& e) {
+            ALPACA_LOG_ERROR("SkyWatcher", std::string("Motion limit guard did not start: ") + e.what());
+        }
+    }
+
+    // Caller holds mutex_ and has refreshed the position cache.
+    util::MotionSample limit_sample_locked() const {
+        const double a1 = dead_reckoned_axes_locked().first;
+        auto [alt, az] = compute_alt_az_locked();
+        return {alt, az, std::abs(a1) - 90.0};
+    }
+
+    static std::string limit_number(double v) {
+        char text[32];
+        std::snprintf(text, sizeof text, "%.1f", v);
+        return text;
+    }
+
+    void run_limit_guard(util::OperationContext& ctx) {
+        detail::g_limit_guard_started.fetch_add(1);
+        detail::g_limit_guard_running.fetch_add(1);
+        struct Running {
+            ~Running() { detail::g_limit_guard_running.fetch_sub(1); }
+        } running;
+
+        // 250 ms while MoveAxis drives an axis, 2 s while only tracking.
+        constexpr auto kManualPoll = std::chrono::milliseconds(250);
+        constexpr auto kTrackingPoll = std::chrono::milliseconds(2000);
+        for (;;) {
+            std::chrono::milliseconds poll = kTrackingPoll;
+            auto crossing = util::LimitCrossing::None;
+            util::MotionSample sample;
+            bool stop_ra = false;
+            bool stop_dec = false;
+            bool stop_tracking = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                // Superseded or cancelled: the newer body (or the
+                // disconnect) owns the baseline now.
+                if (ctx.stop_reason() != util::StopReason::None) {
+                    return;
+                }
+                const bool manual = manual_axis_slewing_[0] || manual_axis_slewing_[1];
+                if (!connected_ || (!manual && !tracking_)) {
+                    limit_guard_baseline_.reset();
+                    return;
+                }
+                if (manual) {
+                    poll = kManualPoll;
+                }
+                if (goto_in_progress_ || parking_ || homing_ || slewing_cached_ || restoring_tracking_) {
+                    limit_guard_baseline_.reset();
+                } else {
+                    try {
+                        refresh_position_cache_locked(false);
+                        sample = limit_sample_locked();
+                        if (limit_guard_baseline_) {
+                            crossing = util::crossed(motion_limits_, *limit_guard_baseline_, sample);
+                        }
+                        // On a crossing the inside baseline stays until the
+                        // stops have landed (below).
+                        if (crossing == util::LimitCrossing::None) {
+                            limit_guard_baseline_ = sample;
+                        }
+                    } catch (const std::exception& e) {
+                        // No sample this poll: the read paths report the
+                        // link fault; keep the last good baseline.
+                        ALPACA_LOG_DEBUG("SkyWatcher", std::string("Motion limit guard: no sample: ") + e.what());
+                    }
+                }
+                if (crossing != util::LimitCrossing::None) {
+                    stop_ra = manual_axis_slewing_[0];
+                    stop_dec = manual_axis_slewing_[1];
+                    stop_tracking = tracking_;
+                }
+            }
+            if (crossing != util::LimitCrossing::None && ctx.stop_reason() != util::StopReason::Cancelled) {
+                const bool at_floor = crossing == util::LimitCrossing::AltitudeFloor;
+                const std::string what =
+                    at_floor
+                        ? "Minimum altitude limit (" + limit_number(motion_limits_.min_altitude_deg.value_or(0.0)) +
+                              " deg) crossed at altitude " + limit_number(sample.altitude_deg) + " deg"
+                        : "Meridian limit (" + limit_number(motion_limits_.meridian_limit_minutes.value_or(0.0)) +
+                              " min) crossed at " + limit_number(sample.counterweight_up_deg * 4.0) +
+                              " min past the meridian";
+                ALPACA_LOG_WARN("SkyWatcher", what + ": stopping" + (stop_tracking ? " tracking" : "") +
+                                                  (stop_ra || stop_dec ? " MoveAxis" : ""));
+                bool all_stopped = true;
+                const auto stop = [&](bool wanted, const auto& command) {
+                    if (!wanted) {
+                        return;
+                    }
+                    // A superseded body leaves the stop to the current one,
+                    // which may own a MoveAxis started since the decision.
+                    if (ctx.stop_reason() != util::StopReason::None) {
+                        all_stopped = false;
+                        return;
+                    }
+                    try {
+                        command();
+                    } catch (const std::exception& e) {
+                        all_stopped = false;
+                        ALPACA_LOG_ERROR("SkyWatcher", std::string("Motion limit guard: stop failed: ") + e.what());
+                    }
+                };
+                stop(stop_dec, [this] { move_axis(1, 0.0); });
+                stop(stop_tracking, [this] { set_tracking(false); });
+                stop(stop_ra, [this] { move_axis(0, 0.0); });
+                if (all_stopped) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    // Not when a sync, goto or newer body has reset or taken
+                    // the baseline since the decision.
+                    if (ctx.stop_reason() == util::StopReason::None && limit_guard_baseline_) {
+                        limit_guard_baseline_ = sample;
+                    }
+                }
+            }
+            if (!ctx.wait_for(poll)) {
+                return;
+            }
+        }
+    }
+
     // ── Background task threads (async slew, pulse stop) ────────────────────
 
     // Wakes every task parked in task_wait_for after its cancel flag is stored.
@@ -4598,6 +4815,9 @@ private:
     }
 
     void cancel_async_tasks() {
+        // First: the limit guard stops motion through move_axis(), which
+        // spawns a stop task, so it must be gone before those are joined.
+        limit_guard_.cancel_all_and_join();
         slew_task_cancel_.store(true);
         pulse_task_cancel_[0].store(true);
         pulse_task_cancel_[1].store(true);
@@ -4935,6 +5155,14 @@ private:
     mutable std::atomic<bool> pulse_task_cancel_[2]{false, false};  // indexed by axis
     mutable std::atomic<bool> stop_task_cancel_[2]{false, false};   // indexed by axis
     mutable std::atomic<bool> rate_verify_cancel_{false};
+
+    // open-astro#436 live limit guard. The baseline is the last sample taken
+    // (under mutex_), empty when no guarded motion runs. Its own generation:
+    // no other slot owns these bodies, and only a newer start() supersedes
+    // one. Declared last, so the slot is destroyed (and joins) first.
+    std::optional<util::MotionSample> limit_guard_baseline_;
+    util::OperationGeneration limit_guard_generation_;
+    util::AsyncOperation limit_guard_{"SkyWatcher limit guard", limit_guard_generation_, clock_};
 };
 
 namespace detail {
@@ -4963,6 +5191,9 @@ void set_host_synchronized_probe(std::function<bool()> probe) {
     probe_slot() =
         probe ? std::move(probe) : std::function<bool()>(&alpacacore::util::HostClock::kernel_is_synchronized);
 }
+
+std::uint64_t limit_guard_bodies_started() { return g_limit_guard_started.load(); }
+int limit_guard_bodies_running() { return g_limit_guard_running.load(); }
 
 namespace {
 std::function<void()>& pulse_restore_hook_slot() {

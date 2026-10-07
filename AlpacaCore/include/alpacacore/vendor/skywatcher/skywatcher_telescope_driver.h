@@ -19,6 +19,7 @@
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -64,6 +65,12 @@ std::chrono::milliseconds host_discipline_resample_interval();
 // restore the default afterwards.
 void set_relink_motion_preserve_window(std::chrono::milliseconds window);
 std::chrono::milliseconds relink_motion_preserve_window();
+// open-astro#436: the live limit guard's bodies, counted process-wide for
+// tests. started: bodies ever entered; running: bodies not yet returned. A
+// driver with no limit set never starts one, and a disconnect returns only
+// after its driver's body has returned.
+std::uint64_t limit_guard_bodies_started();
+int limit_guard_bodies_running();
 
 bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
                         std::chrono::steady_clock::duration steady_elapsed,
