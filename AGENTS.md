@@ -942,11 +942,14 @@ floor. `/commit` and `/submit-pr` check the fragment's categories.
 ### Changelog fragments (one file per PR)
 
 Every PR that changes code, tests, scripts, CI or docs adds `changelog.d/<branch-slug>.md` (the
-branch name after its last `/`, lowercased) and **never edits `CHANGELOG.md`**: parallel PRs that all edited
+branch name after its last `/`, lowercased) and **never edits `CHANGELOG.md`** (except to correct a misfiled or wrong entry, which the PR
+description says): parallel PRs that all edited
 its one UNRELEASED section conflicted on every merge to main. Format, categories and commands are
-in [`changelog.d/README.md`](changelog.d/README.md). `scripts/changelog_fragments.py --check`
+in [`changelog.d/README.md`](changelog.d/README.md), including its "Breaking or not" test, which
+applies to fixes too: a saved config that no longer loads or a call that now fails is breaking even
+when it is the fix. `scripts/changelog_fragments.py --check`
 validates every fragment (the `docs-drift` CI job and pre-flight run it with `--self-test`), and
-only `/bump-release` writes `CHANGELOG.md`, through `--release`.
+apart from such corrections only `/bump-release` writes `CHANGELOG.md`, through `--release`.
 
 ## Testing Requirements
 

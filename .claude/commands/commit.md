@@ -241,13 +241,19 @@ appliance, so "breaking" means **breaks an existing user's install/setup**, not 
 
 | Bump | When | Fragment category | Examples |
 |------|------|-------------------|----------|
-| **MAJOR** `x.0.0` | Breaks an existing user | `Breaking changes` | Drop a platform (amd64 → 2.0.0), remove a driver, config-format change needing migration, change a default that alters behavior |
+| **MAJOR** `x.0.0` | Breaks an existing user | `Breaking changes` | Drop a platform (amd64 → 2.0.0), remove a driver, config-format change needing migration, change a default that alters behavior, a saved config that loaded now refused at start-up, a call that succeeded now refused (new precondition, removed retry or fallback) |
 | **MINOR** `x.Y.0` | New backward-compatible capability (resets patch to 0) | `Added` | **A new driver**, new device/model support, a new optional feature/flag |
 | **PATCH** `x.y.Z` | No new capability | anything else, `Added (tests)` included | Bug fix to an existing driver, ConformU re-validation, packaging fix, docs/skill/spec changes |
 
 Quick test: **broke** an existing user → put it under `Breaking changes`; **added** something new
 → `Added`; **fixed/polished** what already existed → `Fixed` or `Changed`. A new driver MUST be
 under an unqualified `### Added`, or the release undershoots the version.
+
+**Ask the "Breaking or not" test in `changelog.d/README.md` of every change, fixes included:**
+could someone who changes nothing but the package version see something that worked on the last
+release stop working? A fix can be breaking. Keep its `Fixed` bullet and add a `Breaking changes`
+bullet for the consequence, ending in **After upgrading:** and what to do. A bullet that tells the
+user to re-save, set a value first or switch driver is a Breaking changes bullet.
 
 **`/commit` adds only the fragment for the changelog.** Do **not** modify `CHANGELOG.md`, the
 `VERSION` file or the `#### [x.x.x] - …` version badge in `README.md` in this flow. Those are
