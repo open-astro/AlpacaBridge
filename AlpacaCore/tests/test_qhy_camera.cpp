@@ -538,7 +538,15 @@ TEST_CASE("QHY Camera Driver - a disconnect inside a telemetry start does not st
     // report it: neither the setpoint fallback (0.0) nor the first
     // generation's reading (-5.0) matches.
     sdk.set_param("fake-qhy-0", CURTEMP, 12.5);
-    CHECK(eventually([&]() { return std::abs(driver->get_ccd_temperature() - 12.5) < 1e-3; }));
+    // Until the new worker's first poll lands the getter raises InvalidOperation
+    // instead of answering a placeholder, so a throw counts as "not yet".
+    CHECK(eventually([&]() {
+        try {
+            return std::abs(driver->get_ccd_temperature() - 12.5) < 1e-3;
+        } catch (const alpacacore::AlpacaException&) {
+            return false;
+        }
+    }));
 
     driver->set_connected(false);
 }
@@ -621,5 +629,145 @@ TEST_CASE("QHY Camera Driver - BinX write during an exposure fails at once", "[q
     CHECK(state_ok);
     CHECK(bin_done);
     CHECK(code == alpacacore::AlpacaError::InvalidOperation);
+    driver->set_connected(false);
+}
+
+namespace {
+int error_code_of(const std::function<void()>& fn) {
+    try {
+        fn();
+        return 0;
+    } catch (const alpacacore::AlpacaException& ex) {
+        return ex.error_code();
+    }
+}
+}  // namespace
+
+TEST_CASE("QHY Camera Driver - a failed exposure is raised by ImageReady and ImageArray", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    fake.frame_ok = false;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.1, true);
+    REQUIRE(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) != 0; }));
+    CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)driver->get_image_array(); }) == alpacacore::AlpacaError::DriverException);
+    // The next StartExposure clears the stored failure.
+    fake.frame_ok = true;
+    driver->start_exposure(0.05, true);
+    CHECK(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == 0; }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - StopExposure is not supported and AbortExposure keeps a finished frame",
+          "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_can_stop_exposure());
+    CHECK(driver->get_can_abort_exposure());
+    require_alpaca_error([&] { driver->stop_exposure(); }, alpacacore::AlpacaError::MethodNotImplemented);
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    driver->abort_exposure();
+    CHECK(driver->get_image_ready());
+    CHECK(error_code_of([&] { (void)driver->get_last_exposure_duration(); }) == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - HeatSinkTemperature, ElectronsPerADU and FullWellCapacity are not implemented",
+          "[qhy][camera][unit]") {
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(eventually([&] { return error_code_of([&] { (void)driver->get_ccd_temperature(); }) == 0; }));
+    require_alpaca_error([&] { (void)driver->get_heat_sink_temperature(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    for (const auto& s : driver->get_device_state()) {
+        CHECK(s.name != "HeatSinkTemperature");
+        CHECK(s.name != "ElectronsPerADU");
+        CHECK(s.name != "FullWellCapacity");
+    }
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - CCDTemperature is not invented", "[qhy][camera][unit]") {
+    SECTION("uncooled camera") {
+        auto fake = make_fake();
+        LockedQHYSDK sdk(fake);
+        auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+        driver->set_connected(true);
+        require_alpaca_error([&] { (void)driver->get_ccd_temperature(); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
+        for (const auto& s : driver->get_device_state()) CHECK(s.name != "CCDTemperature");
+        driver->set_connected(false);
+    }
+    SECTION("cooled camera without a CURTEMP control") {
+        auto fake = FakeQHYSDK::with_one_cooled_camera();
+        fake.controls_available.erase(alpacacore::vendor::qhy::control::CURTEMP);
+        fake.params.erase(alpacacore::vendor::qhy::control::CURTEMP);
+        LockedQHYSDK sdk(fake);
+        auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+        driver->set_connected(true);
+        CHECK(eventually([&] {
+            return error_code_of([&] { (void)driver->get_ccd_temperature(); }) ==
+                   alpacacore::AlpacaError::PropertyNotImplemented;
+        }));
+        driver->set_connected(false);
+    }
+    SECTION("cooled camera whose CURTEMP read fails") {
+        auto fake = FakeQHYSDK::with_one_cooled_camera();
+        fake.throw_from.insert("get_param");
+        LockedQHYSDK sdk(fake);
+        auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+        driver->set_connected(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        CHECK(error_code_of([&] { (void)driver->get_ccd_temperature(); }) == alpacacore::AlpacaError::InvalidOperation);
+        driver->set_connected(false);
+        fake.throw_from.clear();
+    }
+}
+
+TEST_CASE("QHY Camera Driver - StartExposure above ExposureMax is InvalidValue", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    require_alpaca_error([&] { driver->start_exposure(driver->get_exposure_max() + 1000.0, true); },
+                         alpacacore::AlpacaError::InvalidValue);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - ImageArray during an exposure is InvalidOperation at once", "[qhy][camera][unit]") {
+    std::atomic<bool> armed{false};
+    std::atomic<bool> in_frame{false};
+    std::atomic<bool> release{false};
+    auto fake = make_fake();
+    fake.before_call = [&](const std::string& fn) {
+        if (armed.load() && fn == "get_single_frame") {
+            in_frame = true;
+            while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    armed = true;
+    driver->start_exposure(1.0, true);
+    REQUIRE(eventually([&] { return in_frame.load(); }));
+    const auto t0 = std::chrono::steady_clock::now();
+    const int code = error_code_of([&] { (void)driver->get_image_array(); });
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+    release = true;
+    CHECK(code == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(ms.count() < 1000);
     driver->set_connected(false);
 }
