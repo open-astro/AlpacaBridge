@@ -448,20 +448,31 @@ TEST_CASE("SynScan position - stale cache faults after repeated failed polls and
 }
 
 TEST_CASE("SynScan tracking - mode follows mount geometry and site hemisphere", "[synscan][telescope][tracking]") {
+    using alpacacore::vendor::synscan::SynScanAlignmentSetting;
     struct Expected {
         unsigned char model_id;
+        SynScanAlignmentSetting setting;
         alpacacore::AlignmentMode alignment;
         unsigned char tracking_mode;
     };
-    for (const auto& expected : {Expected{50, alpacacore::AlignmentMode::GermanPolar, 2},
-                                 Expected{50, alpacacore::AlignmentMode::GermanPolar, 3},
-                                 Expected{128, alpacacore::AlignmentMode::AltAz, 1}}) {
+    for (const auto& expected :
+         {Expected{50, SynScanAlignmentSetting::Auto, alpacacore::AlignmentMode::GermanPolar, 2},
+          Expected{50, SynScanAlignmentSetting::Auto, alpacacore::AlignmentMode::GermanPolar, 3},
+          Expected{128, SynScanAlignmentSetting::Auto, alpacacore::AlignmentMode::AltAz, 1},
+          // #860: the configured geometry decides for an AZ-EQ mount (5 = AZ-EQ6, 6 = AZ-EQ5) ...
+          Expected{5, SynScanAlignmentSetting::Equatorial, alpacacore::AlignmentMode::GermanPolar, 2},
+          Expected{6, SynScanAlignmentSetting::Equatorial, alpacacore::AlignmentMode::GermanPolar, 3},
+          Expected{5, SynScanAlignmentSetting::AltAz, alpacacore::AlignmentMode::AltAz, 1},
+          // ... and is ignored for a mount whose geometry the model ID fixes.
+          Expected{50, SynScanAlignmentSetting::AltAz, alpacacore::AlignmentMode::GermanPolar, 2},
+          Expected{128, SynScanAlignmentSetting::Equatorial, alpacacore::AlignmentMode::AltAz, 1}}) {
         auto st = std::make_shared<FakeSynScanState>();
         st->model_id.store(expected.model_id);
         alpacacore::test::FakeMountServer server(synscan_responder(st));
         REQUIRE(server.ok());
-        auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+            std::nullopt, std::nullopt, expected.setting);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         driver->set_site_latitude(expected.tracking_mode == 2 ? 41.3 : -41.3);
         driver->set_site_longitude(174.8);
@@ -481,11 +492,13 @@ TEST_CASE("SynScan tracking - mode follows mount geometry and site hemisphere", 
     st->model_id.store(5);  // AZ-EQ can be used in two alignment configurations; the HC does not report which.
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
+    // alignmentMode "auto" (or absent) keeps the refusal to guess (#857).
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     CHECK_THROWS_AS(driver->get_alignment_mode(), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->set_tracking(true), alpacacore::AlpacaException);
+    CHECK(st->command_count('T') == 0);
     driver->set_connected(false);
 }
 

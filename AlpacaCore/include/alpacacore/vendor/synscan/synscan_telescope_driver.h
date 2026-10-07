@@ -27,19 +27,21 @@ enum class SynScanVersion {
     V4
 };
 
+/// Configured geometry of an AZ-EQ mount (model IDs 5/6), whose handset does
+/// not report whether it is set up Alt-Az or equatorial (#860). Auto keeps the
+/// driver's refusal to guess; other models ignore the setting.
+enum class SynScanAlignmentSetting { Auto, AltAz, Equatorial };
+
 std::unique_ptr<TelescopeDriver> create_synscan_telescope(
     int device_number,
     const ConnectionInfo& connection_info,
     SynScanVersion version);
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    SynScanVersion version,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect);
+    int device_number, const ConnectionInfo& connection_info, SynScanVersion version,
+    std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+    SynScanAlignmentSetting alignment = SynScanAlignmentSetting::Auto);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
@@ -47,7 +49,8 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     SynScanVersion version = SynScanVersion::Auto, std::optional<double> site_latitude_deg = std::nullopt,
     std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt,
-    std::optional<bool> sync_time_on_connect = std::nullopt);
+    std::optional<bool> sync_time_on_connect = std::nullopt,
+    SynScanAlignmentSetting alignment = SynScanAlignmentSetting::Auto);
 
 /// The serial scan behind create_synscan_telescope_auto(); throws when nothing answers.
 ConnectionInfo resolve_synscan_serial_auto(int mount_index);
@@ -55,12 +58,9 @@ ConnectionInfo resolve_synscan_serial_auto(int mount_index);
 // Auto-detect: the scan runs at connect time, so construction succeeds while
 // the mount is absent (#659).
 std::unique_ptr<TelescopeDriver> create_synscan_telescope_auto(
-    int device_number,
-    int mount_index = 0,
-    SynScanVersion version = SynScanVersion::Auto,
-    std::optional<double> site_latitude_deg = std::nullopt,
-    std::optional<double> site_longitude_deg = std::nullopt,
-    std::optional<double> site_elevation_m = std::nullopt,
-    std::optional<bool> sync_time_on_connect = std::nullopt);
+    int device_number, int mount_index = 0, SynScanVersion version = SynScanVersion::Auto,
+    std::optional<double> site_latitude_deg = std::nullopt, std::optional<double> site_longitude_deg = std::nullopt,
+    std::optional<double> site_elevation_m = std::nullopt, std::optional<bool> sync_time_on_connect = std::nullopt,
+    SynScanAlignmentSetting alignment = SynScanAlignmentSetting::Auto);
 
 } // namespace alpacacore::vendor::synscan

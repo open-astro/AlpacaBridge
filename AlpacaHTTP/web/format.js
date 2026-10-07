@@ -434,11 +434,18 @@ function asiairDuplicateGpioError(gpios) {
     return null;
 }
 
+// The alignmentMode values the SynScan and Celestron drivers accept (#860);
+// anything else reads as 'auto', as the server's sanitize drops it.
+function normalizeAlignmentMode(value) {
+    return value === 'altaz' || value === 'equatorial' ? value : 'auto';
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
-                        wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError };
+                        wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
+                        normalizeAlignmentMode };
 }

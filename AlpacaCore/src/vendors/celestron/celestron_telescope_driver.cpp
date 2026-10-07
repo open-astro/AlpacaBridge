@@ -129,6 +129,7 @@ public:
     CelestronTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                              std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                              std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+                             CelestronAlignmentSetting alignment,
                              util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
         : AsyncConnectable("Celestron"),
           device_number_(device_number),
@@ -159,7 +160,8 @@ public:
           pending_site_latitude_(site_latitude_deg),
           pending_site_longitude_(site_longitude_deg),
           pending_site_elevation_(site_elevation_m),
-          sync_time_on_connect_(sync_time_on_connect.value_or(false)) {
+          sync_time_on_connect_(sync_time_on_connect.value_or(false)),
+          alignment_setting_(alignment) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
     }
@@ -2147,7 +2149,10 @@ private:
             case 21:  // Cosmos
             case 22:  // NexStar Evolution
             case 25:  // Astro Fi
-                return AlignmentMode::AltAz;
+                // Nominally Alt-Az, but a fork can sit on a wedge; the handset
+                // does not say, so the device config's alignmentMode can (#860).
+                return alignment_setting_ == CelestronAlignmentSetting::Equatorial ? AlignmentMode::Polar
+                                                                                   : AlignmentMode::AltAz;
             default:
                 throw AlpacaException(
                     "Celestron cannot determine AlignmentMode for mount model ID " + std::to_string(mount_model_id_),
@@ -2601,6 +2606,7 @@ private:
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
+    const CelestronAlignmentSetting alignment_setting_;  // fork geometry from the device config (#860)
     GuideRate guide_rate_{};
     mutable std::array<bool, 2> pulse_guide_active_{false, false};
     mutable std::array<std::chrono::steady_clock::time_point, 2> pulse_guide_end_time_{
@@ -2677,27 +2683,25 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope(
 }
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope_with_site(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect) {
-    return std::make_unique<CelestronTelescopeDriver>(device_number, connection_info,
-                                                      site_latitude_deg, site_longitude_deg,
-                                                      site_elevation_m, sync_time_on_connect);
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect, CelestronAlignmentSetting alignment) {
+    return std::make_unique<CelestronTelescopeDriver>(device_number, connection_info, site_latitude_deg,
+                                                      site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                      alignment);
 }
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect) {
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+    CelestronAlignmentSetting alignment) {
     if (!connection_resolver) {
         throw AlpacaException("Celestron telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<CelestronTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
                                                       site_longitude_deg, site_elevation_m, sync_time_on_connect,
-                                                      std::move(connection_resolver));
+                                                      alignment, std::move(connection_resolver));
 }
 
 ConnectionInfo resolve_celestron_serial_auto(int mount_index) {
@@ -2724,11 +2728,12 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_auto(int device_numb
                                                                  std::optional<double> site_latitude_deg,
                                                                  std::optional<double> site_longitude_deg,
                                                                  std::optional<double> site_elevation_m,
-                                                                 std::optional<bool> sync_time_on_connect) {
+                                                                 std::optional<bool> sync_time_on_connect,
+                                                                 CelestronAlignmentSetting alignment) {
     // The serial scan runs at connect time (#659), not here.
     return create_celestron_telescope_deferred(
         device_number, [mount_index] { return resolve_celestron_serial_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, sync_time_on_connect);
+        site_longitude_deg, site_elevation_m, sync_time_on_connect, alignment);
 }
 
 } // namespace alpacacore::vendor::celestron

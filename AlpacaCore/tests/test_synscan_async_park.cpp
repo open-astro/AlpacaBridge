@@ -423,6 +423,56 @@ TEST_CASE("SynScan SetPark - Alt-Az mount retains azimuth and altitude", "[synsc
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan SetPark - AZ-EQ park follows the configured alignment mode (#860)", "[synscan][telescope][park]") {
+    using alpacacore::vendor::synscan::SynScanAlignmentSetting;
+    {
+        // Alt-Az: the park keeps azimuth and altitude, as on an AZ GOTO mount.
+        auto st = std::make_shared<FakeSynScanState>();
+        st->model_id.store(5);  // AZ-EQ6
+        st->set_position("40000000,20000000#");
+        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+            std::nullopt, std::nullopt, SynScanAlignmentSetting::AltAz);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+        driver->set_park();
+        st->set_position("00000000,00000000#");
+        driver->park();
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+
+        const auto gotos = st->goto_snapshot();
+        REQUIRE(gotos.size() == 1);
+        INFO("AZ-EQ Alt-Az Park GOTO: " << gotos.front());
+        CHECK((gotos.front() == "b40000000,20000000" || gotos.front() == "B4000,2000"));
+        driver->set_connected(false);
+    }
+    {
+        // Equatorial: the park keeps the hour angle, so a sidereal shift moves the RA target.
+        auto st = std::make_shared<FakeSynScanState>();
+        st->model_id.store(6);  // AZ-EQ5
+        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+            std::nullopt, std::nullopt, SynScanAlignmentSetting::Equatorial);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+        driver->set_park();                      // mechanical position is RA=0, Dec=0 at longitude 0
+        st->set_position("40000000,00000000#");  // six hours later, the same mount position reads RA=6h
+        driver->set_site_longitude(90.0);        // longitude +90 degrees has the same six-hour LST effect
+        driver->park();
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+
+        const auto gotos = st->goto_snapshot();
+        REQUIRE(gotos.size() == 1);
+        INFO("AZ-EQ equatorial Park GOTO after a six-hour sidereal shift: " << gotos.front());
+        CHECK((gotos.front() == "r40000000,00000000" || gotos.front() == "R4000,0000"));
+        driver->set_connected(false);
+    }
+}
+
 TEST_CASE("SynScan ambiguous or unknown mount - Park keeps the RA/Dec fallback", "[synscan][telescope][park]") {
     for (const auto model_id :
          {static_cast<unsigned char>(5), static_cast<unsigned char>(6), static_cast<unsigned char>(255)}) {

@@ -830,6 +830,7 @@ function startEditDevice(device) {
         }
     } else if (vendor === 'synscan') {
         setFormValue('synscan-version', config.synscanVersion || 'auto');
+        setFormValue('synscan-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
         const synscanConnectionType = config.connectionType || 'auto';
         setFormValue('synscan-connection-type', synscanConnectionType);
         if (synscanConnectionType === 'serial') {
@@ -888,6 +889,7 @@ function startEditDevice(device) {
             onstepConnectionTypeEl.dispatchEvent(new Event('change'));
         }
     } else if (vendor === 'celestron') {
+        setFormValue('celestron-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
         const celestronConnectionType = config.connectionType || 'auto';
         setFormValue('celestron-connection-type', celestronConnectionType);
         if (celestronConnectionType === 'serial') {
@@ -3817,6 +3819,7 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'synscan') {
         deviceData.connectionType = formData.get('synscanConnectionType') || 'auto';
         deviceData.synscanVersion = formData.get('synscanVersion') || 'auto';
+        deviceData.alignmentMode = normalizeAlignmentMode(formData.get('synscanAlignmentMode'));
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('synscanPortPath');
             deviceData.baudRate = parseInt(formData.get('synscanBaudRate')) || 9600;
@@ -3889,6 +3892,7 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
     } else if (deviceData.vendor === 'celestron') {
         deviceData.connectionType = formData.get('celestronConnectionType') || 'auto';
+        deviceData.alignmentMode = normalizeAlignmentMode(formData.get('celestronAlignmentMode'));
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('celestronPortPath');
             deviceData.baudRate = parseInt(formData.get('celestronBaudRate')) || 9600;
@@ -4469,6 +4473,7 @@ function renderDeviceSettings(config) {
         ['host', 'Host'],
         ['tcpPort', 'TCP Port'],
         ['synscanVersion', 'SynScan V3/V4 Version'],
+        ['alignmentMode', 'Alignment Mode'],
         ['cameraIndex', 'Camera Index'],
         ['cameraId', 'Camera ID'],
         ['filterwheelIndex', 'Filter Wheel Index'],

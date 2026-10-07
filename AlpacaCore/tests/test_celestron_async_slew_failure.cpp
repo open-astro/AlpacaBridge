@@ -500,6 +500,48 @@ TEST_CASE("Celestron tracking - mode follows mount geometry and site hemisphere"
     driver->set_connected(false);
 }
 
+TEST_CASE("Celestron tracking - a configured alignment mode overrides the nominal fork geometry (#860)",
+          "[celestron][telescope][tracking]") {
+    using alpacacore::vendor::celestron::CelestronAlignmentSetting;
+    struct Expected {
+        unsigned char model_id;
+        CelestronAlignmentSetting setting;
+        double latitude;
+        alpacacore::AlignmentMode alignment;
+        unsigned char tracking_mode;
+    };
+    // 9 = CPC and 22 = NexStar Evolution (forks); 24 = CGX-L (German equatorial).
+    for (const auto& expected :
+         {Expected{9, CelestronAlignmentSetting::Equatorial, 41.3, alpacacore::AlignmentMode::Polar, 2},
+          Expected{22, CelestronAlignmentSetting::Equatorial, -41.3, alpacacore::AlignmentMode::Polar, 3},
+          Expected{9, CelestronAlignmentSetting::AltAz, 41.3, alpacacore::AlignmentMode::AltAz, 1},
+          Expected{9, CelestronAlignmentSetting::Auto, 41.3, alpacacore::AlignmentMode::AltAz, 1},
+          Expected{24, CelestronAlignmentSetting::AltAz, 41.3, alpacacore::AlignmentMode::GermanPolar, 2}}) {
+        auto st = std::make_shared<FakeCelestronState>();
+        st->model_id.store(expected.model_id);
+        alpacacore::test::FakeMountServer server(celestron_responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+            0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt, expected.setting);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        driver->set_site_latitude(expected.latitude);
+        driver->set_site_longitude(174.8);
+        CHECK(driver->get_alignment_mode() == expected.alignment);
+        driver->set_tracking(true);
+
+        const auto commands = [&] {
+            std::lock_guard<std::mutex> lock(st->command_mutex);
+            return st->commands;
+        }();
+        const auto tracking = std::find_if(commands.rbegin(), commands.rend(), [](const std::string& command) {
+            return command.size() >= 2 && command[0] == 'T';
+        });
+        REQUIRE(tracking != commands.rend());
+        CHECK(static_cast<unsigned char>((*tracking)[1]) == expected.tracking_mode);
+        driver->set_connected(false);
+    }
+}
+
 TEST_CASE("Celestron PulseGuide - an operation that reaps the pulse clears IsPulseGuiding (#831)",
           "[celestron][telescope][pulseguiding][reap]") {
     enum class Op { SlewToCoordinates, SlewToCoordinatesAsync, FindHome, Park };

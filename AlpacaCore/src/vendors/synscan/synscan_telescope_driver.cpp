@@ -156,6 +156,7 @@ public:
     SynScanTelescopeDriver(int device_number, const ConnectionInfo& connection_info, SynScanVersion version,
                            std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                            std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+                           SynScanAlignmentSetting alignment,
                            util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
         : AsyncConnectable("SynScan"),
           device_number_(device_number),
@@ -187,7 +188,8 @@ public:
           pending_site_latitude_(site_latitude_deg),
           pending_site_longitude_(site_longitude_deg),
           pending_site_elevation_(site_elevation_m),
-          sync_time_on_connect_(sync_time_on_connect.value_or(false)) {
+          sync_time_on_connect_(sync_time_on_connect.value_or(false)),
+          alignment_setting_(alignment) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
     }
@@ -1966,9 +1968,17 @@ private:
                 return AlignmentMode::AltAz;
             case 5:
             case 6:
+                // The handset does not say which geometry an AZ-EQ mount is set
+                // up in; only the device config's alignmentMode can (#860).
+                if (alignment_setting_ == SynScanAlignmentSetting::AltAz) {
+                    return AlignmentMode::AltAz;
+                }
+                if (alignment_setting_ == SynScanAlignmentSetting::Equatorial) {
+                    return AlignmentMode::GermanPolar;
+                }
                 throw AlpacaException(
                     "SynScan cannot report whether this AZ-EQ mount is currently configured "
-                    "for Alt-Az or equatorial alignment",
+                    "for Alt-Az or equatorial alignment; set Alignment Mode in the device settings",
                     AlpacaError::DriverException);
             default:
                 if ((model_id >= 128 && model_id <= 159)) {
@@ -2290,6 +2300,7 @@ private:
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
+    const SynScanAlignmentSetting alignment_setting_;  // AZ-EQ geometry from the device config (#860)
     GuideRate guide_rate_{};
     mutable std::array<bool, 2> pulse_guiding_active_{};
     mutable std::array<std::chrono::steady_clock::time_point, 2> pulse_guide_end_time_{};
@@ -2330,28 +2341,26 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope(
 }
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    SynScanVersion version,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect) {
-    return std::make_unique<SynScanTelescopeDriver>(device_number, connection_info, version,
-                                                    site_latitude_deg, site_longitude_deg,
-                                                    site_elevation_m, sync_time_on_connect);
+    int device_number, const ConnectionInfo& connection_info, SynScanVersion version,
+    std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+    SynScanAlignmentSetting alignment) {
+    return std::make_unique<SynScanTelescopeDriver>(device_number, connection_info, version, site_latitude_deg,
+                                                    site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                    alignment);
 }
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver, SynScanVersion version,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect) {
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+    SynScanAlignmentSetting alignment) {
     if (!connection_resolver) {
         throw AlpacaException("SynScan telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<SynScanTelescopeDriver>(device_number, ConnectionInfo{}, version, site_latitude_deg,
                                                     site_longitude_deg, site_elevation_m, sync_time_on_connect,
-                                                    std::move(connection_resolver));
+                                                    alignment, std::move(connection_resolver));
 }
 
 ConnectionInfo resolve_synscan_serial_auto(int mount_index) {
@@ -2374,16 +2383,14 @@ ConnectionInfo resolve_synscan_serial_auto(int mount_index) {
     return conn;
 }
 
-std::unique_ptr<TelescopeDriver> create_synscan_telescope_auto(int device_number, int mount_index,
-                                                               SynScanVersion version,
-                                                               std::optional<double> site_latitude_deg,
-                                                               std::optional<double> site_longitude_deg,
-                                                               std::optional<double> site_elevation_m,
-                                                               std::optional<bool> sync_time_on_connect) {
+std::unique_ptr<TelescopeDriver> create_synscan_telescope_auto(
+    int device_number, int mount_index, SynScanVersion version, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect, SynScanAlignmentSetting alignment) {
     // The serial scan runs at connect time (#659), not here.
     return create_synscan_telescope_deferred(
         device_number, [mount_index] { return resolve_synscan_serial_auto(mount_index); }, version, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, sync_time_on_connect);
+        site_longitude_deg, site_elevation_m, sync_time_on_connect, alignment);
 }
 
 } // namespace alpacacore::vendor::synscan

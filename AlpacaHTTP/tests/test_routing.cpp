@@ -4203,6 +4203,16 @@ int main() {
         add("synscan", "telescope", "Telescope", "auto",
             R"({"connectionType":"auto","synscanVersion":"v4","mountIndex":1})",
             R"({"connectionType":"auto","synscanVersion":"v4","mountIndex":1})");  // #659
+        // #860: a known alignmentMode survives; an unknown string or a non-string drops.
+        add("synscan", "telescope", "Telescope", "alignmentMode equatorial",
+            R"({"connectionType":"auto","mountIndex":1,"alignmentMode":"equatorial"})",
+            R"({"connectionType":"auto","mountIndex":1,"alignmentMode":"equatorial"})");
+        add("synscan", "telescope", "Telescope", "alignmentMode altaz",
+            R"({"connectionType":"auto","mountIndex":1,"alignmentMode":"altaz"})",
+            R"({"connectionType":"auto","mountIndex":1,"alignmentMode":"altaz"})");
+        add("synscan", "telescope", "Telescope", "alignmentMode unknown",
+            R"({"connectionType":"auto","mountIndex":1,"alignmentMode":"wedge"})",
+            R"({"connectionType":"auto","mountIndex":1})");
 #endif
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
@@ -4245,6 +4255,16 @@ int main() {
             R"({"connectionType":"network","host":"192.168.1.7","tcpPort":2000,"mountIndex":2})");
         add("celestron", "telescope", "Telescope", "auto", R"({"connectionType":"auto","mountIndex":1})",
             R"({"connectionType":"auto","mountIndex":1})");  // #659
+        // #860: a known alignmentMode survives; an unknown string or a non-string drops.
+        add("celestron", "telescope", "Telescope", "alignmentMode auto",
+            R"({"connectionType":"auto","mountIndex":1,"alignmentMode":"auto"})",
+            R"({"connectionType":"auto","mountIndex":1,"alignmentMode":"auto"})");
+        add("celestron", "telescope", "Telescope", "alignmentMode equatorial",
+            R"({"connectionType":"auto","mountIndex":1,"alignmentMode":"equatorial"})",
+            R"({"connectionType":"auto","mountIndex":1,"alignmentMode":"equatorial"})");
+        add("celestron", "telescope", "Telescope", "alignmentMode non-string",
+            R"({"connectionType":"auto","mountIndex":1,"alignmentMode":2})",
+            R"({"connectionType":"auto","mountIndex":1})");
 #endif
 
 #ifdef ALPACACORE_ENABLE_BISQUE

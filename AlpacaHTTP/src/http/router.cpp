@@ -6876,6 +6876,21 @@ std::string config_get(const nlohmann::json& config, const char* key, const char
     return config_get<std::string>(config, key, fallback != nullptr ? std::string(fallback) : std::string());
 }
 
+// Issue #860: `alignmentMode` ("auto", "altaz" or "equatorial") tells the
+// SynScan and Celestron drivers the geometry of a mount whose handset does not
+// report it. Returns the value when it is one of those three, nullopt when it
+// is absent or unknown; an unknown value reads as "auto" and is not persisted.
+std::optional<std::string> known_alignment_mode(const nlohmann::json& config) {
+    if (!config_has(config, "alignmentMode") || !config.at("alignmentMode").is_string()) {
+        return std::nullopt;
+    }
+    std::string mode = config.at("alignmentMode").get<std::string>();
+    if (mode == "auto" || mode == "altaz" || mode == "equatorial") {
+        return mode;
+    }
+    return std::nullopt;
+}
+
 // Reads siteLatitude/siteLongitude out of a device config and range-checks
 // them (issue #398).
 //
@@ -8574,6 +8589,14 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         } else if (version_normalized == "v4" || version_normalized == "4") {
             version = alpacacore::vendor::synscan::SynScanVersion::V4;
         }
+        const std::string alignment_mode = known_alignment_mode(config).value_or("auto");
+        alpacacore::vendor::synscan::SynScanAlignmentSetting alignment =
+            alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto;
+        if (alignment_mode == "altaz") {
+            alignment = alpacacore::vendor::synscan::SynScanAlignmentSetting::AltAz;
+        } else if (alignment_mode == "equatorial") {
+            alignment = alpacacore::vendor::synscan::SynScanAlignmentSetting::Equatorial;
+        }
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -8596,8 +8619,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         if (conn_type == "auto" || conn_type.empty()) {
             int mount_index = config_get(config, "mountIndex", 0);
             telescope = alpacacore::vendor::synscan::create_synscan_telescope_auto(
-                device_number, mount_index, version, site_latitude, site_longitude,
-                site_elevation, sync_time_on_connect);
+                device_number, mount_index, version, site_latitude, site_longitude, site_elevation,
+                sync_time_on_connect, alignment);
         } else {
             alpacacore::vendor::synscan::ConnectionInfo conn_info;
 
@@ -8628,7 +8651,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
             telescope = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
-                device_number, conn_info, version, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
+                device_number, conn_info, version, site_latitude, site_longitude, site_elevation, sync_time_on_connect,
+                alignment);
         }
 
         if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
@@ -8759,14 +8783,22 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         if (config_has(config, "syncTimeOnConnect")) {
             sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
         }
+        const std::string alignment_mode = known_alignment_mode(config).value_or("auto");
+        alpacacore::vendor::celestron::CelestronAlignmentSetting alignment =
+            alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto;
+        if (alignment_mode == "altaz") {
+            alignment = alpacacore::vendor::celestron::CelestronAlignmentSetting::AltAz;
+        } else if (alignment_mode == "equatorial") {
+            alignment = alpacacore::vendor::celestron::CelestronAlignmentSetting::Equatorial;
+        }
 
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
 
         if (conn_type == "auto" || conn_type.empty()) {
             int mount_index = config_get(config, "mountIndex", 0);
             telescope = alpacacore::vendor::celestron::create_celestron_telescope_auto(
-                device_number, mount_index, site_latitude, site_longitude,
-                site_elevation, sync_time_on_connect);
+                device_number, mount_index, site_latitude, site_longitude, site_elevation, sync_time_on_connect,
+                alignment);
         } else {
             alpacacore::vendor::celestron::ConnectionInfo conn_info;
 
@@ -8797,8 +8829,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
             telescope = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
-                device_number, conn_info, site_latitude, site_longitude,
-                site_elevation, sync_time_on_connect);
+                device_number, conn_info, site_latitude, site_longitude, site_elevation, sync_time_on_connect,
+                alignment);
         }
 
         if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
@@ -9946,6 +9978,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         }
     } else if (vendor == "synscan") {
         copy_if_present("synscanVersion");
+        if (const auto alignment_mode = known_alignment_mode(config)) {
+            sanitized["alignmentMode"] = *alignment_mode;  // #860; an unknown value drops
+        }
         copy_if_present("connectionType");
         copy_if_present("mountIndex");  // same issue-#102 gap as ioptron above
         std::string connection_type = config_get(config, "connectionType", "");
@@ -10072,6 +10107,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("focuserId");
         }
     } else if (vendor == "celestron") {
+        if (const auto alignment_mode = known_alignment_mode(config)) {
+            sanitized["alignmentMode"] = *alignment_mode;  // #860; an unknown value drops
+        }
         copy_if_present("connectionType");
         copy_if_present("mountIndex");
         std::string connection_type = config_get(config, "connectionType", "");
