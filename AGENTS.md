@@ -949,7 +949,7 @@ in [`changelog.d/README.md`](changelog.d/README.md), including its "Breaking or 
 applies to fixes too: a saved config that no longer loads or a call that now fails is breaking even
 when it is the fix. `scripts/changelog_fragments.py --check`
 validates every fragment (the `docs-drift` CI job and pre-flight run it with `--self-test`), and
-only `/bump-release` writes `CHANGELOG.md`, through `--release`.
+apart from such corrections only `/bump-release` writes `CHANGELOG.md`, through `--release`.
 
 ## Testing Requirements
 
