@@ -49,6 +49,8 @@ struct LandingOffsetHandset {
     std::atomic<uint32_t> dec_raw{0x100000};
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
+    std::atomic<Clock::rep> first_goto_at{0};
+    std::atomic<Clock::rep> second_goto_at{0};
     std::atomic<bool> goto_stopped{false};
     // Each GOTO lands this many counts past the commanded RA; multiplied by the GOTO ordinal when `growing`.
     std::atomic<uint32_t> ra_offset_counts{kRaOffsetCounts};
@@ -86,6 +88,8 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 st->ra_raw.store((ra + offset) & kCountsMask);
                 st->dec_raw.store(dec);
                 st->goto_started.store(Clock::now().time_since_epoch().count());
+                if (ordinal == 1) st->first_goto_at.store(st->goto_started.load());
+                if (ordinal == 2) st->second_goto_at.store(st->goto_started.load());
                 st->goto_stopped.store(false);
                 return "#";
             }
@@ -152,6 +156,41 @@ TEST_CASE("SynScan GOTO landing - SlewToCoordinates refines a GOTO the handset l
     CHECK(dec_error_arcsec(*driver, kTargetDec) < kConformUToleranceArcsec);
     CHECK(st->goto_count.load() == 2);  // the GOTO plus one refinement
     driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - the settle time follows the last refinement pass once (#880)",
+          "[synscan][telescope][goto-landing]") {
+    struct Timing {
+        Clock::duration between_gotos;
+        Clock::duration after_second_goto;
+    };
+    // One SlewToCoordinates that needs exactly one refinement, with the given settle time.
+    auto run = [](int settle_seconds) {
+        auto st = std::make_shared<LandingOffsetHandset>();
+        alpacacore::test::FakeMountServer server(responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        driver->set_slew_settle_time(settle_seconds);
+        REQUIRE_NOTHROW(driver->slew_to_coordinates(kTargetRa, kTargetDec));
+        const auto returned = Clock::now();
+        REQUIRE(st->goto_count.load() == 2);
+        const auto first = Clock::time_point(Clock::duration(st->first_goto_at.load()));
+        const auto second = Clock::time_point(Clock::duration(st->second_goto_at.load()));
+        driver->set_connected(false);
+        return Timing{second - first, returned - second};
+    };
+    constexpr int kSettleSeconds = 3;
+    const Timing none = run(0);
+    const Timing settled = run(kSettleSeconds);
+    const auto slack = std::chrono::milliseconds(1500);
+
+    // The refinement GOTO goes out before any settle wait: no settle between the passes...
+    CHECK(settled.between_gotos < none.between_gotos + slack);
+    // ...and exactly one settle period follows the last pass (none: dropped; twice: doubled).
+    CHECK(settled.after_second_goto >= none.after_second_goto + std::chrono::seconds(kSettleSeconds) - slack);
+    CHECK(settled.after_second_goto < none.after_second_goto + std::chrono::seconds(kSettleSeconds) + slack);
 }
 
 TEST_CASE("SynScan GOTO landing - SlewToTarget refines the landing too (#880)", "[synscan][telescope][goto-landing]") {
