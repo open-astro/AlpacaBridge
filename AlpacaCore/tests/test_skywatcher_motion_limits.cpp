@@ -559,6 +559,22 @@ TEST_CASE("SkyWatcher limits - a floor crossed before the guard's first sample i
     driver->set_connected(false);
 }
 
+// Tracking start from rest takes the same pre-dispatch baseline as MoveAxis:
+// the cache holds the inside position, the board is already past the limit.
+TEST_CASE("SkyWatcher limits - a meridian limit crossed before tracking's first sample is stopped",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.jump_axis_degrees(1, 92.0);  // 8 min past the meridian: inside the limit
+    auto driver = connected_driver(mount, meridian_minutes(10.0));
+
+    mount.jump_axis_degrees(1, 94.0);  // 16 min past the meridian, before the dispatch
+    driver->set_tracking(true);
+    CHECK(wait_until([&] { return !driver->get_tracking(); }, 8000));
+    CHECK(wait_until([&] { return !mount.axis_running(1); }, 6000));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher limits - tracking past the meridian limit stops tracking",
           "[skywatcher][telescope][limits][guard]") {
     FakeSkyWatcherMount mount;

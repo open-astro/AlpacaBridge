@@ -4630,7 +4630,8 @@ private:
     // returns once neither runs. The previous sample lives in the driver
     // (limit_guard_baseline_, under mutex_), not in the body, so a body
     // superseded between two polls never takes an edge with it; a motion
-    // that starts from rest drops it, since the last body may not have
+    // that starts from rest re-seeds it before its first command
+    // (seed_limit_guard_baseline_locked), since the last body may not have
     // polled since its own motion ended. Goto, Park
     // and FindHome are exempt: while one owns the axes the baseline is
     // dropped, and the first sample after it starts a new one. A crossing
