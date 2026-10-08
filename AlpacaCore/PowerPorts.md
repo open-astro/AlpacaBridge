@@ -136,7 +136,7 @@ The defaults match the Pi 4 ASIair Pro wiring. The device config can rename port
 
 ### Disconnect behavior — important for unattended observatories
 
-When the ASCOM client (or the AlpacaBridge Web UI) disconnects the device, the driver releases its hold on the four GPIO lines but **does not drive them LOW first**. The lines stay in whatever state they were last in.
+When the ASCOM client (or the AlpacaBridge Web UI) disconnects the device, the driver releases its hold on the four GPIO lines but **does not drive a boolean port LOW first**; boolean lines stay in whatever state they were last in. A PWM port stops its worker and is first driven to the steady level of its duty (on for any duty above 0, off at 0%), so it is never left mid-cycle.
 
 Combined with the `gpio=18,12,13,26=op,dh,pu` boot directive in `/boot/firmware/config.txt`, which configures the lines as outputs with default-high and pull-up enabled, this means **released lines stay HIGH**. The 12V outputs remain powered after disconnect — your camera, mount, and dew heaters keep getting voltage.
 
@@ -355,7 +355,7 @@ The driver's userspace soft-PWM accepts any value in 1–100,000 Hz, but the pra
 
 ### Disconnect behavior
 
-Identical to the ASIair Pro driver: `close()` releases our fd without driving the lines LOW first, so released ports stay in their last-driven state. The kernel module retains per-port mode + level across opens, so a disconnect from the ASCOM client does **not** power-cycle anything. Set each port OFF in your client before disconnecting if you want a cold release.
+Same policy as the ASIair Pro driver: `close()` stops each PWM worker and sets that port to the steady level of its duty (`PWM_GPIO_SET_LEVEL`: on for any duty above 0, off at 0%), and boolean ports keep their commanded level; then it releases our fd. The kernel module retains per-port mode + level across opens, so a disconnect from the ASCOM client does **not** power-cycle anything. Set each port OFF in your client before disconnecting if you want a cold release.
 
 ### What about the USB power ports and the button?
 
