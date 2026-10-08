@@ -491,6 +491,10 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
             if (chunk.find(":GAT") != std::string::npos) {
                 return counts->tracking.load() ? "1#" : "0#";
             }
+            // :GU carries the "n" (not tracking) flag the cache refresh reads.
+            if (chunk.find(":GU") != std::string::npos) {
+                return counts->tracking.load() ? "0#" : "n#";
+            }
             return "0#";
         });
         REQUIRE(server.ok());
