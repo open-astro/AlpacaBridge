@@ -36,6 +36,7 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -43,9 +44,11 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "http/thread_join.h"
+#include "route_table_stubs.h"
 #include "test_assert.h"
 
 namespace {
@@ -175,9 +178,13 @@ bool wait_for_restart_done(const alpacahttp::Server& server, int budget_ms) {
     return !server.restart_in_progress_for_test();
 }
 
-int connect_local(std::uint16_t port) {
+int connect_local(std::uint16_t port, int receive_buffer = 0) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     EXPECT(fd >= 0);
+    if (receive_buffer > 0) {
+        // Set before connect so the small receive window is negotiated in SYN.
+        EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof(receive_buffer)) == 0);
+    }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
@@ -231,6 +238,19 @@ std::string read_one_response(int fd, std::string& carry) {
     std::string response = carry.substr(0, total);
     carry.erase(0, total);
     return response;
+}
+
+std::string read_response_headers(int fd) {
+    std::string response;
+    char buffer[1024];
+    while (response.find("\r\n\r\n") == std::string::npos) {
+        const ssize_t received = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (received <= 0) {
+            return {};
+        }
+        response.append(buffer, static_cast<std::size_t>(received));
+    }
+    return response.substr(0, response.find("\r\n\r\n") + 4);
 }
 
 // open-astro#547: minimal telescope stub for the end-to-end watchdog-timer
@@ -503,6 +523,100 @@ int main() {
         EXPECT(r2.find("Connection: keep-alive\r\n") != std::string::npos);
         EXPECT(!peer_closed(fd, 200));
         ::close(fd);
+    }
+
+    {
+        // case: Large binary responses remain framed across vectored sends
+        constexpr int kCameraNumber = 9898;
+        constexpr int kImageWidth = 1024;
+        constexpr int kImageHeight = 1024;
+        const std::size_t pixel_count = static_cast<std::size_t>(kImageWidth) * kImageHeight;
+        std::vector<std::int32_t> pixels(pixel_count);
+        for (std::size_t i = 0; i < pixels.size(); ++i) {
+            pixels[i] = static_cast<std::int32_t>(i);
+        }
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        camera->set_image_array({std::move(pixels), kImageWidth, kImageHeight, 2});
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        EXPECT(registry.register_device(camera));
+
+        const std::string image_request = "GET /api/v1/camera/" + std::to_string(kCameraNumber) +
+                                          "/imagearray HTTP/1.1\r\nHost: localhost\r\n"
+                                          "Accept: application/imagebytes\r\n\r\n";
+        const std::size_t payload_size = 44 + pixel_count * sizeof(std::int32_t);
+        auto set_receive_timeout = [](int fd) {
+            timeval timeout{};
+            timeout.tv_sec = 30;
+            EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+        };
+
+        // Read the full 4 MiB body, then issue another request on the same
+        // keep-alive connection. The payload contains embedded NUL bytes.
+        {
+            int fd = connect_local(port);
+            EXPECT(fd >= 0);
+            set_receive_timeout(fd);
+            std::string carry;
+            send_all(fd, image_request);
+            const std::string response = read_one_response(fd, carry);
+            const auto headers_end = response.find("\r\n\r\n");
+            EXPECT(headers_end != std::string::npos);
+            EXPECT(response.find("Content-Type: application/imagebytes\r\n") != std::string::npos);
+            EXPECT(response.find("Content-Length: " + std::to_string(payload_size) + "\r\n") != std::string::npos);
+            EXPECT(response.size() == headers_end + 4 + payload_size);
+            const std::size_t pixels_start = headers_end + 4 + 44;
+            EXPECT(response[pixels_start] == '\0');
+            const std::size_t second_x_pixel = pixels_start + kImageHeight * sizeof(std::int32_t);
+            EXPECT(response[second_x_pixel] == '\1');
+            EXPECT(response[second_x_pixel + 1] == '\0');
+            EXPECT(response[second_x_pixel + 2] == '\0');
+            EXPECT(response[second_x_pixel + 3] == '\0');
+            EXPECT(response.find("Connection: keep-alive\r\n") != std::string::npos);
+
+            send_all(fd, kGet11);
+            const std::string next_response = read_one_response(fd, carry);
+            EXPECT(next_response.rfind("HTTP/1.1 200 ", 0) == 0);
+            EXPECT(next_response.find("Connection: keep-alive\r\n") != std::string::npos);
+            send_all(fd,
+                     "GET /management/apiversions HTTP/1.1\r\nHost: localhost\r\n"
+                     "Connection: close\r\n\r\n");
+            EXPECT(read_one_response(fd, carry).find("Connection: close\r\n") != std::string::npos);
+            EXPECT(peer_closed(fd, 2000));
+            ::close(fd);
+        }
+
+        // Closing after the headers while the server is blocked sending the
+        // larger-than-send-buffer body must release a single worker, with no
+        // sleep-based guess about when the send notices the peer reset.
+        {
+            alpacahttp::Config one_worker_config;
+            one_worker_config.set_http_port(0);
+            one_worker_config.set_discovery_enabled(false);
+            one_worker_config.set_thread_pool_size(1);
+            alpacahttp::Server one_worker_server(one_worker_config);
+            one_worker_server.start_async();
+            const auto one_worker_port = wait_for_bound_port(one_worker_server, 2000);
+            EXPECT(one_worker_port != 0);
+
+            int fd = connect_local(one_worker_port, 4096);
+            EXPECT(fd >= 0);
+            set_receive_timeout(fd);
+            send_all(fd, image_request);
+            const std::string headers = read_response_headers(fd);
+            EXPECT(headers.find("Content-Length: " + std::to_string(payload_size) + "\r\n") != std::string::npos);
+            ::close(fd);
+
+            int next_fd = connect_local(one_worker_port);
+            EXPECT(next_fd >= 0);
+            set_receive_timeout(next_fd);
+            std::string carry;
+            send_all(next_fd, kGet11);
+            EXPECT(read_one_response(next_fd, carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(next_fd);
+            one_worker_server.stop();
+        }
+
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
     }
 
     // A connection is force-closed after kMaxRequestsPerConnection requests,

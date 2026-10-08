@@ -891,8 +891,10 @@ void send_error(util::SocketHandle socket_fd, int status, const char* reason, co
     Response error_response;
     error_response.set_status(status, reason);
     error_response.set_body(body);
-    std::string response_str = error_response.to_string();
-    util::socket_send_all(socket_fd, response_str.c_str(), response_str.size());
+    const std::string response_headers = error_response.to_header_string();
+    const std::string& response_body = error_response.body();
+    util::socket_send_allv(socket_fd, response_headers.data(), response_headers.size(), response_body.data(),
+                           response_body.size());
 }
 
 // True when the client wants the connection kept open after this request
@@ -959,8 +961,8 @@ bool may_persist(const Request& request, const Response& response) {
     }
     // Without Content-Length the response is framed by connection close, so
     // it cannot share a connection with anything after it. Every router path
-    // sets a body (and therefore a length) today, and Response::to_string()
-    // now defaults the header when a handler does not, but this stays as the
+    // sets a body (and therefore a length) today, and to_header_string() now
+    // defaults the header when a handler does not, but this stays as the
     // structural guard: a future bodyless response must close, not desync.
     if (response.get_header("Content-Length").empty()) {
         return false;
@@ -1191,12 +1193,16 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
     // client would read "keep-alive" while the server closes the socket
     // right after sending, a protocol-violating response (review round
     // 3). Explicitly writing "close" here is identical to leaving the
-    // header unset, since Response::to_string() defaults to "close".
+    // header unset, since Response::to_header_string() defaults to "close".
     response.set_header("Connection", keep_alive ? "keep-alive" : "close");
 
-    // Send response (loop until fully sent; MSG_NOSIGNAL prevents SIGPIPE)
-    std::string response_str = response.to_string();
-    if (!util::socket_send_all(conn.fd, response_str.c_str(), response_str.size())) {
+    // Send both buffers as one vectored write: small responses avoid the
+    // Nagle/delayed-ACK stall of separate header/body sends, and large bodies
+    // do not require a second full-sized HTTP response string.
+    const std::string response_headers = response.to_header_string();
+    const std::string& response_body = response.body();
+    if (!util::socket_send_allv(conn.fd, response_headers.data(), response_headers.size(), response_body.data(),
+                                response_body.size())) {
         util::log_warning("Failed to send full response: " + util::socket_error_message(util::socket_get_last_error()));
         return ServeResult::Close;
     }

@@ -17,6 +17,7 @@
 #include <cctype>
 #include <sstream>
 #include <unordered_map>
+#include <utility>
 
 namespace alpacahttp {
 
@@ -65,8 +66,8 @@ void Response::set_content_length(std::size_t length) {
     set_header("Content-Length", std::to_string(length));
 }
 
-void Response::set_body(const std::string& body) {
-    body_ = body;
+void Response::set_body(std::string body) {
+    body_ = std::move(body);
     set_content_length(body_.size());
 }
 
@@ -80,7 +81,7 @@ void Response::set_body(const AlpacaResponse& alpaca_response) {
     set_content_length(body_.size());
 }
 
-std::string Response::to_string() const {
+std::string Response::to_header_string() const {
     std::ostringstream oss;
     oss << "HTTP/1.1 " << status_code_ << " " << reason_phrase_ << "\r\n";
 
@@ -111,9 +112,14 @@ std::string Response::to_string() const {
     }
 
     oss << "\r\n";
-    oss << body_;
 
     return oss.str();
+}
+
+std::string Response::to_string() const {
+    std::string response = to_header_string();
+    response.append(body_);
+    return response;
 }
 
 const std::string& Response::get_header(const std::string& key) const {

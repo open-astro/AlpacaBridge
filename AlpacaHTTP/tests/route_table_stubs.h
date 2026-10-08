@@ -35,6 +35,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace route_table_stubs {
@@ -64,6 +65,8 @@ class CameraStub final : public alpacacore::CameraDriver {
 public:
     explicit CameraStub(int number) : number_(number) {}
     ROUTE_TABLE_STUB_COMMON(Camera, "camera")
+
+    void set_image_array(ImageArray image) { image_array_ = std::move(image); }
 
     int get_bayer_offset_x() const override { return int{}; }
     int get_bayer_offset_y() const override { return int{}; }
@@ -99,7 +102,7 @@ public:
     std::vector<std::string> get_gains() const override { return std::vector<std::string>{}; }
     bool get_has_shutter() const override { return bool{}; }
     double get_heat_sink_temperature() const override { return double{}; }
-    ImageArray get_image_array() const override { return ImageArray{}; }
+    ImageArray get_image_array() const override { return image_array_; }
     std::string get_image_array_variant() const override { return std::string{}; }
     bool get_image_ready() const override { return bool{}; }
     bool get_is_pulse_guiding() const override { return bool{}; }
@@ -143,6 +146,7 @@ public:
 private:
     int number_;
     bool connected_ = false;
+    ImageArray image_array_;
 };
 
 class TelescopeStub final : public alpacacore::TelescopeDriver {
