@@ -320,6 +320,7 @@ test('deviceStatus maps Connected, LoadError, LastConnectError and unknown', () 
     const { deviceStatus } = require('../../web/format.js');
     assert.strictEqual(deviceStatus({ Connected: true }).state, 'connected');
     assert.strictEqual(deviceStatus({ Connected: false }).state, 'idle');
+    assert.strictEqual(deviceStatus({ Connected: false }).text, 'Loaded, not connected');
     assert.strictEqual(deviceStatus({}).state, 'error');
     assert.strictEqual(deviceStatus({ Connected: true, LastConnectError: 'port busy' }).text, 'Error: port busy');
     const both = deviceStatus({ LoadError: true, LastConnectError: 'x' });

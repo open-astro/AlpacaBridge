@@ -453,7 +453,7 @@ function deviceStatus(device) {
     if (d.LinkFault) reasons.push('Link fault: ' + String(d.LinkFault));
     if (reasons.length > 0) return { state: 'error', text: 'Error: ' + reasons.join('; ') };
     if (d.Connected === true) return { state: 'connected', text: 'Connected' };
-    if (d.Connected === false) return { state: 'idle', text: 'Not connected' };
+    if (d.Connected === false) return { state: 'idle', text: 'Loaded, not connected' };
     return { state: 'error', text: 'Error: status unknown' };
 }
 
