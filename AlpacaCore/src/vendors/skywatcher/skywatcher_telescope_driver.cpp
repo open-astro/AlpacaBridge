@@ -327,15 +327,30 @@ public:
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         // open-astro#582: the web UI shows this name and has no field for the
-        // eps source, so a user override is named here. The measured table and
-        // the unmeasured default are the unmarked cases.
-        const char* sense = dec_axis_sense_setting_ == DecAxisSenseSetting::Normal     ? ", dec axis sense: normal"
-                            : dec_axis_sense_setting_ == DecAxisSenseSetting::Reversed ? ", dec axis sense: reversed"
-                                                                                       : "";
-        if (model_cache_.empty()) {
-            return std::string("Sky-Watcher Mount (EQMOD") + sense + ")";
+        // eps source, so every connected source is named here. It is kept with
+        // the model across a disconnect, like the model itself.
+        std::string source;
+        switch (eps_source_) {
+            case EpsSource::Measured:
+                source = ", eps: measured";
+                break;
+            case EpsSource::Override:
+                source = dec_axis_sense_setting_ == DecAxisSenseSetting::Reversed ? ", eps: override reversed"
+                                                                                  : ", eps: override normal";
+                break;
+            case EpsSource::Unmeasured:
+                source = ", eps: unmeasured default";
+                break;
+            case EpsSource::IdentifyFailed:
+                source = ", eps: identify failed";
+                break;
+            case EpsSource::None:
+                break;
         }
-        return "Sky-Watcher " + model_cache_ + " (EQMOD" + sense + ")";
+        if (model_cache_.empty()) {
+            return "Sky-Watcher Mount (EQMOD" + source + ")";
+        }
+        return "Sky-Watcher " + model_cache_ + " (EQMOD" + source + ")";
     }
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
@@ -518,6 +533,8 @@ public:
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 firmware_cache_.clear();
                 model_cache_.clear();
+                eps_source_ = dec_axis_sense_setting_ != DecAxisSenseSetting::Auto ? EpsSource::Override
+                                                                                   : EpsSource::IdentifyFailed;
             }
 
             // open-astro#445: the sequence below is the first thing the board
@@ -2831,6 +2848,12 @@ private:
     // a measured entry is honoured with a WARN. Only the home term reads eps.
     void resolve_dec_axis_sense_locked(std::uint8_t mount_code) {
         const int measured = measured_dec_axis_sense(mount_code);
+        {
+            std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+            eps_source_ = dec_axis_sense_setting_ != DecAxisSenseSetting::Auto ? EpsSource::Override
+                          : measured != 0                                      ? EpsSource::Measured
+                                                                               : EpsSource::Unmeasured;
+        }
         if (dec_axis_sense_setting_ != DecAxisSenseSetting::Auto) {
             dec_axis_sense_ = override_dec_axis_sense();
             const std::string eps = dec_axis_sense_ > 0 ? "+1" : "-1";
@@ -5251,6 +5274,9 @@ private:
     // Web-UI firmware copy under its own narrow mutex (never mutex_).
     mutable std::mutex firmware_mutex_;
     std::string model_cache_;  // guarded by firmware_mutex_
+    // open-astro#582: where eps came from, shown in get_name(). Guarded by firmware_mutex_.
+    enum class EpsSource { None, Measured, Override, Unmeasured, IdentifyFailed };
+    EpsSource eps_source_ = EpsSource::None;
     std::string firmware_cache_;
 
     // Background task threads; task_mutex_ only guards handles + cv, never

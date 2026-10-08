@@ -130,8 +130,10 @@ datagrams before each send so replies cannot get off-by-one.
   `decAxisSense` setting (`auto` default, `normal` = eps +1, `reversed` = eps -1;
   open-astro#582) overrides the table on connect and when `:e` fails; it sets eps,
   never k, and the connect log names the source (measured table / user override /
-  unmeasured default / identify failed). The device name carries
-  `dec axis sense: normal|reversed` when set. Pier side is
+  unmeasured default / identify failed). The web UI shows the same source in the
+  device name (`eps: measured`, `eps: override normal|reversed`,
+  `eps: unmeasured default`, `eps: identify failed`), kept after a disconnect like the
+  model, and the Sky-Watcher form has a Dec axis sense select. Pier side is
   `k * branch > 0` -> pierEast, the same reader, since the goto picks the side from the
   sky hour angle; the Dec rate and guide signs read `branch` alone, because dec does not
   involve `eps`.

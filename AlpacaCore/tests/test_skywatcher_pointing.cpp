@@ -45,6 +45,7 @@
 
 #ifndef _WIN32
 
+#include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
@@ -444,7 +445,7 @@ TEST_CASE("SkyWatcher pointing - the EQ-AL55i Pro reaches a southern target on t
 
     // ":e" -> "=032E09": firmware 3.46, mount code 0x09. The name comes from
     // mount_code_to_name(), so this is the only thing that pins `case 0x09`.
-    CHECK(driver->get_name() == "Sky-Watcher EQ-AL55i Pro (EQMOD)");
+    CHECK(driver->get_name() == "Sky-Watcher EQ-AL55i Pro (EQMOD, eps: measured)");
     const auto firmware = driver->get_device_firmware();
     REQUIRE(firmware.has_value());
     CHECK(*firmware == "3.46");
@@ -1633,7 +1634,7 @@ TEST_CASE("SkyWatcher pointing - the connect log names where eps came from (#582
         auto [name, captured] =
             connect_log(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Auto, false);
         CHECK(find_line(captured, "from the measured table"));
-        CHECK(name == "Sky-Watcher EQM-35 Pro (EQMOD)");
+        CHECK(name == "Sky-Watcher EQM-35 Pro (EQMOD, eps: measured)");
     }
     {
         auto [name, captured] =
@@ -1646,7 +1647,7 @@ TEST_CASE("SkyWatcher pointing - the connect log names where eps came from (#582
         const LogLevel* level = find_line(captured, "from the user override");
         REQUIRE(level);
         CHECK(*level == LogLevel::Info);
-        CHECK(name == "Sky-Watcher Wave 100i (EQMOD, dec axis sense: reversed)");
+        CHECK(name == "Sky-Watcher Wave 100i (EQMOD, eps: override reversed)");
     }
     {
         auto [name, captured] =
@@ -1654,19 +1655,54 @@ TEST_CASE("SkyWatcher pointing - the connect log names where eps came from (#582
         const LogLevel* level = find_line(captured, "disagrees with the measured value");
         REQUIRE(level);
         CHECK(*level == LogLevel::Warn);
+        CHECK(name == "Sky-Watcher EQM-35 Pro (EQMOD, eps: override normal)");
     }
     {
         auto [name, captured] =
             connect_log(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Auto, true);
         CHECK(find_line(captured, "Motor board not identified"));
         CHECK(find_line(captured, "unmeasured-board default"));
+        CHECK(name == "Sky-Watcher Mount (EQMOD, eps: identify failed)");
     }
     {
         auto [name, captured] =
             connect_log(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Reversed, true);
         CHECK(find_line(captured, "Motor board not identified"));
         CHECK(find_line(captured, "from the user override"));
+        CHECK(name == "Sky-Watcher Mount (EQMOD, eps: override reversed)");
     }
+}
+
+TEST_CASE("SkyWatcher pointing - a catalog-built driver maps decAxisSense to the override (#582)",
+          "[skywatcher][telescope][pointing][catalog]") {
+    using alpacacore::catalog::DeviceCatalog;
+    using alpacacore::catalog::DeviceConfig;
+    DeviceCatalog catalog;
+    alpacacore::catalog::register_builtin_schemas(catalog);
+    alpacacore::catalog::register_builtin_factories(catalog);
+    const alpacacore::catalog::DeviceKey key{"skywatcher", alpacacore::DeviceType::Telescope};
+
+    const auto name_for = [&](const char* sense) {
+        FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+        REQUIRE(mount.ok());
+        DeviceConfig config;
+        config.set("connectionType", std::string{"network"});
+        config.set("host", std::string{"127.0.0.1"});
+        config.set("udpPort", static_cast<std::int64_t>(mount.port()));
+        config.set("responseTimeoutMs", std::int64_t{250});
+        config.set("siteLatitude", 35.0);
+        config.set("siteLongitude", 11.0);
+        config.set("decAxisSense", std::string{sense});
+        auto driver = catalog.create(key, config, 0);
+        REQUIRE(driver);
+        driver->set_connected(true);
+        std::string name = driver->get_name();
+        driver->set_connected(false);
+        return name;
+    };
+    CHECK(name_for("auto") == "Sky-Watcher EQM-35 Pro (EQMOD, eps: measured)");
+    CHECK(name_for("normal") == "Sky-Watcher EQM-35 Pro (EQMOD, eps: override normal)");
+    CHECK(name_for("reversed") == "Sky-Watcher EQM-35 Pro (EQMOD, eps: override reversed)");
 }
 
 #endif  // !_WIN32
