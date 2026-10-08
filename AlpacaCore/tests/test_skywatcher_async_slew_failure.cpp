@@ -58,6 +58,7 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
         if (pred()) return true;
+        // real time: default-clock case, polls the fake mount in real time
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return pred();
@@ -152,9 +153,11 @@ TEST_CASE("SkyWatcher async - AbortSlew's own cancellation is not reported as a 
     const double lst = driver->get_sidereal_time();
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0));
     REQUIRE(read_slewing(*driver) == SlewingRead::True);
+    // real time: default-clock case, polls the fake mount in real time
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     driver->abort_slew();  // joins the slew task: its catch block has run by now
     CHECK(read_slewing(*driver) == SlewingRead::False);
+    // real time: default-clock case, polls the fake mount in real time
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     CHECK(read_slewing(*driver) == SlewingRead::False);
     driver->set_connected(false);

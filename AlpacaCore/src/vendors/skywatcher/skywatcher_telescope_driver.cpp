@@ -1572,7 +1572,7 @@ public:
                     } catch (...) {
                         last_error = "unknown error";
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    clock_.sleep_for(std::chrono::milliseconds(100));
                 }
                 ALPACA_LOG_ERROR("SkyWatcher",
                                  "PulseGuide dispatch failed AFTER the RA pulse rate was written and "
@@ -2015,7 +2015,7 @@ public:
             // Slewing must read true once this returns, but goto_in_progress_
             // is only set when the task below takes mutex_. This window covers
             // that gap for client reads; landing detection ignores it.
-            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            slew_force_until_ = clock_.now() + std::chrono::seconds(8);
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
             target_ra_set_ = true;
@@ -2603,7 +2603,7 @@ private:
         // stalling every Connected poll meanwhile (review of #553). Whichever
         // axis is confirmed second gets whatever remains; its ":K" is sent
         // regardless, since only the confirmation is bounded here.
-        const auto stop_confirm_deadline = std::chrono::steady_clock::now() + kConnectStopConfirmBudget;
+        const auto stop_confirm_deadline = clock_.now() + kConnectStopConfirmBudget;
 
         for (int axis = 0; axis < 2; ++axis) {
             const AxisStatus& status = entry_status[axis];
@@ -2701,7 +2701,7 @@ private:
                              "Failed to stop surviving motion on axis " + std::to_string(channel) + ": " + e.what());
             return;
         }
-        while (std::chrono::steady_clock::now() < deadline) {
+        while (clock_.now() < deadline) {
             try {
                 if (!protocol.inquire_status(channel).running) {
                     cmd_axis_rate_deg_s_[channel - 1] = 0.0;
@@ -2713,7 +2713,7 @@ private:
                 message += e.what();
                 ALPACA_LOG_TRACE("SkyWatcher", message);
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            clock_.sleep_for(std::chrono::milliseconds(50));
         }
         // The stop was sent and accepted; we simply ran out of the shared
         // connect budget before seeing it come to rest. Say both halves, so
@@ -3523,8 +3523,8 @@ private:
         auto& protocol = *protocol_;
         cmd_axis_rate_deg_s_[channel - 1] = 0.0;
         protocol.stop_motion(channel);
-        auto deadline = std::chrono::steady_clock::now() + kAxisStopTimeout;
-        while (std::chrono::steady_clock::now() < deadline) {
+        auto deadline = clock_.now() + kAxisStopTimeout;
+        while (clock_.now() < deadline) {
             // Generation only: slew_task_cancel_ stays stale-true between an
             // AbortSlew and the next reap, and must not poison unrelated
             // commands (ConformU: Tracking Write failed "Motion superseded").
@@ -3537,7 +3537,7 @@ private:
                 return true;
             }
             lock.unlock();
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            clock_.sleep_for(std::chrono::milliseconds(50));
             lock.lock();
             check_connected();
         }
@@ -4016,7 +4016,7 @@ private:
         refresh_position_cache_locked(true);
         auto [p1, p2] = ra_dec_to_axis_degrees_locked(ra, dec);
         double dist = std::max(std::abs(p1 - cached_ra_axis_deg_), std::abs(p2 - cached_dec_axis_deg_));
-        last_goto_dispatch_time_ = std::chrono::steady_clock::now();
+        last_goto_dispatch_time_ = clock_.now();
         last_goto_dist_deg_ = dist;
         double est_seconds = dist / kMaxMoveAxisRateDegPerSec + goto_overhead_seconds_ + resume_latency_seconds_;
         auto [t1, t2] = ra_dec_to_axis_degrees_locked(ra, dec, est_seconds * kLstHoursPerSecond);
@@ -4106,8 +4106,7 @@ private:
                 // Landing -> ":J" latency of THIS restart, folded into the
                 // aim-ahead/deadband estimate (see kTrackingResumeSeconds).
                 if (last_landing_time_ != std::chrono::steady_clock::time_point{}) {
-                    const double measured =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() - last_landing_time_).count();
+                    const double measured = std::chrono::duration<double>(clock_.now() - last_landing_time_).count();
                     if (measured > 0.0 && measured < 5.0) {
                         resume_latency_seconds_ = std::clamp(0.5 * resume_latency_seconds_ + 0.5 * measured, 0.05, 2.0);
                     }
@@ -4201,7 +4200,7 @@ private:
         uint64_t entry_generation = motion_generation_;
         auto sleep_unlocked = [&](std::chrono::milliseconds d) {
             lock.unlock();
-            std::this_thread::sleep_for(d);
+            clock_.sleep_for(d);
             lock.lock();
             check_connected();
             if (slew_task_cancel_.load()) {
@@ -4246,12 +4245,12 @@ private:
                     return;
                 }
                 before = protocol.inquire_position(kAxisRa);
-                sampled_at = std::chrono::steady_clock::now();
+                sampled_at = clock_.now();
                 if (!sleep_unlocked(kPostSlewRateWindow)) {
                     return;
                 }
                 after = protocol.inquire_position(kAxisRa);
-                elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - sampled_at).count();
+                elapsed = std::chrono::duration<double>(clock_.now() - sampled_at).count();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(
                     "SkyWatcher",
@@ -4346,7 +4345,7 @@ private:
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
-        if (honor_force_window && std::chrono::steady_clock::now() < slew_force_until_) {
+        if (honor_force_window && clock_.now() < slew_force_until_) {
             return true;
         }
         bool was_slewing = slewing_cached_;
@@ -4358,11 +4357,11 @@ private:
             // while either axis is running in GOTO mode. A tracking axis
             // (speed mode) is NOT slewing.
             slewing_cached_ = (ra.running && !ra.speed_mode) || (dec.running && !dec.speed_mode);
-            last_slewing_poll_ = std::chrono::steady_clock::now();
+            last_slewing_poll_ = clock_.now();
         } catch (...) {
             // Keep last known state across a transient poll failure, but a
             // sustained fault must surface, not report frozen Slewing forever.
-            if ((std::chrono::steady_clock::now() - last_slewing_poll_) > kStaleCacheLimit) {
+            if ((clock_.now() - last_slewing_poll_) > kStaleCacheLimit) {
                 throw;
             }
         }
@@ -4390,7 +4389,7 @@ private:
 
     void autohome_sleep(std::unique_lock<std::mutex>& lock, std::chrono::milliseconds d) const {
         lock.unlock();
-        std::this_thread::sleep_for(d);
+        clock_.sleep_for(d);
         lock.lock();
         check_connected();
         if (slew_task_cancel_.load()) {
@@ -4400,9 +4399,9 @@ private:
 
     void autohome_wait_axes_stopped(std::unique_lock<std::mutex>& lock) const {
         auto& proto = *protocol_;
-        const auto start = std::chrono::steady_clock::now();
+        const auto start = clock_.now();
         while (proto.inquire_status(kAxisRa).running || proto.inquire_status(kAxisDec).running) {
-            if (std::chrono::steady_clock::now() - start > std::chrono::seconds(300)) {
+            if (clock_.now() - start > std::chrono::seconds(300)) {
                 throw AlpacaException("AutoHome: axes did not stop");
             }
             autohome_sleep(lock, std::chrono::milliseconds(250));
@@ -4477,18 +4476,18 @@ private:
             }
             std::chrono::steady_clock::time_point edge_at[2];
             bool edge[2] = {false, false};
-            const auto start = std::chrono::steady_clock::now();
+            const auto start = clock_.now();
             while (hunting[0] || hunting[1]) {
-                if (std::chrono::steady_clock::now() - start > std::chrono::seconds(300)) {
+                if (clock_.now() - start > std::chrono::seconds(300)) {
                     throw AlpacaException("AutoHome: coarse hunt timed out");
                 }
                 for (int i = 0; i < 2; ++i) {
                     if (!hunting[i]) continue;
                     if (!edge[i] && read_idx(i) != kIndexerAbove) {
                         edge[i] = true;
-                        edge_at[i] = std::chrono::steady_clock::now();
+                        edge_at[i] = clock_.now();
                     }
-                    if (edge[i] && std::chrono::steady_clock::now() - edge_at[i] > std::chrono::seconds(3)) {
+                    if (edge[i] && clock_.now() - edge_at[i] > std::chrono::seconds(3)) {
                         {
                             const uint64_t gen = ++motion_generation_;
                             if (!stop_axis_and_wait_locked(lock, axes[i], gen)) {
@@ -4511,9 +4510,9 @@ private:
         bool latched[2] = {false, false};
         start_speed_motion_locked(lock, kAxisRa, kAutoHomeDetectRateDegPerSec);
         start_speed_motion_locked(lock, kAxisDec, kAutoHomeDetectRateDegPerSec);
-        const auto detect_start = std::chrono::steady_clock::now();
+        const auto detect_start = clock_.now();
         while (!latched[0] || !latched[1]) {
-            if (std::chrono::steady_clock::now() - detect_start > std::chrono::seconds(300)) {
+            if (clock_.now() - detect_start > std::chrono::seconds(300)) {
                 proto.stop_motion(kAxisRa);
                 proto.stop_motion(kAxisDec);
                 throw AlpacaException("AutoHome: index detect timed out");
@@ -4557,15 +4556,15 @@ private:
     // kLandingSettle apart agree. Releases mutex_ around every sleep.
     void wait_axis_stationary_locked(std::unique_lock<std::mutex>& lock, int channel) const {
         auto& protocol = *protocol_;
-        const auto deadline = std::chrono::steady_clock::now() + kLandingSettleTimeout;
+        const auto deadline = clock_.now() + kLandingSettleTimeout;
         try {
             uint32_t last = protocol.inquire_position(channel);
-            while (std::chrono::steady_clock::now() < deadline) {
+            while (clock_.now() < deadline) {
                 if (slew_task_cancel_.load()) {
                     return;
                 }
                 lock.unlock();
-                std::this_thread::sleep_for(kLandingSettle);
+                clock_.sleep_for(kLandingSettle);
                 lock.lock();
                 check_connected();
                 const AxisStatus status = protocol.inquire_status(channel);
@@ -4590,12 +4589,12 @@ private:
     bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock,
                                 std::optional<uint64_t> expected_generation = std::nullopt) const {
         const auto timeout = std::chrono::seconds(180);
-        auto start = std::chrono::steady_clock::now();
+        auto start = clock_.now();
         const auto start_grace = std::chrono::seconds(2);
         bool saw_slewing = false;
         auto sleep_unlocked = [&](std::chrono::milliseconds d) {
             lock.unlock();
-            std::this_thread::sleep_for(d);
+            clock_.sleep_for(d);
             lock.lock();
             check_connected();
         };
@@ -4614,13 +4613,13 @@ private:
                 saw_slewing = true;
             }
             if (!slewing) {
-                if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
+                if (!saw_slewing && (clock_.now() - start) < start_grace) {
                     sleep_unlocked(std::chrono::milliseconds(200));
                     continue;
                 }
                 break;
             }
-            if (std::chrono::steady_clock::now() - start > timeout) {
+            if (clock_.now() - start > timeout) {
                 throw AlpacaException("Slew timed out");
             }
             sleep_unlocked(std::chrono::milliseconds(250));
@@ -4630,7 +4629,7 @@ private:
         if (expected_generation && motion_generation_ != *expected_generation) {
             return false;
         }
-        last_landing_time_ = std::chrono::steady_clock::now();
+        last_landing_time_ = clock_.now();
         if (last_goto_dispatch_time_ != std::chrono::steady_clock::time_point{}) {
             const double took = std::chrono::duration<double>(last_landing_time_ - last_goto_dispatch_time_).count();
             const double overhead = took - last_goto_dist_deg_ / kMaxMoveAxisRateDegPerSec;
@@ -5025,8 +5024,10 @@ private:
     bool connection_resolved_ = false;
     std::unique_ptr<SkyWatcherProtocolWrapper> protocol_;
     // The clock every task wait and deadline runs on (open-astro#743,
-    // decision 0005). Pointing time (UTC anchor, dead reckoning, the
-    // discipline resample) stays on steady_clock / system time.
+    // decision 0005): the slew, stop-confirm, settle and homing waits and
+    // the slew-timing state (slew_force_until_, last_goto_dispatch_time_,
+    // last_landing_time_, last_slewing_poll_). Pointing time (UTC anchor,
+    // dead reckoning, the discipline resample) stays on steady_clock / system time.
     util::TaskClock& clock_;
     mutable std::mutex mutex_;
     bool connected_ = false;
@@ -5126,7 +5127,7 @@ private:
     // task records a failure only if no newer command cleared the slot since
     // its initiator did.
     uint64_t slew_error_epoch_ = 0;
-    mutable std::chrono::steady_clock::time_point last_slewing_poll_ = std::chrono::steady_clock::now();
+    mutable std::chrono::steady_clock::time_point last_slewing_poll_ = clock_.now();
     mutable std::chrono::steady_clock::time_point slew_force_until_ = std::chrono::steady_clock::time_point::min();
     mutable bool manual_axis_slewing_[2] = {false, false};
 
