@@ -12,7 +12,12 @@
 
 #include <alpacacore/util/rotator_sync_offset_store.h>
 
+#include <alpacacore/util/logging.h>
+
+#include <cmath>
 #include <fstream>
+#include <string>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "rotator_sync_offset_test_dir.h"
@@ -61,4 +66,28 @@ TEST_CASE("Rotator sync offset store - failed save returns false without throwin
     CHECK_NOTHROW(ok = RotatorSyncOffsetStore::save("A", 1.0));
     CHECK_FALSE(ok);
     CHECK(RotatorSyncOffsetStore::load("A") == 0.0);
+}
+
+TEST_CASE("Rotator sync offset store - unreadable file logs a warning", "[rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    std::filesystem::create_directories(dir.file().parent_path());
+    { std::ofstream(dir.file(), std::ios::trunc) << "not json"; }
+
+    std::vector<std::string> warnings;
+    const auto previous = alpacacore::logging::get_log_sink();
+    alpacacore::logging::set_log_sink(
+        [&warnings](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn) {
+                warnings.emplace_back(message);
+            }
+        });
+    const double loaded = RotatorSyncOffsetStore::load("A");
+    const bool saved = RotatorSyncOffsetStore::save("A", std::nan(""));
+    alpacacore::logging::set_log_sink(previous);
+
+    CHECK(loaded == 0.0);
+    CHECK_FALSE(saved);
+    REQUIRE(warnings.size() == 2);
+    CHECK(warnings[0].find(dir.file().string()) != std::string::npos);
+    CHECK(warnings[1].find("non-finite") != std::string::npos);
 }

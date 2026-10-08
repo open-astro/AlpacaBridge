@@ -111,13 +111,20 @@ bool parse(const std::string& text, std::map<std::string, double>& out) {
 
 std::map<std::string, double> read_all(const std::string& path) {
     std::map<std::string, double> m;
+    std::error_code ec;
+    const bool present = std::filesystem::exists(path, ec);
     std::ifstream in(path);
     if (!in) {
+        if (present) {
+            ALPACA_LOG_WARN("RotatorSyncOffset", "Could not read sync offsets from " + path + "; treating as empty");
+        }
         return m;
     }
     std::ostringstream ss;
     ss << in.rdbuf();
-    parse(ss.str(), m);
+    if (!parse(ss.str(), m)) {
+        ALPACA_LOG_WARN("RotatorSyncOffset", "Sync offset file " + path + " is not valid; treating as empty");
+    }
     return m;
 }
 
@@ -157,6 +164,10 @@ double RotatorSyncOffsetStore::load(const std::string& key) {
 bool RotatorSyncOffsetStore::save(const std::string& key, double offset_degrees) {
     std::lock_guard<std::mutex> lock(store_mutex());
     const std::string path = effective_path_locked();
+    if (!std::isfinite(offset_degrees)) {
+        ALPACA_LOG_WARN("RotatorSyncOffset", "Refusing to save a non-finite sync offset to " + path);
+        return false;
+    }
     try {
         auto m = read_all(path);
         m[key] = offset_degrees;

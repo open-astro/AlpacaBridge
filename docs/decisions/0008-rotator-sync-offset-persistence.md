@@ -26,6 +26,7 @@ One helper, `alpacacore::util::RotatorSyncOffsetStore` (`AlpacaCore/include/alpa
 
 - The ZWO CAA change has no hardware-free test (the driver has no SDK seam); the helper test and review cover it until the seam slice lands.
 - Moving the state file or changing the unique id orphans a saved offset; the rotator then reads 0 until the next `Sync`.
+- The Wanderer key is the device number: deleting a Wanderer rotator and adding a different one at the same number inherits the old offset.
 - To reverse: remove the load and save calls in the two drivers and delete the helper; nothing else reads the file.
 
 ## Links
