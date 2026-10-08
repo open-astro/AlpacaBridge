@@ -236,6 +236,14 @@ public:
         return connected_;
     }
 
+    // Reads only the published copy under its own narrow mutex, never the coarse
+    // mutex_ that set_connected() holds across the connect, so a configureddevices
+    // poll does not wait on the mount connection.
+    std::string get_link_fault() const override {
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        return link_fault_text_;
+    }
+
     void connect() override {
         start_connection_task(true);
     }
@@ -310,6 +318,7 @@ public:
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
             position_link_health_.reset();
+            publish_link_fault_locked();
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
             last_slew_error_.clear();
 
@@ -459,6 +468,7 @@ public:
             flip_in_progress_ = false;
             last_slew_error_.clear();
             position_link_health_.reset();
+            publish_link_fault_locked();
         }
     }
 
@@ -2042,6 +2052,14 @@ private:
         if (position_link_health_.on_reply()) {
             ALPACA_LOG_INFO("Celestron", "Position link recovered; mount readback is available again");
         }
+        publish_link_fault_locked();
+    }
+
+    // Copies the latched fault text to the narrow-mutex copy get_link_fault() reads.
+    // Call under mutex_ after every change to position_link_health_.
+    void publish_link_fault_locked() const {
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        link_fault_text_ = position_link_health_.fault();
     }
 
     void note_position_failure_locked(const std::exception& e) const {
@@ -2052,6 +2070,7 @@ private:
                                              std::to_string(position_link_health_.consecutive_failures()) +
                                              " consecutive failures): " + e.what());
         }
+        publish_link_fault_locked();
     }
 
     [[noreturn]] void throw_position_link_fault_locked() const {
@@ -2549,6 +2568,8 @@ private:
     mutable bool equatorial_cache_valid_ = false;
     mutable bool altaz_cache_valid_ = false;
     mutable util::PolledLinkHealth position_link_health_;
+    mutable std::mutex link_fault_mutex_;
+    mutable std::string link_fault_text_;
     mutable std::chrono::steady_clock::time_point last_equatorial_update_;
     mutable std::chrono::steady_clock::time_point last_altaz_update_;
 

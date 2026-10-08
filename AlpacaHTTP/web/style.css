@@ -201,9 +201,50 @@ h2 {
 }
 
 .device-card h3 {
+    /* Flex so the status dot centers on the name's line box instead of
+       sitting on the text baseline. */
+    display: flex;
+    align-items: center;
     color: var(--text);
     font-size: 14px;
     font-weight: 600;
+}
+
+.status-dot {
+    --status-dot-size: 0.65em;
+    --status-dot-color: #d4a72c;
+    position: relative;
+    display: inline-block;
+    width: var(--status-dot-size);
+    height: var(--status-dot-size);
+    margin-right: 0.5em;
+    border-radius: 50%;
+    background: var(--status-dot-color);
+    flex: none;
+}
+
+.status-dot.status-connected { --status-dot-color: #0BDA51; }
+.status-dot.status-idle { --status-dot-color: #d4a72c; }
+.status-dot.status-error { --status-dot-color: #f85149; }
+
+/* Pulsing halo for "online" only; it is absolutely positioned, so no layout shift. */
+.status-dot.status-connected::before {
+    content: '';
+    position: absolute;
+    inset: calc(var(--status-dot-size) / 4 * -1);
+    background: inherit;
+    border-radius: 50%;
+    opacity: 0;
+    animation: status-dot-pulse 2s ease infinite;
+}
+
+@keyframes status-dot-pulse {
+    0% { opacity: 0.7; transform: scale(0.5); }
+    40%, 100% { opacity: 0; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .status-dot.status-connected::before { animation: none; }
 }
 
 .device-card.device-error {

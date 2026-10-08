@@ -152,6 +152,18 @@ public:
     virtual std::string get_last_connect_error() const { return {}; }
 
     /**
+     * @brief The latched link-fault text of a connected device, or "" when the
+     *        link is healthy or the driver keeps no latch.
+     *
+     * Same contract as get_last_connect_error(): cheap, never touches the
+     * hardware and never starts an exchange (it reads the latch a driver
+     * already keeps, issue #237 / #505). `Connected` stays true while a link is
+     * faulted, so the management listing reports this beside it and the web
+     * UI shows a connected-but-silent device as red rather than green.
+     */
+    virtual std::string get_link_fault() const { return {}; }
+
+    /**
      * @brief The failure GET Connecting raises, or "" when none stands.
      *
      * Issue #776: after a failed Connect() the completion property must report

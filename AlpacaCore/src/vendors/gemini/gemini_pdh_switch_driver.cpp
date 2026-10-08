@@ -187,6 +187,12 @@ public:
 
     bool get_connected() const override { return connected_.load(); }
 
+    // Latched link fault, read under the wrapper's narrow state_mutex_.
+    std::string get_link_fault() const override {
+        const auto fault = protocol_.link_fault();
+        return fault ? *fault : std::string{};
+    }
+
     void connect() override { start_connection_task(true); }
 
     void disconnect() override {

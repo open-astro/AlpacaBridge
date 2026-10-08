@@ -436,6 +436,7 @@ TEST_CASE("iOptron Telescope Driver - three consecutive failed reads latch the f
     // Latched: members that run the connection check refuse with the same message, even once the link answers.
     mount.set_fail_reads(false);
     CHECK(contains(sync_failure(*driver), kLatched));
+    CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
     require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::DriverException);
 
@@ -455,6 +456,7 @@ TEST_CASE("iOptron Telescope Driver - AbortSlew sends the stop on a latched faul
         CHECK(contains(sync_failure(*driver), kReadFailure));
     }
     REQUIRE(contains(sync_failure(*driver), kLatched));
+    CHECK_FALSE(driver->get_link_fault().empty());
 
     // Reads still fail and the cached status says "not slewing": the stop
     // must go out anyway, with no status read in front of it.
@@ -470,10 +472,12 @@ TEST_CASE("iOptron Telescope Driver - AbortSlew sends the stop on a latched faul
     CHECK(stops == 1);
     CHECK(status_reads == 0);
 
-    // The stop was sent, so the latch is gone.
+    // The stop was sent, so the latch is gone, and the management listing
+    // stops reporting it.
     mount.set_fail_reads(false);
     CHECK_NOTHROW(driver->get_right_ascension());
     CHECK(sync_failure(*driver).empty());
+    CHECK(driver->get_link_fault().empty());
 
     driver->set_connected(false);
 }

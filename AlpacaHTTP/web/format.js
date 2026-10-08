@@ -440,6 +440,23 @@ function normalizeAlignmentMode(value) {
     return value === 'altaz' || value === 'equatorial' ? value : 'auto';
 }
 
+// Status dot for a configureddevices row: green = driver loaded and Connected,
+// yellow = loaded, not connected, red = LoadError, LastConnectError, a
+// LinkFault (connected or not), or Connected missing/non-boolean (unknown).
+// Green means a client is connected AND the device still replies, so any latched
+// LinkFault turns the device red. The red text joins every reason.
+function deviceStatus(device) {
+    const d = device || {};
+    const reasons = [];
+    if (d.LoadError === true) reasons.push('Driver failed to load');
+    if (d.LastConnectError) reasons.push(String(d.LastConnectError));
+    if (d.LinkFault) reasons.push('Link fault: ' + String(d.LinkFault));
+    if (reasons.length > 0) return { state: 'error', text: 'Error: ' + reasons.join('; ') };
+    if (d.Connected === true) return { state: 'connected', text: 'Connected' };
+    if (d.Connected === false) return { state: 'idle', text: 'Loaded, not connected' };
+    return { state: 'error', text: 'Error: status unknown' };
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
@@ -447,5 +464,5 @@ if (typeof module !== 'undefined' && module.exports) {
                        updateStatusText, installerStateText, renderReleaseNotes,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
                         wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
-                        normalizeAlignmentMode };
+                        normalizeAlignmentMode, deviceStatus };
 }

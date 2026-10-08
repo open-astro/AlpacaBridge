@@ -353,7 +353,12 @@ public:
     std::string get_driver_info() const override { return "fake driver"; }
     std::string get_driver_version() const override { return "0.0.1"; }
     int get_interface_version() const override { return 1; }
-    bool get_connected() const override { return true; }
+    bool get_connected() const override {
+        if (connected_throws) {
+            throw alpacacore::AlpacaException("link probe failed", alpacacore::AlpacaError::DriverException);
+        }
+        return connected;
+    }
     void set_connected(bool) override {}
     std::vector<std::string> get_supported_actions() const override { return {}; }
     std::string action(std::string_view, std::string_view) override { return ""; }
@@ -361,6 +366,18 @@ public:
     std::string command_blind(std::string_view, bool) override { return ""; }
     bool command_bool(std::string_view, bool) override { return false; }
     std::string command_string(std::string_view, bool) override { return ""; }
+
+    bool connected = true;
+    bool connected_throws = false;
+    std::string link_fault;
+    bool link_fault_throws = false;
+
+    std::string get_link_fault() const override {
+        if (link_fault_throws) {
+            throw alpacacore::AlpacaException("fault probe failed", alpacacore::AlpacaError::DriverException);
+        }
+        return link_fault;
+    }
 
     std::optional<std::string> get_device_firmware() const override { return firmware_; }
     std::optional<std::string> get_device_sdk_version() const override { return sdk_version_; }
@@ -4732,6 +4749,58 @@ int main() {
             }
             EXPECT(warnings_ok);
         }
+    }
+
+    // configureddevices carries Connected from get_connected() (web UI status
+    // dot); it is omitted when the call throws.
+    {
+        // case: configureddevices Connected field
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto up = std::make_shared<FirmwareStubDriver>(9511, std::nullopt);
+        auto down = std::make_shared<FirmwareStubDriver>(9512, std::nullopt);
+        down->connected = false;
+        auto broken = std::make_shared<FirmwareStubDriver>(9513, std::nullopt);
+        broken->connected_throws = true;
+        EXPECT(registry.register_device(up));
+        EXPECT(registry.register_device(down));
+        EXPECT(registry.register_device(broken));
+        auto faulted = std::make_shared<FirmwareStubDriver>(9514, std::nullopt);
+        faulted->link_fault = "no status frame for 12 s";
+        auto fault_throws = std::make_shared<FirmwareStubDriver>(9515, std::nullopt);
+        fault_throws->link_fault_throws = true;
+        EXPECT(registry.register_device(faulted));
+        EXPECT(registry.register_device(fault_throws));
+
+        const auto json =
+            nlohmann::json::parse(route_request(router, "GET", "/management/v1/configureddevices").body());
+        int seen = 0;
+        for (const auto& entry : json["Value"]) {
+            if (entry.value("DeviceType", "") != "CoverCalibrator") {
+                continue;
+            }
+            const int number = entry.value("DeviceNumber", -1);
+            if (number == 9511) {
+                EXPECT(entry.contains("Connected") && entry["Connected"].get<bool>() == true);
+                EXPECT(!entry.contains("LinkFault"));
+                ++seen;
+            } else if (number == 9512) {
+                EXPECT(entry.contains("Connected") && entry["Connected"].get<bool>() == false);
+                ++seen;
+            } else if (number == 9513) {
+                EXPECT(!entry.contains("Connected"));
+                ++seen;
+            } else if (number == 9514) {
+                EXPECT(entry["Connected"].get<bool>() == true);
+                EXPECT(entry.contains("LinkFault") &&
+                       entry["LinkFault"].get<std::string>() == "no status frame for 12 s");
+                ++seen;
+            } else if (number == 9515) {
+                EXPECT(entry["Connected"].get<bool>() == true);
+                EXPECT(!entry.contains("LinkFault"));
+                ++seen;
+            }
+        }
+        EXPECT(seen == 5);
     }
 
     // configureddevices surfaces Firmware and SdkVersion independently, each only

@@ -540,10 +540,11 @@ async function loadDevices() {
             const settingsHtml = renderDeviceSettings(config);
             const deviceName = device.DeviceName || device.Name || 'Unknown Device';
             const hasLoadError = device.LoadError === true;
+            const status = deviceStatus(device);
             return `
             <div class="device-card collapsed${hasLoadError ? ' device-error' : ''}">
                 <div class="device-card-header">
-                    <h3>${hasLoadError ? '&#x26a0; ' : ''}${escapeHtml(deviceName)}</h3>
+                    <h3><span class="status-dot status-${status.state}" role="img" data-device-type="${escapeHtml(device.DeviceType)}" data-device-number="${escapeHtml(String(device.DeviceNumber))}" title="${escapeHtml(status.text)}" aria-label="${escapeHtml(status.text)}"></span>${hasLoadError ? '&#x26a0; ' : ''}${escapeHtml(deviceName)}</h3>
                     <button class="device-toggle" type="button" aria-expanded="false" data-device-index="${index}">
                         <span class="device-toggle-icon" aria-hidden="true"></span>
                         <span class="device-toggle-label">Details</span>
@@ -1298,6 +1299,50 @@ function startEditDevice(device) {
 
     // Switch to the Configure tab without resetting the form we just populated.
     showTab('configure', { preserveForm: true });
+}
+
+// Light poll of the Devices listing: updates only the status dots in place, so
+// expanded cards and scroll position survive. Runs only while the Devices tab
+// is shown and the page is visible.
+const DEVICE_STATUS_POLL_MS = 5000;
+let deviceStatusPollTimer = null;
+let deviceStatusPollInFlight = false;
+
+async function pollDeviceStatus() {
+    const tab = document.getElementById('devices-tab');
+    if (document.hidden || !tab || !tab.classList.contains('active')) {
+        return;
+    }
+    // A listing can stall behind a driver mutex during a connect; never queue a second request.
+    if (deviceStatusPollInFlight) return;
+    deviceStatusPollInFlight = true;
+    try {
+        const response = await fetch(API_BASE + '/management/v1/configureddevices?ts=' + Date.now(), { cache: 'no-store' });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) return;
+        for (const device of data.Value) {
+            const status = deviceStatus(device);
+            document.querySelectorAll('.status-dot').forEach(dot => {
+                if (dot.dataset.deviceType === String(device.DeviceType) &&
+                    dot.dataset.deviceNumber === String(device.DeviceNumber)) {
+                    dot.className = 'status-dot status-' + status.state;
+                    dot.title = status.text;
+                    dot.setAttribute('aria-label', status.text);
+                }
+            });
+        }
+    } catch (e) {
+        // Next tick retries; the dots keep their last state.
+    } finally {
+        deviceStatusPollInFlight = false;
+    }
+}
+
+function startDeviceStatusPoll() {
+    if (deviceStatusPollTimer === null) {
+        deviceStatusPollTimer = setInterval(pollDeviceStatus, DEVICE_STATUS_POLL_MS);
+    }
 }
 
 // Refresh devices
@@ -4586,6 +4631,7 @@ function escapeHtml(text) {
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     loadDevices();
+    startDeviceStatusPoll();
     loadServerInfo();
     const serverClock = document.getElementById('server-clock');
     if (serverClock) {
