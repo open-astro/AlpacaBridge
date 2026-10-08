@@ -10,9 +10,8 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacacore/util/rotator_sync_offset_store.h>
-
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/rotator_sync_offset_store.h>
 
 #include <cmath>
 #include <fstream>
