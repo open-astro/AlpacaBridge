@@ -919,3 +919,4 @@ probes link health first. The late-loss branch needs a deterministic probe seam 
 outstanding fake-board task; assert that the old task never sends commands to the new link.
 Zero-byte reads are not themselves proof of removal; back off within the response deadline
 so a hung-up-but-present tty cannot busy-spin, while retaining the quiet-board timeout policy.
+- **The session open claims the tty with `TIOCEXCL` and re-applies the termios settings after every silent timeout** (#912): an outside open (a GPS probe at 9600) reprograms the shared line, and without the re-apply the latched link fault never cleared. `disconnect_locked()` issues `TIOCNXCL` explicitly, because the flag survives our close while any other fd holds the tty open. The echo-guard/probe opens are short-lived and do not claim.

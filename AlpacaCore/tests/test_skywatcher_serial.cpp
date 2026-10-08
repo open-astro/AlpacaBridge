@@ -23,6 +23,7 @@
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -734,6 +735,66 @@ TEST_CASE("SkyWatcher serial - a silent board latches a link fault after three e
     CHECK_FALSE(protocol.link_faulted());
     CHECK(protocol.link_recovery_epoch() == epoch_before + 1);
     CHECK(protocol.is_connected());  // never dropped, so no reconnect was needed
+    protocol.disconnect();
+}
+
+TEST_CASE("SkyWatcher serial - the connected port is claimed exclusively and released on disconnect",
+          "[skywatcher][serial][exclusive]") {
+    // open-astro#912: an outside open reprograms the line and makes a reconnect
+    // fail EBUSY. TIOCEXCL refuses a non-root open while we hold the port.
+    if (geteuid() == 0) {
+        SUCCEED("root bypasses TIOCEXCL");
+        return;
+    }
+    FakeSkyWatcherSerialBoard board;
+    sw::SkyWatcherProtocolWrapper protocol;
+    REQUIRE(protocol.connect(serial_info(board.slave_path())));
+
+    errno = 0;
+    int fd = open(board.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    const int err = errno;
+    if (fd >= 0) close(fd);
+    CHECK(fd < 0);
+    CHECK(err == EBUSY);
+
+    protocol.disconnect();
+    fd = open(board.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    CHECK(fd >= 0);
+    if (fd >= 0) close(fd);
+}
+
+TEST_CASE("SkyWatcher serial - a latched fault from a reprogrammed line recovers without a reconnect",
+          "[skywatcher][serial][linkhealth]") {
+    // open-astro#912: line settings belong to the tty. After an outside open
+    // leaves it at the wrong rate the board is unreachable until the driver
+    // re-applies its own settings.
+    FakeSkyWatcherSerialBoard board;
+    board.answer_only_at_baud(9600);
+    sw::SkyWatcherProtocolWrapper protocol;
+    REQUIRE(protocol.connect(serial_info(board.slave_path())));
+    REQUIRE(protocol.inquire_position(sw::kAxisRa) == 0x800000);
+
+    board.set_muted(true);
+    for (int i = 0; i < 3; ++i) {
+        CHECK_THROWS_AS(protocol.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    }
+    CHECK(protocol.link_faulted());
+
+    // An outside open leaves the shared line at the wrong rate, then the board
+    // answers again. The first exchange may still time out; the driver
+    // re-applies its settings, so a later one succeeds without a reconnect.
+    board.set_line_baud(115200);
+    board.set_muted(false);
+    bool recovered = false;
+    for (int i = 0; i < 3 && !recovered; ++i) {
+        try {
+            recovered = protocol.inquire_position(sw::kAxisRa) == 0x800000;
+        } catch (const alpacacore::AlpacaException&) {
+        }
+    }
+    CHECK(recovered);
+    CHECK_FALSE(protocol.link_faulted());
+    CHECK(protocol.is_connected());
     protocol.disconnect();
 }
 
