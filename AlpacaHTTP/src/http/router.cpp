@@ -96,9 +96,6 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_CELESTRON
-#include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
@@ -6925,6 +6922,23 @@ std::optional<std::string> known_alignment_mode(const nlohmann::json& config) {
     return std::nullopt;
 }
 
+// #860 for a catalog descriptor with an `alignmentMode` field (Celestron): the
+// config without the key when its value is not one of the three known strings,
+// so a wrong-typed or unknown value drops like the deleted arm's did instead
+// of failing the typed read. Other configs come back unchanged.
+nlohmann::json without_unknown_alignment_mode(const nlohmann::json& config,
+                                              std::span<const alpacacore::catalog::FieldRef> fields) {
+    const bool declared = std::any_of(fields.begin(), fields.end(), [](const alpacacore::catalog::FieldRef& f) {
+        return std::string_view(f.key) == "alignmentMode";
+    });
+    if (!declared || !config.is_object() || known_alignment_mode(config) || !config.contains("alignmentMode")) {
+        return config;
+    }
+    nlohmann::json out = config;
+    out.erase("alignmentMode");
+    return out;
+}
+
 // Reads siteLatitude/siteLongitude out of a device config and range-checks
 // them (issue #398).
 //
@@ -8300,7 +8314,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
         if (auto view = find_descriptor(catalog_, key)) {
-            const alpacacore::catalog::DeviceConfig typed = catalog_json::config_from_json(config, view->fields);
+            const alpacacore::catalog::DeviceConfig typed =
+                catalog_json::config_from_json(without_unknown_alignment_mode(config, view->fields), view->fields);
             const auto result =
                 catalog_.normalize(key, typed,
                                    source == ConfigSource::Api ? alpacacore::catalog::Source::Api
@@ -8708,105 +8723,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         return false;
 #else
         error_message = "SynScan support not enabled. Rebuild with -DALPACACORE_ENABLE_SYNSCAN=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "celestron" && device_type_str == "telescope") {
-#ifdef ALPACACORE_ENABLE_CELESTRON
-        std::string conn_type = config_get(config, "connectionType", "auto");
-        // Issue #380: an unrecognised connectionType on a persisted config is
-        // normalised to "serial" rather than dropping the device, so it stays
-        // listed and editable in the web UI and its connect fails on the port
-        // path instead of auto-probing and attaching to whatever answers. The
-        // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
-                                                        device_type_str, device_number);
-
-        std::optional<double> site_latitude;
-        std::optional<double> site_longitude;
-        std::optional<double> site_elevation;
-        std::optional<bool> sync_time_on_connect;
-
-        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
-            return false;
-        }
-        if (config_has(config, "siteElevation")) {
-            site_elevation = config_get(config, "siteElevation", 0.0);
-        }
-        if (config_has(config, "syncTimeOnConnect")) {
-            sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
-        }
-        const std::string alignment_mode = known_alignment_mode(config).value_or("auto");
-        alpacacore::vendor::celestron::CelestronAlignmentSetting alignment =
-            alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto;
-        if (alignment_mode == "altaz") {
-            alignment = alpacacore::vendor::celestron::CelestronAlignmentSetting::AltAz;
-        } else if (alignment_mode == "equatorial") {
-            alignment = alpacacore::vendor::celestron::CelestronAlignmentSetting::Equatorial;
-        }
-
-        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
-
-        if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config_get(config, "mountIndex", 0);
-            telescope = alpacacore::vendor::celestron::create_celestron_telescope_auto(
-                device_number, mount_index, site_latitude, site_longitude, site_elevation, sync_time_on_connect,
-                alignment);
-        } else {
-            alpacacore::vendor::celestron::ConnectionInfo conn_info;
-
-            if (conn_type == "serial") {
-                conn_info.type = alpacacore::vendor::celestron::ConnectionType::Serial;
-                conn_info.port_path = config_get(config, "portPath", "");
-                conn_info.baud_rate = config_get(config, "baudRate", 9600);
-
-                if (conn_info.port_path.empty() &&
-                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
-                                          device_number, error_message)) {
-                    return false;
-                }
-            } else if (conn_type == "network") {
-                conn_info.type = alpacacore::vendor::celestron::ConnectionType::Network;
-                conn_info.host = config_get(config, "host", "");
-                conn_info.tcp_port = config_get(config, "tcpPort", conn_info.tcp_port);
-
-                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
-                                                                    device_type_str, device_number, error_message)) {
-                    return false;
-                }
-            } else {
-                error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
-                return false;
-            }
-
-            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
-
-            telescope = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
-                device_number, conn_info, site_latitude, site_longitude, site_elevation, sync_time_on_connect,
-                alignment);
-        }
-
-        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
-            telescope->set_aperture_diameter(aperture);
-        }
-        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
-            telescope->set_focal_length(focal);
-        }
-        if (site_elevation.has_value()) {
-            telescope->set_site_elevation(site_elevation.value());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
-            util::log_info("Registered Celestron telescope");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Celestron support not enabled. Rebuild with -DALPACACORE_ENABLE_CELESTRON=ON";
         return false;
 #endif
     }
@@ -9871,7 +9787,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     try {
         const alpacacore::catalog::DeviceKey key{vendor, string_to_device_type(device_type)};
         if (auto view = find_descriptor(catalog_, key)) {
-            const auto extra = sanitize_fields_json(config, view->fields);
+            const auto extra = sanitize_fields_json(without_unknown_alignment_mode(config, view->fields), view->fields);
             for (const auto& [k, v] : extra.items()) {
                 sanitized[k] = v;
             }
@@ -10050,21 +9966,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("focuserIndex");
             copy_if_present("focuserId");
         }
-    } else if (vendor == "celestron") {
-        if (const auto alignment_mode = known_alignment_mode(config)) {
-            sanitized["alignmentMode"] = *alignment_mode;  // #860; an unknown value drops
-        }
-        copy_if_present("connectionType");
-        copy_if_present("mountIndex");
-        std::string connection_type = config_get(config, "connectionType", "");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
-        } else if (connection_type == "network") {
-            copy_if_present("host");
-            copy_if_present("tcpPort");
-        }
-        // "auto" needs no extra fields — port is discovered at startup
     } else if (vendor == "gemini") {
         copy_if_present("connectionType");
         copy_if_present("focuserIndex");

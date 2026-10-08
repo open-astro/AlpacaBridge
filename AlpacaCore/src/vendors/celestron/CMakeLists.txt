@@ -8,6 +8,7 @@ if(ALPACACORE_ENABLE_CELESTRON)
     set(CELESTRON_SOURCES
         celestron_protocol_wrapper.cpp
         celestron_telescope_driver.cpp
+        celestron_catalog.cpp
     )
 
     add_library(alpacacore_celestron STATIC ${CELESTRON_SOURCES})

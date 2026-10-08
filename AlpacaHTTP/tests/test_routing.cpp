@@ -4336,13 +4336,15 @@ int main() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
-        // celestron / telescope had no roundtrip_config() case before #647.
+        // celestron / telescope had no roundtrip_config() case before #647. It is a
+        // catalog vendor since the Celestron slice: sanitize keeps every declared
+        // field whatever the connection type (ADR 0004), so the unused endpoint survives.
         add("celestron", "telescope", "Telescope", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB4","baudRate":9600,"mountIndex":1,"host":"h"})",
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB4","baudRate":9600,"mountIndex":1})");
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB4","baudRate":9600,"mountIndex":1,"host":"h"})");
         add("celestron", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.1.7","tcpPort":2000,"mountIndex":2,"portPath":"/dev/x"})",
-            R"({"connectionType":"network","host":"192.168.1.7","tcpPort":2000,"mountIndex":2})");
+            R"({"connectionType":"network","host":"192.168.1.7","tcpPort":2000,"mountIndex":2,"portPath":"/dev/x"})");
         add("celestron", "telescope", "Telescope", "auto", R"({"connectionType":"auto","mountIndex":1})",
             R"({"connectionType":"auto","mountIndex":1})");  // #659
         // #860: a known alignmentMode survives; an unknown string or a non-string drops.
@@ -4533,7 +4535,7 @@ int main() {
         mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true, true});
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true, false});
+        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true, true});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
         mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true, true});
@@ -6839,8 +6841,8 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the Bisque, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors plus the
-    // "zzz" test descriptor, schema only, so its `available` is false.
+    // and the Bisque, Celestron, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors
+    // plus the "zzz" test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema(router.catalog());
@@ -6850,7 +6852,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 11);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 12);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -6872,6 +6874,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "gphoto") {
 #ifdef ALPACACORE_ENABLE_GPHOTO
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "celestron") {
+#ifdef ALPACACORE_ENABLE_CELESTRON
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -7853,6 +7862,21 @@ int main() {
         EXPECT(off.message == "Bisque support not enabled. Rebuild with -DALPACACORE_ENABLE_BISQUE=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "Telescope", 9268).is_null());
+    }
+#endif
+
+#ifndef ALPACACORE_ENABLE_CELESTRON
+    // With the vendor built out, the catalog path reports the deleted arm's text.
+    {
+        // case: Celestron vendors-OFF refusal text
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router, nlohmann::json{{"vendor", "celestron"}, {"deviceType", "telescope"}, {"deviceNumber", 9272}},
+            "Telescope");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "Celestron support not enabled. Rebuild with -DALPACACORE_ENABLE_CELESTRON=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "Telescope", 9272).is_null());
     }
 #endif
 
