@@ -26,6 +26,7 @@
 
 #include "catch2_compat.h"
 #include "fake_pty_write.h"
+#include "rotator_sync_offset_test_dir.h"
 
 namespace {
 
@@ -245,4 +246,28 @@ TEST_CASE("WandererAstro Rotator Driver - No completion report keeps Position an
     driver->halt();
     CHECK_FALSE(driver->get_is_moving());
     driver->set_connected(false);
+}
+
+TEST_CASE("WandererAstro Rotator Driver - Sync offset persists", "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_position() == 0.0);
+    driver->sync(30.0);
+    CHECK(driver->get_position() == 30.0);
+
+    // Disconnect + reconnect keeps the offset.
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 30.0);
+    driver->set_connected(false);
+
+    // A new driver instance (service restart) reads the same state file.
+    auto restarted = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    restarted->set_connected(true);
+    CHECK(restarted->get_position() == 30.0);
+    CHECK(restarted->get_mechanical_position() == 0.0);
+    restarted->set_connected(false);
 }

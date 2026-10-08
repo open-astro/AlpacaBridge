@@ -1,0 +1,2 @@
+### Fixed
+- **Rotator `Sync` offset now persists** (AlpacaCore, WandererAstro and ZWO CAA rotators, issue #777): the offset is saved to `config/rotator_sync_offsets.json` on `Sync` and loaded at connect, so `Position` keeps its offset across reconnects and restarts instead of resetting to 0. Covered for WandererAstro by `WandererAstro Rotator Driver - Sync offset persists`; the ZWO change is covered by the store tests only.

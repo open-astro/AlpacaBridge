@@ -77,6 +77,7 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/error_handling.cpp
     src/core/util/host_clock.cpp
     src/core/util/units.cpp
+    src/core/util/rotator_sync_offset_store.cpp
     src/catalog/device_config.cpp
     src/catalog/device_catalog.cpp
 )
