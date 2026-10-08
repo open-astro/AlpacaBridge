@@ -3674,8 +3674,8 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "canslew") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, false);  // #775: synchronous slews are not served
+                AlpacaResponse alpaca_response =
+                    make_success_response(client_tx_id, server_tx_id, false);  // #775: synchronous slews are not served
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -3698,8 +3698,8 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "canslewaltaz") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, false);  // #775: synchronous slews are not served
+                AlpacaResponse alpaca_response =
+                    make_success_response(client_tx_id, server_tx_id, false);  // #775: synchronous slews are not served
                 response.set_body(alpaca_response);
                 return response;
             }
